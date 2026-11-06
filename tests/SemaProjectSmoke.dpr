@@ -11941,6 +11941,155 @@ begin
   end;
 end;
 
+// A class or record helper's set marked `overload` and the helped type's own
+// set are one overload set (15.3.3; local/type-conv-2026-11/helper-ovl): the
+// helped class's GetString(TBy) and GetString(TBy, I, N) stay callable beside
+// a helper's GetString(PBy, I, N) overload (XA, the wide gate's TEncoding
+// shape), the merged set is ranked as one (C.MB: a Byte takes TC's Integer
+// over the helper's Int64), the helped type's own plain set joins and ends
+// the walk (C.MC(1): TC's plain MC(Integer), past the helper's MC(string)), at
+// an ancestor level the helper's plain set does not end it (D.MD(True): TQA's
+// MD(Boolean) past TQB's helper's plain MD(string) and TQB's MD(Integer)), a
+// record helper alike (R.RA); a helper's set without `overload` still hides
+// the type's (C.MP('x'): the helper's). Each call compiles with dcc64 and runs
+// the overload its `.W` / `.A` names (helper-ovl/smoke).
+procedure TestHelperOverloadSet;
+const
+  SRC_TYPES =
+    'unit HoT;'#10 +
+    'interface'#10 +
+    'type'#10 +
+    '  TRA = record A: Integer; end;'#10 +
+    '  TRW = record W: Integer; end;'#10 +
+    '  TBy = array of Byte;'#10 +
+    '  PBy = ^Byte;'#10 +
+    '  TEnc = class'#10 +
+    '    function GetString(const B: TBy): TRW; overload;'#10 +
+    '    function GetString(const B: TBy; I, N: Integer): TRW; overload;'#10 +
+    '  end;'#10 +
+    '  TB = class'#10 +
+    '    function MC(D: Double): TRA; overload;'#10 +
+    '  end;'#10 +
+    '  TC = class(TB)'#10 +
+    '    function MB(I: Integer): TRW; overload;'#10 +
+    '    function MC(I: Integer): TRW;'#10 +
+    '    function MP(I: Integer): TRW; overload;'#10 +
+    '  end;'#10 +
+    '  TQA = class'#10 +
+    '    function MD(B: Boolean): TRW; overload;'#10 +
+    '  end;'#10 +
+    '  TQB = class(TQA)'#10 +
+    '    function MD(I: Integer): TRA; overload;'#10 +
+    '  end;'#10 +
+    '  TQD = class(TQB)'#10 +
+    '    function MD(D: Double): TRA; overload;'#10 +
+    '  end;'#10 +
+    '  TR = record'#10 +
+    '    function RA(I: Integer): TRW; overload;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TEnc.GetString(const B: TBy): TRW; begin Result.W := 1; end;'#10 +
+    'function TEnc.GetString(const B: TBy; I, N: Integer): TRW; begin Result.W := 2; end;'#10 +
+    'function TB.MC(D: Double): TRA; begin Result.A := 3; end;'#10 +
+    'function TC.MB(I: Integer): TRW; begin Result.W := 4; end;'#10 +
+    'function TC.MC(I: Integer): TRW; begin Result.W := 5; end;'#10 +
+    'function TC.MP(I: Integer): TRW; begin Result.W := 6; end;'#10 +
+    'function TQA.MD(B: Boolean): TRW; begin Result.W := 7; end;'#10 +
+    'function TQB.MD(I: Integer): TRA; begin Result.A := 8; end;'#10 +
+    'function TQD.MD(D: Double): TRA; begin Result.A := 9; end;'#10 +
+    'function TR.RA(I: Integer): TRW; begin Result.W := 10; end;'#10 +
+    'end.'#10;
+  SRC_HELPERS =
+    'unit HoH;'#10 +
+    'interface'#10 +
+    'uses HoT;'#10 +
+    'type'#10 +
+    '  TEncH = class helper for TEnc'#10 +
+    '    function GetString(const P: PBy; I, N: Integer): TRA; overload;'#10 +
+    '  end;'#10 +
+    '  TCH = class helper for TC'#10 +
+    '    function MB(I: Int64): TRA; overload;'#10 +
+    '    function MC(const S: string): TRA; overload;'#10 +
+    '    function MP(const S: string): TRA;'#10 +
+    '  end;'#10 +
+    '  TQBH = class helper for TQB'#10 +
+    '    function MD(const S: string): TRA;'#10 +
+    '  end;'#10 +
+    '  TRH = record helper for TR'#10 +
+    '    function RA(const S: string): TRA; overload;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TEncH.GetString(const P: PBy; I, N: Integer): TRA; begin Result.A := 11; end;'#10 +
+    'function TCH.MB(I: Int64): TRA; begin Result.A := 12; end;'#10 +
+    'function TCH.MC(const S: string): TRA; begin Result.A := 13; end;'#10 +
+    'function TCH.MP(const S: string): TRA; begin Result.A := 14; end;'#10 +
+    'function TQBH.MD(const S: string): TRA; begin Result.A := 15; end;'#10 +
+    'function TRH.RA(const S: string): TRA; begin Result.A := 16; end;'#10 +
+    'end.'#10;
+  SRC_PROG =
+    'program HoP;'#10 +
+    '{$APPTYPE CONSOLE}'#10 +
+    'uses HoT, HoH;'#10 +
+    'var'#10 +
+    '  E: TEnc; vB: TBy; vP: PBy; C: TC; vBt: Byte; D: TQD; R: TR; K: Integer;'#10 +
+    'begin'#10 +
+    '  E := TEnc.Create; C := TC.Create; D := TQD.Create; vBt := 1; vP := nil;'#10 +
+    '  K := E.GetString(vB).W; Writeln(K);'#10 +
+    '  K := E.GetString(vB, 0, 2).W; Writeln(K);'#10 +
+    '  K := E.GetString(vP, 0, 2).A; Writeln(K);'#10 +
+    '  K := C.MB(vBt).W; Writeln(K);'#10 +
+    '  K := C.MC(1).W; Writeln(K);'#10 +
+    '  K := D.MD(True).W; Writeln(K);'#10 +
+    '  K := C.MP(''x'').A; Writeln(K);'#10 +
+    '  K := R.RA(1).W; Writeln(K);'#10 +
+    'end.'#10;
+var
+  LDir, LName: string;
+  LCount: Integer;
+begin
+  LDir := FreshDir('pastree_sema_helperovl');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class constructor Create; end;'#10 +
+    '  TVarRec = record VType: Byte; end;'#10 +
+    '  TArray<T> = array of T;'#10 +
+    'implementation'#10 +
+    'constructor TObject.Create; begin end;'#10 +
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'HoT.pas'), SRC_TYPES);
+  TFile.WriteAllText(TPath.Combine(LDir, 'HoH.pas'), SRC_HELPERS);
+  TFile.WriteAllText(TPath.Combine(LDir, 'HoP.dpr'), SRC_PROG);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'HoP.dpr'));
+    LName := '';
+    for var LD in ModelByName('hop').Diags do
+      if LD.Code = 'E2003' then
+        LName := LName + ' line ' + IntToStr(LD.Line);
+    Ok('helper overload set: every call binds dcc''s overload - no E2003 [' +
+      LName + ' ]', DiagCount(ModelByName('hop'), 'E2003') = 0);
+    // An unbound call reports no E2003: count the bound ones by name.
+    for var LWant in ['getstring=3', 'mb=1', 'mc=1', 'md=1', 'mp=1',
+      'ra=1'] do
+    begin
+      LName := Copy(LWant, 1, Pos('=', LWant) - 1);
+      LCount := 0;
+      for var LPr in ModelByName('hop').CallTargetX do
+        if GProj.Model(LPr.Value.UnitId).Symbols[LPr.Value.Sym].NameLower =
+           LName then
+          Inc(LCount);
+      Ok('helper overload set: ' + LName + ' calls bound [' +
+        IntToStr(LCount) + ' of ' + Copy(LWant, Pos('=', LWant) + 1, MaxInt) +
+        ']', IntToStr(LCount) = Copy(LWant, Pos('=', LWant) + 1, MaxInt));
+    end;
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // Parameter modes in overload ranking (6.2.2, 6.2.7, 6.3.1;
 // local/type-conv-2026-11/n8): an untyped parameter ranks just above the
 // argument's Variant line - over a lossy conversion (ZA), Variant (ZB, ZG,
@@ -18922,6 +19071,7 @@ begin
   TestPtrConvRanking;
   TestModeConvRanking;
   TestAssignConv;
+  TestHelperOverloadSet;
   TestOperatorTable;
   TestTargetFacts;
   TestOracleDepth;

@@ -18047,12 +18047,67 @@ var
       (local/probe-b33 C1: TC0.Take(string) overload over TB0's plain
       Take(Integer) over TA0.Take(Double) overload - `C0.Take(1)` calls
       TB0's, `C0.Take(1.5)` is E2250). Without AFollow: the nearest
-      ancestor's set alone - the "nothing in the own chain fits" fallback. }
+      ancestor's set alone - the "nothing in the own chain fits" fallback.
+
+      A class or record HELPER is a level of its own in front of the type
+      it helps (15.3.3, local/type-conv-2026-11/helper-ovl): a helper's set
+      found - the head or an ancestor level's - is followed by the helped
+      type's OWN set, and only that set's directive ends the walk; the
+      helper's does not past the head (Q1, Q7: TD.M(Double) overload, TB's
+      helper's plain M(string), TB.M(Integer) overload, TA.M(Boolean)
+      overload - `D.M(True)` is TA's). A head without `overload` never gets
+      here with AFollow, and the fallback reads no further than before.
+      Before this a helper's set was the whole set: `TEncoding.Unicode.
+      GetString(Bytes, 0, N)` beside a class helper's GetString(PByte, ...)
+      overload had only the helper's candidates. }
     procedure ConsiderAncestors(AFollow: Boolean);
     var
-      LOwnerX, LAnc: TSemaXType;
+      LOwnerX, LAnc, LLevel: TSemaXType;
       LOwner, LAMid, LASym, LACtx, LScope: Integer;
       LName: string;
+
+      // The helped type's own set at ALevel (not inherited, no helper),
+      // joined. False = it ends the walk: a set without `overload`, or a
+      // member of the name that is no routine. ALevel returns the struct an
+      // alias names, the type the walk climbs from - from the alias it
+      // would meet the helper again.
+      function JoinOwnSet(var ALevel: TSemaXType): Boolean;
+      var
+        LCur: TSemaXType;
+        LOwnScope, LOwnSym: Integer;
+      begin
+        Result := True;
+        LCur := ALevel;
+        // An alias of the struct (`for TAlias`): its target's members.
+        for var LAlias := 1 to 8 do
+        begin
+          if not XValid(LCur) or
+             (FModels[LCur.UnitId].Symbols[LCur.Sym].MemberScope <> NIL_SCOPE) then
+            Break;
+          var LDef := TypeDefNodeOf(LCur.UnitId, LCur.Sym);
+          if (LDef = NIL_NODE) or not (FModels[LCur.UnitId].Tree.Nodes[LDef].
+             Kind in [nkIdent, nkMember, nkTypeArgs]) then
+            Break;
+          LCur := AncestorOfX(LCur);
+        end;
+        if not XValid(LCur) then
+          Exit;
+        ALevel := LCur;
+        LOwnScope := FModels[LCur.UnitId].Symbols[LCur.Sym].MemberScope;
+        if LOwnScope = NIL_SCOPE then
+          Exit;
+        LOwnSym := FModels[LCur.UnitId].FindLocalNoHelpers(LOwnScope,
+          SemaKey(LName));
+        while (LOwnSym <> NIL_SYM) and IsClassCtorDtorSym(LCur.UnitId, LOwnSym) do
+          LOwnSym := FModels[LCur.UnitId].Symbols[LOwnSym].NextOverload;
+        if LOwnSym = NIL_SYM then
+          Exit;
+        if FModels[LCur.UnitId].Symbols[LOwnSym].Kind <> skRoutine then
+          Exit(False);
+        ConsiderChain(LCur.UnitId, LOwnSym, LCur.Inst);
+        Result := ChainSaysOverload(LCur.UnitId, LOwnSym);
+      end;
+
     begin
       LScope := FModels[AHeadMid].Symbols[AHeadSym].Scope;
       if LScope = NIL_SCOPE then
@@ -18062,6 +18117,14 @@ var
         Exit;
       LName := FModels[AHeadMid].Symbols[AHeadSym].NameLower;
       LOwnerX := FrameOwnerX(AHeadMid, LOwner, ACtx);
+      // The head is a helper's set: the type it helps comes next.
+      LLevel := HelperTargetX(AHeadMid, LOwner);
+      if XValid(LLevel) then
+      begin
+        if not AFollow or not JoinOwnSet(LLevel) then
+          Exit;
+        LOwnerX := LLevel;
+      end;
       for var LHop := 1 to 64 do
       begin
         LAnc := AncestorOfX(LOwnerX);
@@ -18070,6 +18133,24 @@ var
            (FModels[LAMid].Symbols[LASym].Kind <> skRoutine) then
           Exit;
         ConsiderChain(LAMid, LASym, LACtx);
+        // An ancestor level's helper: its set joined whatever it says, the
+        // type it helps decides whether the walk goes on.
+        if AFollow and (FModels[LAMid].Symbols[LASym].Scope <> NIL_SCOPE) then
+        begin
+          LOwner := FModels[LAMid].Scopes[FModels[LAMid].Symbols[LASym].Scope].
+            StructSym;
+          if LOwner <> NIL_SYM then
+          begin
+            LLevel := HelperTargetX(LAMid, LOwner);
+            if XValid(LLevel) then
+            begin
+              if not JoinOwnSet(LLevel) then
+                Exit;
+              LOwnerX := LLevel;
+              Continue;
+            end;
+          end;
+        end;
         if not AFollow or not ChainSaysOverload(LAMid, LASym) then
           Exit;
         LScope := FModels[LAMid].Symbols[LASym].Scope;
