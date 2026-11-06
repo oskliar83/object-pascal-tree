@@ -1575,6 +1575,58 @@ const
     '  X := WZ(G0);'#10 +
     'end;'#10'end.'#10;
 
+  { A helper's set marked `overload` and the helped type's own set are one
+    overload set (15.3.3; local/type-conv-2026-11/helper-ovl), read here by
+    a bare call in the type's own method: HA(1) takes TC's HA(Integer)
+    beside the helper's HA(string), HB(B) of a Byte TC's Integer over the
+    helper's Int64, TR's HD(1) the record's own; a helper's set without
+    `overload` hides the type's - HC('x') is the helper's. Each call's
+    result names the overload dcc runs (helper-ovl/smoke HoUP). }
+  SRC_HELPER =
+    'unit HoU;'#10 +
+    'interface'#10 +
+    'type'#10 +
+    '  TRA = record A: Integer; end;'#10 +
+    '  TRW = record W: Integer; end;'#10 +
+    '  TC = class'#10 +
+    '    function HA(I: Integer): TRW; overload;'#10 +
+    '    function HB(I: Integer): TRW; overload;'#10 +
+    '    function HC(I: Integer): TRA; overload;'#10 +
+    '    procedure Go(B: Byte);'#10 +
+    '  end;'#10 +
+    '  TCH = class helper for TC'#10 +
+    '    function HA(const S: string): TRA; overload;'#10 +
+    '    function HB(I: Int64): TRA; overload;'#10 +
+    '    function HC(const S: string): TRW;'#10 +
+    '  end;'#10 +
+    '  TR = record'#10 +
+    '    function HD(I: Integer): TRW; overload;'#10 +
+    '    procedure Go;'#10 +
+    '  end;'#10 +
+    '  TRH = record helper for TR'#10 +
+    '    function HD(const S: string): TRA; overload;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TC.HA(I: Integer): TRW; begin Result.W := 1; end;'#10 +
+    'function TC.HB(I: Integer): TRW; begin Result.W := 2; end;'#10 +
+    'function TC.HC(I: Integer): TRA; begin Result.A := 3; end;'#10 +
+    'procedure TC.Go(B: Byte);'#10 +
+    'begin'#10 +
+    '  Writeln(HA(1).W);'#10 +
+    '  Writeln(HB(B).W);'#10 +
+    '  Writeln(HC(''x'').W);'#10 +
+    'end;'#10 +
+    'function TCH.HA(const S: string): TRA; begin Result.A := 4; end;'#10 +
+    'function TCH.HB(I: Int64): TRA; begin Result.A := 5; end;'#10 +
+    'function TCH.HC(const S: string): TRW; begin Result.W := 6; end;'#10 +
+    'function TR.HD(I: Integer): TRW; begin Result.W := 7; end;'#10 +
+    'procedure TR.Go;'#10 +
+    'begin'#10 +
+    '  Writeln(HD(1).W);'#10 +
+    'end;'#10 +
+    'function TRH.HD(const S: string): TRA; begin Result.A := 8; end;'#10 +
+    'end.'#10;
+
   { The Char-literal and nil exemptions of the assignment check (A4-10,
     A4-11; probe-b32 P1): dcc compiles every line but the last, where an
     operator-less record takes nil - E2010 naming `Pointer`, not `_nil`. }
@@ -1746,6 +1798,12 @@ begin
   for var LName in MODE_NAMES do
     Ok('parameter-mode ranking (6.2.2, 6.2.7): ' + LName +
       ' binds the TRW overload',
+      HasCallTyped(LName, 'TRW') and not HasCallTyped(LName, 'TRA'));
+  GModel.Free;
+
+  Analyze(SRC_HELPER);
+  for var LName in ['HA', 'HB', 'HC', 'HD'] do
+    Ok('helper overload set (15.3.3): ' + LName + ' binds the TRW overload',
       HasCallTyped(LName, 'TRW') and not HasCallTyped(LName, 'TRA'));
   GModel.Free;
 

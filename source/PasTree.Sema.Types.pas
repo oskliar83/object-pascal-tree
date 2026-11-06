@@ -7278,8 +7278,57 @@ var
   LMinReq, LMaxTot: Integer;
   LAnyFit, LAllHaveParams, LAnyVariadic, LVariadic: Boolean;
   LParams: TArray<Integer>;
-  LP, LIfaceHead: Integer;
+  LP, LIfaceHead, LOwnHead: Integer;
   LTrailing, LAnyOverload: Boolean;
+
+  { The helped type's own routine set of AHead's name when AHead heads a
+    class or record HELPER's set that says `overload` (15.3.3: the two are
+    one overload set, local/type-conv-2026-11/helper-ovl P1, P6, P10);
+    NIL_SYM otherwise - a helper's set without it hides the type's (P3), and
+    any other head has no such partner. This unit's helpers only: the helped
+    type's scope is the one JoinHelperScopes put the helper's member scope
+    in front of, so a helper for another unit's type finds none. The
+    ancestors' sets are the project pass's (ConsiderAncestors), as for every
+    method set here. }
+  function HelpedTypeSet(AHead: Integer): Integer;
+  var
+    LHelperScope, LScope, LDef, LSym: Integer;
+    LSays: Boolean;
+  begin
+    Result := NIL_SYM;
+    LHelperScope := M.Symbols[AHead].Scope;
+    if (LHelperScope = NIL_SCOPE) or
+       (M.Scopes[LHelperScope].Kind <> sckStruct) or
+       (M.Scopes[LHelperScope].StructSym = NIL_SYM) then
+      Exit;
+    LDef := TypeDefNode(M.Scopes[LHelperScope].StructSym);
+    if (LDef = NIL_NODE) or (Kind(LDef) <> nkHelperType) then
+      Exit;
+    LSays := False;
+    LSym := AHead;
+    while (LSym <> NIL_SYM) and (M.Symbols[LSym].Kind = skRoutine) do
+    begin
+      if M.RoutineSaysOverload(LSym) then
+      begin
+        LSays := True;
+        Break;
+      end;
+      LSym := M.Symbols[LSym].NextOverload;
+    end;
+    if not LSays then
+      Exit;
+    for LScope := 0 to M.Scopes.Count - 1 do
+      for var LShadow in M.Scopes[LScope].Shadowing do
+        if LShadow = LHelperScope then
+        begin
+          Result := M.FindLocalNoHelpers(LScope,
+            SemaKey(M.Symbols[AHead].NameLower));
+          if (Result <> NIL_SYM) and (M.Symbols[Result].Kind <> skRoutine) then
+            Result := NIL_SYM;
+          Exit;
+        end;
+  end;
+
 begin
   LAnyOverload := False;
   LArgs := CallArgCount(M, ACall, LTrailing);
@@ -7292,6 +7341,7 @@ begin
   LMinReq := MaxInt; LMaxTot := -1;
 
   LIfaceHead := InterfaceCounterpart(AHead);
+  LOwnHead := HelpedTypeSet(AHead);
   LCand := AHead;
   while LCand <> NIL_SYM do
   begin
@@ -7337,6 +7387,13 @@ begin
     begin
       LCand := LIfaceHead;
       LIfaceHead := NIL_SYM;
+    end;
+    // 15.3.3: a helper's set saying `overload` and the helped type's own set
+    // are one set - see HelpedTypeSet.
+    if LCand = NIL_SYM then
+    begin
+      LCand := LOwnHead;
+      LOwnHead := NIL_SYM;
     end;
   end;
 
