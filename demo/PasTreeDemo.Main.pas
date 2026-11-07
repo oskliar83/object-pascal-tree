@@ -4670,7 +4670,7 @@ var
   LMissing: TDictionary<string, TPasMissingUnit>;
   LNotLoadedUnits: TDictionary<string, Boolean>;   // lower-cased names
   LModel: TPasSemaModel;
-  LDiagFile, LVolume: string;
+  LDiagFile, LDiagNote, LVolume: string;
   LOwnFile: Boolean;
 begin
   // Locate the main unit's model, and report diagnostics. The analyzed
@@ -4785,11 +4785,16 @@ begin
         // The label comes from the CODE, not a hardcoded "Error": a PPIF
         // reports our own inability to decide an $IF, and calling that an
         // error in the user's code is a lie (see DiagSeverityLabel).
+        // The editor's second line (TSemaDiag.Note): why a conversion
+        // failed, beside dcc's own wording.
+        LDiagNote := LModel.Diags[LDIdx].Note;
+        if LDiagNote <> '' then
+          LDiagNote := ' - ' + LDiagNote;
         LogError(LDiagFile, LModel.Diags[LDIdx].Line, LModel.Diags[LDIdx].Col,
-          Format('[%s] %s(%d,%d): %s',
+          Format('[%s] %s(%d,%d): %s%s',
             [DiagSeverityLabel(LModel.Diags[LDIdx].Code),
              TPath.GetFileName(LDiagFile), LModel.Diags[LDIdx].Line,
-             LModel.Diags[LDIdx].Col, LModel.Diags[LDIdx].Msg]),
+             LModel.Diags[LDIdx].Col, LModel.Diags[LDIdx].Msg, LDiagNote]),
           LModel.Diags[LDIdx].Code);
       end;
     end;

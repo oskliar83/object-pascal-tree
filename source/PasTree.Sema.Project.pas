@@ -1386,7 +1386,7 @@ type
       AId: Integer = -1);
     function UnknownAncestryX(const AX: TSemaXType): Boolean;
     procedure EmitAt(AModel: TPasSemaModel; ANode: Integer;
-      const ACode, AMsg: string);
+      const ACode, AMsg: string; const ANote: string = '');
     { The line and column of ANode's first token, AFile its file id; zeros
       and False when the token is out of range. EmitAt's, EmitE2003's and
       NodeSite's one position. }
@@ -1566,6 +1566,8 @@ type
     function XAssignableX(const ADst, ASrc: TSemaXType): Boolean;
     function ParCatOf(const APar, ACanonPar: TSemaXType): TSemaTypeCat;
     function IsStaticArrayX(const AX: TSemaXType): Boolean;
+    // Is the nkArrayType ADef of unit AMid a static array (an index child)?
+    function StaticArrayDef(AMid, ADef: Integer): Boolean;
     // ArrayArgFit over two canonical types - see the implementation.
     function ArrayConvX(const ACanonParX, ACanonArgX: TSemaXType;
       AParCat, AArgCat: TSemaTypeCat; out ARank: Integer): Integer;
@@ -2154,6 +2156,13 @@ type
       scNone without one says nothing. }
     function UserConvX(const ADst, ASrc: TSemaXType; AConv: PSemaArgConv;
       out ARank: Integer; out AOps: Boolean): TSemaConv;
+    { Why a value of type ASrc does not convert to ADst, when a record is on
+      either side - the E2010's note (TSemaDiag.Note; spec 9.3.1): an
+      `Explicit` that would take it (a cast is wanted), an `Implicit` it
+      reaches only through another (operators do not chain), else the
+      conversions the record does declare, or that it declares none. Empty
+      for two types neither of which is a record. }
+    function ConvNoteX(const ADst, ASrc: TSemaXType): string;
     { Is ADesc ABase (canonicalized: a constraint named through an alias is
       the class, spec 16.4.1) or a descendant of it? xdNo only when the walk
       reached the end of ADesc's ancestry without meeting it; xdUnknown at a
@@ -9549,12 +9558,15 @@ begin
 end;
 
 procedure TPasSemaProject.EmitAt(AModel: TPasSemaModel; ANode: Integer;
-  const ACode, AMsg: string);
+  const ACode, AMsg: string; const ANote: string);
 var
   LFile, LLine, LCol: Integer;
+  LDiag: TSemaDiag;
 begin
   NodeLineCol(AModel, ANode, LFile, LLine, LCol);
-  AModel.AddDiag(MakeDiag(ACode, AMsg, ANode, LFile, LLine, LCol));
+  LDiag := MakeDiag(ACode, AMsg, ANode, LFile, LLine, LCol);
+  LDiag.Note := ANote;
+  AModel.AddDiag(LDiag);
 end;
 
 // Model-aware parameter arity of a routine symbol. Result=False if the routine
@@ -14411,6 +14423,167 @@ begin
   Result := scMaybe;
 end;
 
+function TPasSemaProject.ConvNoteX(const ADst, ASrc: TSemaXType): string;
+type
+  TOp = record
+    Owner, Q, R: TSemaXType;   // Q, R canonical
+    Text: string;              // `TB.Explicit(Integer): TB`
+  end;
+var
+  LD, LS: TSemaXType;
+  LDRec, LSRec: Boolean;
+  LOp: TOp;
+  LList: string;
+  LRank: Integer;
+  LOps: Boolean;
+
+  procedure Add(const AText: string);
+  begin
+    if Result <> '' then
+      Result := Result + '; ';
+    Result := Result + AText;
+  end;
+
+  // The operators named ANameLower of the record AOwner, their types read
+  // in its frame; an operator whose types are not known is left out.
+  function OpsOf(const AOwner: TSemaXType;
+    const ANameLower: string): TArray<TOp>;
+  var
+    LOm: TPasSemaModel;
+    LScope, LSym, LN: Integer;
+    LParams: TArray<Integer>;
+    LQ, LR: TSemaXType;
+  begin
+    Result := nil;
+    LN := 0;
+    LOm := FModels[AOwner.UnitId];
+    LScope := LOm.Symbols[AOwner.Sym].MemberScope;
+    if LScope = NIL_SCOPE then
+      Exit;
+    for LSym in LOm.Scopes[LScope].Symbols do
+    begin
+      if (LOm.Symbols[LSym].Kind <> skRoutine) or
+         (LOm.Symbols[LSym].NameLower <> ANameLower) or
+         (LOm.RoutineHead(LSym) <> rhOperator) then
+        Continue;
+      LParams := XParamSyms(AOwner.UnitId, LSym);
+      if Length(LParams) <> 1 then
+        Continue;
+      LQ := SubstX(DeclTypeX(AOwner.UnitId, LParams[0]), AOwner.Inst, 0);
+      LR := SubstX(DeclTypeX(AOwner.UnitId, LSym), AOwner.Inst, 0);
+      if not XValid(LQ) or not XValid(LR) then
+        Continue;
+      SetLength(Result, LN + 1);
+      Result[LN].Owner := AOwner;
+      Result[LN].Q := CanonTypeX(LQ);
+      Result[LN].R := CanonTypeX(LR);
+      Result[LN].Text := Format('%s.%s(%s): %s', [XTypeText(AOwner),
+        LOm.Symbols[LSym].Name, XTypeText(LQ), XTypeText(LR)]);
+      Inc(LN);
+    end;
+  end;
+
+  // A built-in conversion (no operator) - one leg of an operator's.
+  function Leg(const ATo, AFrom: TSemaXType): Boolean;
+  begin
+    Result := XConvCoreX(ATo, AFrom, False) in [scIdentical, scImplicit];
+  end;
+
+  // Through one operator (UserConvX's verdict) - a second leg's.
+  function UserLeg(const ATo, AFrom: TSemaXType): Boolean;
+  begin
+    Result := (UserConvX(ATo, AFrom, nil, LRank, LOps) = scImplicit);
+  end;
+
+  function Owners: TArray<TSemaXType>;
+  begin
+    Result := nil;
+    if LDRec then
+      Result := Result + [LD];
+    if LSRec and not (LDRec and XSameType(LD, LS)) then
+      Result := Result + [LS];
+  end;
+
+begin
+  Result := '';
+  if not XValid(ADst) or not XValid(ASrc) then
+    Exit;
+  LD := CanonTypeX(ADst);
+  LS := CanonTypeX(ASrc);
+  if not XValid(LD) or not XValid(LS) then
+    Exit;
+  LDRec := XCatOf(LD) = tcRecord;
+  LSRec := XCatOf(LS) = tcRecord;
+  if not (LDRec or LSRec) then
+    Exit;
+  // An Explicit that would take the value: a cast is what is missing
+  // (local/type-conv-2026-11/diag p1 c01, c04: `B := 5` beside
+  // TB.Explicit(Integer) is E2010).
+  for var LOwner in Owners do
+    for LOp in OpsOf(LOwner, 'explicit') do
+      if Leg(LOp.Q, LS) and Leg(LD, LOp.R) then
+      begin
+        Add(Format('''%s'' converts to ''%s'' by an explicit cast only ' +
+          '(class operator %s)', [XTypeText(ASrc), XTypeText(ADst),
+          LOp.Text]));
+        Exit;
+      end;
+  // An Implicit reached through another: no chain (c03, c14, d09).
+  for var LOwner in Owners do
+    for LOp in OpsOf(LOwner, 'implicit') do
+    begin
+      if Leg(LD, LOp.R) and not Leg(LOp.Q, LS) and UserLeg(LOp.Q, LS) then
+      begin
+        Add(Format('conversion operators do not chain: ''%s'' reaches ' +
+          '''%s'' through one, and %s takes ''%s''', [XTypeText(ASrc),
+          XTypeText(LOp.Q), LOp.Text, XTypeText(LOp.Q)]));
+        Exit;
+      end;
+      if Leg(LOp.Q, LS) and not Leg(LD, LOp.R) and UserLeg(LD, LOp.R) then
+      begin
+        Add(Format('conversion operators do not chain: %s gives ''%s'', ' +
+          'which reaches ''%s'' only through another', [LOp.Text,
+          XTypeText(LOp.R), XTypeText(ADst)]));
+        Exit;
+      end;
+    end;
+  // What the records do declare.
+  if LDRec then
+  begin
+    LList := '';
+    for LOp in OpsOf(LD, 'implicit') do
+      if XSameType(LOp.R, LD) and not XSameType(LOp.Q, LD) then
+      begin
+        if LList <> '' then
+          LList := LList + ', ';
+        LList := LList + '''' + XTypeText(LOp.Q) + '''';
+      end;
+    if LList <> '' then
+      Add(Format('''%s'' converts implicitly from %s alone',
+        [XTypeText(ADst), LList]))
+    else if not HasImplicitOperator(LD) then
+      Add(Format('''%s'' declares no class operator Implicit',
+        [XTypeText(ADst)]));
+  end;
+  if LSRec and not (LDRec and XSameType(LD, LS)) then
+  begin
+    LList := '';
+    for LOp in OpsOf(LS, 'implicit') do
+      if XSameType(LOp.Q, LS) and not XSameType(LOp.R, LS) then
+      begin
+        if LList <> '' then
+          LList := LList + ', ';
+        LList := LList + '''' + XTypeText(LOp.R) + '''';
+      end;
+    if LList <> '' then
+      Add(Format('''%s'' converts implicitly to %s alone',
+        [XTypeText(ASrc), LList]))
+    else if not HasImplicitOperator(LS) then
+      Add(Format('''%s'' declares no class operator Implicit',
+        [XTypeText(ASrc)]));
+  end;
+end;
+
 { Does AX's type declare `class operator Implicit` - the one thing that can
   make a value of another type acceptable where a record is wanted, or a
   record where another type is (9.3.1)? Only the type's OWN members are
@@ -14705,6 +14878,25 @@ begin
   Result := XValid(LC) and
     (FModels[LC.UnitId].Symbols[LC.Sym].Kind = skBuiltinType) and
     (FModels[LC.UnitId].Symbols[LC.Sym].NameLower = 'pointer');
+end;
+
+// A static array definition: an nkArrayType that is no open array (Aux 1)
+// and has a child before its element - an index type.
+function TPasSemaProject.StaticArrayDef(AMid, ADef: Integer): Boolean;
+var
+  LTree: TPasTree;
+  LFirst: Integer;
+begin
+  Result := False;
+  if (AMid < 0) or (ADef = NIL_NODE) then
+    Exit;
+  LTree := FModels[AMid].Tree;
+  if (LTree.Nodes[ADef].Kind <> nkArrayType) or
+     (LTree.Nodes[ADef].Aux = 1) then
+    Exit;
+  LFirst := LTree.Nodes[ADef].FirstChild;
+  Result := (LFirst <> NIL_NODE) and
+    (LTree.Nodes[LFirst].NextSibling <> NIL_NODE);
 end;
 
 // Is AX a STATIC array (`array[0..N] of T`, `TByteArray`)? Read off its
@@ -16626,6 +16818,10 @@ var
   // silent misses into false E2003s on the next line). Created on the first
   // tie only: ambiguity is rare, and this walk is the hot path.
   LAmbig: TDictionary<Integer, Boolean>;
+  // Calls whose overload set no candidate fits (pass mode), four entries
+  // each: the call, its callee node, the set head's unit and symbol -
+  // CheckNoFits' E2250.
+  LNoFit: TArray<Integer>;
   // Inferred types of this model's own untyped declarations, held OUT of
   // SymTypeX until the parallel phase is over (see FXNewSymType). The nkIdent
   // case reads this before SymTypeX so a later use in the same walk sees it.
@@ -19607,10 +19803,13 @@ var
                     // No modeled ctor overload admits the args (inherited
                     // constructors across unseen hierarchy links) - keep the
                     // long-standing behavior: a ctor call is the class type.
-                    SetXAt(N, CtorResultX(GetX(LM.Tree.Nodes[LBase].FirstChild)));
-                  // else: no candidate admits the arg count - the real
-                  // callee is likely an unseen same-named overload; leave
-                  // the call untyped rather than claim the wrong result.
+                    SetXAt(N, CtorResultX(GetX(LM.Tree.Nodes[LBase].FirstChild)))
+                  else if LProbe = nil then
+                    // No candidate admits the arguments - the real callee may
+                    // be an unseen same-named overload; the call stays untyped
+                    // rather than claim the wrong result, and CheckNoFits
+                    // judges whether this is dcc's E2250.
+                    LNoFit := LNoFit + [N, LBase, LMemMid, LMemSym];
                 end;
               skType, skBuiltinType:
                 if LKind = nkAmbiguous then
@@ -20032,13 +20231,10 @@ var
       types it wrongly (a third-party list's `.Add` read as its ancestor's
       Add: Integer, a third-party `GetScreenBounds` as the Boolean one,
       SysUtils' `StrNew` as the PAnsiChar one - the frozen client's 35, m2
-      gate) - the binding's own gap, which E2010 would only repeat;
-    - an index over a typed pointer: under $POINTERMATH ON `PBytes(P)[I]`
-      of a `PBytes = ^TBytes` is a TBytes, typed here as the dereferenced
-      array's element (System.Generics.Collections' TListHelper). }
+      gate) - the binding's own gap, which E2010 would only repeat. }
   function Unreliable(AAssign, ANode: Integer; const AX: TSemaXType): Boolean;
   var
-    LCore, LBase, LHead, LMid, LSym: Integer;
+    LCore, LHead, LMid, LSym: Integer;
   begin
     if OpenX(AX) or NestedInGenericX(AX) then
       Exit(True);
@@ -20059,18 +20255,6 @@ var
           sfOverloadDirective, sfOverrideDirective] <> []) or
         (FModels[LMid].Symbols[LSym].NextOverload <> NIL_SYM)) then
       Exit(True);
-    if (LCore <> NIL_NODE) and (LM.Tree.Nodes[LCore].Kind = nkIndex) then
-    begin
-      LBase := LM.Tree.Nodes[LCore].FirstChild;
-      if LBase <> NIL_NODE then
-      begin
-        var LBaseX := GetX(LBase);
-        if XValid(LBaseX) then
-          LBaseX := CanonTypeX(LBaseX);
-        if XValid(LBaseX) and (XCatOf(LBaseX) = tcPointer) then
-          Exit(True);
-      end;
-    end;
     Result := False;
   end;
 
@@ -20079,38 +20263,319 @@ var
     error-tolerant is the primary mode). Decided here, on the closure's
     types, in place of the unit typer's CheckAssign (TPasSemaModel
     .ProjectAssign), which sees one unit's symbols. }
-  procedure CheckAssigns;
+  { E2250 at a call whose overload set no candidate fits (6.3.1, 9.3.1;
+    local/type-conv-2026-11/diag p1 c08, c16, c19, p3 e07) - asked only
+    where every part of the verdict is typed reliably, the rest of the
+    unbound calls staying silent (error-tolerant is the primary mode): the
+    set is its head's own chain of two or more plain routines - no generic,
+    no untyped, `var` / `out` or array parameter, no constructor - and the
+    walk merged nothing into it (no ancestor's, no helper's, no other
+    unit's set: a set another level completes is one this check cannot see
+    whole); every argument is a variable, a field, a literal or an element,
+    typed, by no overload choice, no type name. The note lists the set. }
+  procedure CheckNoFits;
   var
-    N, LDst, LSrc: Integer;
-    LDstX, LSrcX: TSemaXType;
-    LSrcName: string;
+    LIdx, LCall, LCallee, LHMid, LHSym, LCand, LCount, LArg, LCore: Integer;
+    LAMid, LASym: Integer;
+    LPar, LPDecl: Integer;
+    LArgX: TSemaXType;
+    LOk: Boolean;
+    LList, LName: string;
+    LOm: TPasSemaModel;
   begin
-    for N := 0 to High(LM.Tree.Nodes) do
+    LIdx := 0;
+    while LIdx + 3 <= High(LNoFit) do
     begin
-      if LM.Tree.Nodes[N].Kind <> nkAssign then
+      LCall := LNoFit[LIdx];
+      LCallee := LNoFit[LIdx + 1];
+      LHMid := LNoFit[LIdx + 2];
+      LHSym := LNoFit[LIdx + 3];
+      Inc(LIdx, 4);
+      if (LHMid < 0) or (LHSym = NIL_SYM) or InUntypedWith(LCall) then
         Continue;
-      LDst := LM.Tree.Nodes[N].FirstChild;
-      if LDst = NIL_NODE then
+      LOm := FModels[LHMid];
+      // A member of a struct: its ancestors' and helpers' sets may join.
+      if (LOm.Symbols[LHSym].Scope <> NIL_SCOPE) and
+         (LOm.Scopes[LOm.Symbols[LHSym].Scope].StructSym <> NIL_SYM) then
         Continue;
-      LSrc := LM.Tree.Nodes[LDst].NextSibling;
-      if LSrc = NIL_NODE then
+      // A unit-level name: another used unit's set may join (the walk's
+      // UsesByName merge) - only the calling unit's own routines here.
+      if LHMid <> AId then
         Continue;
-      LDstX := GetX(LDst);
-      LSrcX := GetX(LSrc);
-      if not XValid(LDstX) or not XValid(LSrcX) then
+      // The set: two or more plain routines.
+      LOk := True;
+      LCount := 0;
+      LList := '';
+      LCand := LHSym;
+      while LOk and (LCand <> NIL_SYM) do
+      begin
+        if (LOm.Symbols[LCand].Kind <> skRoutine) or
+           (GenericParamCount(LHMid, LCand) > 0) or
+           IsConstructorSym(LHMid, LCand) or
+           (sfVarArgs in LOm.Symbols[LCand].Flags) then
+        begin
+          LOk := False;
+          Break;
+        end;
+        LName := '';
+        for LPar in XParamSyms(LHMid, LCand) do
+        begin
+          if (LOm.Symbols[LPar].TypeNode = NIL_NODE) or
+             (LOm.Tree.Nodes[LOm.Symbols[LPar].TypeNode].Kind = nkArrayType) or
+             not XValid(DeclTypeX(LHMid, LPar)) or
+             OpenX(DeclTypeX(LHMid, LPar)) then
+          begin
+            LOk := False;
+            Break;
+          end;
+          LPDecl := LOm.Symbols[LPar].DeclNode;
+          while (LPDecl <> NIL_NODE) and
+                (LOm.Tree.Nodes[LPDecl].Kind <> nkParam) do
+            LPDecl := LOm.Tree.Nodes[LPDecl].Parent;
+          if (LPDecl <> NIL_NODE) and
+             (LOm.Tree.Nodes[LPDecl].Flags * [nfVar, nfOut] <> []) then
+          begin
+            LOk := False;
+            Break;
+          end;
+          if LName <> '' then
+            LName := LName + ', ';
+          LName := LName + XTypeText(DeclTypeX(LHMid, LPar));
+        end;
+        if not LOk then
+          Break;
+        if LCount < 4 then
+        begin
+          if LList <> '' then
+            LList := LList + ', ';
+          LList := LList + LOm.Symbols[LCand].Name + '(' + LName + ')';
+        end;
+        Inc(LCount);
+        LCand := LOm.Symbols[LCand].NextOverload;
+      end;
+      if not LOk or (LCount < 2) then
         Continue;
-      if AssignConvX(N, LSrc, LDstX, LSrcX) <> TSemaConv.scNone then
+      // The arguments: plain values, typed reliably.
+      LArg := CallFirstArg(LM.Tree, LCall);
+      while LOk and (LArg <> NIL_NODE) do
+      begin
+        LCore := PeelParens(LM.Tree, LArg);
+        LArgX := GetX(LArg);
+        LOk := (LCore <> NIL_NODE) and
+          (LM.Tree.Nodes[LCore].Kind in [nkIdent, nkMember, nkIndex,
+             nkIntLit, nkStrLit, nkRealLit]) and
+          XValid(LArgX) and (XCatOf(LArgX) <> tcNil) and
+          not ((LM.Tree.Nodes[LCore].Kind in [nkIdent, nkMember]) and
+               (IsTypeDesignator(LCore) or
+                LM.Tree.NodeTextEquals(LCore, 'Self'))) and
+          not Unreliable(LCall, LArg, LArgX);
+        if LOk and (LM.Tree.Nodes[LCore].Kind in [nkIdent, nkMember]) and
+           TargetSym(LCore, LAMid, LASym) and
+           (FModels[LAMid].Symbols[LASym].Kind = skRoutine) then
+          LOk := False;   // a routine named: called, or its address
+        LArg := LM.Tree.Nodes[LArg].NextSibling;
+      end;
+      if not LOk then
         Continue;
-      if InUntypedWith(N) or Unreliable(N, LDst, LDstX) or
-         Unreliable(N, LSrc, LSrcX) then
-        Continue;
+      if LCount > 4 then
+        LList := LList + ', ...';
+      EmitAt(LM, LCallee, 'E2250', Format(SE2250_NoOverload,
+        [LOm.Symbols[LHSym].Name]), 'candidates: ' + LList);
+    end;
+  end;
+
+  procedure CheckAssigns;
+
+    // One value going to one target (2.6.1): ASrc typed ASrcX to the target
+    // ADst typed ADstX, at the statement or declaration AStmt; the E2010 at
+    // AAt. ADst / ASrc are the nodes Unreliable reads.
+    function CheckConv(AStmt, ADst, ASrc, AAt: Integer; const ADstX,
+      ASrcX: TSemaXType): Boolean;
+    var
+      LSrcName: string;
+      LDc, LSc: TSemaXType;
+    begin
+      Result := False;
+      if not XValid(ADstX) or not XValid(ASrcX) then
+        Exit;
+      if AssignConvX(AStmt, ASrc, ADstX, ASrcX) <> TSemaConv.scNone then
+        Exit;
+      if InUntypedWith(AStmt) or Unreliable(AStmt, ADst, ADstX) or
+         Unreliable(AStmt, ASrc, ASrcX) then
+        Exit;
+      // Two instances of one generic: whether they are one type is the
+      // instantiation's question, not a conversion's (FMX.ListView
+      // .Appearances' `for LPair in FFactories`: TDictionary's TPair<K, V>
+      // read in its frame against the variable's written TPair<...> - the
+      // same text, two instances; diag gate 1).
+      LDc := CanonTypeX(ADstX);
+      LSc := CanonTypeX(ASrcX);
+      if XValid(LDc) and XValid(LSc) and (LDc.UnitId = LSc.UnitId) and
+         (LDc.Sym = LSc.Sym) then
+        Exit;
+      Result := True;
       // dcc names the nil literal's type `Pointer`.
-      if XCatOf(LSrcX) = tcNil then
+      if XCatOf(ASrcX) = tcNil then
         LSrcName := 'Pointer'
       else
-        LSrcName := XTypeText(LSrcX);
-      EmitAt(LM, LSrc, 'E2010', Format(SE2010_IncompatibleTypes,
-        [XTypeText(LDstX), LSrcName]));    end;
+        LSrcName := XTypeText(ASrcX);
+      EmitAt(LM, AAt, 'E2010', Format(SE2010_IncompatibleTypes,
+        [XTypeText(ADstX), LSrcName]), ConvNoteX(ADstX, ASrcX));
+    end;
+
+    // The declared type of the variable a name node (or an nkInlineVar's
+    // first name) declares; XNil for one with no written type - inferred
+    // from its value, which then cannot disagree with it.
+    function DeclaredX(ANameNode: Integer): TSemaXType;
+    var
+      LSym: Integer;
+    begin
+      Result := XNil;
+      if (ANameNode = NIL_NODE) or
+         (LM.Tree.Nodes[ANameNode].Kind <> nkIdent) then
+        Exit;
+      LSym := RefAt(ANameNode);
+      if (LSym = NIL_SYM) or
+         not (LM.Symbols[LSym].Kind in [skVar, skConst]) or
+         (LM.Symbols[LSym].TypeNode = NIL_NODE) then
+        Exit;
+      Result := DeclTypeX(AId, LSym);
+    end;
+
+    // A loop variable's type: a variable named, or an inline one declared
+    // with a type (`for var I: Integer := ...`).
+    function LoopVarX(AVar: Integer): TSemaXType;
+    begin
+      if LM.Tree.Nodes[AVar].Kind = nkInlineVar then
+        Result := DeclaredX(LM.Tree.Nodes[AVar].FirstChild)
+      else
+        Result := GetX(AVar);
+    end;
+
+    // `var X: T = V;`, `const X: T = V;`, `var X: T := V` (3.1, 3.2.2,
+    // 3.1.3): the value to the declared type, as an assignment (m2 Set X:
+    // the initialized global, the typed constant and the inline variable
+    // take what `X := V` takes). An aggregate `(...)` is no value here; a
+    // string for a TGUID is the typed constant's and the initialized
+    // global's alone (an inline variable's is E2010).
+    procedure CheckDecl(N: Integer);
+    var
+      LChild, LName, LType, LInit, LCount: Integer;
+      LDstX, LSrcX: TSemaXType;
+    begin
+      LName := NIL_NODE;
+      LType := NIL_NODE;
+      LInit := NIL_NODE;
+      LCount := 0;
+      LChild := LM.Tree.Nodes[N].FirstChild;
+      while LChild <> NIL_NODE do
+      begin
+        if LM.Tree.Nodes[LChild].Kind in [nkDirective, nkAttrGroup] then
+          // a hint, an attribute
+        else if (nfName in LM.Tree.Nodes[LChild].Flags) or
+                ((LName = NIL_NODE) and
+                 (LM.Tree.Nodes[N].Kind = nkConstDecl)) then
+        begin
+          // the names (an nkConstDecl's one: its first child)
+          if LName = NIL_NODE then
+            LName := LChild;
+        end
+        else
+        begin
+          Inc(LCount);
+          if LCount = 1 then
+            LType := LChild
+          else if LCount = 2 then
+            LInit := LChild;
+        end;
+        LChild := LM.Tree.Nodes[LChild].NextSibling;
+      end;
+      if (LType = NIL_NODE) or (LInit = NIL_NODE) or (LName = NIL_NODE) then
+        Exit;
+      if LM.Tree.Nodes[LInit].Kind = nkAggregate then
+        Exit;
+      LDstX := DeclaredX(LName);
+      LSrcX := GetX(LInit);
+      if not XValid(LDstX) or not XValid(LSrcX) then
+        Exit;
+      if (N <> NIL_NODE) and (LM.Tree.Nodes[N].Kind <> nkInlineVar) and
+         (XCatOf(CanonTypeX(LDstX)) = tcRecord) and
+         (XCatOf(CanonTypeX(LSrcX)) in [tcString, tcChar]) then
+        Exit;
+      CheckConv(N, LType, LInit, LInit, LDstX, LSrcX);
+    end;
+
+    procedure CheckFor(N: Integer);
+    var
+      LVar, LFrom, LTo: Integer;
+      LVarX: TSemaXType;
+    begin
+      LVar := LM.Tree.Nodes[N].FirstChild;
+      if LVar = NIL_NODE then
+        Exit;
+      LFrom := LM.Tree.Nodes[LVar].NextSibling;
+      if LFrom = NIL_NODE then
+        Exit;
+      LTo := LM.Tree.Nodes[LFrom].NextSibling;
+      LVarX := LoopVarX(LVar);
+      // A counter that is no ordinal is E2032's, not this check's.
+      if not XValid(LVarX) or not (XCatOf(CanonTypeX(LVarX)) in [tcInteger,
+         tcChar, tcBoolean, tcEnum]) then
+        Exit;
+      // One report per loop, as dcc gives (diag/fix DgBad line 13).
+      if CheckConv(N, LVar, LFrom, LFrom, LVarX, GetX(LFrom)) then
+        Exit;
+      if LTo <> NIL_NODE then
+        CheckConv(N, LVar, LTo, LTo, LVarX, GetX(LTo));
+    end;
+
+    procedure CheckForIn(N: Integer);
+    var
+      LVar, LColl: Integer;
+      LVarX, LCollX: TSemaXType;
+    begin
+      LVar := LM.Tree.Nodes[N].FirstChild;
+      if LVar = NIL_NODE then
+        Exit;
+      LColl := LM.Tree.Nodes[LVar].NextSibling;
+      if LColl = NIL_NODE then
+        Exit;
+      LVarX := LoopVarX(LVar);
+      LCollX := GetX(LColl);
+      if not XValid(LVarX) or not XValid(LCollX) then
+        Exit;
+      CheckConv(N, LVar, LColl, LVar, LVarX,
+        ForInElementX(AId, LColl, LCollX));
+    end;
+
+  var
+    N, LDst, LSrc: Integer;
+  begin
+    for N := 0 to High(LM.Tree.Nodes) do
+      case LM.Tree.Nodes[N].Kind of
+        nkAssign:
+          begin
+            LDst := LM.Tree.Nodes[N].FirstChild;
+            if LDst = NIL_NODE then
+              Continue;
+            LSrc := LM.Tree.Nodes[LDst].NextSibling;
+            if LSrc = NIL_NODE then
+              Continue;
+            CheckConv(N, LDst, LSrc, LSrc, GetX(LDst), GetX(LSrc));
+          end;
+        nkVarDecl:
+          if LM.Tree.Nodes[N].Aux <> 1 then   // not `absolute`
+            CheckDecl(N);
+        nkConstDecl:
+          CheckDecl(N);
+        nkInlineVar, nkInlineConst:
+          if LM.Tree.Nodes[N].Aux = 1 then
+            CheckDecl(N);
+        nkForStmt:
+          CheckFor(N);
+        nkForInStmt:
+          CheckForIn(N);
+      end;
   end;
 
 var
@@ -20172,7 +20637,10 @@ begin
     begin
       Walk(0);
       if LM.ProjectAssign then
+      begin
         CheckAssigns;
+        CheckNoFits;
+      end;
     end;
     BindAggregateLabelsX(AId, LNewExt);
   finally
@@ -22201,18 +22669,21 @@ var
   end;
 
   // Through a pointer to APointee: before `[` the `^` may be omitted over a
-  // pointer to an ARRAY (no level is consumed - `AO[1][0]` over `array of
-  // PObjs`, `PObjs = ^TObjs`, audit B3-36); over anything else `P[I]` is
-  // POINTERMATH's `(P + I)^`, one level, the pointee (4.8; audit E3-36:
-  // `N[1].Value` over `N: ^TNode`). dcc rejects the second without the
-  // directive, so answering it unconditionally makes no valid program wrong.
+  // pointer to a STATIC array (no level is consumed - `AO[1][0]` over `array
+  // of PObjs`, `PObjs = ^TObjs`, audit B3-36); over anything else - a
+  // dynamic array too - `P[I]` is POINTERMATH's `(P + I)^`, one level, the
+  // pointee (4.8; audit E3-36: `N[1].Value` over `N: ^TNode`; `PBytes(P)[I]`
+  // over `PBytes = ^TBytes` is a TBytes, local/type-conv-2026-11/diag/pm).
+  // dcc rejects the second without the directive (E2016), so answering it
+  // unconditionally makes no valid program wrong.
   function ThroughPointer(const APointee: TSemaXType): TSemaXType;
   var
     LPMid, LPDef: Integer;
   begin
     Result := APointee;
     if XValid(APointee) and
-       not ArrayDefOfX(AId, NIL_NODE, APointee, LPMid, LPDef) then
+       not (ArrayDefOfX(AId, NIL_NODE, APointee, LPMid, LPDef) and
+            StaticArrayDef(LPMid, LPDef)) then
       Dec(LRemaining);
   end;
 
@@ -22711,10 +23182,18 @@ begin
     end;
     case FModels[LCur.UnitId].Tree.Nodes[LDef].Kind of
       nkArrayType:
-        // Close the element type over the ARRAY's instantiation frame:
-        // TArray<TElementAlias> is `array of T`, so the raw element is the
-        // open parameter T and only SubstX turns it into TElementAlias.
-        Exit(SubstX(ElemOf(LCur.UnitId, LDef), LCur.Inst, 0));
+        begin
+          // Reached through a pointer, only a STATIC array is indexed in
+          // place of its pointer (`P^[I]`); a dynamic one is POINTERMATH's
+          // `(P + I)^`, the pointee itself: `PBytes(P)[I]` over `PBytes =
+          // ^TBytes` is a TBytes (4.8, local/type-conv-2026-11/diag/pm b2).
+          if LViaPointer and not StaticArrayDef(LCur.UnitId, LDef) then
+            Exit(LCur);
+          // Close the element type over the ARRAY's instantiation frame:
+          // TArray<TElementAlias> is `array of T`, so the raw element is the
+          // open parameter T and only SubstX turns it into TElementAlias.
+          Exit(SubstX(ElemOf(LCur.UnitId, LDef), LCur.Inst, 0));
+        end;
       nkIdent, nkMember, nkTypeArgs:
         LCur := AliasStepX(LCur, LDef);   // alias link
       nkPointerType:

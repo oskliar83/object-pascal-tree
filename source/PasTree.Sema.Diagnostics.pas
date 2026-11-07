@@ -24,6 +24,12 @@ type
     FileId: Integer;   // index into TPasPreprocessed.FileNames
     Line: Integer;     // 1-based
     Col: Integer;      // 1-based
+    // A second line for an editor, never part of dcc's wording (Msg stays
+    // byte-for-byte dcc's, so tooling matching dcc output is unaffected):
+    // why a conversion failed - an Explicit-only operator, operators that do
+    // not chain, the conversions the record does declare (spec 9.3.1).
+    // Empty for most diagnostics; a host shows it as related information.
+    Note: string;
   end;
 
 const
@@ -54,6 +60,10 @@ const
   // wording names no operator, so the template has no %s and every call site
   // passes it verbatim.
   SE2010_IncompatibleTypes    = 'E2010 Incompatible types: ''%s'' and ''%s''';
+  // E2250 names the routine as declared (dcc: the callee's name); its
+  // note (TSemaDiag.Note) lists the candidates.
+  SE2250_NoOverload = 'E2250 There is no overloaded version of ''%s'' ' +
+    'that can be called with these arguments';
   SE2015_OperatorNotApplicable =
     'E2015 Operator not applicable to this operand type';
   // E2008 names nothing either: `I + True`, `Ch + I` (4.2.1).
@@ -239,6 +249,7 @@ begin
   Result.FileId := AFileId;
   Result.Line := ALine;
   Result.Col := ACol;
+  Result.Note := '';
 end;
 
 function DiagSeverityLabel(const ACode: string): string;

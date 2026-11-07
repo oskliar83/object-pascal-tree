@@ -140,9 +140,13 @@ begin
     begin
       LSB.Append('diags:'#10);
       for LNode := 0 to High(AModel.Diags) do
+      begin
         LSB.AppendFormat('  %s(%d,%d): %s'#10,
           [AModel.Diags[LNode].Code, AModel.Diags[LNode].Line,
            AModel.Diags[LNode].Col, AModel.Diags[LNode].Msg]);
+        if AModel.Diags[LNode].Note <> '' then
+          LSB.AppendFormat('    note: %s'#10, [AModel.Diags[LNode].Note]);
+      end;
     end;
   finally
     Result := LSB.ToString;
