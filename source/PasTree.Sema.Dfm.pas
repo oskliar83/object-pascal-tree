@@ -398,7 +398,8 @@ uses
   System.StrUtils,
   System.IOUtils,
   System.Generics.Defaults,
-  PasTree.Types;   // PasFoldName: a form name's symbol key
+  PasTree.Types,   // PasFoldName: a form name's symbol key
+  PasTree.Sema.Types;   // TSemaConv: SameType's XConvX verdict
 
 { TPasFormBinder }
 
@@ -972,10 +973,11 @@ begin
   Result := FProj.CanonTypeX(FProj.DeclTypeX(AFMid, AFSym));
 end;
 
+// One class: the one conversion test's identity (XConvX, scIdentical) -
+// weak aliases followed, as every other type comparison of the project.
 function TPasFormBinder.SameType(const A, B: TSemaXType): Boolean;
 begin
-  Result := XValid(A) and XValid(B) and (A.UnitId = B.UnitId) and
-    (A.Sym = B.Sym);
+  Result := FProj.XConvX(A, B) = scIdentical;
 end;
 
 { What (ATMid, ASym) is, as far as form files are concerned, and the class

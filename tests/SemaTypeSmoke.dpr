@@ -271,8 +271,17 @@ begin
     'end;'#10 +
     'end.'#10;
   Analyze(INTR);
-  Ok('4.11: the intrinsic fixture itself is diagnostic-free',
-    Length(GModel.Diags) = 0);
+  // The fixture's only diagnostics are dcc64's own: R43 .. R48 put a
+  // Pointer, a record and a static array into a Variant, each E2010 (the
+  // one conversion test, which the unit typer asks since type-conversion
+  // migration step 4; the category table it used let them pass).
+  var LE2010 := 0;
+  for var LDiag := 0 to High(GModel.Diags) do
+    if (GModel.Diags[LDiag].Code = 'E2010') and
+       (GModel.Diags[LDiag].Line >= 72) and (GModel.Diags[LDiag].Line <= 77) then
+      Inc(LE2010);
+  Ok('4.11: the intrinsic fixture has dcc''s six E2010 and nothing else',
+    (LE2010 = 6) and (Length(GModel.Diags) = 6));
   Eq('4.11: Length(string) is Integer', AssignedType('R01'), 'Integer');
   Eq('4.11: Length(dynamic array) is NativeInt', AssignedType('R02'),
     'NativeInt');
