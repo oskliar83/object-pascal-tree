@@ -1181,6 +1181,8 @@ begin
               Writeln(Format('%s(%d,%d): %s %s',
                 [LFile, LM.Diags[LDIdx].Line, LM.Diags[LDIdx].Col,
                  LM.Diags[LDIdx].Code, LM.Diags[LDIdx].Msg]));
+              if LM.Diags[LDIdx].Note <> '' then
+                Writeln('  note: ', LM.Diags[LDIdx].Note);
             end;
           end
           else
@@ -1205,6 +1207,8 @@ begin
               Writeln(Format('%s(%d,%d): %s %s',
                 [LFile, LM.Diags[LDIdx].Line, LM.Diags[LDIdx].Col,
                  LM.Diags[LDIdx].Code, LM.Diags[LDIdx].Msg]));
+              if LM.Diags[LDIdx].Note <> '' then
+                Writeln('  note: ', LM.Diags[LDIdx].Note);
             end;
             // Library diagnostics are counted, not listed - but a bare count
             // is not actionable: working the tail down means opening the site,

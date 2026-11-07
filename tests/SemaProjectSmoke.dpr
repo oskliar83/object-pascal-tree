@@ -12431,6 +12431,245 @@ begin
   end;
 end;
 
+// E2010 beyond the assignment statement, and the note a record conversion's
+// E2010 carries (2.6.1, 9.3.1; local/type-conv-2026-11/diag): an
+// initialized global, a typed constant, an inline variable with a type, a
+// `for` counter against its bounds (one report per loop), a `for-in`
+// variable against the element, and $POINTERMATH's `P[I]` over a pointer
+// to a dynamic array - the pointee, not its element (a pointer to a static
+// array indexes the array). DgBad's 14 lines are each E2010 to dcc64 37.0
+// and here; DgOkP compiles with dcc64 (diag/fix, on the real RTL) and
+// reports nothing. The notes: an Explicit-only operator, operators that do
+// not chain, the conversions a record declares.
+procedure TestConvDiags;
+const
+  SRC_UNIT =
+    'unit DgU;'#10 +
+    'interface'#10 +
+    'type'#10 +
+    '  TE = (e1, e2, e3);'#10 +
+    '  TSE = set of TE;'#10 +
+    '  TA = record X: Integer; end;'#10 +
+    '  TB = record Y: Integer; class operator Implicit(const A: TA): TB; class operator Explicit(A: Integer): TB; end;'#10 +
+    '  TC = record Z: Integer; class operator Implicit(const A: TB): TC; end;'#10 +
+    '  TF1 = record W: Integer; class operator Implicit(const A: TF1): Integer; end;'#10 +
+    '  TDA = array of Integer;'#10 +
+    '  TBA = array of Byte;'#10 +
+    '  PDA = ^TBA;'#10 +
+    '  TSA = array[0..3] of Byte;'#10 +
+    '  PSA = ^TSA;'#10 +
+    '  TRec = record X: Integer; end;'#10 +
+    '  PRec = ^TRec;'#10 +
+    'var'#10 +
+    '  vI: Integer; vB: Byte; vSg: Single; vS: string; vC: Char; vE: TE; vSE: TSE;'#10 +
+    '  vA: TA; vTB: TB; vTC: TC; vF1: TF1; vDA: TDA; vBA: TBA; vPD: PDA; vPS: PSA;'#10 +
+    '  vR: TRec; vPR: PRec; vI64: Int64;'#10 +
+    'implementation'#10 +
+    'class operator TB.Implicit(const A: TA): TB; begin Result.Y := A.X; end;'#10 +
+    'class operator TB.Explicit(A: Integer): TB; begin Result.Y := A; end;'#10 +
+    'class operator TC.Implicit(const A: TB): TC; begin Result.Z := A.Y; end;'#10 +
+    'class operator TF1.Implicit(const A: TF1): Integer; begin Result := A.W; end;'#10 +
+    'end.'#10;
+  SRC_BAD =
+    'unit DgBad;'#10 +
+    'interface'#10 +
+    'uses DgU;'#10 +
+    'procedure Bad;'#10 +
+    'implementation'#10 +
+    '{$POINTERMATH ON}'#10 +
+    'var GS: string = 5;'#10 +
+    'const CBo: Boolean = 1;'#10 +
+    'var GI: Integer = 1.5;'#10 +
+    'procedure Bad;'#10 +
+    'var C: Char; I: Integer; S: string; B: Byte;'#10 +
+    'begin'#10 +
+    '  for C := 0 to 10 do ;'#10 +
+    '  for I := 0 to vSg do ;'#10 +
+    '  for S in vDA do ;'#10 +
+    '  for B in vS do ;'#10 +
+    '  for I in vSE do ;'#10 +
+    '  var LG: TGUID := ''{00000000-0000-0000-0000-000000000000}'';'#10 +
+    '  vTB := 5;'#10 +
+    '  vTC := vA;'#10 +
+    '  vS := vF1;'#10 +
+    '  vB := vPD[1];'#10 +
+    '  var LI: Integer := ''x'';'#10 +
+    'end;'#10 +
+    'end.'#10;
+  SRC_PROG =
+    'program DgOkP;'#10 +
+    'uses DgU, DgBad;'#10 +
+    '{$POINTERMATH ON}'#10 +
+    'var GB: Byte = 5;'#10 +
+    'const CG: TGUID = ''{00000000-0000-0000-0000-000000000000}'';'#10 +
+    'var GG: TGUID = ''{00000000-0000-0000-0000-000000000000}'';'#10 +
+    'var GP: Pointer = nil;'#10 +
+    'var GPC: PChar = ''abc'';'#10 +
+    'const CA: array[0..1] of Integer = (1, 2);'#10 +
+    'var GD: Double = 5;'#10 +
+    'const CE: TE = e2;'#10 +
+    'const CSE: TSE = [e1];'#10 +
+    'procedure Ok;'#10 +
+    'var B: Byte; E: TE; I64: Int64; C: Char;'#10 +
+    'begin'#10 +
+    '  for B := 0 to 10 do ;'#10 +
+    '  for E := e1 to e3 do ;'#10 +
+    '  for B in vDA do ;'#10 +
+    '  for I64 in vDA do ;'#10 +
+    '  for C in vS do ;'#10 +
+    '  for E in vSE do ;'#10 +
+    '  for var LK: Integer := 0 to vB do ;'#10 +
+    '  var LB: Byte := 5;'#10 +
+    '  vTB := vA;'#10 +
+    '  vI := vF1;'#10 +
+    '  vTB := TB(5);'#10 +
+    '  vBA := vPD[1];'#10 +
+    '  vB := vPS[1];'#10 +
+    '  vB := vPD[1][2];'#10 +
+    '  vR := vPR[1];'#10 +
+    'end;'#10 +
+    'begin'#10 +
+    '  Ok;'#10 +
+    'end.'#10;
+  SRC_OVL =
+    'unit DgOvl;'#10 +
+    'interface'#10 +
+    'uses DgU;'#10 +
+    'procedure PO(const B: TB); overload;'#10 +
+    'procedure PO(const S: string); overload;'#10 +
+    'procedure PN(I: Integer); overload;'#10 +
+    'procedure PN(I: Int64); overload;'#10 +
+    'procedure Bad;'#10 +
+    'implementation'#10 +
+    'procedure PO(const B: TB); begin end;'#10 +
+    'procedure PO(const S: string); begin end;'#10 +
+    'procedure PN(I: Integer); begin end;'#10 +
+    'procedure PN(I: Int64); begin end;'#10 +
+    'procedure Bad;'#10 +
+    'begin'#10 +
+    '  PO(vI);'#10 +
+    '  PN(vSg);'#10 +
+    '  PO(vTC);'#10 +
+    'end;'#10 +
+    'end.'#10;
+  SRC_OVLP =
+    'program DgOvlP;'#10 +
+    'uses DgU, DgOvl;'#10 +
+    'begin'#10 +
+    '  PO(vA);'#10 +
+    '  PO(vS);'#10 +
+    '  PO(vC);'#10 +
+    '  PO(vTB);'#10 +
+    '  PN(vB);'#10 +
+    '  PN(vI64);'#10 +
+    '  PN(5);'#10 +
+    'end.'#10;
+var
+  LDir, LLines, LNotes: string;
+  LBad, LOk: TPasSemaModel;
+  LAll: Boolean;
+
+  function NoteAt(ALine: Integer): string;
+  begin
+    Result := '';
+    if LBad <> nil then
+      for var LD in LBad.Diags do
+        if (LD.Code = 'E2010') and (LD.Line = ALine) then
+          Exit(LD.Note);
+  end;
+
+begin
+  LDir := FreshDir('pastree_sema_convdiags');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    '  TClass = class of TObject;'#10 +
+    '  TGUID = record D1: Cardinal; end;'#10 +
+    '  IInterface = interface end;'#10 +
+    '  TVarRec = record VType: Byte; end;'#10 +
+    '  TArray<T> = array of T;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'DgU.pas'), SRC_UNIT);
+  TFile.WriteAllText(TPath.Combine(LDir, 'DgBad.pas'), SRC_BAD);
+  TFile.WriteAllText(TPath.Combine(LDir, 'DgOkP.dpr'), SRC_PROG);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'DgOkP.dpr'));
+    LBad := ModelByName('dgbad');
+    LOk := ModelByName('dgokp');
+    LLines := '';
+    LAll := LBad <> nil;
+    if LBad <> nil then
+    begin
+      for var LD in LBad.Diags do
+        LLines := LLines + ' ' + LD.Code + '@' + IntToStr(LD.Line);
+      for var LLine in [7, 8, 9, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
+        23] do
+        if Pos(' E2010@' + IntToStr(LLine) + ' ', LLines + ' ') = 0 then
+          LAll := False;
+    end;
+    Ok('conversion diagnostics: each of DgBad''s 14 is E2010 [' + LLines +
+      ' ]', LAll and (DiagCount(LBad, 'E2010') = 14) and
+      (Length(LBad.Diags) = 14));
+    LLines := '';
+    if LOk <> nil then
+      for var LD in LOk.Diags do
+        LLines := LLines + ' ' + LD.Code + '@' + IntToStr(LD.Line);
+    Ok('conversion diagnostics: what dcc compiles reports nothing [' +
+      LLines + ' ]', (LOk <> nil) and (Length(LOk.Diags) = 0));
+    LNotes := NoteAt(19);
+    Ok('note: an Explicit-only operator asks for a cast [' + LNotes + ']',
+      (Pos('explicit cast', LNotes) > 0) and
+      (Pos('TB.Explicit(Integer): TB', LNotes) > 0));
+    LNotes := NoteAt(20);
+    Ok('note: operators do not chain [' + LNotes + ']',
+      (Pos('do not chain', LNotes) > 0) and
+      (Pos('TC.Implicit(TB): TC', LNotes) > 0));
+    LNotes := NoteAt(21);
+    Ok('note: what the record converts to [' + LNotes + ']',
+      Pos('''TF1'' converts implicitly to ''Integer'' alone', LNotes) > 0);
+    Ok('note: none on two types that are no record [' + NoteAt(7) + ']',
+      NoteAt(7) = '');
+    FreeAndNil(GProj);
+    // E2250 (6.3.1, 9.3.1; diag/fix2, dcc64): DgOvl's three calls reach no
+    // candidate of a unit's own set of plain routines; DgOvlP's each bind
+    // one (an Implicit among them). The note lists the set.
+    GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+    try
+      TFile.WriteAllText(TPath.Combine(LDir, 'DgOvl.pas'), SRC_OVL);
+      TFile.WriteAllText(TPath.Combine(LDir, 'DgOvlP.dpr'), SRC_OVLP);
+      GProj.AnalyzeProject(TPath.Combine(LDir, 'DgOvlP.dpr'));
+      LBad := ModelByName('dgovl');
+      LOk := ModelByName('dgovlp');
+      LLines := '';
+      LNotes := '';
+      if LBad <> nil then
+        for var LD in LBad.Diags do
+        begin
+          LLines := LLines + ' ' + LD.Code + '@' + IntToStr(LD.Line);
+          if LD.Line = 16 then
+            LNotes := LD.Note;
+        end;
+      Ok('E2250: each of DgOvl''s 3 calls [' + LLines + ' ]',
+        (LBad <> nil) and (LLines = ' E2250@16 E2250@17 E2250@18'));
+      Ok('E2250: the note lists the set [' + LNotes + ']',
+        LNotes = 'candidates: PO(TB), PO(string)');
+      LLines := '';
+      if LOk <> nil then
+        for var LD in LOk.Diags do
+          LLines := LLines + ' ' + LD.Code + '@' + IntToStr(LD.Line);
+      Ok('E2250: the calls dcc binds report nothing [' + LLines + ' ]',
+        (LOk <> nil) and (Length(LOk.Diags) = 0));
+    finally
+      FreeAndNil(GProj);
+    end;
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // B35: one operator rule table for both typers (4.2.1) - narrow and alias
 // operands, an enum-subrange array's bounds, a subrange whose bound is
 // another unit's enumeration value or constant, and an inherited cross-unit
@@ -19250,6 +19489,7 @@ begin
   TestPtrConvRanking;
   TestModeConvRanking;
   TestAssignConv;
+  TestConvDiags;
   TestHelperOverloadSet;
   TestOperatorTable;
   TestTargetFacts;
