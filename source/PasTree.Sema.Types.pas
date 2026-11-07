@@ -703,6 +703,22 @@ type
     class procedure RecheckWithBodies(AModel: TPasSemaModel;
       APlatform: TPasPlatform; const AExtTypeOf: TSemaExtTypeFunc;
       const ATargetsTyped: TSemaWithTypedFunc = nil); static;
+    { A typer over AModel, an analyzed model, for questions asked of it
+      afterwards (ArgNodeConv): prepared, not run - it types nothing and
+      reports nothing. The caller frees it. }
+    class function Over(AModel: TPasSemaModel;
+      APlatform: TPasPlatform): TPasSemaTyper; static;
+    { The NODE half of an argument's conversion facts over this model's
+      nodes, the one TPasSemaProject.ArgConvX reads off a unit of the
+      closure: the caller has set AArg.Facts from the argument's TYPE (its
+      category, the builtin it is stored as - OpFactsX with no node); this
+      adds what the node says - a string or character literal is its own
+      kind, an integer constant expression its value (folded, a true
+      constant of this model followed), a real literal - then the kind
+      (ConvArgKindOf) and the named-string-constant flag. The completion
+      engine ranks a buffer's arguments with it (TPasSemaProject.ArgFitX):
+      the buffer is no unit of the closure, so ArgConvX cannot read it. }
+    procedure ArgNodeConv(ANode: Integer; var AArg: TSemaArgConv);
   end;
 
 { Overload scoring rules shared by the unit's typer (ScoreArgs) and the
@@ -5923,6 +5939,68 @@ begin
   finally
     LT.Free;
   end;
+end;
+
+class function TPasSemaTyper.Over(AModel: TPasSemaModel;
+  APlatform: TPasPlatform): TPasSemaTyper;
+begin
+  Result := TPasSemaTyper.Create;
+  try
+    Result.M := AModel;
+    Result.T := AModel.Tree;
+    Result.FPlatform := APlatform;
+    Result.Prepare;
+  except
+    Result.Free;
+    raise;
+  end;
+end;
+
+procedure TPasSemaTyper.ArgNodeConv(ANode: Integer; var AArg: TSemaArgConv);
+var
+  LLit: Integer;
+begin
+  if ANode <> NIL_NODE then
+  begin
+    // OpFacts' node half, the type half being the caller's.
+    LLit := PeelParens(T, ANode);
+    AArg.Facts.SetCtor := (LLit <> NIL_NODE) and (Kind(LLit) = nkSetCtor);
+    if (LLit <> NIL_NODE) and (Kind(LLit) in [nkStrLit, nkCaretChar]) then
+    begin
+      if (Kind(LLit) = nkCaretChar) or IsOneCharLiteralNode(T, LLit) then
+        AArg.Facts.Text := stkCharLit
+      else
+        AArg.Facts.Text := stkLit;
+    end
+    else
+      case AArg.Facts.Cat of
+        tcInteger:
+          begin
+            AArg.Facts.IntConst := ConstOperandValue(ANode,
+              AArg.Facts.IntValue, AArg.Facts.IntFolded);
+            if not AArg.Facts.IntConst and (LLit <> NIL_NODE) and
+               (Kind(LLit) = nkCall) then
+              FoldedCallOpFacts(T, ANode, ConstFacts(), OrdNameValue(),
+                ArgFacts(), AArg.Facts);
+          end;
+        tcFloat:
+          begin
+            LLit := RealLiteralNode(T, ANode);
+            AArg.Facts.RealLit := LLit <> NIL_NODE;
+            AArg.Facts.CurrLit := AArg.Facts.RealLit and
+              (PasLiteralTypeName(T, LLit, False, FIs64) = 'currency');
+            AArg.Facts.Curr := AArg.Facts.Curr and not AArg.Facts.RealLit;
+          end;
+      end;
+  end;
+  AArg.Kind := ConvArgKindOf(AArg.Facts);
+  AArg.StrConstName := (AArg.Facts.Cat in [tcString, tcChar]) and
+    (AArg.Kind <> cnkStrLit) and (AArg.Kind <> cnkCharLit) and
+    (ANode <> NIL_NODE) and IsConstName(ANode);
+  if (AArg.Kind <> cnkNone) and (AArg.Facts.Cat = tcInteger) and
+     not AArg.Facts.IntConst and (ANode <> NIL_NODE) and
+     (MayFoldConvConst(T, ANode) or IsConstName(ANode)) then
+    FoldConvConst(T, ANode, ConstFacts(), OrdNameValue(), AArg);
 end;
 
 function TPasSemaTyper.Kind(N: Integer): TPasNodeKind;

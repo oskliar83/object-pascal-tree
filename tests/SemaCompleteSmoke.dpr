@@ -772,6 +772,20 @@ const
     'function UJoin(const A: array of string): TCustOv; overload;'#10 +
     'function UDyn(const A: array of const): TObjOv; overload;'#10 +
     'function UDyn(const A: TStrsU): TCustOv; overload;'#10 +
+    // Ranked (6.3.1): each pair's second overload is the one dcc64 binds
+    // (local/type-conv-2026-11/mig6/probe).
+    'function UNum(I: Integer): TObjOv; overload;'#10 +
+    'function UNum(B: Byte): TCustOv; overload;'#10 +
+    'function UWid(I: Int64): TObjOv; overload;'#10 +
+    'function UWid(I: Integer): TCustOv; overload;'#10 +
+    'function UFlt(D: Double): TObjOv; overload;'#10 +
+    'function UFlt(I: Int64): TCustOv; overload;'#10 +
+    'function UVar(var I: Integer): TObjOv; overload;'#10 +
+    'function UVar(const I: Int64): TCustOv; overload;'#10 +
+    'function UCls(O: TObject): TObjOv; overload;'#10 +
+    'function UCls(O: TObjOv): TCustOv; overload;'#10 +
+    'function UUnt(const V: Variant): TObjOv; overload;'#10 +
+    'function UUnt(const X): TCustOv; overload;'#10 +
     'implementation'#10 +
     'class function TUtilU.FirstOf<T>(const B: TBoxOv<T>): T;'#10 +
     'begin'#10'end;'#10 +
@@ -787,6 +801,18 @@ const
     'function UJoin(const A: array of string): TCustOv;'#10'begin'#10'end;'#10 +
     'function UDyn(const A: array of const): TObjOv;'#10'begin'#10'end;'#10 +
     'function UDyn(const A: TStrsU): TCustOv;'#10'begin'#10'end;'#10 +
+    'function UNum(I: Integer): TObjOv;'#10'begin'#10'end;'#10 +
+    'function UNum(B: Byte): TCustOv;'#10'begin'#10'end;'#10 +
+    'function UWid(I: Int64): TObjOv;'#10'begin'#10'end;'#10 +
+    'function UWid(I: Integer): TCustOv;'#10'begin'#10'end;'#10 +
+    'function UFlt(D: Double): TObjOv;'#10'begin'#10'end;'#10 +
+    'function UFlt(I: Int64): TCustOv;'#10'begin'#10'end;'#10 +
+    'function UVar(var I: Integer): TObjOv;'#10'begin'#10'end;'#10 +
+    'function UVar(const I: Int64): TCustOv;'#10'begin'#10'end;'#10 +
+    'function UCls(O: TObject): TObjOv;'#10'begin'#10'end;'#10 +
+    'function UCls(O: TObjOv): TCustOv;'#10'begin'#10'end;'#10 +
+    'function UUnt(const V: Variant): TObjOv;'#10'begin'#10'end;'#10 +
+    'function UUnt(const X): TCustOv;'#10'begin'#10'end;'#10 +
     'end.'#10;
   OV_MAIN =
     'unit mainu;'#10 +
@@ -818,6 +844,12 @@ const
     'function MJoin(const A: array of string): TCustOv; overload;'#10 +
     'function MDyn(const A: array of const): TObjOv; overload;'#10 +
     'function MDyn(const A: TIntsM): TCustOv; overload;'#10 +
+    'function MNum(I: Integer): TObjOv; overload;'#10 +
+    'function MNum(B: Byte): TCustOv; overload;'#10 +
+    'function MWid(I: Int64): TObjOv; overload;'#10 +
+    'function MWid(I: Integer): TCustOv; overload;'#10 +
+    'function MVar(var I: Integer): TObjOv; overload;'#10 +
+    'function MVar(const I: Int64): TCustOv; overload;'#10 +
     'implementation'#10 +
     'class function TUtilM.FirstOf<T>(const B: TBoxOv<T>): T;'#10 +
     'begin'#10'end;'#10 +
@@ -838,9 +870,15 @@ const
     'function MJoin(const A: array of string): TCustOv;'#10'begin'#10'end;'#10 +
     'function MDyn(const A: array of const): TObjOv;'#10'begin'#10'end;'#10 +
     'function MDyn(const A: TIntsM): TCustOv;'#10'begin'#10'end;'#10 +
+    'function MNum(I: Integer): TObjOv;'#10'begin'#10'end;'#10 +
+    'function MNum(B: Byte): TCustOv;'#10'begin'#10'end;'#10 +
+    'function MWid(I: Int64): TObjOv;'#10'begin'#10'end;'#10 +
+    'function MWid(I: Integer): TCustOv;'#10'begin'#10'end;'#10 +
+    'function MVar(var I: Integer): TObjOv;'#10'begin'#10'end;'#10 +
+    'function MVar(const I: Int64): TCustOv;'#10'begin'#10'end;'#10 +
     'procedure Go(BM: TCustBoxM; CM: TCustAliasM; CD: TCustOv;'#10 +
     '  BU: TCustBoxU; SU: TStrsU; SM: TStrsM; const OA: array of string;'#10 +
-    '  I: Integer; DD: TDerOv; GG: TGenOv<TCustOv>);'#10 +
+    '  I: Integer; DD: TDerOv; GG: TGenOv<TCustOv>; B: Byte);'#10 +
     'begin'#10 +
     '//OV'#10 +
     'end;'#10 +
@@ -2572,6 +2610,26 @@ begin
   OvCase('UDyn([''a'', SU[0]]).|', 'CreatedF', '');
   OvCase('UDyn([1, ''b'']).|', 'IdF', 'CreatedF');
   OvCase('MDyn([I]).|', 'CreatedF', '');
+  // Type-conversion migration 6: the overload is RANKED as dcc ranks the
+  // conversion (6.3.1), the first declared no longer winning a tie of two
+  // conversions: `5` takes Byte over Integer (its value, read off the
+  // buffer), a Byte Integer over Int64, an Integer Int64 over Double, a
+  // class its nearer ancestor, an untyped `const` beats Variant; a `var`
+  // parameter refuses a literal. A used unit's family and the edited unit's
+  // own; dcc64 probe local/type-conv-2026-11/mig6/probe.
+  OvCase('UNum(5).|', 'CreatedF', '');
+  OvCase('UNum(I).|', 'IdF', 'CreatedF');
+  OvCase('UWid(B).|', 'CreatedF', '');
+  OvCase('UFlt(I).|', 'CreatedF', '');
+  OvCase('UVar(5).|', 'CreatedF', '');
+  OvCase('UVar(I).|', 'IdF', 'CreatedF');
+  OvCase('UCls(CD).|', 'CreatedF', '');
+  OvCase('UUnt(I).|', 'CreatedF', '');
+  OvCase('MNum(5).|', 'CreatedF', '');
+  OvCase('MNum(I).|', 'IdF', 'CreatedF');
+  OvCase('MWid(B).|', 'CreatedF', '');
+  OvCase('MVar(5).|', 'CreatedF', '');
+  OvCase('MVar(I).|', 'IdF', 'CreatedF');
   // C2: the written type arguments are the answer (16.5.1), for a generic
   // method of the edited unit and of a used one.
   OvCase('TUtilM.FirstOf<TCustOv>(BU).|', 'CreatedF', '');

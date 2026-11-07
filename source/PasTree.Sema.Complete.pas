@@ -1980,8 +1980,11 @@ end;
   admits (6.2.5; TPasSemaTyper.ArityFits) and, after `Name<...>`, of those
   declaring that many type parameters (16.5.1), the one whose arguments fit
   its parameters best - each pair scored in project space by the cross-type
-  pass's own rule (TPasSemaProject.ArgFitX), the first declared winning a
-  tie. The callee comes with less: a project family found by NAME is its
+  pass's own rule (TPasSemaProject.ArgFitX), RANKED as dcc ranks the
+  conversion (6.3.1: a Byte takes F(Integer) over F(Int64), `5` F(Byte)
+  over F(Integer), a class its nearer ancestor; a `var` parameter refuses
+  a literal; an untyped one ranks above Variant) from the argument's facts
+  read off the buffer (BufferArgConvX), the first declared winning a tie. The callee comes with less: a project family found by NAME is its
   head (`B.GetObj(1).` must be the overload with a parameter), and Phase 1's
   choice in a family of the buffer's own was made without any type of
   another unit - an argument typed TCust scored nothing, and one typed by an
@@ -2004,6 +2007,30 @@ var
   LRef: TPasComplTypeRef;
   LParX: TSemaXType;
   LNode, LTypeNode, LVarRecMid, LVarRecSym: Integer;
+  LConvs: TArray<TSemaArgConv>;
+  LHeads: TArray<TSemaSymbolKind>;
+  LTyper: TPasSemaTyper;
+
+  // What the argument ACore names or calls, by the buffer's own binding
+  // (ByRefShapeRejects' AHeadKind); skKeyword: not known - a name of
+  // another unit, which the shape rules then leave alone.
+  function ArgHeadKind(ACore: Integer): TSemaSymbolKind;
+  var
+    LName, LSym: Integer;
+  begin
+    Result := skKeyword;
+    LName := ACore;
+    if (LName <> NIL_NODE) and (FModel.Tree.Nodes[LName].Kind = nkCall) then
+      LName := PeelParens(FModel.Tree, FModel.Tree.Nodes[LName].FirstChild);
+    if (LName <> NIL_NODE) and (FModel.Tree.Nodes[LName].Kind = nkMember) then
+      LName := FModel.Tree.LastChild(LName);
+    if (LName = NIL_NODE) or (FModel.Tree.Nodes[LName].Kind <> nkIdent) then
+      Exit;
+    LSym := FModel.RefMap[LName];
+    if LSym <> NIL_SYM then
+      Result := FModel.Symbols[LSym].Kind;
+  end;
+
 begin
   Result := ASym;
   if (FProj = nil) or (ASym = NIL_SYM) or (ACall = NIL_NODE) or
@@ -2071,21 +2098,34 @@ begin
   SetLength(LCores, LArgs);
   SetLength(LProcs, LArgs);
   SetLength(LRefs, LArgs);
+  SetLength(LConvs, LArgs);
+  SetLength(LHeads, LArgs);
   LCount := 0;
-  LNode := CallFirstArg(FModel.Tree, ACall);
-  while (LNode <> NIL_NODE) and (LCount < LArgs) and
-        (FModel.Tree.Nodes[LNode].Kind <> nkMissing) do
-  begin
-    if FModel.Tree.Nodes[LNode].Kind = nkAmbiguous then
-      Exit;
-    LCores[LCount] := PeelParens(FModel.Tree, LNode);
-    LRef := DesignatorType(LNode, ADepth + 1);
-    LArgXs[LCount] := ArgValueX(LRef);
-    LArrs[LCount] := ArrayArgOf(LCores[LCount], LRef, ADepth + 1);
-    LRefs[LCount] := LRef.IsTypeRef;
-    LProcs[LCount] := IsProcedureValue(LCores[LCount], ADepth + 1);
-    Inc(LCount);
-    LNode := FModel.Tree.Nodes[LNode].NextSibling;
+  // The conversion facts of each argument (6.3.1's ranking: a literal's
+  // value, a constant folded) are read off the buffer's nodes by a typer
+  // over it - the buffer is no unit of the closure (BufferArgConvX).
+  LTyper := TPasSemaTyper.Over(FModel, FProj.Platform);
+  try
+    LNode := CallFirstArg(FModel.Tree, ACall);
+    while (LNode <> NIL_NODE) and (LCount < LArgs) and
+          (FModel.Tree.Nodes[LNode].Kind <> nkMissing) do
+    begin
+      if FModel.Tree.Nodes[LNode].Kind = nkAmbiguous then
+        Exit;
+      LCores[LCount] := PeelParens(FModel.Tree, LNode);
+      LRef := DesignatorType(LNode, ADepth + 1);
+      LArgXs[LCount] := ArgValueX(LRef);
+      LArrs[LCount] := ArrayArgOf(LCores[LCount], LRef, ADepth + 1);
+      LRefs[LCount] := LRef.IsTypeRef;
+      LProcs[LCount] := IsProcedureValue(LCores[LCount], ADepth + 1);
+      LConvs[LCount] := FProj.BufferArgConvX(LTyper, LCores[LCount],
+        LArgXs[LCount]);
+      LHeads[LCount] := ArgHeadKind(LCores[LCount]);
+      Inc(LCount);
+      LNode := FModel.Tree.Nodes[LNode].NextSibling;
+    end;
+  finally
+    LTyper.Free;
   end;
   // The written type arguments' count, the 16.5.1 filter; when it leaves no
   // candidate the choice runs again without it, as SelectCallTarget's does.
@@ -2165,7 +2205,9 @@ begin
             LCores[LIdx], LRefs[LIdx], LArrs[LIdx])
         else
           LFit := FProj.ArgFitX(LArgXs[LIdx], LParX, FModel.Tree, LCores[LIdx],
-            LProcs[LIdx], LRefs[LIdx], LArrs[LIdx], FModel);
+            LProcs[LIdx], LRefs[LIdx], LArrs[LIdx], FModel, @LConvs[LIdx],
+            ParamIsByRef(LM, LParams[LIdx]), ParamIsUntyped(LM, LParams[LIdx]),
+            LHeads[LIdx]);
         if LFit < 0 then
         begin
           LScore := -1;
