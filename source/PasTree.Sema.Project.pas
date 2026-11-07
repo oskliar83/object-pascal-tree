@@ -19836,20 +19836,28 @@ var
     procedure CheckForIn(N: Integer);
     var
       LVar, LColl: Integer;
-      LVarX, LCollX: TSemaXType;
+      LVarX, LCollX, LElemX: TSemaXType;
     begin
       LVar := LM.Tree.Nodes[N].FirstChild;
       if LVar = NIL_NODE then
         Exit;
-      LColl := LM.Tree.Nodes[LVar].NextSibling;
+      LColl :=LM.Tree.Nodes[LVar].NextSibling;
       if LColl = NIL_NODE then
         Exit;
       LVarX := LoopVarX(LVar);
       LCollX := GetX(LColl);
       if not XValid(LVarX) or not XValid(LCollX) then
         Exit;
-      CheckConv(N, LVar, LColl, LVar, LVarX,
-        ForInElementX(AId, LColl, LCollX));
+      LElemX := ForInElementX(AId, LColl, LCollX);
+      // A set of characters walks byte characters any character variable
+      // takes: a Char over a `set of AnsiChar` compiles (Data.DB's
+      // TField.IsValidChar), a Char over an `array of AnsiChar` does not
+      // (spec 5.5.2, probe wide-mig/probe ForInSet.dpr).
+      if (XCatOf(CanonTypeX(LCollX)) = tcSet) and
+         (XCatOf(CanonTypeX(LVarX)) = tcChar) and XValid(LElemX) and
+         (XCatOf(CanonTypeX(LElemX)) = tcChar) then
+        Exit;
+      CheckConv(N, LVar, LColl, LVar, LVarX, LElemX);
     end;
 
   var
