@@ -88,7 +88,8 @@ type
   // leaves TBase's `Foo(const S: string)` callable through a TDer).
   TSemaSymbolFlag = (sfBuiltin, sfExternalUnresolved, sfStrict, sfOverload,
     sfClassMember, sfForward, sfHasBody, sfHasDefault, sfGeneric, sfVarArgs,
-    sfDefaultArrayProp, sfInline, sfOverloadDirective, sfOverrideDirective);
+    sfDefaultArrayProp, sfInline, sfOverloadDirective, sfOverrideDirective,
+    sfCompletesForward);
   TSemaSymbolFlags = set of TSemaSymbolFlag;
 
   // A reference resolved to a symbol in another unit's model.
@@ -507,11 +508,16 @@ type
     FNamePool: TSemaNamePool;
     FNamePoolOn: Boolean;
     procedure GrowSyms;
-    { Is ASym, found in AScope, visible at AAtToken (3.1.3): a block's
-      inline declarations only from their declaration on, everything else
-      throughout; AAtToken < 0 skips the test. ResolveAt's and
-      ResolveByArityAt's one rule. }
+    { Is ASym, found in AScope, visible at AAtToken (3.3.2, general approach
+      point 3): a declaration of a block, a routine, a unit's interface or
+      implementation exists from its declaration on (a block's inline ones
+      past their whole declaration, 3.1.3); a struct's members, a generic's
+      parameters, an enumeration's values throughout. AAtToken < 0 skips the
+      test. ResolveAt's and ResolveByArityAt's one rule. }
     function VisibleAt(AScope, ASym, AAtToken: Integer): Boolean; inline;
+    { ASym, declared after AAtToken, a type completing a forward `TFoo =
+      class;` (sfCompletesForward) of the type section AAtToken lies in? }
+    function ForwardVisibleAt(ASym, AAtToken: Integer): Boolean;
     { A new symbol slot with every field but the names at its default -
       NIL_SYM, NIL_NODE and NIL_SCOPE are not the zero GrowSyms leaves, and
       0 is a real index. Both AddSymbol overloads start here. }
@@ -2503,8 +2509,30 @@ end;
   reason to unbind. }
 function TPasSemaModel.VisibleAt(AScope, ASym, AAtToken: Integer): Boolean;
 begin
-  Result := (AAtToken < 0) or (Scopes[AScope].Kind <> sckBlock) or
-    not DeclaredAfter(ASym, AAtToken);
+  Result := (AAtToken < 0) or
+    not (Scopes[AScope].Kind in [sckBlock, sckRoutine, sckUnit,
+      sckImplementation]) or
+    not DeclaredAfter(ASym, AAtToken) or ForwardVisibleAt(ASym, AAtToken);
+end;
+
+{ A forward `TFoo = class;` (interface, dispinterface) and its completion
+  lie in one type section (11.1.1), and DeclNode is the completion's
+  (CollectTypeDecl): a reference in that section is past the forward. One
+  above the forward in the same section reads it too - dcc's E2003 there
+  (or a used unit's TFoo) is not told apart. }
+function TPasSemaModel.ForwardVisibleAt(ASym, AAtToken: Integer): Boolean;
+var
+  LSec: Integer;
+begin
+  Result := False;
+  if not (sfCompletesForward in Symbols[ASym].Flags) then
+    Exit;
+  LSec := Symbols[ASym].DeclNode;
+  while (LSec <> NIL_NODE) and (Tree.Nodes[LSec].Kind <> nkTypeSec) do
+    LSec := Tree.Nodes[LSec].Parent;
+  Result := (LSec <> NIL_NODE) and
+    (AAtToken >= Tree.Nodes[LSec].FirstToken) and
+    (AAtToken <= Tree.Nodes[LSec].LastToken);
 end;
 
 function TPasSemaModel.ResolveByArityAt(AScope: Integer;

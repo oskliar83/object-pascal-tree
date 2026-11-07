@@ -114,6 +114,7 @@ type
     function IsBareTypeUse(ANode: Integer): Boolean;
     function IsHeritageRef(ANode: Integer): Boolean;
     function DeclaredAfter(ASym, ANode: Integer): Boolean;
+    function TargetAtToken(ANode: Integer): Integer;
     function IsTypeParamSym(ASym: Integer): Boolean;
     function InAccessorSpecifier(ANode: Integer): Boolean;
     function RanksAfterUnit(ANode, ASym: Integer): Boolean;
@@ -471,6 +472,28 @@ end;
 { Is ASym's declaration written BELOW ANode in this unit? The declaration name
   node's first token against ANode's, both in this model - the cheapest total
   order the tree has. }
+{ The token a reference ANode is looked up at: its own, but for the target
+  of a pointer type `^T` or a class reference `class of T` declared in a
+  `type` section, the section's last - such a target is completed anywhere
+  in that section, ahead of a used unit's same name (10.1.1, 15.2.1; dcc64
+  37.0, local/type-conv-2026-11/late P3). Elsewhere a declaration exists
+  from its position on (3.3.2, general approach point 3). }
+function TPasSemaResolver.TargetAtToken(ANode: Integer): Integer;
+var
+  LUp: Integer;
+begin
+  Result := FTree.Nodes[ANode].FirstToken;
+  LUp := FTree.Nodes[ANode].Parent;
+  if (LUp = NIL_NODE) or not (KindOf(LUp) in [nkPointerType, nkClassOf]) then
+    Exit;
+  LUp := FTree.Nodes[LUp].Parent;
+  if (LUp = NIL_NODE) or (KindOf(LUp) <> nkTypeDecl) then
+    Exit;
+  LUp := FTree.Nodes[LUp].Parent;
+  if (LUp <> NIL_NODE) and (KindOf(LUp) = nkTypeSec) then
+    Result := FTree.Nodes[LUp].LastToken;
+end;
+
 function TPasSemaResolver.DeclaredAfter(ASym, ANode: Integer): Boolean;
 var
   LDecl: Integer;
@@ -1802,6 +1825,10 @@ begin
     // DeclNode must reach the real definition so ancestor/generic-param walks
     // (TypeDefNode and the project's cross typer) see heritage and params.
     FModel.Symbols[LSym].DeclNode := LName;
+    // Named from the forward on, not from here (3.3.2, general approach
+    // point 3): TPasSemaModel.ForwardVisibleAt.
+    FModel.Symbols[LSym].Flags := FModel.Symbols[LSym].Flags +
+      [sfCompletesForward];
     // Not a new symbol, but a declaration all the same: `type U = class; U =
     // class end;` in unit U is two E2004, one per half.
     if RedeclaresOwnName(AScope, skType, LName, LNameKey) then
@@ -3307,12 +3334,13 @@ begin
         // at the end of the branch - nothing they call reads RefMap.
         var LScope := FNodeScope[ANode];
         var LTok := FTree.Nodes[ANode].FirstToken;
-        // ResolveAt, not Resolve: this is a REFERENCE, and an inline
-        // `var`/`const` is visible only from its own declaration onward
-        // (3.1.3). See TPasSemaModel.ResolveAt - the position is only
-        // consulted for block scopes, so a routine's classic `var` section and
-        // everything above it stay order-independent.
-        var LSym := FModel.ResolveAt(LScope, LKey, LTok);
+        // ResolveAt, not Resolve: this is a REFERENCE, and a declaration of
+        // a block, a routine or a unit section exists from its declaration
+        // on (3.3.2, general approach point 3; an inline `var` / `const`
+        // past its whole declaration, 3.1.3) - see TPasSemaModel.VisibleAt.
+        // A pointer's and a class reference's target in a type section are
+        // completed in that section (10.1.1, 15.2.1): read from its end.
+        var LSym := FModel.ResolveAt(LScope, LKey, TargetAtToken(ANode));
         // ARITY is part of a type's identity (16.1.2), and BOTH directions of
         // ignoring that are real - one third-party library's base unit sets both traps:
         // `Pointer<T>` beside the builtin `Pointer` (a BARE name must skip the
@@ -3330,7 +3358,8 @@ begin
           var LWantGeneric := not IsBareTypeUse(ANode);
           if (sfGeneric in FModel.Symbols[LSym].Flags) <> LWantGeneric then
           begin
-            LHead := FModel.ResolveByArityAt(LScope, LKey, LTok, LWantGeneric);
+            LHead := FModel.ResolveByArityAt(LScope, LKey,
+              TargetAtToken(ANode), LWantGeneric);
             // NIL_SYM = only the other arity is in scope, which is dcc's error
             // and not a reason to drop the binding we have.
             if LHead <> NIL_SYM then

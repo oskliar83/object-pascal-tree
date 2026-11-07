@@ -256,6 +256,15 @@ of less work, not a gap in following the language; its consequences are in
   label is silent. Every label that does name a field is bound - a record
   from any unit, an array of records per dimension, an anonymous record.
 
+### 3.3.2 Name resolution order
+- a forward class or interface is read from the start of its type section,
+  not from the forward: a reference above `TFoo = class;` in that section
+  binds the completed TFoo where dcc reports E2003 or takes a used unit's
+  TFoo.
+- an implementation heading written below a type that its declaration's
+  heading named above (the same name, two types) pairs with the declaration
+  all the same: dcc's E2037 there is not reported.
+
 ## 04-expressions-operators.md
 
 ### 4.2.1 Result type of an operator expression
