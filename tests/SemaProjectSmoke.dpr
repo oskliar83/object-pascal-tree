@@ -12684,7 +12684,9 @@ end;
 // to a dynamic array - the pointee, not its element (a pointer to a static
 // array indexes the array). DgBad's 14 lines are each E2010 to dcc64 37.0
 // and here; DgOkP compiles with dcc64 (diag/fix, on the real RTL) and
-// reports nothing. The notes: an Explicit-only operator, operators that do
+// reports nothing - its set-of-characters loops too (5.5.2: a Char over a
+// `set of AnsiChar`, Data.DB's IsValidChar; wide-mig/probe ForInSet.dpr,
+// three E2010 on 0.160.0). The notes: an Explicit-only operator, operators that do
 // not chain, the conversions a record declares.
 procedure TestConvDiags;
 const
@@ -12754,8 +12756,9 @@ const
     'var GD: Double = 5;'#10 +
     'const CE: TE = e2;'#10 +
     'const CSE: TSE = [e1];'#10 +
+    'type TFC = set of AnsiChar; TCC = set of Char;'#10 +
     'procedure Ok;'#10 +
-    'var B: Byte; E: TE; I64: Int64; C: Char;'#10 +
+    'var B: Byte; E: TE; I64: Int64; C: Char; A: AnsiChar; W: WideChar; SF: TFC; SCC: TCC;'#10 +
     'begin'#10 +
     '  for B := 0 to 10 do ;'#10 +
     '  for E := e1 to e3 do ;'#10 +
@@ -12763,6 +12766,10 @@ const
     '  for I64 in vDA do ;'#10 +
     '  for C in vS do ;'#10 +
     '  for E in vSE do ;'#10 +
+    '  for C in SF do ;'#10 +
+    '  for W in SF do ;'#10 +
+    '  for A in SCC do ;'#10 +
+    '  for C in [''a''..''c''] do ;'#10 +
     '  for var LK: Integer := 0 to vB do ;'#10 +
     '  var LB: Byte := 5;'#10 +
     '  vTB := vA;'#10 +
