@@ -1110,9 +1110,13 @@ Still open, roughly in the order we're tackling it:
   (`TPasSemaModel.ResolveAt`/`DeclaredAfter`) - the entry outlived the fix and is
   corrected here on 2026-08-07, the second one in this list to do that. 3 sec. 3.1.3
   scopes an inline variable "from its declaration to the end of the enclosing
-  block", and only a REFERENCE lookup consults the position, for `sckBlock`
-  scopes alone, so everything the language keeps order-independent stays that
-  way. The comparison is on the visible-stream token index, monotonic in source
+  block", and only a REFERENCE lookup consults the position. Since 0.156.2 it
+  does so for a routine's and a unit section's scopes too (3 sec. 3.3.2,
+  general approach point 3: a name above the unit's own declaration of it is
+  a used unit's), with a pointer's and a class reference's target and a
+  forward class completed in their type section; a struct's members, a
+  generic's parameters and an enumeration's values stay order-independent.
+  The comparison is on the visible-stream token index, monotonic in source
   order across include boundaries.
 
   Re-probed against dcc32 37.0 on 2026-08-07, five shapes, and we match on all

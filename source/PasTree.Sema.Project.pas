@@ -20035,12 +20035,7 @@ var
       gate) - the binding's own gap, which E2010 would only repeat;
     - an index over a typed pointer: under $POINTERMATH ON `PBytes(P)[I]`
       of a `PBytes = ^TBytes` is a TBytes, typed here as the dereferenced
-      array's element (System.Generics.Collections' TListHelper);
-    - a type this unit declares BELOW the statement, which no statement
-      sees: a name the resolver bound past its declaration order (Vcl
-      .ActnMenus' `var ControlClass: TCustomActionControlClass` bound to the
-      unit's later `TCustomActionControlClass = class(TCustomActionControl)`
-      rather than Vcl.ActnMan's class reference). }
+      array's element (System.Generics.Collections' TListHelper). }
   function Unreliable(AAssign, ANode: Integer; const AX: TSemaXType): Boolean;
   var
     LCore, LBase, LHead, LMid, LSym: Integer;
@@ -20076,8 +20071,7 @@ var
           Exit(True);
       end;
     end;
-    Result := (AX.UnitId = AId) and
-      LM.DeclaredAfter(AX.Sym, LM.Tree.Nodes[AAssign].FirstToken);
+    Result := False;
   end;
 
   { E2010 at every assignment of the unit whose value does not convert to

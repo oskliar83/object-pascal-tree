@@ -12617,6 +12617,184 @@ begin
     TDirectory.Delete(LDir, True);
 end;
 
+{ A unit-level and a routine's declaration exists from its position on (spec
+  3.3.2, general approach point 3): a name written above it means a used
+  unit's or an enclosing scope's declaration - a routine heading, its var
+  section, a nested routine, a statement, a field, a constant - but for a
+  pointer's or class reference's target and a forward class, completed
+  anywhere in their type section. Both units compiled by dcc64 37.0
+  (local/type-conv-2026-11/late/smoke; the bindings: late/p P1-P5). On 0.156.1
+  every name below bound DB's later declaration. }
+procedure TestDeclOrder;
+const
+  UDA =
+    'unit DA;'#13#10 +                                        // 1
+    'interface'#13#10 +                                       // 2
+    'type'#13#10 +                                            // 3
+    '  TX = Int64;'#13#10 +                                   // 4
+    '  TY = Int64;'#13#10 +                                   // 5
+    '  TBase = class end;'#13#10 +                            // 6
+    '  TCls = class end;'#13#10 +                             // 7
+    'const'#13#10 +                                           // 8
+    '  KX = 10;'#13#10 +                                      // 9
+    'function FX: Int64;'#13#10 +                             // 10
+    'var GV: Integer;'#13#10 +                                // 11
+    'implementation'#13#10 +                                  // 12
+    'function FX: Int64; begin Result := 1; end;'#13#10 +     // 13
+    'end.'#13#10;                                             // 14
+  UDB =
+    'unit DB;'#13#10 +                                        // 1
+    'interface'#13#10 +                                       // 2
+    'uses DA;'#13#10 +                                        // 3
+    'type'#13#10 +                                            // 4
+    '  TBase = class;'#13#10 +                                // 5
+    '  TK = class'#13#10 +                                    // 6
+    '    F: TX;'#13#10 +                                      // 7
+    '    B: TBase;'#13#10 +                                   // 8
+    '    procedure M(A: TY);'#13#10 +                         // 9
+    '  end;'#13#10 +                                          // 10
+    '  PX = ^TX;'#13#10 +                                     // 11
+    '  TBC = class of TCls;'#13#10 +                          // 12
+    '  TX = Byte;'#13#10 +                                    // 13
+    '  TBase = class end;'#13#10 +                            // 14
+    '  TCls = class end;'#13#10 +                             // 15
+    'const'#13#10 +                                           // 16
+    '  CK = KX;'#13#10 +                                      // 17
+    '  KX = 1;'#13#10 +                                       // 18
+    'implementation'#13#10 +                                  // 19
+    'procedure TK.M(A: TY);'#13#10 +                          // 20
+    'var L: TY;'#13#10 +                                      // 21
+    '  procedure Nest;'#13#10 +                               // 22
+    '  var NL: TY;'#13#10 +                                   // 23
+    '  begin'#13#10 +                                         // 24
+    '    NL := FX;'#13#10 +                                   // 25
+    '  end;'#13#10 +                                          // 26
+    'begin'#13#10 +                                           // 27
+    '  L := SizeOf(TY);'#13#10 +                              // 28
+    'end;'#13#10 +                                            // 29
+    'type'#13#10 +                                            // 30
+    '  TY = Byte;'#13#10 +                                    // 31
+    'function FX: Integer;'#13#10 +                           // 32
+    'begin'#13#10 +                                           // 33
+    '  Result := SizeOf(TY) + KX;'#13#10 +                    // 34
+    'end;'#13#10 +                                            // 35
+    'procedure Outer;'#13#10 +                                // 36
+    '  procedure Inner;'#13#10 +                              // 37
+    '  begin'#13#10 +                                         // 38
+    '    GV := 1;'#13#10 +                                    // 39
+    '  end;'#13#10 +                                          // 40
+    'var GV: Integer;'#13#10 +                                // 41
+    'begin'#13#10 +                                           // 42
+    '  GV := 2;'#13#10 +                                      // 43
+    'end;'#13#10 +                                            // 44
+    'end.'#13#10;                                             // 45
+  PDO =
+    'program PDO;'#13#10 +
+    'uses DB;'#13#10 +
+    'begin'#13#10 +
+    'end.'#13#10;
+var
+  LDir: string;
+  LProj: TPasSemaProject;
+  LM: TPasSemaModel;
+  LMid: Integer;
+
+  // The declaration the first identifier AName on line ALine of DB binds
+  // to: its unit, name and declaration line (`DA.TX@4`); '' when unbound.
+  function Bound(ALine: Integer; const AName: string): string;
+  var
+    LFile, LDeclFile: string;
+    LLine, LCol, LDeclLine, LSym, LBest: Integer;
+    LExt: TPasExtRef;
+    LTo: TPasSemaModel;
+    LToId: Integer;
+  begin
+    Result := '?';
+    LBest := MaxInt;
+    for var LNode := 0 to High(LM.Tree.Nodes) do
+    begin
+      if (LM.Tree.Nodes[LNode].Kind <> nkIdent) or
+         not SameText(LM.Tree.NodeNameLower(LNode), AName) or
+         not LProj.NodeSite(LMid, LNode, LFile, LLine, LCol) or
+         (LLine <> ALine) or (LCol > LBest) then
+        Continue;
+      LBest := LCol;
+      if LM.ExtRefMap.TryGetValue(LNode, LExt) then
+      begin
+        LToId := LExt.UnitId;
+        LSym := LExt.Sym;
+      end
+      else
+      begin
+        LToId := LMid;
+        LSym := LM.RefMap[LNode];
+      end;
+      if LSym = NIL_SYM then
+      begin
+        Result := '';
+        Continue;
+      end;
+      LTo := LProj.Model(LToId);
+      Result := ChangeFileExt(ExtractFileName(LProj.ModelFile(LToId)), '') +
+        '.' + LTo.Symbols[LSym].Name + '@';
+      if LProj.NodeSite(LToId, LTo.Symbols[LSym].DeclNode, LDeclFile,
+         LDeclLine, LCol) then
+        Result := Result + IntToStr(LDeclLine);
+    end;
+  end;
+
+  procedure Check(ALine: Integer; const AName, AWant, AWhat: string);
+  var
+    LGot: string;
+  begin
+    LGot := Bound(ALine, AName);
+    Ok('decl-order: ' + AWhat + ' -> ' + AWant + ' [' + LGot + ']',
+      LGot = AWant);
+  end;
+
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_decl_order');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'DA.pas'), UDA);
+  TFile.WriteAllText(TPath.Combine(LDir, 'DB.pas'), UDB);
+  TFile.WriteAllText(TPath.Combine(LDir, 'PDO.dpr'), PDO);
+  LProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    Ok('decl-order: PDO analyzed',
+      LProj.AnalyzeProject(TPath.Combine(LDir, 'PDO.dpr')) >= 0);
+    LMid := LProj.ModelIdOf(TPath.Combine(LDir, 'DB.pas'));
+    Ok('decl-order: DB loaded', LMid >= 0);
+    if LMid < 0 then
+      Exit;
+    LM := LProj.Model(LMid);
+    Check(7, 'TX', 'DA.TX@4', 'a field above the section''s TX');
+    Check(8, 'TBase', 'DB.TBase@14', 'a field past the forward TBase');
+    Check(9, 'TY', 'DA.TY@5', 'a method declaration''s parameter');
+    Check(11, 'TX', 'DB.TX@13', 'a pointer''s target, completed in section');
+    Check(12, 'TCls', 'DB.TCls@15', 'a class reference''s target');
+    Check(17, 'KX', 'DA.KX@9', 'a constant above the unit''s KX');
+    Check(20, 'TY', 'DA.TY@5',
+      'an implementation heading above the implementation''s TY');
+    Check(21, 'TY', 'DA.TY@5', 'the var section');
+    Check(23, 'TY', 'DA.TY@5', 'a nested routine''s var section');
+    Check(25, 'FX', 'DA.FX@10', 'a call above the implementation''s FX');
+    Check(28, 'TY', 'DA.TY@5', 'a statement');
+    Check(34, 'TY', 'DB.TY@31', 'a statement below the implementation''s TY');
+    Check(34, 'KX', 'DB.KX@18', 'a statement below the unit''s KX');
+    Check(39, 'GV', 'DA.GV@11',
+      'a nested routine above its enclosing routine''s local');
+    Check(43, 'GV', 'DB.GV@41', 'the enclosing routine''s own body');
+    Ok('decl-order: DB has no diagnostics [' + IntToStr(Length(LM.Diags)) +
+      ']', Length(LM.Diags) = 0);
+  finally
+    LProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 procedure TestDeclAfterUnit;
 const
   UFA =
@@ -19039,6 +19217,7 @@ begin
   TestWithBodySelfMember;
   TestNestedOuterAfterUnit;
   TestDeclAfterUnit;
+  TestDeclOrder;
   TestSystemQualifiedUnit;
   TestSystemOverloadJoins;
   TestInlineProcType;
