@@ -1097,7 +1097,24 @@ const
     '    V: T;'#10 +
     '    class operator Add(const A, B: TOpGen<T>): TOpGen<T>;'#10 +
     '  end;'#10 +
+    // Operands rank as a call's arguments (9.3.1, 6.3.1; type-conversion
+    // migration step 5, local/type-conv-2026-11/mig4/probes op1).
+    '  TOpS = record V: Integer; class operator Implicit(A: Integer): TOpS; end;'#10 +
+    '  TOpRk = record'#10 +
+    '    V: Integer;'#10 +
+    '    class operator Add(const A: TOpRk; B: Integer): TOpRk;'#10 +
+    '    class operator Add(const A: TOpRk; B: Double): string;'#10 +
+    '    class operator Subtract(const A: TOpRk; B: TOpS): TOpRk;'#10 +
+    '    class operator Multiply(const A: TOpRk; B: Int64): TOpRk;'#10 +
+    '    class operator Multiply(const A: TOpRk; B: Single): string;'#10 +
+    '  end;'#10 +
     'implementation'#10 +
+    'class operator TOpS.Implicit(A: Integer): TOpS; begin Result.V := A; end;'#10 +
+    'class operator TOpRk.Add(const A: TOpRk; B: Integer): TOpRk; begin Result := A; end;'#10 +
+    'class operator TOpRk.Add(const A: TOpRk; B: Double): string; begin Result := ''''; end;'#10 +
+    'class operator TOpRk.Subtract(const A: TOpRk; B: TOpS): TOpRk; begin Result := A; end;'#10 +
+    'class operator TOpRk.Multiply(const A: TOpRk; B: Int64): TOpRk; begin Result := A; end;'#10 +
+    'class operator TOpRk.Multiply(const A: TOpRk; B: Single): string; begin Result := ''''; end;'#10 +
     'function TOpVec.Len: Single; begin Result := X + Y; end;'#10 +
     'class operator TOpVec.Add(const A, B: TOpVec): TOpVec;'#10 +
     'begin Result := A; end;'#10 +
@@ -1333,6 +1350,14 @@ const
     '  var OpDot := A * B;'#10 +
     '  var OpGen := (G + G).V;'#10 +
     '  var OpChain := ((A - B) * F + A).Len;'#10 +
+    'end;'#10 +
+    'procedure OpRank(const R: TOpRk; By: Byte; I: Integer; Sg: Single; Db: Double);'#10 +
+    'begin'#10 +
+    '  var OpRkB := R + By;'#10 +
+    '  var OpRkSg := R + Sg;'#10 +
+    '  var OpRkS := R - I;'#10 +
+    '  var OpRkM := R * I;'#10 +
+    '  var OpRkMD := R * Db;'#10 +
     'end;'#10 +
     'end.'#10;
 
@@ -3647,6 +3672,17 @@ begin
       DeclTypeOf(LE, 'opgen'), 'Integer');
     Eq('F46: operators chained', DeclTypeOf(LE, 'opchain'), 'Single');
     Eq('F46: through a probe', ProbeTypeOf(LE, '(A-B).Len'), 'Single');
+    // Operands rank as arguments (9.3.1): dcc64 takes these (mig4 op1).
+    Eq('9.3.1: a Byte operand takes Add(TOpRk, Integer) over Double',
+      DeclTypeOf(LE, 'oprkb'), 'TOpRk');
+    Eq('9.3.1: a Single operand takes Add(TOpRk, Double)',
+      DeclTypeOf(LE, 'oprksg'), 'string');
+    Eq('9.3.1: an Integer reaches Subtract(TOpRk, TOpS) through Implicit',
+      DeclTypeOf(LE, 'oprks'), 'TOpRk');
+    Eq('9.3.1: an Integer takes Multiply(TOpRk, Int64) over Single',
+      DeclTypeOf(LE, 'oprkm'), 'TOpRk');
+    Eq('9.3.1: a Double takes Multiply(TOpRk, Single), lossy',
+      DeclTypeOf(LE, 'oprkmd'), 'string');
 
     // ---- F46: a helper's member off a character pointer's pointee ----
     LE := ModelByName('xci');

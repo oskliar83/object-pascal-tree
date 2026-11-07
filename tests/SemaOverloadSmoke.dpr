@@ -585,7 +585,7 @@ const
     'end;'#10'end.'#10;
 
   { `class operator Implicit` by its signature in the unit's own typer
-    (UserConvSym, the project's UserConvX rule; 6.3.1, 9.3.1,
+    (TSemaConvView.UserConv, the project's UserConvX rule; 6.3.1, 9.3.1,
     local/type-conv-2026-11/n2): SemaProjectSmoke's TestImplicitRanking in
     one unit. The overload dcc does NOT pick is declared first. }
   SRC_IMPL =
@@ -790,7 +790,7 @@ const
     '  X := V(SG, DV);'#10 +
     'end;'#10'end.'#10;
 
-  { Classes, interfaces and nil in the unit's own typer (RefConvSym, the
+  { Classes, interfaces and nil in the unit's own typer (TSemaConvView.RefConv, the
     project's XRefConvX; 6.3.1, 14.2.1, local/type-conv-2026-11/n3): a
     nearer ancestor class over a farther one (UA), an unrelated class out
     (UB), a class over an interface (UC), an interface no class of the
@@ -876,7 +876,7 @@ const
     '  X := UK(IA);'#10 +
     'end;'#10'end.'#10;
 
-  { Sets in the unit's own typer (SetCtorScore, SetsMeetSym - the project's
+  { Sets in the unit's own typer (SetCtorScore, TSemaConvView.SetsMeetT - the project's
     SetCtorFitX, SetsMeetX; 6.3.1, local/type-conv-2026-11/n4): a set
     variable's own type over another that meets it (VA), a `[...]` or a
     variable of another enumeration's family out (VB, VC, VD), an integer
@@ -1006,7 +1006,7 @@ const
     'end;'#10'end.'#10;
 
   { Arrays in the unit's own typer (ArrayArgFit through ArrayShapeSym /
-    ArrayIdentitySym, OpenArrayScore's single element, CtorScore's graded
+    TSemaConvView.ArrayIdentity, OpenArrayScore's single element, CtorScore's graded
     conversions, SetCtorScore's widening; 6.3.1, 8.1.1,
     local/type-conv-2026-11/n6): the cases of SemaProjectSmoke's
     TestArrConvRanking whose types this unit declares (not XC, XT, XU). The
@@ -1124,8 +1124,8 @@ const
     'end;'#10'end.'#10;
   ARR_NAMES: array[0..16] of string = ('XA', 'XB', 'XD', 'XE', 'XF', 'XG', 'XH', 'XJ', 'XK', 'XL', 'XM', 'XN', 'XO', 'XQ', 'XS', 'XV', 'XW');
 
-  { Pointers in the unit's own typer (RefConvSym's typed-pointer and class
-    reference rows, AddrArgSym, ZeroPointerRank, ArgCatRejects' pointer
+  { Pointers in the unit's own typer (TSemaConvView.RefConv's typed-pointer and class
+    reference rows, AddrArgFit, ZeroPointerRank, ArgCatRejects' pointer
     rows, ArrayArgFit's untyped Pointer, OpenArrayScore's `array of Pointer`;
     6.3.1, 10.1.2, 4.8, local/type-conv-2026-11/n7): the cases of
     SemaProjectSmoke's TestPtrConvRanking. The overload dcc does NOT pick is
@@ -1263,9 +1263,9 @@ const
     local/type-conv-2026-11/n8): the cases of SemaProjectSmoke's
     TestModeConvRanking; IInterface is declared in the unit (this typer has
     no System); ZN passes a Char variable (this typer types no `P^` of a
-    PChar), ZV is not asked (it reads no property behind `Obj.Prop` - the
-    resolver binds members later). The overload dcc does NOT pick is
-    declared first. }
+    PChar); ZV reads the property behind `Obj.Prop` through its base's type
+    (MemberSym - the resolver binds members later). The overload dcc does
+    NOT pick is declared first. }
   SRC_MODE =
     'unit U;'#10 +
     'interface'#10 +
@@ -1289,6 +1289,7 @@ const
     '    function GetA: TDA;'#10 +
     '    property PA: TDA read GetA;'#10 +
     '  end;'#10 +
+    '  THoD = class(THo) end;'#10 +
     'const'#10 +
     '  KT: Integer = 5;'#10 +
     'function ZA(A: ShortInt): TRA; overload;'#10 +
@@ -1331,6 +1332,8 @@ const
     'function ZV(A: Int64): TRW; overload;'#10 +
     'function ZW(A: Variant): TRA; overload;'#10 +
     'function ZW(var A: array of Integer): TRW; overload;'#10 +
+    'function ZX(out A: Integer): TRA; overload;'#10 +
+    'function ZX(A: Int64): TRW; overload;'#10 +
     'implementation'#10 +
     'class operator TRo.Implicit(A: TCls): TRo; begin end;'#10 +
     'function ZA(A: ShortInt): TRA; begin end;'#10 +
@@ -1373,8 +1376,10 @@ const
     'function ZV(A: Int64): TRW; begin end;'#10 +
     'function ZW(A: Variant): TRA; begin end;'#10 +
     'function ZW(var A: array of Integer): TRW; begin end;'#10 +
+    'function ZX(out A: Integer): TRA; begin end;'#10 +
+    'function ZX(A: Int64): TRW; begin end;'#10 +
     'function THo.GetA: TDA; begin end;'#10 +
-    'procedure Test(vB: Byte; vS: string; vI: Integer; vO, vC: TClsD; vIntf: IInterface; vDA: TDA; vV: Variant; vSE: TSE; vPC: PChar; vR: TR; vH: THo; vCh: Char);'#10 +
+    'procedure Test(vB: Byte; vS: string; vI: Integer; vO, vC: TClsD; vIntf: IInterface; vDA: TDA; vV: Variant; vSE: TSE; vPC: PChar; vR: TR; vH: THo; vCh: Char; vHD: THoD);'#10 +
     'var'#10 +
     '  X: TRW;'#10 +
     'begin'#10 +
@@ -1398,12 +1403,13 @@ const
     '  X := ZU(vR);'#10 +
     '  X := ZV(vH.PX);'#10 +
     '  X := ZW(vH.PA);'#10 +
+    '  X := ZX(vHD.PX);'#10 +
     'end;'#10 +
     'end.'#10;
-  MODE_NAMES: array[0..18] of string = ('ZA', 'ZB', 'ZC', 'ZD', 'ZE', 'ZF', 'ZG', 'ZH', 'ZK', 'ZL', 'ZM', 'ZN', 'ZP', 'ZQ', 'ZR', 'ZS', 'ZT', 'ZU', 'ZW');
+  MODE_NAMES: array[0..20] of string = ('ZA', 'ZB', 'ZC', 'ZD', 'ZE', 'ZF', 'ZG', 'ZH', 'ZK', 'ZL', 'ZM', 'ZN', 'ZP', 'ZQ', 'ZR', 'ZS', 'ZT', 'ZU', 'ZV', 'ZW', 'ZX');
 
   { Procedural types and Pointer values in the unit's own typer (ProcArgSym
-    - the project's ProcArgScore; RefConvSym's Pointer and nil rows; 6.3.1,
+    - the project's ProcArgScore; RefConv's Pointer and nil rows; 6.3.1,
     6.6.1, local/type-conv-2026-11/n5): the cases of SemaProjectSmoke's
     TestProcConvRanking whose types this unit declares (not WT, WW). The
     overload dcc does NOT pick is declared first. }

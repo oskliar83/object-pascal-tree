@@ -108,6 +108,12 @@ type
     Inst: Integer;     // project instance-table index; NIL_INST = plain type
   end;
 
+  { An inheritance answer (TPasSemaProject.XDescent, TSemaConvView's
+    DescentDist): xdUnknown when the walk met a link it cannot follow (an
+    ancestor's unit missing from the path, a depth cap, a type of another
+    unit seen from one unit's typer) - a diagnostic acts on xdNo only. }
+  TPasDescent = (xdYes, xdNo, xdUnknown);
+
   // One `uses` entry, recorded by the resolver and completed by the project.
   TPasUsesRef = record
     NameFull: string;  // dotted unit name as written
@@ -1097,11 +1103,40 @@ threadvar
   // The calling thread's sink, nil when it writes to the models directly.
   GSemaDiagSink: PSemaDiagSink;
 
+{ TSemaXType value helpers: the null value, its test, and a plain
+  (uninstantiated) wrapper - so a caller of FindMemberX/WithTargetTypeX can
+  build and test the record without knowing its field conventions. Here,
+  beside the record, since the conversion rules (TSemaConvView,
+  PasTree.Sema.Types) read types through them too. }
+// Inline: about 370 call sites on per-node and per-hop paths (audit C1-25).
+function XNil: TSemaXType; inline;
+function XValid(const AX: TSemaXType): Boolean; inline;
+function XPlain(AMid, ASym: Integer): TSemaXType; inline;
+
 implementation
 
 uses
   System.SysUtils,
   PasTree.SourceManager;   // PasIncludeFileName, an F1026's file name
+
+function XNil: TSemaXType;
+begin
+  Result.UnitId := NIL_SYM;
+  Result.Sym := NIL_SYM;
+  Result.Inst := NIL_INST;
+end;
+
+function XValid(const AX: TSemaXType): Boolean;
+begin
+  Result := AX.Sym <> NIL_SYM;
+end;
+
+function XPlain(AMid, ASym: Integer): TSemaXType;
+begin
+  Result.UnitId := AMid;
+  Result.Sym := ASym;
+  Result.Inst := NIL_INST;
+end;
 
 const
   // Names up to this many: an exact-length array scanned linearly. Measured

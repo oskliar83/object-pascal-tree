@@ -391,11 +391,6 @@ type
     destructor Destroy; override;
   end;
 
-  { TPasSemaProject.XDescent: does a type descend from another? xdUnknown
-    when the walk met a link it cannot follow (an ancestor's unit missing
-    from the path, a depth cap) - a diagnostic acts on xdNo only. }
-  TPasDescent = (xdYes, xdNo, xdUnknown);
-
   { One `uses` entry's ResolveUnit answer as the load engine's discovery got
     it, with the arguments and the source manager's ResolveEpoch then: what
     ResolveUses reuses while the epoch has not moved. }
@@ -464,22 +459,13 @@ type
     Empty: Boolean;
   end;
 
-  { A procedural signature (6.6.1) as ProcSigsMeetX compares two: the model
-    it is read in (Mid), its parameter symbols there in order, the frame
-    their types close over (Inst), whether it is a function and its result,
-    its kind and calling convention (DirectiveConvOf; -1 unread). Read off
-    an nkProcType (ProcTypeSigX) or a routine (RoutineSigX). }
-  TPasProcSig = record
-    Mid, Inst, Conv: Integer;
-    Params: TArray<Integer>;
-    IsFunc: Boolean;
-    ResultX: TSemaXType;
-    Kind: TSemaProcKind;
-  end;
-
   TPasSemaProject = class
   private
     FPlatform: TPasPlatform;
+    // The one conversion rule set (TSemaConvView) over this project's facts
+    // - the X functions below; XConvX, XRefConvX, UserConvX, ArgFitCanonX
+    // and their kin ask it (type-conversion migration step 4).
+    FConv: TSemaConvView;
     FCompilerVersion: Double;   // emulated dcc: VERnnn + $IF CompilerVersion
     FInfo: TPasPlatformInfo;
     FTarget: TPasBuiltinTarget;   // FInfo's size facts, for the builtin table
@@ -1563,23 +1549,11 @@ type
     // Cross-model overload selection (CrossType's call typing; XCatOf and
     // XSameType are public, below):
     function SubrangeCatX(AMid, ASym: Integer): TSemaTypeCat;
-    function XAssignableX(const ADst, ASrc: TSemaXType): Boolean;
-    function ParCatOf(const APar, ACanonPar: TSemaXType): TSemaTypeCat;
     function IsStaticArrayX(const AX: TSemaXType): Boolean;
     // Is the nkArrayType ADef of unit AMid a static array (an index child)?
     function StaticArrayDef(AMid, ADef: Integer): Boolean;
-    // ArrayArgFit over two canonical types - see the implementation.
-    function ArrayConvX(const ACanonParX, ACanonArgX: TSemaXType;
-      AParCat, AArgCat: TSemaTypeCat; out ARank: Integer): Integer;
     // Is AX the untyped Pointer (after aliases)?
     function IsUntypedPointerX(const AX: TSemaXType): Boolean;
-    // Are two array types one (ArrayArgFit's identity) - see the
-    // implementation.
-    function ArrayIdentityX(const ACanonPar, ACanonArg: TSemaXType;
-      APDyn, AADyn: Boolean): Integer;
-    // XConvX; AUser False leaves the user conversions out (UserConvX's
-    // built-in parts: no chain of two operators).
-    function XConvCoreX(const ADst, ASrc: TSemaXType; AUser: Boolean): TSemaConv;
     // ArgFitX over sides already canonicalized - see there. AConv: the
     // argument as the conversion ranking reads it (ArgConvX), nil for none;
     // ARank: that ranking's rank of a conversion fit (1), else 0.
@@ -1613,7 +1587,6 @@ type
     function SetBaseX(const AX: TSemaXType; out ABase: TSemaSetBase;
       out AHostX, AExactX: TSemaXType): Boolean;
     function EnumHostX(const AX: TSemaXType): TSemaXType;
-    function SetsMeetX(const ADstX, ASrcX: TSemaXType): Boolean;
     function SetElemX(AMid, ANode: Integer; const AX: TSemaXType): TPasSetElem;
     function SetConstArgX(AMid, ANode: Integer; out AArg: TPasSetArg): Boolean;
     function SetCtorFitX(const ACanonParX: TSemaXType;
@@ -2774,15 +2747,6 @@ type
     procedure EnterAnalysis(const AEntry: string);
   end;
 
-{ TSemaXType value helpers, promoted with the query surface above: the null
-  value, its test, and a plain (uninstantiated) wrapper - so a caller of
-  FindMemberX/WithTargetTypeX can build and test the record without knowing
-  its field conventions. }
-// Inline: about 370 call sites on per-node and per-hop paths (audit C1-25).
-function XNil: TSemaXType; inline;
-function XValid(const AX: TSemaXType): Boolean; inline;
-function XPlain(AMid, ASym: Integer): TSemaXType; inline;
-
 { The key a project and a navigator index a file path by - its lower-cased
   full path. False for a path TPath.GetFullPath rejects (empty, or holding a
   character no file name may hold): such a path names no model, and a lookup
@@ -2803,25 +2767,232 @@ uses
   PasTree.Sema.Diagnostics,
   PasTree.WordIndex;
 
-// The TSemaXType helpers first, so every call below can inline them.
-function XNil: TSemaXType;
+type
+  { The project's facts for the one conversion rule set (TSemaConvView):
+    each is the X function of the same name - read across every model, in
+    a generic instance's frame. Stateless past the project, so the parallel
+    passes share one. }
+  TPasProjectConvView = class(TSemaConvView)
+  private
+    FP: TPasSemaProject;
+  public
+    constructor Create(AProject: TPasSemaProject);
+    function Model(const AX: TSemaXType): TPasSemaModel; override;
+    function Canon(const AX: TSemaXType): TSemaXType; override;
+    function Cat(const AX: TSemaXType): TSemaTypeCat; override;
+    function Open(const AX: TSemaXType): Boolean; override;
+    function NestedInGeneric(const AX: TSemaXType): Boolean; override;
+    function IsDynArray(const AX: TSemaXType): Boolean; override;
+    function IsStaticArray(const AX: TSemaXType): Boolean; override;
+    function ArrayElem(const AX: TSemaXType): TSemaXType; override;
+    function IsUntypedPointer(const AX: TSemaXType): Boolean; override;
+    function Pointee(const AX: TSemaXType): TSemaXType; override;
+    function TypeOpFacts(const AX: TSemaXType): TSemaOpFacts; override;
+    function VarConv(const AX: TSemaXType): TSemaArgConv; override;
+    function ClassRefTarget(const AX: TSemaXType): TSemaXType; override;
+    function DescentDist(const ADesc, ABase: TSemaXType;
+      out ADist: Integer): TPasDescent; override;
+    function Implements(const AClass, AIntf: TSemaXType): TPasDescent; override;
+    function HeritageDepth(const AX: TSemaXType;
+      out AWhole: Boolean): Integer; override;
+    function EnumHost(const AX: TSemaXType): TSemaXType; override;
+    function SetBase(const AX: TSemaXType; out ABase: TSemaSetBase;
+      out AHost, AExact: TSemaXType): Boolean; override;
+    function ProcTypeSig(const AX: TSemaXType;
+      out ASig: TPasProcSig): Boolean; override;
+    function ReferenceProc(const AX: TSemaXType): Integer; override;
+    function ParamType(const ASig: TPasProcSig;
+      AParam: Integer): TSemaXType; override;
+    function NextImplicit(const AOwner: TSemaXType; var AIter: Integer;
+      out AOp: TSemaImplicitOp): Boolean; override;
+    function GuidType(const AFrom: TSemaXType;
+      out AGuid: TSemaXType): Integer; override;
+    function IsGuidType(const AX: TSemaXType): Boolean; override;
+  end;
+
+constructor TPasProjectConvView.Create(AProject: TPasSemaProject);
 begin
-  Result.UnitId := NIL_SYM;
-  Result.Sym := NIL_SYM;
-  Result.Inst := NIL_INST;
+  inherited Create;
+  FP := AProject;
+  FPlatform := AProject.FPlatform;
+  FWideExt := AProject.FInfo.ExtendedBytes > 8;
 end;
 
-function XValid(const AX: TSemaXType): Boolean;
+function TPasProjectConvView.Model(const AX: TSemaXType): TPasSemaModel;
 begin
-  Result := AX.Sym <> NIL_SYM;
+  Result := FP.FModels[AX.UnitId];
 end;
 
-function XPlain(AMid, ASym: Integer): TSemaXType;
+function TPasProjectConvView.Canon(const AX: TSemaXType): TSemaXType;
 begin
-  Result.UnitId := AMid;
-  Result.Sym := ASym;
-  Result.Inst := NIL_INST;
+  Result := FP.CanonTypeX(AX);
 end;
+
+function TPasProjectConvView.Cat(const AX: TSemaXType): TSemaTypeCat;
+begin
+  Result := FP.XCatOf(AX);
+end;
+
+function TPasProjectConvView.Open(const AX: TSemaXType): Boolean;
+begin
+  Result := FP.OpenX(AX);
+end;
+
+function TPasProjectConvView.NestedInGeneric(const AX: TSemaXType): Boolean;
+begin
+  Result := FP.NestedInGenericX(AX);
+end;
+
+function TPasProjectConvView.IsDynArray(const AX: TSemaXType): Boolean;
+begin
+  Result := FP.IsDynArrayTypeX(AX);
+end;
+
+function TPasProjectConvView.IsStaticArray(const AX: TSemaXType): Boolean;
+begin
+  Result := FP.IsStaticArrayX(AX);
+end;
+
+function TPasProjectConvView.ArrayElem(const AX: TSemaXType): TSemaXType;
+begin
+  Result := FP.ArrayElemX(AX);
+end;
+
+function TPasProjectConvView.IsUntypedPointer(const AX: TSemaXType): Boolean;
+begin
+  Result := FP.IsUntypedPointerX(AX);
+end;
+
+function TPasProjectConvView.Pointee(const AX: TSemaXType): TSemaXType;
+begin
+  Result := FP.PointeeX(AX);
+end;
+
+function TPasProjectConvView.TypeOpFacts(const AX: TSemaXType): TSemaOpFacts;
+begin
+  Result := FP.OpFactsX(AX.UnitId, NIL_NODE, AX);
+end;
+
+function TPasProjectConvView.VarConv(const AX: TSemaXType): TSemaArgConv;
+begin
+  Result := FP.ArgConvX(AX.UnitId, NIL_NODE, AX);
+end;
+
+function TPasProjectConvView.ClassRefTarget(const AX: TSemaXType): TSemaXType;
+begin
+  Result := FP.ClassRefTargetX(AX);
+end;
+
+function TPasProjectConvView.DescentDist(const ADesc, ABase: TSemaXType;
+  out ADist: Integer): TPasDescent;
+begin
+  Result := FP.XDescentDistX(ADesc, ABase, ADist);
+end;
+
+function TPasProjectConvView.Implements(const AClass,
+  AIntf: TSemaXType): TPasDescent;
+begin
+  Result := FP.XImplementsX(AClass, AIntf);
+end;
+
+function TPasProjectConvView.HeritageDepth(const AX: TSemaXType;
+  out AWhole: Boolean): Integer;
+begin
+  AWhole := True;
+  Result := FP.XHeritageDepthX(AX);
+end;
+
+function TPasProjectConvView.EnumHost(const AX: TSemaXType): TSemaXType;
+begin
+  Result := FP.EnumHostX(AX);
+end;
+
+function TPasProjectConvView.SetBase(const AX: TSemaXType;
+  out ABase: TSemaSetBase; out AHost, AExact: TSemaXType): Boolean;
+begin
+  Result := FP.SetBaseX(AX, ABase, AHost, AExact);
+end;
+
+function TPasProjectConvView.ProcTypeSig(const AX: TSemaXType;
+  out ASig: TPasProcSig): Boolean;
+begin
+  Result := FP.ProcTypeSigX(AX, ASig);
+end;
+
+// AX's own declaration, not through a distinct copy: an nkProcType saying
+// `reference to` (Aux 2).
+function TPasProjectConvView.ReferenceProc(const AX: TSemaXType): Integer;
+var
+  LDef: Integer;
+begin
+  Result := 0;
+  LDef := FP.TypeDefNodeOf(AX.UnitId, AX.Sym);
+  if (LDef <> NIL_NODE) and
+     (FP.FModels[AX.UnitId].Tree.Nodes[LDef].Kind = nkProcType) and
+     (FP.FModels[AX.UnitId].Tree.Nodes[LDef].Aux = 2) then
+    Result := 1;
+end;
+
+function TPasProjectConvView.ParamType(const ASig: TPasProcSig;
+  AParam: Integer): TSemaXType;
+begin
+  Result := FP.SubstX(FP.DeclTypeX(ASig.Mid, AParam), ASig.Inst, 0);
+end;
+
+function TPasProjectConvView.NextImplicit(const AOwner: TSemaXType;
+  var AIter: Integer; out AOp: TSemaImplicitOp): Boolean;
+var
+  LOm: TPasSemaModel;
+  LScope, LSym: Integer;
+  LParams: TArray<Integer>;
+begin
+  Result := False;
+  AOp := Default(TSemaImplicitOp);
+  if not XValid(AOwner) then
+    Exit;
+  LOm := FP.FModels[AOwner.UnitId];
+  LScope := LOm.Symbols[AOwner.Sym].MemberScope;
+  if LScope = NIL_SCOPE then
+    Exit;
+  while AIter + 1 < LOm.Scopes[LScope].Symbols.Count do
+  begin
+    Inc(AIter);
+    LSym := LOm.Scopes[LScope].Symbols[AIter];
+    if (LOm.Symbols[LSym].Kind <> skRoutine) or
+       (LOm.Symbols[LSym].NameLower <> 'implicit') or
+       (LOm.RoutineHead(LSym) <> rhOperator) then
+      Continue;
+    LParams := FP.XParamSyms(AOwner.UnitId, LSym);
+    AOp.Single := Length(LParams) = 1;
+    AOp.Q := XNil;
+    AOp.R := XNil;
+    if AOp.Single then
+    begin
+      AOp.Q := FP.SubstX(FP.DeclTypeX(AOwner.UnitId, LParams[0]),
+        AOwner.Inst, 0);
+      AOp.R := FP.SubstX(FP.DeclTypeX(AOwner.UnitId, LSym), AOwner.Inst, 0);
+    end;
+    Exit(True);
+  end;
+end;
+
+function TPasProjectConvView.GuidType(const AFrom: TSemaXType;
+  out AGuid: TSemaXType): Integer;
+var
+  LGMid, LGSym: Integer;
+begin
+  AGuid := XNil;
+  if not FP.ImplicitRootX(AFrom.UnitId, 'tguid', LGMid, LGSym) then
+    Exit(-1);
+  AGuid := XPlain(LGMid, LGSym);
+  Result := 1;
+end;
+
+function TPasProjectConvView.IsGuidType(const AX: TSemaXType): Boolean;
+begin
+  Result := FP.IsGuidTypeX(AX);
+end;
+
 const
 
   { Overlay tombstone: "this node's committed ExtRefMap entry must go away".
@@ -3038,6 +3209,7 @@ begin
   FInfo := PlatformInfo(APlatform);
   FTarget := PasBuiltinTargetOf(FInfo.PointerBytes, FInfo.ExtendedBytes,
     FInfo.ExtendedAlign, FInfo.LongBytes);
+  FConv := TPasProjectConvView.Create(Self);
   FCompilerVersion := ACompilerVersion;
   FSM := TPasSourceManager.Create(ASearchPaths);
   FDefines := CreatePlatformDefines(APlatform, ACompilerVersion);
@@ -3084,6 +3256,7 @@ end;
 destructor TPasSemaProject.Destroy;
 begin
   ReleaseUsesMemo;
+  FConv.Free;
   FWordIdx.Free;
   FVocab.Free;
   FVocabFiles.Free;
@@ -13846,28 +14019,8 @@ end;
 // first declared won: every `CharInSet(C, ...)` and `StrLen(P)` of a Unicode
 // code base bound the AnsiChar / PAnsiChar overload (audit A3-17 = E3-24).
 function TPasSemaProject.XSameType(const A, B: TSemaXType): Boolean;
-var
-  LBuiltinA, LBuiltinB: Boolean;
 begin
-  if not XValid(A) or not XValid(B) or (A.Inst <> B.Inst) then
-    Exit(False);
-  if (A.Sym = B.Sym) and (A.UnitId = B.UnitId) then
-    Exit(True);
-  LBuiltinA := sfBuiltin in FModels[A.UnitId].Symbols[A.Sym].Flags;
-  LBuiltinB := sfBuiltin in FModels[B.UnitId].Symbols[B.Sym].Flags;
-  Result := LBuiltinA and LBuiltinB and
-    ((A.Sym = B.Sym) or
-     (PasBuiltinCanonSym(FModels[A.UnitId], A.Sym, FPlatform) =
-      PasBuiltinCanonSym(FModels[B.UnitId], B.Sym, FPlatform)));
-end;
-
-// Assignment compatibility of two types (5.1.1, 2.6.1): the one conversion
-// test's verdict (XConvX) - scNone alone rejects, scMaybe passes, as an
-// error-tolerant analysis must (`nil` reaches a record through its `class
-// operator Implicit` there, audit A4-11).
-function TPasSemaProject.XAssignableX(const ADst, ASrc: TSemaXType): Boolean;
-begin
-  Result := XConvX(ADst, ASrc) <> TSemaConv.scNone;
+  Result := FConv.Same(A, B);
 end;
 
 function TPasSemaProject.IsGuidTypeX(const AX: TSemaXType): Boolean;
@@ -13884,283 +14037,26 @@ end;
 
 function TPasSemaProject.TypedPointersMeetX(const ADst, ASrc: TSemaXType;
   ATypedAddr: Boolean): Integer;
-var
-  LDB, LSB: TSemaXType;
 begin
-  Result := 0;
-  if not XValid(ADst) or not XValid(ASrc) or (ADst.Inst <> NIL_INST) or
-     (ASrc.Inst <> NIL_INST) or NestedInGenericX(ADst) or
-     NestedInGenericX(ASrc) then
-    Exit;
-  if not ATypedAddr then
-    Exit(-1);
-  LDB := PointeeX(ADst);
-  LSB := PointeeX(ASrc);
-  if not XValid(LDB) or not XValid(LSB) then
-    Exit;
-  LDB := CanonTypeX(LDB);
-  LSB := CanonTypeX(LSB);
-  if not XValid(LDB) or not XValid(LSB) or OpenX(LDB) or OpenX(LSB) then
-    Exit;
-  if XSameType(LDB, LSB) then
-    Result := 1
-  else
-    Result := -1;
+  Result := FConv.TypedPointersMeet(ADst, ASrc, ATypedAddr);
 end;
 
 function TPasSemaProject.AddrArgFitX(const ACanonParX, APointeeX: TSemaXType;
   ARoutine: Boolean; out ARank: Integer): Integer;
-var
-  LPB, LXB: TSemaXType;
 begin
-  ARank := 0;
-  case XCatOf(ACanonParX) of
-    tcPointer:
-      begin
-        if IsUntypedPointerX(ACanonParX) then
-        begin
-          ARank := RefConvRank(rcTypedPointer, 0);
-          Exit(1);
-        end;
-        LXB := XNil;
-        if XValid(APointeeX) then
-          LXB := CanonTypeX(APointeeX);
-        if ARoutine or (XValid(LXB) and (XCatOf(LXB) = tcProc)) then
-          Exit(-1);
-        LPB := PointeeX(ACanonParX);
-        if XValid(LPB) then
-          LPB := CanonTypeX(LPB);
-        if not XValid(LPB) or not XValid(LXB) or OpenX(LPB) or OpenX(LXB) then
-          Exit(-2);
-        if not XSameType(LPB, LXB) then
-          Exit(-1);
-        ARank := RefConvRank(rcTypedSameBase, 0);
-        Result := 1;
-      end;
-    tcRecord, tcUnknown:
-      Result := -2;
-  else
-    Result := -1;
-  end;
+  Result := FConv.AddrArgFit(ACanonParX, APointeeX, ARoutine, ARank);
 end;
 
 function TPasSemaProject.XRefConvX(const ADst, ASrc: TSemaXType;
   D, S: TSemaTypeCat; out ARank, AUserRank: Integer;
   ATypedAddr: Boolean): Integer;
-var
-  LConv: TSemaRefConv;
-  LRel: TPasDescent;
-  LStep, LDef: Integer;
-  LSig: TPasProcSig;
-
-  // The untyped Pointer, a distinct copy `type Pointer` too (Vcl.Themes'
-  // TStyleServicesHandle goes to a TStream as a Pointer does; n7 gate).
-  function Untyped(const AX: TSemaXType): Boolean;
-  begin
-    Result := ((FModels[AX.UnitId].Symbols[AX.Sym].Kind = skBuiltinType) and
-      (FModels[AX.UnitId].Symbols[AX.Sym].NameLower = 'pointer')) or
-      (FModels[AX.UnitId].Symbols[AX.Sym].Kind = skType) and
-      IsUntypedPointerX(AX);
-  end;
-
 begin
-  ARank := 0;
-  AUserRank := 0;
-  LStep := 0;
-  LRel := xdYes;
-  case S of
-    tcNil:
-      case D of
-        tcPointer:
-          if Untyped(ADst) then
-            LConv := rcNilPointer
-          else
-            LConv := rcNilTypedPointer;
-        tcProc:
-          begin
-            // A `reference to` type is an interface (17.1): nil ranks it as
-            // one of depth 1.
-            LConv := rcNilProc;
-            LDef := TypeDefNodeOf(ADst.UnitId, ADst.Sym);
-            if (LDef <> NIL_NODE) and
-               (FModels[ADst.UnitId].Tree.Nodes[LDef].Kind = nkProcType) and
-               (FModels[ADst.UnitId].Tree.Nodes[LDef].Aux = 2) then
-            begin
-              LConv := rcNilIntf;
-              LStep := 1;
-            end;
-          end;
-        tcClass:
-          begin
-            LConv := rcNilClass;
-            LStep := XHeritageDepthX(ADst);
-          end;
-        tcInterface:
-          begin
-            LConv := rcNilIntf;
-            LStep := XHeritageDepthX(ADst);
-          end;
-        tcClassOf:
-          LConv := rcNilClassRef;
-        tcArray:
-          if IsDynArrayTypeX(ADst) then
-            LConv := rcNilDynArray
-          else
-            Exit(-1);
-        // nil is no Variant, no string, no number (n3 Set A: E2250).
-        tcVariant, tcString, tcInteger, tcFloat, tcBoolean, tcChar, tcEnum,
-        tcSet:
-          Exit(-1);
-      else
-        Exit(0);
-      end;
-    tcClass:
-      case D of
-        tcClass:
-          begin
-            LConv := rcClassUp;
-            LRel := XDescentDistX(ASrc, ADst, LStep);
-          end;
-        tcInterface:
-          begin
-            LConv := rcClassIntf;
-            LRel := XImplementsX(ASrc, ADst);
-            if LRel = xdYes then
-              LStep := XHeritageDepthX(ADst);
-          end;
-        tcPointer:
-          if Untyped(ADst) then
-            LConv := rcClassPointer
-          else
-            Exit(-1);
-        tcVariant:
-          Exit(-1);
-      else
-        Exit(0);
-      end;
-    tcInterface:
-      case D of
-        tcInterface:
-          begin
-            LConv := rcIntfUp;
-            LRel := XDescentDistX(ASrc, ADst, LStep);
-          end;
-        tcVariant:
-          LConv := rcIntfVariant;
-        // An interface reaches no class, no pointer (n3 Set A).
-        tcClass, tcPointer, tcClassOf:
-          Exit(-1);
-      else
-        Exit(0);
-      end;
-    // An untyped Pointer value - a variable, `@X` (6.3.1; n3 Set C, n5 Set
-    // B): a typed pointer, a plain procedural type, a class (deeper first,
-    // a class reference between TObject and the rest); no interface, method
-    // pointer, `reference to` type or Variant.
-    tcPointer:
-      begin
-        // A typed pointer value (n7 Sets A, T): the untyped Pointer; under
-        // {$T+} another typed pointer of its base, under {$T-} none (a
-        // typed pointer type is nominal, 10.1.2); nothing else - no class,
-        // class reference, procedural type, array, interface. A PChar's
-        // conversions to the strings are ConvRank's, decided before.
-        if not Untyped(ASrc) then
-        begin
-          case D of
-            tcPointer:
-              if Untyped(ADst) then
-                LConv := rcTypedPointer
-              else
-                case TypedPointersMeetX(ADst, ASrc, ATypedAddr) of
-                  1: LConv := rcTypedSameBase;
-                  -1: Exit(-1);
-                else
-                  Exit(0);
-                end;
-            // A PChar / PAnsiChar to a string is the ranking's; no other
-            // pointer to a character is a string (`PC2 = ^Char`: E2010).
-            tcString:
-              if ConvPtrKindX(ASrc) <> cnkNone then
-                Exit(0)
-              else
-                Exit(-1);
-            tcClass, tcClassOf, tcProc, tcArray, tcInterface, tcVariant,
-            tcInteger, tcFloat, tcBoolean, tcChar, tcEnum, tcSet:
-              Exit(-1);
-          else
-            Exit(0);
-          end;
-          ARank := RefConvRank(LConv, 0);
-          AUserRank := RefUserRank(LConv);
-          Exit(1);
-        end;
-        case D of
-          tcPointer:
-            LConv := rcPtrTypedPointer;
-          tcProc:
-            begin
-              if not ProcTypeSigX(ADst, LSig) then
-                Exit(0);
-              if LSig.Kind <> pkPlain then
-                Exit(-1);
-              LConv := rcPtrProc;
-            end;
-          tcClass:
-            begin
-              LConv := rcPtrClass;
-              LStep := XHeritageDepthX(ADst);
-            end;
-          tcClassOf:
-            LConv := rcPtrClassRef;
-          tcInterface, tcVariant, tcInteger, tcFloat, tcBoolean, tcChar,
-          tcEnum, tcSet:
-            Exit(-1);
-        else
-          Exit(0);
-        end;
-      end;
-    // A class reference value (n7): its ancestors' class references, the
-    // nearer first, then the untyped Pointer; no typed pointer, class,
-    // interface, procedural type, Variant or scalar.
-    tcClassOf:
-      case D of
-        tcClassOf:
-          begin
-            var LSrcT := CanonTypeX(ClassRefTargetX(ASrc));
-            var LDstT := CanonTypeX(ClassRefTargetX(ADst));
-            if not XValid(LSrcT) or not XValid(LDstT) or OpenX(LSrcT) or
-               OpenX(LDstT) then
-              Exit(0);
-            LConv := rcClassRefUp;
-            LRel := XDescentDistX(LSrcT, LDstT, LStep);
-          end;
-        tcPointer:
-          if Untyped(ADst) then
-            LConv := rcClassRefPointer
-          else
-            Exit(-1);
-        tcClass, tcInterface, tcProc, tcVariant, tcInteger, tcFloat, tcArray,
-        tcBoolean, tcChar, tcString, tcEnum, tcSet:
-          Exit(-1);
-      else
-        Exit(0);
-      end;
-  else
-    Exit(0);
-  end;
-  case LRel of
-    xdNo:
-      Exit(-1);
-    xdUnknown:
-      Exit(0);
-  end;
-  ARank := RefConvRank(LConv, LStep);
-  AUserRank := RefUserRank(LConv);
-  Result := 1;
+  Result := FConv.RefConv(ADst, ASrc, D, S, ARank, AUserRank, ATypedAddr);
 end;
 
-{ The first version of the one conversion test (TSemaConv,
-  local/TYPE-CONVERSION-PLAN.md has the rest). Rules, each a plain
+{ The one conversion test (TSemaConv) - its body is TSemaConvView.Conv
+  (PasTree.Sema.Types), the rule set the unit typer asks too, over this
+  project's facts (TPasProjectConvView). Rules, each a plain
   statement of the language's assignment compatibility (spec 6.3, 7.x):
   - the same type (XSameType) is identical;
   - an integer converts to an integer or a float, a Char or a PChar to a
@@ -14192,235 +14088,7 @@ end;
   every pair it is asked about (local/type-conv-2026-11/m2). }
 function TPasSemaProject.XConvX(const ADst, ASrc: TSemaXType): TSemaConv;
 begin
-  Result := XConvCoreX(ADst, ASrc, True);
-  // A type of a generic read in two frames - its open parameters on one
-  // side, an instance's arguments on the other, or a type nested in it
-  // (System.Net.Mime's TAcceptValueListBase<T>.InternalNegotiate passing
-  // its own TMatchMode, the m2 gate) - does not compare here: no verdict.
-  if (Result = TSemaConv.scNone) and
-     (OpenX(ADst) or OpenX(ASrc) or NestedInGenericX(ADst) or
-      NestedInGenericX(ASrc)) then
-    Result := scMaybe;
-end;
-
-{ May the pair of categories be ArrayArgFit's - an array on one side, or a
-  category not read (a generic instance of a dynamic array may read
-  tcUnknown) beside one ArrayArgFit decides for an array: a pointer,
-  Variant, a string, nil? The cheap gate before ArrayConvX, asked for every
-  argument of every candidate (perf: asking it for every tcUnknown side cost
-  bigflat's xtype 15%). }
-function MayArrayPair(AParCat, AArgCat: TSemaTypeCat): Boolean;
-begin
-  Result := (AParCat = tcArray) or (AArgCat = tcArray) or
-    (AParCat = tcUnknown) and
-    (AArgCat in [tcPointer, tcVariant, tcString, tcNil]) or
-    (AArgCat = tcUnknown) and (AParCat in [tcPointer, tcVariant, tcString]);
-end;
-
-function TPasSemaProject.XConvCoreX(const ADst, ASrc: TSemaXType;
-  AUser: Boolean): TSemaConv;
-const
-  SCALARS = [tcInteger, tcFloat, tcBoolean, tcChar, tcString, tcEnum];
-  STRUCTURED = [tcPointer, tcSet, tcArray, tcRecord, tcClass, tcInterface,
-    tcProc, tcClassOf, tcFile];
-var
-  LD, LS: TSemaXType;
-  D, S: TSemaTypeCat;
-  LRank, LUserRank: Integer;
-  LOps: Boolean;
-begin
-  if not XValid(ADst) or not XValid(ASrc) then
-    Exit(scMaybe);
-  LD := CanonTypeX(ADst);
-  LS := CanonTypeX(ASrc);
-  if not XValid(LD) or not XValid(LS) then
-    Exit(scMaybe);
-  if XSameType(LD, LS) then
-    Exit(scIdentical);
-  D := XCatOf(LD);
-  S := XCatOf(LS);
-  // An array on either side (ArrayConvX: an array type is nominal, a
-  // dynamic array goes to Pointer and Variant, Variant to a dynamic array).
-  if MayArrayPair(D, S) then
-    case ArrayConvX(LD, LS, D, S, LRank) of
-      -1: Exit(TSemaConv.scNone);
-      1: Exit(scImplicit);
-      2: Exit(scIdentical);
-    end;
-  if (D = tcUnknown) or (S = tcUnknown) then
-    Exit(scMaybe);
-  if (D = tcRecord) or (S = tcRecord) then
-  begin
-    if AUser then
-    begin
-      Result := UserConvX(LD, LS, nil, LRank, LOps);
-      if LOps then
-        Exit;
-    end;
-    // No operator: a record converts to and from nothing but itself.
-    Exit(TSemaConv.scNone);
-  end;
-  // Two enumerations convert when they are one: an enumeration and its
-  // subranges, two subranges of one, whatever their ranges (2.6.1; m2 Set
-  // X: TE := TES, TES := TES2 compile) - and not otherwise.
-  if (D = tcEnum) and (S = tcEnum) then
-  begin
-    var LHostD := EnumHostX(LD);
-    var LHostS := EnumHostX(LS);
-    if not XValid(LHostD) or not XValid(LHostS) then
-      Exit(scMaybe);
-    if XSameType(LHostD, LHostS) then
-      Exit(scImplicit);
-    Exit(TSemaConv.scNone);
-  end;
-  // A Variant goes to the other Variant type, to IInterface / IUnknown /
-  // IDispatch among the interfaces (VariantIntfRank), and to no character,
-  // pointer, class, class reference, procedural type or set (6.3.1; m2 Sets
-  // A, Y: a dynamic array and a record are decided above).
-  if S = tcVariant then
-    case D of
-      tcVariant:
-        Exit(scImplicit);
-      tcInterface:
-        if VariantIntfRank(FModels[LD.UnitId].Symbols[LD.Sym].NameLower) > 0 then
-          Exit(scImplicit)
-        else
-          Exit(TSemaConv.scNone);
-      tcChar, tcPointer, tcClass, tcClassOf, tcProc, tcSet:
-        Exit(TSemaConv.scNone);
-    end;
-  // A Char and an AnsiChar value do not convert either way (m2 Set A; a
-  // one-character literal, which goes to both, is the value's rule). A
-  // character subrange has no conversion kind and converts as before.
-  if (D = tcChar) and (S = tcChar) then
-  begin
-    var LKD := ParConvKindX(LD);
-    var LKS := ParConvKindX(LS);
-    if (LKD in [cnkChar, cnkAnsiChar]) and (LKS in [cnkChar, cnkAnsiChar]) and
-       (LKD <> LKS) then
-      Exit(TSemaConv.scNone);
-  end;
-  // A procedural value converts to procedural types alone - calling a
-  // parameterless function is the value's rule, not its type's - and nothing
-  // but a pointer and nil (above, below) to one: no class, class reference,
-  // interface, set, array or Variant either way (m2 Sets A, Y).
-  if (S = tcProc) and (D <> tcProc) then
-    Exit(TSemaConv.scNone);
-  // A `reference to` type is an interface (17.1.1): a class whose chain
-  // lists it converts to it (`TImpl = class(TInterfacedObject, TRefF)` for
-  // `TRefF = reference to function: IFoo`, a client unit in the m2 gate).
-  if (D = tcProc) and (S = tcClass) then
-  begin
-    var LSig: TPasProcSig;
-    if not ProcTypeSigX(LD, LSig) or (LSig.Kind in [pkReference, pkUnknown]) then
-      case XImplementsX(LS, LD) of
-        xdYes: Exit(scImplicit);
-        xdUnknown: Exit(scMaybe);
-      end;
-  end;
-  if (D = tcProc) and
-     (S in [tcClass, tcClassOf, tcInterface, tcSet, tcArray, tcVariant]) then
-    Exit(TSemaConv.scNone);
-  // No class, interface or class reference goes to an array; an instance to
-  // no class reference (m2 Set A; a TYPE NAME is a class reference - the
-  // caller's, not the type's, rule).
-  if (D = tcArray) and (S in [tcClass, tcInterface, tcClassOf]) then
-    Exit(TSemaConv.scNone);
-  if (D = tcClassOf) and (S = tcClass) then
-    Exit(TSemaConv.scNone);
-  // Two conversions an assignment and a lone parameter of a routine that is
-  // not overloaded take, which an overload set never does (6.3.1, 5.1.1;
-  // m2 Set A vs n8 Set L, Set Y): any pointer - typed, PChar - to any class
-  // reference, an interface to the untyped Pointer. Not for a user
-  // conversion's built-in parts (AUser False), which were probed as
-  // arguments only.
-  if AUser then
-  begin
-    if (D = tcClassOf) and (S = tcPointer) then
-      Exit(scImplicit);
-    if (D = tcPointer) and (S = tcInterface) and IsUntypedPointerX(LD) then
-      Exit(scImplicit);
-  end;
-  // A class, an interface, nil: XRefConvX (14.2.1, 6.3.1).
-  if S in [tcNil, tcClass, tcInterface, tcPointer, tcClassOf] then
-    case XRefConvX(LD, LS, D, S, LRank, LUserRank) of
-      1: Exit(scImplicit);
-      -1: Exit(TSemaConv.scNone);
-    end;
-  // Two procedural types: by their kinds and signatures (ProcKindsMeet,
-  // ProcSigsMeetX; 6.6.1, n5) - a `reference to` value goes to another
-  // `reference to` type of its signature in an assignment.
-  if (D = tcProc) and (S = tcProc) then
-  begin
-    var LDSig, LSSig: TPasProcSig;
-    var LPConv: TSemaProcConv;
-    if ProcTypeSigX(LD, LDSig) and ProcTypeSigX(LS, LSSig) then
-    begin
-      if ProcKindsMeet(LSSig.Kind, LDSig.Kind, LPConv) and
-         ProcSigsMeetX(LDSig, LSSig) then
-        Exit(scImplicit);
-      Exit(TSemaConv.scNone);
-    end;
-  end;
-  // A set converts to a set whose base is of its family (SetsMeetX) and to
-  // nothing else; nothing else converts to a set (2.4.1, 6.3.1; n4 Sets A,
-  // D). A record's operators are decided above; a procedural type is left
-  // alone (a parameterless function in a value position is called).
-  if (D = tcSet) or (S = tcSet) then
-  begin
-    if (D = tcSet) and (S = tcSet) and SetsMeetX(LD, LS) then
-      Exit(scImplicit);
-    if (D <> tcProc) and (S <> tcProc) then
-      Exit(TSemaConv.scNone);
-  end;
-  if S = tcNil then
-  begin
-    if (D in [tcPointer, tcClass, tcInterface, tcClassOf, tcProc,
-              tcVariant]) or
-       ((D = tcArray) and IsDynArrayTypeX(LD)) then
-      Exit(scImplicit);
-    Exit(TSemaConv.scNone);
-  end;
-  if (D = tcVariant) and (S in SCALARS) then
-    Exit(scImplicit);
-  if (S = tcVariant) and (D in SCALARS) then
-    Exit(scImplicit);
-  case D of
-    tcInteger:
-      if S = tcInteger then
-        Exit(scImplicit);
-    tcFloat:
-      if S in [tcInteger, tcFloat] then
-        Exit(scImplicit);
-    tcString:
-      begin
-        if S in [tcString, tcChar] then
-          Exit(scImplicit);
-        // PChar / PAnsiChar alone: a pointer type of the source's own to a
-        // character is no string (`PC2 = ^Char`: E2010; n7 Set D).
-        if S = tcPointer then
-        begin
-          if ConvPtrKindX(LS) <> cnkNone then
-            Exit(scImplicit);
-          Exit(TSemaConv.scNone);
-        end;
-      end;
-    tcChar, tcBoolean:
-      if S = D then
-        Exit(scImplicit);
-    tcPointer:
-      if S = tcPointer then
-        Exit(scImplicit);
-  end;
-  if (D in SCALARS) and (S in SCALARS) then
-    Exit(TSemaConv.scNone);
-  // A scalar and a structured type (a class, an array, a set, a record
-  // without operators, a pointer, ...) never convert implicitly; the
-  // exceptions - Variant, a PChar to a string - are handled above.
-  if ((D in SCALARS) and (S in STRUCTURED)) or
-     ((S in SCALARS) and (D in STRUCTURED)) then
-    Exit(TSemaConv.scNone);
-  Result := scMaybe;
+  Result := FConv.Conv(ADst, ASrc);
 end;
 
 function TPasSemaProject.ConvNoteX(const ADst, ASrc: TSemaXType): string;
@@ -14486,7 +14154,7 @@ var
   // A built-in conversion (no operator) - one leg of an operator's.
   function Leg(const ATo, AFrom: TSemaXType): Boolean;
   begin
-    Result := XConvCoreX(ATo, AFrom, False) in [scIdentical, scImplicit];
+    Result := FConv.ConvCore(ATo, AFrom, False) in [scIdentical, scImplicit];
   end;
 
   // Through one operator (UserConvX's verdict) - a second leg's.
@@ -14603,271 +14271,10 @@ end;
 
 function TPasSemaProject.UserConvX(const ADst, ASrc: TSemaXType;
   AConv: PSemaArgConv; out ARank: Integer; out AOps: Boolean): TSemaConv;
-var
-  LWide, LMaybe, LAny: Boolean;
-  LBest: Integer;
-
-  // One built-in leg: AFrom (the argument AConv when given, else a variable
-  // of type AFromX) to ATo. -1 no conversion, else its user rank; ALeg the
-  // leg's own verdict (XConvCoreX without the user conversions).
-  function LegRank(const AToX, AFromX: TSemaXType; AFrom: PSemaArgConv;
-    out ALeg: TSemaConv): Integer;
-  var
-    LArg: TSemaArgConv;
-    LTo: TSemaConvKind;
-    LRaw: Integer;
-  begin
-    ALeg := XConvCoreX(AToX, AFromX, False);
-    // A string literal goes to PChar / PAnsiChar, a string variable does
-    // not: the ranking below decides (n7 Set A: `'abc'` for TRpc).
-    if (ALeg = TSemaConv.scNone) and (AFrom <> nil) and
-       (AFrom.Kind in [cnkStrLit, cnkCharLit]) and
-       (ParConvKindX(AToX) in [cnkPChar, cnkPAnsiChar]) then
-      ALeg := scImplicit;
-    if ALeg = TSemaConv.scNone then
-      Exit(-1);
-    if AFrom <> nil then
-      LArg := AFrom^
-    else
-      LArg := ArgConvX(AFromX.UnitId, NIL_NODE, AFromX);
-    LTo := ParConvKindX(AToX);
-    if (LArg.Kind = cnkNone) or (LTo = cnkNone) then
-    begin
-      // A value the ranking does not cover (a class, a record, nil): under
-      // its built-in conversions of rank 0 (a class to its ancestor, nil
-      // to a pointer) - one lossless level, or its own type; a reference
-      // conversion by RefUserRank (a class to Pointer below a class to its
-      // ancestor; nil to a pointer above nil to a class).
-      // A PChar the ranking covers keeps its own scale: through Pointer it
-      // is a user conversion of the user tier, above its lossy AnsiString
-      // (n7 Set B: F(TRp) with `Implicit(A: Pointer)` over F(AnsiString)).
-      if ALeg = scIdentical then
-        Exit(UserConvRank(7, 0) - CRankLossless);
-      if XRefConvX(AToX, AFromX, XCatOf(AToX), XCatOf(AFromX), LRaw,
-         Result) = 1 then
-      begin
-        if LArg.Kind <> cnkNone then
-          Inc(Result, CRankLossless);
-        Exit;
-      end;
-      Exit(UserConvRank(2, 0) - CRankLossless);
-    end;
-    LRaw := ConvRawRank(LArg, LTo, LWide);
-    if LRaw <= 0 then
-    begin
-      // The ranking refuses it (Char / AnsiChar, a PChar for a Variant).
-      ALeg := TSemaConv.scNone;
-      Exit(-1);
-    end;
-    Result := UserConvRank(UserConvLevel(LArg, LTo, LWide), LRaw);
-  end;
-
-  procedure Consider(const AOwner: TSemaXType);
-  var
-    LOm: TPasSemaModel;
-    LScope, LSym, LRank, LRank2: Integer;
-    LParams: TArray<Integer>;
-    LQ, LR: TSemaXType;
-    LPre, LPost: TSemaConv;
-  begin
-    if XCatOf(AOwner) <> tcRecord then
-      Exit;
-    LOm := FModels[AOwner.UnitId];
-    LScope := LOm.Symbols[AOwner.Sym].MemberScope;
-    if LScope = NIL_SCOPE then
-      Exit;
-    // Walked in declaration order, not looked up by name: a member that
-    // shares the operator's name owns the name (9.3.1).
-    for LSym in LOm.Scopes[LScope].Symbols do
-    begin
-      if (LOm.Symbols[LSym].Kind <> skRoutine) or
-         (LOm.Symbols[LSym].NameLower <> 'implicit') or
-         (LOm.RoutineHead(LSym) <> rhOperator) then
-        Continue;
-      AOps := True;
-      LParams := XParamSyms(AOwner.UnitId, LSym);
-      if Length(LParams) <> 1 then
-        Continue;
-      LQ := SubstX(DeclTypeX(AOwner.UnitId, LParams[0]), AOwner.Inst, 0);
-      LR := SubstX(DeclTypeX(AOwner.UnitId, LSym), AOwner.Inst, 0);
-      if not XValid(LQ) or not XValid(LR) then
-      begin
-        LMaybe := True;
-        Continue;
-      end;
-      LQ := CanonTypeX(LQ);
-      LR := CanonTypeX(LR);
-      // The argument to the operator's parameter, then its result to the
-      // wanted type; one of the two is the record itself.
-      LRank := LegRank(LQ, ASrc, AConv, LPre);
-      if LPre = TSemaConv.scNone then
-        Continue;
-      LRank2 := LegRank(ADst, LR, nil, LPost);
-      if LPost = TSemaConv.scNone then
-        Continue;
-      if (LPre = scMaybe) or (LPost = scMaybe) then
-      begin
-        LMaybe := True;
-        Continue;
-      end;
-      // The leg that converts carries the rank: the argument's to the
-      // parameter, or (the parameter being the record) the result's; when
-      // neither converts, the better of the two (an Integer for
-      // `Implicit(A: Integer)`, a record for `Implicit(A: R): string` to a
-      // string parameter).
-      if (LPre = scIdentical) and (LPost <> scIdentical) then
-        LRank := LRank2
-      else if (LPre = scIdentical) and (LRank2 > LRank) then
-        LRank := LRank2;
-      LAny := True;
-      if LRank > LBest then
-        LBest := LRank;
-    end;
-  end;
-
 begin
-  Result := TSemaConv.scNone;
-  ARank := 0;
-  AOps := False;
-  if not XValid(ADst) or not XValid(ASrc) or XSameType(ADst, ASrc) then
-    Exit;
-  // A side of no known category - a generic parameter (`From<T>(const
-  // Value: T)` before its frame is applied) - may be anything.
-  if (XCatOf(ADst) = tcUnknown) or (XCatOf(ASrc) = tcUnknown) or
-     (FModels[ADst.UnitId].Symbols[ADst.Sym].Kind = skGenericParam) or
-     (FModels[ASrc.UnitId].Symbols[ASrc.Sym].Kind = skGenericParam) then
-    Exit(scMaybe);
-  LWide := FInfo.ExtendedBytes > 8;
-  LMaybe := False;
-  LAny := False;
-  LBest := -MaxInt;
-  Consider(ADst);
-  Consider(ASrc);
-  if LAny then
-  begin
-    ARank := LBest;
-    Result := scImplicit;
-  end
-  else if LMaybe then
-    Result := scMaybe;
+  Result := FConv.UserConv(ADst, ASrc, AConv, ARank, AOps);
 end;
 
-// The parameter's category for the rejections: a Byte or a record is not
-// assignable to `TBytes`, or `MS.Write(B[0], N)` / `Stream.Write(Header,
-// SizeOf(Header))` takes TStream's TBytes overload over the untyped one.
-// CanonTypeX follows `TBytes = TArray<Byte>` to the instance, whose category
-// is the array's; a dynamic array whose canonical type still has no
-// category (tcUnknown, assignable to anything) is asked IsDynArrayTypeX.
-function TPasSemaProject.ParCatOf(const APar,
-  ACanonPar: TSemaXType): TSemaTypeCat;
-begin
-  Result := XCatOf(ACanonPar);
-  if (Result = tcUnknown) and IsDynArrayTypeX(APar) then
-    Result := tcArray;
-end;
-
-{ Are the array types ACanonPar and ACanonArg (canonical; APDyn / AADyn
-  whether each is a dynamic array, IsDynArrayTypeX) one type - ArrayArgFit's
-  AIdentity: 1 one, -1 two, 0 not known. An array type is nominal (8.1.1):
-  two declarations are two types even of one shape, and a static and a
-  dynamic array are always two. A dynamic array declared in a generic type
-  and instantiated (Inst set: TArray<Integer>, TStringDynArray, a
-  `TG<Integer>.TDyn` for `TDyn = array of T`) is one type with every such
-  instance of its element (n6 Set C) and another than a plain declaration
-  of it (TDA = array of Integer). Two arrays of different elements are two
-  types. A side that mentions an open generic parameter (OpenX), or whose
-  element is not read (a seeded TArray / TBytes), is not known. }
-function TPasSemaProject.ArrayIdentityX(const ACanonPar,
-  ACanonArg: TSemaXType; APDyn, AADyn: Boolean): Integer;
-var
-  LPE, LAE: TSemaXType;
-  LPGen, LAGen: Boolean;
-begin
-  Result := 0;
-  if not XValid(ACanonPar) or not XValid(ACanonArg) then
-    Exit;
-  if XSameType(ACanonPar, ACanonArg) then
-    Exit(1);
-  if OpenX(ACanonPar) or OpenX(ACanonArg) then
-    Exit;
-  if APDyn <> AADyn then
-    Exit(-1);
-  LPE := ArrayElemX(ACanonPar);
-  LAE := ArrayElemX(ACanonArg);
-  if not XValid(LPE) or not XValid(LAE) then
-    Exit;
-  LPE := CanonTypeX(LPE);
-  LAE := CanonTypeX(LAE);
-  if not XValid(LPE) or not XValid(LAE) or OpenX(LPE) or OpenX(LAE) then
-    Exit;
-  if not XSameType(LPE, LAE) then
-    Exit(-1);
-  LPGen := APDyn and (ACanonPar.Inst <> NIL_INST);
-  LAGen := AADyn and (ACanonArg.Inst <> NIL_INST);
-  if LPGen and LAGen then
-    Exit(1);
-  Result := -1;
-end;
-
-{ ArrayArgFit (6.3.1, n6) for a value of the canonical type ACanonArgX
-  against ACanonParX, whose categories the caller read (AParCat, AArgCat; a
-  dynamic array may read tcUnknown): each side's shape (IsDynArrayTypeX,
-  IsStaticArrayX), whether the array side is a static array of a character
-  (a string too), a PChar / PAnsiChar parameter, and for two arrays their
-  identity (ArrayIdentityX). -2 when neither side is an array, or the pair
-  is not the rule's. ArgFitCanonX's and XConvCoreX's one reading. }
-function TPasSemaProject.ArrayConvX(const ACanonParX, ACanonArgX: TSemaXType;
-  AParCat, AArgCat: TSemaTypeCat; out ARank: Integer): Integer;
-var
-  LPDyn, LPStatic, LADyn, LAStatic, LCharArr: Boolean;
-  LIdent: Integer;
-  LElem: TSemaXType;
-begin
-  ARank := 0;
-  LPDyn := False;
-  LPStatic := False;
-  LADyn := False;
-  LAStatic := False;
-  // A category not read may be a dynamic array (a generic instance); a
-  // static array always reads tcArray.
-  if AParCat = tcArray then
-  begin
-    LPDyn := IsDynArrayTypeX(ACanonParX);
-    LPStatic := not LPDyn and IsStaticArrayX(ACanonParX);
-  end
-  else if (AParCat = tcUnknown) and IsDynArrayTypeX(ACanonParX) then
-  begin
-    LPDyn := True;
-    AParCat := tcArray;
-  end;
-  if AArgCat = tcArray then
-  begin
-    LADyn := IsDynArrayTypeX(ACanonArgX);
-    LAStatic := not LADyn and IsStaticArrayX(ACanonArgX);
-  end
-  else if (AArgCat = tcUnknown) and IsDynArrayTypeX(ACanonArgX) then
-  begin
-    LADyn := True;
-    AArgCat := tcArray;
-  end;
-  if (AParCat <> tcArray) and (AArgCat <> tcArray) then
-    Exit(-2);
-  LCharArr := False;
-  LElem := XNil;
-  if LAStatic then
-    LElem := ArrayElemX(ACanonArgX)
-  else if LPStatic and (AArgCat = tcString) then
-    LElem := ArrayElemX(ACanonParX);
-  if XValid(LElem) then
-    LCharArr := XCatOf(CanonTypeX(LElem)) = tcChar;
-  LIdent := 0;
-  if (AParCat = tcArray) and (AArgCat = tcArray) then
-    LIdent := ArrayIdentityX(ACanonParX, ACanonArgX, LPDyn, LADyn);
-  Result := ArrayArgFit(AParCat, AArgCat, LPDyn, LPStatic, LADyn, LAStatic,
-    LCharArr, LCharArr and (AParCat = tcPointer) and
-    (ConvPtrKindX(ACanonParX) in [cnkPChar, cnkPAnsiChar]),
-    (AParCat = tcPointer) and IsUntypedPointerX(ACanonParX), LIdent, ARank);
-end;
 
 function TPasSemaProject.IsUntypedPointerX(const AX: TSemaXType): Boolean;
 var
@@ -15106,72 +14513,14 @@ begin
 end;
 
 function TPasSemaProject.ProcSigsMeetX(const A, B: TPasProcSig): Boolean;
-
-  // Is the parameter's type written as a NAME - one type wherever it is
-  // written? An inline `array of T` is a type of its own declaration.
-  function NamedType(const S: TPasProcSig; P: Integer): Boolean;
-  var
-    LNode: Integer;
-  begin
-    LNode := FModels[S.Mid].Symbols[P].TypeNode;
-    Result := (LNode <> NIL_NODE) and
-      (FModels[S.Mid].Tree.Nodes[LNode].Kind in [nkIdent, nkMember,
-       nkTypeArgs]);
-  end;
-
-  // Readable and closed: a type that mentions an open generic parameter
-  // (OpenX - `TArray<T>` of a generic method's `TGetListFunc<T>`, System.Rtti's
-  // GetObjectListInVisOrder<T>(_GetDeclaredFields)) is not compared.
-  function Comparable(const AX: TSemaXType): Boolean;
-  begin
-    Result := XValid(AX) and not OpenX(AX);
-  end;
-
-var
-  LA, LB: TSemaXType;
-  LModeA, LModeB: Integer;
-  LTypedA, LTypedB: Boolean;
 begin
-  Result := False;
-  if (Length(A.Params) <> Length(B.Params)) or (A.IsFunc <> B.IsFunc) or
-     ((A.Conv >= 0) and (B.Conv >= 0) and (A.Conv <> B.Conv)) then
-    Exit;
-  for var LI := 0 to High(A.Params) do
-  begin
-    LModeA := ParamModeOf(FModels[A.Mid], A.Params[LI]);
-    LModeB := ParamModeOf(FModels[B.Mid], B.Params[LI]);
-    if (LModeA >= 0) and (LModeB >= 0) and (LModeA <> LModeB) then
-      Exit;
-    // An untyped parameter (`const Buffer`) against a typed one.
-    LTypedA := FModels[A.Mid].Symbols[A.Params[LI]].TypeNode <> NIL_NODE;
-    LTypedB := FModels[B.Mid].Symbols[B.Params[LI]].TypeNode <> NIL_NODE;
-    if LTypedA <> LTypedB then
-      Exit;
-    if LTypedA and NamedType(A, A.Params[LI]) and NamedType(B, B.Params[LI]) then
-    begin
-      LA := SubstX(DeclTypeX(A.Mid, A.Params[LI]), A.Inst, 0);
-      LB := SubstX(DeclTypeX(B.Mid, B.Params[LI]), B.Inst, 0);
-      if Comparable(LA) and Comparable(LB) and
-         not XSameType(CanonTypeX(LA), CanonTypeX(LB)) then
-        Exit;
-    end;
-  end;
-  Result := not (A.IsFunc and Comparable(A.ResultX) and
-    Comparable(B.ResultX) and
-    not XSameType(CanonTypeX(A.ResultX), CanonTypeX(B.ResultX)));
+  Result := FConv.ProcSigsMeet(A, B);
 end;
 
 function TPasSemaProject.ProcSigFitX(const ADst, ASrc: TPasProcSig;
   out ARank: Integer): Integer;
-var
-  LConv: TSemaProcConv;
 begin
-  ARank := 0;
-  if not ProcKindsMeet(ASrc.Kind, ADst.Kind, LConv) or
-     not ProcSigsMeetX(ADst, ASrc) then
-    Exit(-1);
-  ARank := ProcConvRank(LConv);
-  Result := 1;
+  Result := FConv.ProcSigFit(ADst, ASrc, ARank);
 end;
 
 function TPasSemaProject.ArgFitX(const AArgX, AParX: TSemaXType;
@@ -15681,17 +15030,6 @@ end;
 
 { Do the set types ADstX and ASrcX meet (SetsMeet over SetBaseX)? True
   when either base is not read. }
-function TPasSemaProject.SetsMeetX(const ADstX, ASrcX: TSemaXType): Boolean;
-var
-  LD, LS: TSemaSetBase;
-  LDHost, LSHost, LExact: TSemaXType;
-begin
-  if not SetBaseX(ADstX, LD, LDHost, LExact) or
-     not SetBaseX(ASrcX, LS, LSHost, LExact) then
-    Exit(True);
-  Result := SetsMeet(LD, LS, (LD.Cat <> tcEnum) or XSameType(LDHost, LSHost));
-end;
-
 { One element ANode of model AMid (or a range's bound) of a `[...]` for a
   set parameter, typed AX by the caller (TPasSetElem). A one-character
   literal is a character; a constant's ordinal value is read as dcc folds
@@ -15829,33 +15167,13 @@ begin
 end;
 
 function TPasSemaProject.ConvPtrKindX(const AX: TSemaXType): TSemaConvKind;
-var
-  LC: TSemaXType;
 begin
-  Result := cnkNone;
-  LC := CanonTypeX(AX);
-  if not XValid(LC) or
-     (FModels[LC.UnitId].Symbols[LC.Sym].Kind <> skBuiltinType) then
-    Exit;
-  if (FModels[LC.UnitId].Symbols[LC.Sym].NameLower = 'pchar') or
-     (FModels[LC.UnitId].Symbols[LC.Sym].NameLower = 'pwidechar') then
-    Result := cnkPChar
-  else if FModels[LC.UnitId].Symbols[LC.Sym].NameLower = 'pansichar' then
-    Result := cnkPAnsiChar;
+  Result := FConv.PtrConvKind(AX);
 end;
 
 function TPasSemaProject.ParConvKindX(const AX: TSemaXType): TSemaConvKind;
 begin
-  if not XValid(AX) then
-    Exit(cnkNone);
-  case XCatOf(AX) of
-    tcInteger, tcFloat, tcVariant, tcString, tcChar:
-      Result := ConvKindOf(OpFactsX(AX.UnitId, NIL_NODE, AX));
-    tcPointer:
-      Result := ConvPtrKindX(AX);
-  else
-    Result := cnkNone;
-  end;
+  Result := FConv.ParConvKind(AX);
 end;
 
 function TPasSemaProject.IsConstNameX(AMid, ANode: Integer): Boolean;
@@ -15930,300 +15248,9 @@ function TPasSemaProject.ArgFitCanonX(const AArgX, AParX, ACanonArgX,
   ACanonParX: TSemaXType; const ATree: TPasTree; ACore: Integer;
   AProcDesig, AClassRef: Boolean; AConv: PSemaArgConv;
   out ARank: Integer): Integer;
-var
-  LParCat, LArgCat: TSemaTypeCat;
-  LTarget: TSemaXType;
-  LRank, LUserRank: Integer;
-  LUser: TSemaConv;
-  LOps: Boolean;
 begin
-  Result := 0;
-  ARank := 0;
-  if not XValid(AParX) then
-    Exit;
-  // A class REFERENCE (CrossType's ArgScore says which nodes are one) fits
-  // a `class of` its class or an ancestor names, and nothing that wants an
-  // instance, a record, a scalar or an interface.
-  if AClassRef and XValid(AArgX) and (XCatOf(ACanonArgX) = tcClass) then
-  begin
-    case XCatOf(ACanonParX) of
-      tcClassOf:
-        begin
-          LTarget := CanonTypeX(ClassRefTargetX(ACanonParX));
-          if XValid(LTarget) then
-          begin
-            if XSameType(LTarget, ACanonArgX) then
-              Result := 2
-            else if XDescendsFrom(ACanonArgX, LTarget) then
-              Result := 1
-            else if FModels[LTarget.UnitId].Symbols[LTarget.Sym].Kind <>
-                    skGenericParam then
-              Result := -1;
-          end;
-        end;
-      tcClass, tcRecord, tcInterface, tcInteger, tcFloat, tcBoolean,
-      tcChar, tcString, tcEnum, tcSet, tcArray:
-        Result := -1;
-    end;
-    Exit;
-  end;
-  // An interface TYPE NAME is its GUID (14.1.1): it converts to TGUID and
-  // through it to a record whose Implicit takes one (`Supports(X, IFoo)`),
-  // to nothing else - not to the interface itself, IInterface, a Pointer
-  // or a Variant (local/type-conv-2026-11/n3 Set A: E2250).
-  if AClassRef and XValid(AArgX) and (XCatOf(ACanonArgX) = tcInterface) then
-  begin
-    case XCatOf(ACanonParX) of
-      tcUnknown:
-        Result := 0;
-      tcRecord:
-        if IsGuidTypeX(ACanonParX) then
-          Result := 2
-        else
-        begin
-          var LGMid, LGSym: Integer;
-          Result := -1;
-          if ImplicitRootX(AArgX.UnitId, 'tguid', LGMid, LGSym) then
-            case UserConvX(ACanonParX, XPlain(LGMid, LGSym), nil, LRank,
-                   LOps) of
-              scImplicit:
-                begin
-                  ARank := LRank;
-                  Result := 1;
-                end;
-              scMaybe:
-                Result := 0;
-            end;
-        end;
-    else
-      Result := -1;
-    end;
-    Exit;
-  end;
-  // An ANONYMOUS METHOD LITERAL rejects the candidate outright, and it is
-  // the only mismatch that does. `TThread.Synchronize(nil, procedure ...
-  // end)` fits BOTH the public `(const AThread: TThread; AThreadProc:
-  // TThreadProcedure)` and the PRIVATE `(ASyncRec: PSynchronizeRecord;
-  // QueueEvent: Boolean = False; ForceQueue: Boolean = False)` on arity,
-  // `nil` scores the same against either first parameter, and the first
-  // candidate - the private one - won the tie. 41 of bigflat's 111 false
-  // E2361 came from that single pair.
-  //
-  // Deliberately SYNTACTIC and not a general type-mismatch rejection. A
-  // written-out `procedure ... end` is a value of procedural type and
-  // nothing else, so this is provable at the node; a general "the types do
-  // not fit" rule is not, and would have to answer for record `Implicit`
-  // operators, Variant, untyped parameters, and the rule that a
-  // PARAMETERLESS function reference in a value position is CALLED (which
-  // is why a tcProc argument in general may legitimately meet a Boolean
-  // parameter - see the E2012 entry). A literal cannot be called that way.
-  // The same holds for a `[...]` against a parameter it cannot be passed
-  // to - a string, a scalar, a class (IsBracketToScalar). ArgShapeRejects
-  // is the rule the unit's ScoreArgs applies too.
-  if (ACore <> NIL_NODE) and ArgShapeRejects(ATree.Nodes[ACore].Kind,
-     AProcDesig, XCatOf(ACanonParX),
-     FModels[AParX.UnitId].Symbols[AParX.Sym].Kind = skGenericParam) then
-    Exit(-1);
-  if not XValid(AArgX) then
-    Exit;
-  // A number, Variant or string against one: dcc's ranking of the
-  // conversion (ConvRank), read for the conversion fit below.
-  // Between variables of the same type that is the exact match, decided
-  // first: the most common pair needs no parameter kind (ParConvKindX). An
-  // integer constant and a real one are no type's exact match (ConvRank
-  // ranks them by value): `F(5)` takes F(Byte) over F(Integer), its
-  // literal's type here.
-  LRank := -1;
-  if (AConv <> nil) and (AConv.Kind <> cnkNone) then
-  begin
-    if not (AConv.Facts.IntConst and not AConv.TypedConst or
-            AConv.Facts.RealLit) and
-       (XSameType(AParX, AArgX) or XSameType(ACanonParX, ACanonArgX)) then
-      Exit(2);
-    LRank := ConvRank(AConv^, ParConvKindX(ACanonParX), FInfo.ExtendedBytes > 8);
-  end;
-  // A one-character literal is a Char constant (IsCharLiteralExpr -
-  // through parentheses and both branches of an inline `if`, every
-  // piece of `#13#10` counted): a `Char` parameter fits it best, a
-  // string one next (the literal's own type here), an AnsiChar one
-  // least - 'a' takes F(WideChar) over F(AnsiChar) and F(string) over
-  // F(AnsiChar), either order (local/probe-b31 O2, probe-b32 P1).
-  if (XCatOf(ACanonParX) = tcChar) and (ACore <> NIL_NODE) and
-     IsCharLiteralExpr(ATree, ACore) then
-  begin
-    if PasBuiltinIsChar(FModels[ACanonParX.UnitId], ACanonParX.Sym,
-       FPlatform) then
-      Exit(3);
-    if LRank > 0 then
-      ARank := LRank;
-    Exit(1);
-  end;
-  // A ranked conversion is a conversion fit of that rank. The rejections
-  // below never apply to a pair the ranking takes.
-  if LRank > 0 then
-  begin
-    ARank := LRank;
-    Exit(1);
-  end;
-  // Not the same SYMBOL - but it may still be the same TYPE reached
-  // through an alias, and the two sides are read in different units
-  // by construction. `LayoutUnitsToPixels` in
-  // dxDocumentLayoutUnitConverter is declared for TSize, TPoint and
-  // TRect at one arity; a TRect argument matched none of them by
-  // symbol, all three scored 0, and the FIRST - TSize - won the tie.
-  // The call then typed as TSize: a wrong binding that costs no
-  // diagnostic until something reads a member off it (`.ToRectF` in
-  // a suite's ruler unit). Canonicalized only after the cheap test has
-  // already failed.
-  if XSameType(AParX, AArgX) or XSameType(ACanonParX, ACanonArgX) then
-    Exit(2);
-  LParCat := ParCatOf(AParX, ACanonParX);
-  LArgCat := XCatOf(ACanonArgX);
-  // A set for a set (SetsMeetX): one conversion for every set whose base is
-  // of the value's family, none for another - a set variable takes its own
-  // type, then any set that meets it, all of one rank (n4 Set B).
-  if (LParCat = tcSet) and (LArgCat = tcSet) then
-  begin
-    if SetsMeetX(ACanonParX, ACanonArgX) then
-    begin
-      ARank := CSetConvRank;
-      Exit(1);
-    end;
-    Exit(-1);
-  end;
-  // A Variant for an interface: IDispatch, IInterface / IUnknown, nothing
-  // else (VariantIntfRank, n8).
-  if (LParCat = tcInterface) and (LArgCat = tcVariant) then
-  begin
-    ARank := VariantIntfRank(FModels[ACanonParX.UnitId].Symbols[
-      ACanonParX.Sym].NameLower);
-    if ARank > 0 then
-      Exit(1);
-    Exit(-1);
-  end;
-  // Two DIFFERENT record types REJECT the candidate, and so does an
-  // ARRAY parameter against a record/class/interface argument or the
-  // reverse (ArgStructRejects). The general "the types do not fit"
-  // rule is still not attempted (see the note above), but these
-  // corners are decidable: the one thing that could make them fit -
-  // a `class operator Implicit`/`Explicit` - is a MEMBER, so it can
-  // be looked for. The array one matters because a binding stops at
-  // the FIRST declaration of a name: a derived interface that
-  // declares only the `TArray<T>` overload of a method and INHERITS
-  // the single-item one leaves the array overload as the only
-  // candidate, fitting on arity; rejecting it is what lets the
-  // "nothing in the type's own chain fits, so this means an
-  // INHERITED routine" fallback do its job. `nil` and untyped
-  // arguments never reach here - they are tcNil/tcUnknown.
-  //
-  // A record with `class operator Implicit` on either side converts as
-  // its operators say (UserConvX): a user conversion of its rank, or no
-  // candidate when none of them takes the argument (`F(S)` for a string
-  // against F(TRecInt) with `Implicit(A: Integer)`); `Explicit` is no
-  // conversion here. Ranked against the built-in ones (6.3.1): a built-in
-  // conversion losing nothing first, then the user one, then a lossy
-  // built-in one - an Integer takes F(Double) over F(TRecInt), F(TRecInt)
-  // over F(Byte).
-  LOps := False;
-  if (LParCat = tcRecord) or (LArgCat = tcRecord) then
-  begin
-    LUser := UserConvX(ACanonParX, ACanonArgX, AConv, LRank, LOps);
-    if LOps then
-      case LUser of
-        scImplicit:
-          begin
-            ARank := LRank;
-            Exit(1);
-          end;
-        TSemaConv.scNone: Exit(-1);
-      end;
-  end;
-  if ArgStructNeedsConv(LParCat, LArgCat) and
-     ArgStructRejects(LParCat, LArgCat, LOps and (LParCat = tcRecord),
-       LOps and (LArgCat = tcRecord)) then
-    Exit(-1);
-  // An array value against a typed parameter, a Variant, nil or a Pointer
-  // against an array (ArrayArgFit, 6.3.1): an array type is nominal - a
-  // second declaration of the element, a distinct copy, a static array of
-  // the shape, a static array where a dynamic one is wanted (`Image.Read(
-  // List^, N)` takes TStream's untyped Read, not the TBytes one) are each
-  // out, the generic instances of one element one type (ArrayIdentityX); a
-  // dynamic array goes to Pointer, then Variant, a static one to neither.
-  if MayArrayPair(LParCat, LArgCat) then
-    case ArrayConvX(ACanonParX, ACanonArgX, LParCat, LArgCat, LRank) of
-      -1:
-        Exit(-1);
-      1:
-        begin
-          ARank := LRank;
-          Exit(1);
-        end;
-      2:
-        Exit(2);
-    end;
-  // A scalar where a class, an interface or a class reference is
-  // wanted (IsScalarToReference); an enumeration where another
-  // ordinal, a Boolean, a Char or a float is wanted, or the reverse
-  // (ScalarEnumMismatch: `Seek(0, soCurrent)` takes Seek(Int64;
-  // TSeekOrigin) over Seek(Longint; Word), local/probe-b31 O3); an
-  // ordinal for an array.
-  // An integer constant 0 written as a literal or folded from literals
-  // (`0`, `$0`, `0 + 0`; a named constant is no such value) goes to every
-  // pointer - a typed one above Pointer, both below Variant (ZeroPointerRank;
-  // n7 Sets A, C: `K0` is E2010).
-  if (LParCat = tcPointer) and (LArgCat = tcInteger) and (AConv <> nil) and
-     AConv.Facts.IntConst and (AConv.Facts.IntValue = 0) and
-     not AConv.TypedConst and (ACore <> NIL_NODE) and
-     not (ATree.Nodes[ACore].Kind in [nkIdent, nkMember]) then
-  begin
-    ARank := ZeroPointerRank(not IsUntypedPointerX(ACanonParX),
-      ConvThreshold(AConv^, FInfo.ExtendedBytes > 8));
-    Exit(1);
-  end;
-  // A named string constant the ranking could not read (StrConstName):
-  // a conversion of no rank, as before the pointer rules.
-  if (LParCat = tcPointer) and (AConv <> nil) and AConv.StrConstName then
-    Exit(1);
-  if ArgCatRejects(LParCat, LArgCat) then
-    Exit(-1);
-  // An instance where a class reference is wanted: `RegC(Self)` in
-  // an instance method takes RegC(O: TObject) over RegC(C: TClass)
-  // in either order (15.1.1, local/probe-park/b330 SP.dpr; audit
-  // B3-30). A type name and a class method's Self, which are class
-  // references, took ArgScore's own branch before; the unit typer's
-  // scorer has no such branch, so the rule is this pass's alone.
-  if (LParCat = tcClassOf) and (LArgCat = tcClass) then
-    Exit(-1);
-  // A class instance, an interface, nil (XRefConvX, RefConvRank): a class
-  // to its nearer ancestor over a farther one, over an interface it
-  // implements, over Pointer; out where it does not convert - an unrelated
-  // class, an interface no class of its chain lists (`ShowHint(Self)`), an
-  // interface to a class or a pointer, nil to a Variant or a string; a
-  // typed pointer to Pointer, under {$T+} at the argument to another of its
-  // base; a class reference to its ancestors' (n7).
-  if LArgCat in [tcNil, tcClass, tcInterface, tcPointer, tcClassOf] then
-    case XRefConvX(ACanonParX, ACanonArgX, LParCat, LArgCat, LRank,
-           LUserRank, (LArgCat = tcPointer) and (LParCat = tcPointer) and
-           (ACore <> NIL_NODE) and
-           (Length(ATree.Source.TypedAddressEvents) > 0) and
-           ATree.Source.TypedAddressAt(ATree.Nodes[ACore].FirstToken)) of
-      -1:
-        Exit(-1);
-      1:
-        begin
-          ARank := LRank;
-          Exit(1);
-        end;
-    end;
-  // The rest is the one conversion test's (XAssignableX): a conversion fit,
-  // or the candidate out where the types do not convert - scNone is backed
-  // by dcc's verdict (tests/ConvSmoke.dpr), so it rejects as an assignment
-  // does (2.6.1), where it scored no evidence while the category table
-  // (CatAssignable) answered.
-  if XAssignableX(AParX, AArgX) then
-    Result := 1
-  else
-    Result := -1;
+  Result := FConv.ArgFitCanon(AArgX, AParX, ACanonArgX, ACanonParX, ATree,
+    ACore, AProcDesig, AClassRef, AConv, ARank);
 end;
 
 // A routine's parameter symbols in declaration order (its param scope -
@@ -24579,10 +23606,10 @@ end;
   operator is not inherited, and a record has no ancestors anyway), named
   for the token: `+` Add / Positive, `-` Subtract / Negative, `and` both
   LogicalAnd and BitwiseAnd, ... . Each must take as many parameters as
-  there are operands, and each operand must be able to go to its parameter:
-  the same type scores 2, a scalar assignable to a scalar 1, a record where
-  either side declares an Implicit/Explicit 0 (a conversion may make it
-  fit), anything else rejects the candidate. The best-scoring candidates
+  there are operands, and each operand must be able to go to its parameter,
+  scored as a call's argument (Fit: the one rule set's ArgFitCanon, ranked -
+  a Byte takes Add(TC, Integer) over Add(TC, Double), an Implicit converts
+  an operand, an Explicit does not). The best-scoring candidates
   decide only when they agree on the result type - TPointF's Multiply
   overloads all give TPointF - so an unknown operand or a real ambiguity
   leaves the expression untyped rather than guessed. A generic record's
@@ -24595,45 +23622,25 @@ var
   LWin: TSemaXType;
   LAgreed: Boolean;
 
-  function HasConversion(const AX: TSemaXType): Boolean;
-  var
-    LScope: Integer;
-  begin
-    Result := False;
-    if not XValid(AX) or (XCatOf(AX) <> tcRecord) then
-      Exit;
-    LScope := FModels[AX.UnitId].Symbols[AX.Sym].MemberScope;
-    Result := (LScope <> NIL_SCOPE) and
-      ((FModels[AX.UnitId].DeclaresOperator(LScope, 'implicit')) or
-       (FModels[AX.UnitId].DeclaresOperator(LScope, 'explicit')));
-  end;
-
-  // -1: AArg cannot go to a parameter of type APar.
+  // An operand of type AArg against a parameter of type APar, scored as a
+  // call's argument is (9.3.1: the operands choose among the overloads as
+  // in a call) - the one rule set's ArgFitCanon, ranked by the operand's
+  // type (no node: a literal operand ranks as a variable of its type), on
+  // ScoreCandidate's scale; -1 when it does not go there (`Explicit` never
+  // converts an operand: E2015, local/type-conv-2026-11/mig4/probes).
   function Fit(const APar, AArg: TSemaXType): Integer;
   var
-    LP, LA: TSemaXType;
-    LcP, LcA: TSemaTypeCat;
+    LConv: TSemaArgConv;
+    LFit, LRank: Integer;
   begin
     if not XValid(AArg) or not XValid(APar) then
       Exit(0);
-    LP := CanonTypeX(APar);
-    LA := CanonTypeX(AArg);
-    if XSameType(LP, LA) then
-      Exit(2);
-    LcP := XCatOf(LP);
-    LcA := XCatOf(LA);
-    if (LcP = tcRecord) or (LcA = tcRecord) then
-    begin
-      if HasConversion(LP) or HasConversion(LA) then
-        Exit(0);
+    LConv := ArgConvX(AArg.UnitId, NIL_NODE, AArg);
+    LFit := FConv.ArgFitCanon(AArg, APar, CanonTypeX(AArg), CanonTypeX(APar),
+      FModels[AArg.UnitId].Tree, NIL_NODE, False, False, @LConv, LRank);
+    if LFit < 0 then
       Exit(-1);
-    end;
-    if (LcP in [tcUnknown, tcVariant]) or (LcA in [tcUnknown, tcVariant]) then
-      Exit(0);
-    if XAssignableX(LP, LA) then
-      Result := 1
-    else
-      Result := -1;
+    Result := ScaledFit(2 * LFit, LRank);
   end;
 
   procedure Consider(const AOwner: TSemaXType);
