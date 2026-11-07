@@ -1694,6 +1694,8 @@ type
     // The compiler version this project emulates (VERnnn define, CompilerVersion
     // and RTLVersion in $IF); fixed at Create.
     property CompilerVersion: Double read FCompilerVersion;
+    // The target platform, fixed at Create.
+    property Platform: TPasPlatform read FPlatform;
     { OPT-IN diagnostic, default OFF: report a member after a dot that no
       lookup could resolve, as `E2003` on the member's own name. dcc reports
       such a name and we do not, so this is a real gap - but the member walk
@@ -2260,25 +2262,43 @@ type
     function Instantiate(const ABase: TSemaXType;
       const AArgs: TArray<TSemaXType>): Integer;
     { How one argument of type AArgX fits a parameter of type AParX - the
-      cross-type pass's overload scorer, the rules it applies to every
-      argument, on the doubled scale of a candidate's score (CtorElemFit): 6
-      a Char parameter for a character literal, 4 the same type, 2
-      assignable, 0 no evidence, -1 the candidate is out, and a `[...]` for a
-      dynamic array by its elements (AArg), whose odd steps fall between.
+      cross-type pass's overload scorer (CrossType's ArgScore), the rules it
+      applies to every argument, on a candidate's scale: ScaledFit of the
+      fit on the doubled scale of CtorElemFit (6 a Char parameter for a
+      character literal, 4 the same type, 2 a conversion, 0 no evidence; a
+      `[...]` for a dynamic array by its elements (AArg), whose odd steps
+      fall between) plus the conversion's rank (6.3.1: ConvRank, UserConv,
+      RefConv, ...), -1 the candidate is out.
       ATree / ACore: the argument's node under its parentheses (NIL_NODE:
-      none), whose shape decides the anonymous-method, procedure and `[...]`
-      rejections and the literal's rank; AProcDesig: it names a procedure;
-      AClassRef: it is a class REFERENCE to AArgX (a type name, `Self` in a
-      class method), not an instance. ALitM: the model ACore is a node of,
-      for an anonymous-method literal against a procedural parameter
-      (AnonLiteralFitsX: only a `reference to` type of its shape takes it);
-      nil leaves that rule out. An OPEN-ARRAY parameter is OpenArgFitX's.
+      none), whose shape decides the anonymous-method, procedure, `[...]`
+      and by-reference rejections and the literal's rank; AProcDesig: it
+      names a procedure; AClassRef: it is a class REFERENCE to AArgX (a type
+      name, `Self` in a class method), not an instance. ALitM: the model
+      ACore is a node of, for an anonymous-method literal against a
+      procedural parameter (AnonLiteralFitsX: only a `reference to` type of
+      its shape takes it); nil leaves that rule out. AConv: the argument as
+      the conversion ranking reads it (BufferArgConvX; nil: unranked).
+      AByRef: a `var` / `out` parameter (ParamIsByRef), AUntyped: an untyped
+      one (ParamIsUntyped, AParX then XNil); AHeadKind: what the argument
+      names or calls (skKeyword: not known) - ByRefShapeRejects,
+      UntypedConstShapeRejects, UntypedParamRank, ByRefFitRejects, as
+      ArgScore applies them. An OPEN-ARRAY parameter is OpenArgFitX's.
       Promoted for the completion engine, which picks an overload of a
       buffer being typed by the same rule: the buffer's own unit typer
       cannot see a type of another unit, nor an alias of one (audit C1). }
     function ArgFitX(const AArgX, AParX: TSemaXType; const ATree: TPasTree;
       ACore: Integer; AProcDesig, AClassRef: Boolean;
-      const AArg: TPasArrayArg; const ALitM: TPasSemaModel = nil): Integer;
+      const AArg: TPasArrayArg; const ALitM: TPasSemaModel;
+      AConv: PSemaArgConv; AByRef, AUntyped: Boolean;
+      AHeadKind: TSemaSymbolKind): Integer;
+    { ArgConvX for an argument node ANode of a model outside the closure -
+      the completion engine's buffer - typed AX in project space: the type's
+      facts as ArgConvX reads them (OpFactsX with no node, ConvPtrKindX),
+      the node's through ATyper, a typer over that model
+      (TPasSemaTyper.ArgNodeConv). A name the buffer does not bind itself
+      (another unit's true constant) ranks as a value of its type. }
+    function BufferArgConvX(ATyper: TPasSemaTyper; ANode: Integer;
+      const AX: TSemaXType): TSemaArgConv;
     { Can the anonymous-method literal ALit of model ALitM be passed to a
       parameter of the procedural type AX? Only when AX is a `reference to`
       type (nkProcType Aux 2 - not 1, `of object`, nor 0, a plain procedural
@@ -14525,11 +14545,13 @@ end;
 
 function TPasSemaProject.ArgFitX(const AArgX, AParX: TSemaXType;
   const ATree: TPasTree; ACore: Integer; AProcDesig, AClassRef: Boolean;
-  const AArg: TPasArrayArg; const ALitM: TPasSemaModel): Integer;
+  const AArg: TPasArrayArg; const ALitM: TPasSemaModel; AConv: PSemaArgConv;
+  AByRef, AUntyped: Boolean; AHeadKind: TSemaSymbolKind): Integer;
 var
   LArgX, LCanonArgX, LCanonParX, LElemX: TSemaXType;
   LCoreKind: TPasNodeKind;
-  LRank: Integer;
+  LRank, LFit, LAddrOpd: Integer;
+  LConv: PSemaArgConv;
 begin
   LArgX := AArgX;
   LCoreKind := nkError;   // no node: none of the kinds tested below
@@ -14538,6 +14560,37 @@ begin
   // A literal's own unnamed type scores nothing (CrossType's ArgScore).
   if LCoreKind = nkAnonMethod then
     LArgX := XNil;
+  // A `var` / `out` parameter takes a variable alone, an untyped `const`
+  // one no value E2036 refuses (ArgScore's shape rules). `@X` is left to
+  // the types: `@P` of a procedural variable is the variable (ProcVarAddr),
+  // which the buffer cannot tell here.
+  if (AByRef or AUntyped) and (ACore <> NIL_NODE) and
+     not IsAddrOfExpr(ATree, ACore, LAddrOpd) then
+  begin
+    if AByRef then
+    begin
+      if ByRefShapeRejects(LCoreKind, AHeadKind, False) then
+        Exit(-1);
+    end
+    else if UntypedConstShapeRejects(LCoreKind, AHeadKind,
+            (LCoreKind = nkStrLit) and IsCharLiteralExpr(ATree, ACore),
+            False, False) then
+      Exit(-1);
+  end;
+  // An UNTYPED parameter ranks just above the argument's Variant line
+  // (UntypedParamRank, 6.3.1).
+  if AUntyped then
+  begin
+    if not XValid(LArgX) then
+      Exit(0);
+    LCanonArgX := CanonTypeX(LArgX);
+    LRank := UntypedParamRank(AConv, XCatOf(LCanonArgX),
+      (XCatOf(LCanonArgX) = tcArray) and IsDynArrayTypeX(LCanonArgX),
+      FInfo.ExtendedBytes > 8);
+    if LRank > 0 then
+      Exit(ScaledFit(2, LRank));
+    Exit(0);
+  end;
   LCanonParX := AParX;
   if XValid(AParX) then
     LCanonParX := CanonTypeX(AParX);
@@ -14556,8 +14609,48 @@ begin
   LCanonArgX := LArgX;
   if XValid(LArgX) and XValid(AParX) then
     LCanonArgX := CanonTypeX(LArgX);
-  Result := ScaledFit(2 * ArgFitCanonX(LArgX, AParX, LCanonArgX, LCanonParX,
-    ATree, ACore, AProcDesig, AClassRef, nil, LRank));
+  // The conversion with its rank, as ArgScore reads it: none for a class
+  // reference or a by-reference parameter.
+  LConv := AConv;
+  if AClassRef or AByRef then
+    LConv := nil;
+  LFit := ArgFitCanonX(LArgX, AParX, LCanonArgX, LCanonParX, ATree, ACore,
+    AProcDesig, AClassRef, LConv, LRank);
+  // A `var` / `out` parameter takes its own type alone (ByRefFitRejects).
+  if AByRef and ByRefFitRejects(LFit, XValid(LArgX) and XValid(AParX) and
+     (XCatOf(LCanonArgX) <> tcUnknown) and
+     (XCatOf(LCanonParX) <> tcUnknown) and not OpenX(AParX) and
+     not OpenX(LArgX)) then
+    Exit(-1);
+  Result := ScaledFit(2 * LFit, LRank);
+end;
+
+function TPasSemaProject.BufferArgConvX(ATyper: TPasSemaTyper; ANode: Integer;
+  const AX: TSemaXType): TSemaArgConv;
+var
+  LX: TSemaXType;
+begin
+  Result := Default(TSemaArgConv);
+  if not XValid(AX) then
+    Exit;
+  // ArgConvX's type half: an alias its unit could not categorize is the
+  // type it names.
+  LX := AX;
+  if XCatOf(LX) = tcUnknown then
+    LX := CanonTypeX(LX);
+  case XCatOf(LX) of
+    tcInteger, tcFloat, tcVariant, tcString, tcChar:
+      begin
+        // With no node OpFactsX reads the type alone (no model of AMid).
+        Result.Facts := OpFactsX(0, NIL_NODE, LX);
+        if ATyper <> nil then
+          ATyper.ArgNodeConv(ANode, Result)
+        else
+          Result.Kind := ConvArgKindOf(Result.Facts);
+      end;
+    tcPointer:
+      Result.Kind := ConvPtrKindX(LX);
+  end;
 end;
 
 function TPasSemaProject.CtorElemX(const AX: TSemaXType;
