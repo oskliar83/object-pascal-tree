@@ -64,6 +64,8 @@ const
   // note (TSemaDiag.Note) lists the candidates.
   SE2250_NoOverload = 'E2250 There is no overloaded version of ''%s'' ' +
     'that can be called with these arguments';
+  // E2251 names the routine as declared; its note lists the tied candidates.
+  SE2251_AmbiguousOverload = 'E2251 Ambiguous overloaded call to ''%s''';
   SE2015_OperatorNotApplicable =
     'E2015 Operator not applicable to this operand type';
   // E2008 names nothing either: `I + True`, `Ch + I` (4.2.1).
