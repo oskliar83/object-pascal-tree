@@ -162,6 +162,15 @@ const
     rank). dcc64 37.0 (spec 6.3.1; local/compl-c1c2-2026-11/fd, fe,
     local/type-conv-2026-11/n4, n6). }
   CCtorSetConst = 1000;
+  // A `[...]` for a record through its Implicit from a set type (a user
+  // conversion): the rank on ArgFitCanon's doubled scale that puts it below
+  // every constructor fit (a set's, an array's: ScaledFit(1, ...)) and an
+  // untyped parameter (lane-d Set B: TRset after TSE, TDA, untyped).
+  CCtorUserRank = -CConvScale - CCtorSetConst;
+  // An untyped parameter's fit for a constant `[...]`: below a set's and an
+  // array's constructor fit, above CCtorUserRank (lane-d Set B: TSE, TDA,
+  // `array of Integer` over `const A`, it over TRset, Variant, string).
+  CUntypedCtorFit = CConvScale;
   CCtorDynConst = 980;
   CCtorOpenWiden = 900;
   CCtorSetWiden = 860;
@@ -254,6 +263,14 @@ type
     // so (`sLineBreak`, its value under $IFDEFs): ArgCatRejects is no rule
     // for it.
     StrConstName: Boolean;
+    // A value of an integer SUBRANGE type (`1..10`; SubrangeArgConv): ranked
+    // by its range SubLo..SubHi as a constant is by its value - Kind is the
+    // narrowest integer holding the range.
+    SubRange: Boolean;
+    SubLo, SubHi: Int64;
+    // `@S[I]` of a string under {$T+} (4.8, 6.3.1): a PChar / PAnsiChar
+    // value that takes its string kind over its own pointer type.
+    StrElemAddr: Boolean;
   end;
   PSemaArgConv = ^TSemaArgConv;
 
@@ -464,6 +481,11 @@ type
     function GuidType(const AFrom: TSemaXType; out AGuid: TSemaXType): Integer;
       virtual; abstract;
     function IsGuidType(const AX: TSemaXType): Boolean; virtual; abstract;
+    // The range ALo..AHi of an ordinal SUBRANGE type AX (`1..10`, `e1..e2`
+    // by ordinal), after aliases; False for a builtin, an enumeration or a
+    // bound not read (OrdFactsX).
+    function OrdRange(const AX: TSemaXType; out ALo, AHi: Int64): Boolean;
+      virtual; abstract;
     // What a rank of the reference conversion AConv is lowered by here (0
     // in the project): the unit typer's - see its view.
     function RefRankShift(AConv: TSemaRefConv): Integer; virtual;
@@ -478,6 +500,24 @@ type
     function ParConvKind(const AX: TSemaXType): TSemaConvKind;
     // A parameter's category for the rejections.
     function ParCat(const APar, ACanonPar: TSemaXType): TSemaTypeCat;
+    // An argument of the subrange type AX that has no conversion kind: an
+    // integer one ranked by its range (SubrangeArgConv), a character one as
+    // a Char (lane-d Set D: `'a'..'z'` takes the Char row's strings and no
+    // AnsiChar).
+    procedure SubrangeConv(const AX: TSemaXType; var AConv: TSemaArgConv);
+    // How general an array's element type is for `[]` between two arrays
+    // (CtorEmptyFit): 0 .. 15, the wider integer, real, string kind, the
+    // nearer ancestor class or interface higher; 0 for the rest.
+    function EmptyCtorGenerality(const AElem: TSemaXType): Integer;
+    // A `var` ShortString parameter is an OPEN string ({$P+}, the default;
+    // 6.2.2): it takes a variable of any short string type - `string[10]`
+    // above every conversion, a ShortString itself below the value, `const`
+    // and `out` ShortString candidates, which take it exactly (lane-d Set S:
+    // `var X: ShortString` beside `X: ShortString` compiles). True with
+    // the fit (1) and its rank in AFit / ARank when the rule applies; an
+    // `out` one is no open string (a string[10] does not reach it).
+    function OpenStringFit(const ACanonPar, ACanonArg: TSemaXType;
+      var AFit, ARank: Integer): Boolean;
 
     // ---- the rules ----
     { The one conversion test (XConvX delegates) - see XConvX's header in
@@ -507,6 +547,13 @@ type
     function ProcSigsMeet(const A, B: TPasProcSig): Boolean;
     function ProcSigFit(const ADst, ASrc: TPasProcSig;
       out ARank: Integer): Integer;
+    // The set type AQ a `[...]` reaches the record ARec through - its first
+    // `class operator Implicit` from a set type: 1, -1 none (no `[...]`
+    // reaches the record), 0 an operator's type not read here. The argument
+    // layer asks the set's fit of the elements (SetCtorFitX, SetCtorScore);
+    // a fit ranks CCtorUserRank (lane-d Set B).
+    function SetCtorRecordOp(const ARec: TSemaXType;
+      out AQ: TSemaXType): Integer;
     // ArgFitCanonX: an argument's type against a parameter's - see its
     // header in PasTree.Sema.Project.
     function ArgFitCanon(const AArgX, AParX, ACanonArgX,
@@ -636,7 +683,7 @@ type
       out AFacts: TSemaOpFacts): TSemaConvKind;
     // Is node N (parentheses peeled) a name or member access this unit binds
     // to a constant (skConst)? FoldConvConst's name shape (IsConstNameX).
-    function IsConstName(N: Integer): Boolean;
+    function IsConstName(N: Integer; ATrueOnly: Boolean = False): Boolean;
     // ScoreArg for an open-array parameter - see the implementation.
     function OpenArrayScore(AArg, AAt, ADef: Integer): Integer;
     // The array type ASym's shape (ArrayArgFit's input) - see the
@@ -955,8 +1002,14 @@ function CtorElemFit(ATarget: TSemaCtorTarget; AElemCat: TSemaTypeCat;
   derived class), a dynamic array a step below (`[]` takes `array of
   Integer` over TArray<Integer>; beside a set dcc ties). dcc64 37.0
   (local/compl-c1c2-2026-11/fd F16, fe G25; local/type-conv-2026-11/n4,
-  n6/dbg od.dpr). }
-function CtorEmptyFit(ATarget: TSemaCtorTarget): Integer;
+  n6/dbg od.dpr). Between two open arrays (or two dynamic ones) the more
+  GENERAL element wins - AGenerality, TSemaConvView.EmptyCtorGenerality:
+  `[]` takes `array of Int64` over `array of Integer` over `array of Byte`,
+  an integer over a real, Double over Single, string over WideString over
+  PChar over AnsiString over ShortString, TObject over TComponent (lane-d
+  Set E: 812 calls, both orders); the most general level with a set's. }
+function CtorEmptyFit(ATarget: TSemaCtorTarget;
+  AGenerality: Integer = 15): Integer;
 
 { An element's score as a value argument of T (AFit: 2 exact, 1 a
   conversion, ...) corrected by the open-array rule (6.3.1), for
@@ -1095,6 +1148,35 @@ function ConvRank(const AArg: TSemaArgConv; AParKind: TSemaConvKind;
   AWideExt: Boolean): Integer;
 function ConvRawRank(const AArg: TSemaArgConv; AParKind: TSemaConvKind;
   AWideExt: Boolean): Integer;
+
+{ An integer SUBRANGE value (6.3.1, local/type-conv-2026-11/lane-d Sets D,
+  P): a variable of `1..10`, `-5..5`, `0..1000` has no conversion kind of
+  its own and ranks by its RANGE as a constant ranks by its value
+  (IntConstRank): the integers holding the whole range in the order
+  ShortInt, Byte, SmallInt, Word, Integer, Cardinal, Int64, UInt64 (UInt64
+  holds whatever Int64 holds, as for a signed variable), the reals and
+  Variant, then the integers not holding it, widest first - `-5..5` takes
+  Cardinal over Word over Byte, all below a record's Implicit. Marks AConv
+  (an integer argument of no kind) so and gives it the narrowest kind
+  holding the range. }
+procedure SubrangeArgConv(var AConv: TSemaArgConv; ALo, AHi: Int64);
+
+{ The raw rank (ConvRawRank's scale) of the integer argument AArg - a
+  variable, a constant, a subrange value - for a parameter of an integer
+  SUBRANGE type APLo..APHi: one holding the argument's range ranks with the
+  best integer of its size or wider holding it (`F(TSubB)` for a Byte next
+  to its own type, `0..1000` with SmallInt), one not holding it with the
+  worst integer of its size not holding it (`1..10` for an Integer with
+  ShortInt) or last. dcc64 37.0 puts a subrange just above / below those
+  (lane-d Set P); a tie here. -1 for an argument that is no integer. }
+function SubrangeParRawRank(const AArg: TSemaArgConv; APLo, APHi: Int64;
+  AWideExt: Boolean): Integer;
+
+{ ConvRank's tier for the raw rank ARaw of the argument AArg (CRankLossless
+  at or above its ConvThreshold, Variant one below its line, else
+  CRankLossy). }
+function ConvTier(const AArg: TSemaArgConv; AParKind: TSemaConvKind;
+  ARaw: Integer; AWideExt: Boolean): Integer;
 
 { The lowest raw rank (ConvRawRank) at which a conversion of the argument
   AArg loses nothing: its rank of Variant - every row of the ranking puts
@@ -1262,12 +1344,16 @@ function IsAddrOfExpr(const ATree: TPasTree; ANode: Integer;
   which the ranking does not cover). A literal other than a string of other
   than one character (ACharLit), nil, an operator, an inline `if`, a true
   constant that is no string (AHeadKind skConst, AConstNumber), an
-  enumeration value. AAddrOfElem: the argument is `@A[I]`, which dcc takes
-  where it refuses `@X` (observed, n7 Sets B, C). dcc64 37.0 (n8 Sets L,
-  U). }
+  enumeration value. AAddrOfElem: the argument is `@A[I]` of a DYNAMIC array,
+  which dcc takes where it refuses `@X` (observed, n7 Sets B, C) - of a
+  string, a static array or a PChar it is E2036 too (lane-d Set T). A
+  `[...]` that is no constant (AConstCtor False: `[I]`) and a call that is
+  no variable (AConvCall: `Addr(X)`, a cast that changes the size or a
+  string's to a character pointer - `Integer(B)`, `PChar(S)`) are E2036 too
+  (n7 Set A, n8 Set L). dcc64 37.0 (n8 Sets L, U). }
 function UntypedConstShapeRejects(ACoreKind: TPasNodeKind;
-  AHeadKind: TSemaSymbolKind; ACharLit, AConstNumber,
-  AAddrOfElem: Boolean): Boolean;
+  AHeadKind: TSemaSymbolKind; ACharLit, AConstNumber, AAddrOfElem,
+  AConstCtor, AConvCall: Boolean): Boolean;
 
 { Is the argument a value an open array parameter takes as its single
   element when it is of the element type (6.2.6)? A variable, a parameter,
@@ -1661,6 +1747,115 @@ begin
   Result := Cat(ACanonPar);
   if (Result = tcUnknown) and IsDynArray(APar) then
     Result := tcArray;
+end;
+
+function TSemaConvView.SetCtorRecordOp(const ARec: TSemaXType;
+  out AQ: TSemaXType): Integer;
+var
+  LIter: Integer;
+  LOp: TSemaImplicitOp;
+  LQ: TSemaXType;
+begin
+  Result := -1;
+  AQ := XNil;
+  LIter := -1;
+  while NextImplicit(ARec, LIter, LOp) do
+  begin
+    if not LOp.Single then
+      Continue;
+    if not XValid(LOp.Q) then
+    begin
+      Result := 0;
+      Continue;
+    end;
+    LQ := Canon(LOp.Q);
+    case Cat(LQ) of
+      tcSet:
+        begin
+          AQ := LQ;
+          Exit(1);
+        end;
+      tcUnknown:
+        Result := 0;
+    end;
+  end;
+end;
+
+function TSemaConvView.OpenStringFit(const ACanonPar, ACanonArg: TSemaXType;
+  var AFit, ARank: Integer): Boolean;
+begin
+  Result := XValid(ACanonPar) and XValid(ACanonArg) and (AFit > 0) and
+    (Model(ACanonPar).Symbols[ACanonPar.Sym].Kind = skBuiltinType) and
+    (Model(ACanonPar).Symbols[ACanonPar.Sym].NameLower = 'shortstring') and
+    (Cat(ACanonArg) = tcString) and (ParConvKind(ACanonArg) = cnkShortString);
+  if Result then
+  begin
+    AFit := 1;
+    ARank := CRankLossless + 31;
+  end;
+end;
+
+function TSemaConvView.EmptyCtorGenerality(const AElem: TSemaXType): Integer;
+var
+  LC: TSemaXType;
+  LWhole: Boolean;
+begin
+  Result := 0;
+  if not XValid(AElem) then
+    Exit;
+  LC := Canon(AElem);
+  if not XValid(LC) then
+    Exit;
+  case Cat(LC) of
+    tcClass, tcInterface:
+      begin
+        Result := HeritageDepth(LC, LWhole);
+        if not LWhole or (Result < 0) then
+          Exit(0);
+        if Result > 15 then
+          Result := 15;
+        Exit(15 - Result);
+      end;
+    tcPointer:
+      if IsUntypedPointer(LC) then
+        Exit(7);
+  end;
+  case ParConvKind(LC) of
+    cnkShortInt: Result := 8;
+    cnkByte: Result := 9;
+    cnkSmallInt: Result := 10;
+    cnkWord: Result := 11;
+    cnkInteger: Result := 12;
+    cnkCardinal: Result := 13;
+    cnkInt64: Result := 14;
+    cnkUInt64: Result := 15;
+    cnkSingle: Result := 4;
+    cnkCurrency, cnkComp: Result := 5;
+    cnkDouble: Result := 6;
+    cnkExtended: Result := 6 + Ord(FWideExt);
+    cnkUString, cnkChar: Result := 12;
+    cnkWideString: Result := 11;
+    cnkPChar: Result := 10;
+    cnkAnsiString, cnkCodePage, cnkRawByteString: Result := 9;
+    cnkShortString: Result := 8;
+  end;
+end;
+
+procedure TSemaConvView.SubrangeConv(const AX: TSemaXType;
+  var AConv: TSemaArgConv);
+var
+  LLo, LHi: Int64;
+begin
+  if (AConv.Kind <> cnkNone) or not XValid(AX) then
+    Exit;
+  case Cat(AX) of
+    tcInteger:
+      if not AConv.Facts.IntConst and OrdRange(AX, LLo, LHi) then
+        SubrangeArgConv(AConv, LLo, LHi);
+    tcChar:
+      if AConv.Facts.Cat = tcChar then
+        AConv.Kind := cnkChar;
+  end;
 end;
 
 function TSemaConvView.Conv(const ADst, ASrc: TSemaXType): TSemaConv;
@@ -2510,6 +2705,7 @@ var
   LRank, LUserRank, LDist: Integer;
   LUser: TSemaConv;
   LOps: Boolean;
+  LPLo, LPHi: Int64;
 begin
   Result := 0;
   ARank := 0;
@@ -2602,6 +2798,30 @@ begin
      AProcDesig, Cat(ACanonParX),
      Model(AParX).Symbols[AParX.Sym].Kind = skGenericParam) then
     Exit(-1);
+  // A `[...]` goes to no static array and to a record only through an
+  // Implicit from a set type its elements fit - not TGUID, a record without
+  // one, nor an Implicit from a dynamic or static array; that one ranks as
+  // a user conversion, below an untyped parameter (lane-d Set B).
+  if (ACore <> NIL_NODE) and (ATree.Nodes[ACore].Kind = nkSetCtor) and
+     (Model(AParX).Symbols[AParX.Sym].Kind <> skGenericParam) then
+    case Cat(ACanonParX) of
+      tcArray:
+        if IsStaticArray(ACanonParX) then
+          Exit(-1);
+      tcRecord:
+        begin
+          var LQ: TSemaXType;
+          case SetCtorRecordOp(ACanonParX, LQ) of
+            -1: Exit(-1);
+            0: Exit(0);
+          end;
+          if XValid(AArgX) and (Cat(Canon(AArgX)) = tcSet) and
+             not SetsMeetT(LQ, Canon(AArgX)) then
+            Exit(-1);
+          ARank := CCtorUserRank;
+          Exit(1);
+        end;
+    end;
   if not XValid(AArgX) then
     Exit;
   // A number, Variant or string against one: dcc's ranking of the
@@ -2619,6 +2839,53 @@ begin
        (Same(AParX, AArgX) or Same(ACanonParX, ACanonArgX)) then
       Exit(2);
     LRank := ConvRank(AConv^, ParConvKind(ACanonParX), FWideExt);
+    // A parameter of a SUBRANGE type has no conversion kind of its own: an
+    // integer one ranks with the integers of its size (SubrangeParRawRank),
+    // a character one as a Char - `F(C)` for a Char takes F(TSubC) for
+    // `'a'..'z'` over F(string) (lane-d Sets D, P).
+    if (LRank < 0) and (ParConvKind(ACanonParX) = cnkNone) then
+      case Cat(ACanonParX) of
+        tcInteger:
+          if OrdRange(ACanonParX, LPLo, LPHi) then
+            LRank := ConvTier(AConv^, cnkNone,
+              SubrangeParRawRank(AConv^, LPLo, LPHi, FWideExt), FWideExt);
+        tcChar:
+          LRank := ConvRank(AConv^, cnkChar, FWideExt);
+      end;
+    // A PChar reaches no ShortString parameter in an overload set, though a
+    // lone one takes it; a PAnsiChar does (6.3.1; n1 Set S, m2 Set N, lane-d
+    // Set S).
+    if (AConv.Kind = cnkPChar) and
+       (ParConvKind(ACanonParX) = cnkShortString) then
+      Exit(-1);
+    // A ShortString for a `string[N]` may lose characters: below Variant,
+    // an untyped parameter and the other string kinds (lane-d Set S).
+    if (AConv.Kind = cnkShortString) and (LRank > 0) and
+       (ParConvKind(ACanonParX) = cnkShortString) and
+       not Same(ACanonParX, ACanonArgX) and XValid(ACanonArgX) and
+       (Model(ACanonArgX).Symbols[ACanonArgX.Sym].Kind = skBuiltinType) and
+       (Model(ACanonParX).Symbols[ACanonParX.Sym].Kind <> skBuiltinType) then
+      LRank := CRankLossy + 1;
+  end;
+  // An enumeration value for an enumeration of its host: its own range or
+  // a wider one (the host, a subrange holding it) is a conversion losing
+  // nothing - above an untyped parameter and Variant (`F(SE)` for an
+  // `e1..e2` takes F(TE) over F(const A); lane-d Set D).
+  if (LRank < 0) and XValid(AArgX) and (Cat(ACanonParX) = tcEnum) and
+     (Cat(ACanonArgX) = tcEnum) and not Same(AParX, AArgX) and
+     not Same(ACanonParX, ACanonArgX) then
+  begin
+    var LHostP := EnumHost(ACanonParX);
+    var LHostA := EnumHost(ACanonArgX);
+    var LALo, LAHi: Int64;
+    if XValid(LHostP) and XValid(LHostA) and Same(LHostP, LHostA) and
+       (not OrdRange(ACanonParX, LPLo, LPHi) or
+        OrdRange(ACanonArgX, LALo, LAHi) and (LALo >= LPLo) and
+        (LAHi <= LPHi)) then
+    begin
+      ARank := CRankLossless + 16;
+      Exit(1);
+    end;
   end;
   // A one-character literal is a Char constant (IsCharLiteralExpr -
   // through parentheses and both branches of an inline `if`, every
@@ -2757,7 +3024,9 @@ begin
       ConvThreshold(AConv^, FWideExt));
     Exit(1);
   end;
-  // A named string constant the ranking could not read (StrConstName):
+  // A named TRUE string constant the ranking could not read (StrConstName;
+  // a typed one, `KTS: string = 'abc'`, is a string variable that no
+  // pointer takes - n8 Set L):
   // a conversion of no rank, as before the pointer rules.
   if (LParCat = tcPointer) and (AConv <> nil) and AConv.StrConstName then
     Exit(1);
@@ -2846,6 +3115,8 @@ type
     function GuidType(const AFrom: TSemaXType;
       out AGuid: TSemaXType): Integer; override;
     function IsGuidType(const AX: TSemaXType): Boolean; override;
+    function OrdRange(const AX: TSemaXType; out ALo, AHi: Int64): Boolean;
+      override;
     function RefRankShift(AConv: TSemaRefConv): Integer; override;
   end;
 
@@ -2973,7 +3244,10 @@ function TPasUnitConvView.VarConv(const AX: TSemaXType): TSemaArgConv;
 begin
   Result := Default(TSemaArgConv);
   if XValid(AX) then
+  begin
     Result.Kind := FT.ConvKindSym(AX.Sym, NIL_NODE, True, Result.Facts);
+    SubrangeConv(AX, Result);
+  end;
 end;
 
 function TPasUnitConvView.ClassRefTarget(const AX: TSemaXType): TSemaXType;
@@ -3194,6 +3468,24 @@ end;
   interface or to Pointer (TObject, another unit's ancestor, wins over
   both), an interface to Variant, a class reference to Pointer - ranks below
   0 here, above the user conversions. }
+function TPasUnitConvView.OrdRange(const AX: TSemaXType; out ALo,
+  AHi: Int64): Boolean;
+var
+  LF: TSemaOrdFacts;
+begin
+  ALo := 0;
+  AHi := 0;
+  if not XValid(AX) then
+    Exit(False);
+  LF := FT.OrdFacts(NIL_NODE, AX.Sym);
+  Result := LF.HasRange;
+  if Result then
+  begin
+    ALo := LF.Lo;
+    AHi := LF.Hi;
+  end;
+end;
+
 function TPasUnitConvView.RefRankShift(AConv: TSemaRefConv): Integer;
 begin
   if AConv in [rcClassIntf, rcClassPointer, rcIntfVariant,
@@ -3606,12 +3898,19 @@ begin
   Result := ScaledFit(LFit);
 end;
 
-function CtorEmptyFit(ATarget: TSemaCtorTarget): Integer;
+function CtorEmptyFit(ATarget: TSemaCtorTarget;
+  AGenerality: Integer): Integer;
 begin
+  if ATarget = ctArrayOfConst then
+    Exit(ScaledFit(1, CCtorSetConst));
+  if AGenerality < 0 then
+    AGenerality := 0
+  else if AGenerality > 15 then
+    AGenerality := 15;
+  Result := CCtorSetConst - 2 * (15 - AGenerality);
   if ATarget = ctDynArray then
-    Result := ScaledFit(1, CCtorSetConst - 1)
-  else
-    Result := ScaledFit(1, CCtorSetConst);
+    Dec(Result);
+  Result := ScaledFit(1, Result);
 end;
 
 function CtorValueFit(AFit: Integer; const AConv: TSemaArgConv;
@@ -3794,6 +4093,51 @@ begin
 end;
 
 const
+  CIntKindLo: array[cnkShortInt..cnkUInt64] of Int64 = (-128, 0, -32768, 0,
+    -2147483648, 0, Low(Int64), 0);
+  CIntKindHi: array[cnkShortInt..cnkUInt64] of Int64 = (127, 255, 32767,
+    65535, 2147483647, 4294967295, High(Int64), High(Int64));
+
+// Does the integer kind AK hold every value of ALo..AHi? UInt64 holds what
+// Int64 holds: a signed range goes to it as a signed variable does (lane-d
+// Set D: `-5..5` takes UInt64 above Single).
+function IntKindHolds(AK: TSemaConvKind; ALo, AHi: Int64): Boolean;
+begin
+  if AK = cnkUInt64 then
+    Exit(True);
+  Result := (ALo >= CIntKindLo[AK]) and (AHi <= CIntKindHi[AK]);
+end;
+
+// The storage size of an integer subrange ALo..AHi (1, 2, 4 or 8 bytes).
+function IntRangeSize(ALo, AHi: Int64): Integer;
+begin
+  if (ALo >= -128) and (AHi <= 127) or (ALo >= 0) and (AHi <= 255) then
+    Result := 1
+  else if (ALo >= -32768) and (AHi <= 32767) or (ALo >= 0) and
+          (AHi <= 65535) then
+    Result := 2
+  else if (ALo >= -2147483648) and (AHi <= 2147483647) or (ALo >= 0) and
+          (AHi <= 4294967295) then
+    Result := 4
+  else
+    Result := 8;
+end;
+
+// IntConstRank for a RANGE (SubrangeArgConv): holding = holding all of it.
+function IntRangeRank(ALo, AHi: Int64; AParKind: TSemaConvKind;
+  AWideExt: Boolean): Integer;
+begin
+  if AParKind in [cnkShortInt..cnkUInt64] then
+  begin
+    if IntKindHolds(AParKind, ALo, AHi) then
+      Exit(30 - (Ord(AParKind) - Ord(cnkShortInt)));
+    Exit(1 + Ord(AParKind) - Ord(cnkShortInt));
+  end;
+  Result := IntConstRank(ALo, AParKind, AWideExt,
+    (ALo < -2147483648) or (AHi > 4294967295));
+end;
+
+const
   // ConvRank's table: [Extended wider than Double, argument kind, parameter
   // kind]; a row's highest entry is the argument's own type. Generated from
   // the probe results (local/type-conv-2026-11/n1, table.ps1): dcc64 for
@@ -3913,7 +4257,101 @@ begin
         (AArg.Facts.IntValue > 4294967295);
     Exit(IntConstRank(AArg.Facts.IntValue, AParKind, AWideExt, L64));
   end;
+  if AArg.SubRange then
+    Exit(IntRangeRank(AArg.SubLo, AArg.SubHi, AParKind, AWideExt));
   Result := CConvRanks[AWideExt, AArg.Kind, AParKind];
+end;
+
+procedure SubrangeArgConv(var AConv: TSemaArgConv; ALo, AHi: Int64);
+var
+  K: TSemaConvKind;
+begin
+  if (AConv.Kind <> cnkNone) or AConv.Facts.IntConst or (ALo > AHi) then
+    Exit;
+  for K := cnkShortInt to cnkUInt64 do
+    if IntKindHolds(K, ALo, AHi) then
+    begin
+      AConv.Kind := K;
+      AConv.Facts.Cat := tcInteger;
+      AConv.SubRange := True;
+      AConv.SubLo := ALo;
+      AConv.SubHi := AHi;
+      Exit;
+    end;
+end;
+
+function SubrangeParRawRank(const AArg: TSemaArgConv; APLo, APHi: Int64;
+  AWideExt: Boolean): Integer;
+var
+  LLo, LHi: Int64;
+  LSize: Integer;
+  K: TSemaConvKind;
+  LR: Integer;
+begin
+  Result := -1;
+  if not (AArg.Kind in [cnkShortInt..cnkUInt64]) then
+    Exit;
+  if AArg.Facts.IntConst then
+  begin
+    LLo := AArg.Facts.IntValue;
+    LHi := LLo;
+  end
+  else if AArg.SubRange then
+  begin
+    LLo := AArg.SubLo;
+    LHi := AArg.SubHi;
+  end
+  else
+  begin
+    LLo := CIntKindLo[AArg.Kind];
+    LHi := CIntKindHi[AArg.Kind];
+  end;
+  LSize := IntRangeSize(APLo, APHi);
+  if (LLo >= APLo) and (LHi <= APHi) then
+  begin
+    // Holding: the best integer of its size or wider holding the argument.
+    for K := cnkShortInt to cnkUInt64 do
+      if (IntRangeSize(CIntKindLo[K], CIntKindHi[K]) >= LSize) and
+         IntKindHolds(K, LLo, LHi) then
+      begin
+        LR := ConvRawRank(AArg, K, AWideExt);
+        if LR > Result then
+          Result := LR;
+      end;
+    if Result < 0 then
+      Result := ConvRawRank(AArg, cnkInt64, AWideExt);
+  end
+  else
+  begin
+    // Not holding: the worst integer of its size not holding it, else last.
+    Result := 1;
+    LR := MaxInt;
+    for K := cnkShortInt to cnkUInt64 do
+      if (IntRangeSize(CIntKindLo[K], CIntKindHi[K]) = LSize) and
+         not IntKindHolds(K, LLo, LHi) and
+         (ConvRawRank(AArg, K, AWideExt) < LR) then
+        LR := ConvRawRank(AArg, K, AWideExt);
+    if (LR <> MaxInt) and (LR > 0) then
+      Result := LR;
+  end;
+end;
+
+function ConvTier(const AArg: TSemaArgConv; AParKind: TSemaConvKind;
+  ARaw: Integer; AWideExt: Boolean): Integer;
+begin
+  Result := ARaw;
+  if Result <= 0 then
+    Exit;
+  if Result >= ConvThreshold(AArg, AWideExt) then
+  begin
+    Inc(Result, CRankLossless);
+    // Variant one below its line: an untyped parameter ranks between it and
+    // the conversions above it (UntypedParamRank; no raw rank ties Variant's).
+    if AParKind = cnkVariant then
+      Dec(Result);
+  end
+  else
+    Inc(Result, CRankLossy);
 end;
 
 function ConvThreshold(const AArg: TSemaArgConv; AWideExt: Boolean): Integer;
@@ -3927,19 +4365,8 @@ end;
 function ConvRank(const AArg: TSemaArgConv; AParKind: TSemaConvKind;
   AWideExt: Boolean): Integer;
 begin
-  Result := ConvRawRank(AArg, AParKind, AWideExt);
-  if Result <= 0 then
-    Exit;
-  if Result >= ConvThreshold(AArg, AWideExt) then
-  begin
-    Inc(Result, CRankLossless);
-    // Variant one below its line: an untyped parameter ranks between it and
-    // the conversions above it (UntypedParamRank; no raw rank ties Variant's).
-    if AParKind = cnkVariant then
-      Dec(Result);
-  end
-  else
-    Inc(Result, CRankLossy);
+  Result := ConvTier(AArg, AParKind, ConvRawRank(AArg, AParKind, AWideExt),
+    AWideExt);
 end;
 
 function UserConvLevel(const AArg: TSemaArgConv; AQKind: TSemaConvKind;
@@ -4172,10 +4599,14 @@ begin
 end;
 
 function UntypedConstShapeRejects(ACoreKind: TPasNodeKind;
-  AHeadKind: TSemaSymbolKind; ACharLit, AConstNumber,
-  AAddrOfElem: Boolean): Boolean;
+  AHeadKind: TSemaSymbolKind; ACharLit, AConstNumber, AAddrOfElem,
+  AConstCtor, AConvCall: Boolean): Boolean;
 begin
   case ACoreKind of
+    nkSetCtor:
+      Result := not AConstCtor;
+    nkCall:
+      Result := AConvCall;
     nkIntLit, nkRealLit, nkNilLit, nkCaretChar, nkBinaryOp, nkInlineIf:
       Result := True;
     nkUnaryOp:
@@ -7368,11 +7799,22 @@ begin
     end
     // An untyped `const` one: a value E2036 refuses after the choice
     // (UntypedConstShapeRejects - CrossType's ArgScore).
-    else if UntypedConstShapeRejects(Kind(LCore), LHeadKind,
-            (Kind(LCore) = nkStrLit) and IsCharLiteralExpr(T, LCore),
-            LTrueConst and (AAt <> NIL_SYM) and (CatOf(AAt) <> tcString),
-            IsAddrOfExpr(T, LCore, LElem) and (Kind(LElem) = nkIndex)) then
-      Exit(-1);
+    else
+    begin
+      // Addr(X) is no variable (the unit typer reads no cast's size).
+      var LAddrCall := (Kind(LCore) = nkCall) and (LHeadKind = skRoutine) and
+        (LElem <> NIL_SYM) and (sfBuiltin in M.Symbols[LElem].Flags) and
+        (M.Symbols[LElem].NameLower = 'addr');
+      if UntypedConstShapeRejects(Kind(LCore), LHeadKind,
+         (Kind(LCore) = nkStrLit) and IsCharLiteralExpr(T, LCore),
+         LTrueConst and (AAt <> NIL_SYM) and (CatOf(AAt) <> tcString),
+         IsAddrOfExpr(T, LCore, LElem) and (Kind(LElem) = nkIndex) and
+         (Child(LElem) <> NIL_NODE) and
+         (M.ExprType[Child(LElem)] <> NIL_SYM) and
+         FConv.IsDynArray(UX(M.ExprType[Child(LElem)])),
+         (Kind(LCore) <> nkSetCtor) or IsConstArg(LCore), LAddrCall) then
+        Exit(-1);
+    end;
   end;
   // An UNTYPED parameter ranks just above the argument's Variant line
   // (UntypedParamRank).
@@ -7423,12 +7865,29 @@ begin
           Exit(0);
         Exit(CtorScore(LCore, LElem, ctDynArray));
       end;
-      // ...and one for a SET by its elements (SetCtorScore).
+      // ...and one for a SET by its elements (SetCtorScore), for a record
+      // through its Implicit from a set type (SetCtorRecordOp).
       if CatOf(LPt) = tcSet then
         Exit(SetCtorScore(LCore, LPt));
+      if CatOf(LPt) = tcRecord then
+      begin
+        var LQ: TSemaXType;
+        if (FConv.SetCtorRecordOp(UX(LPt), LQ) = 1) and XValid(LQ) then
+        begin
+          if SetCtorScore(LCore, LQ.Sym) > 0 then
+            Exit(ScaledFit(2, CCtorUserRank));
+          Exit(-1);
+        end;
+      end;
     end;
   end;
   Result := ScoreArgRanked(AArg, AAt, LPt, not LByRef, LRank);
+  // A `var` ShortString is an open string (OpenStringFit).
+  if LByRef and (AAt <> NIL_SYM) and (LPt <> NIL_SYM) and
+     (ParamModeOf(M, AParam) <> 3) and
+     FConv.OpenStringFit(FConv.Canon(UX(LPt)), FConv.Canon(UX(AAt)), Result,
+       LRank) then
+    Exit(ScaledFit(2 * Result, LRank));
   // A `var` / `out` parameter takes its own type alone (ByRefFitRejects).
   if LByRef and ByRefFitRejects(Result, (AAt <> NIL_SYM) and
      (LPt <> NIL_SYM) and (CatOf(AAt) <> tcUnknown) and
@@ -7446,11 +7905,14 @@ var
   LDyn, LStatic, LCharArr: Boolean;
 begin
   Result := 0;
+  if (AArg <> NIL_NODE) and (Kind(PeelParens(T, AArg)) = nkSetCtor) then
+    Exit(CUntypedCtorFit);
   if (AArg = NIL_NODE) or (AAt = NIL_SYM) then
     Exit;
   LCore := PeelParens(T, AArg);
+  LArgC := Default(TSemaArgConv);
   LArgC.Kind := ConvKindSym(AAt, LCore, True, LArgC.Facts);
-  LArgC.TypedConst := False;
+  FConv.SubrangeConv(UX(AAt), LArgC);
   LDyn := False;
   if CatOf(AAt) = tcArray then
   begin
@@ -7469,13 +7931,14 @@ begin
   Result := ScaledFit(2, LRank);
 end;
 
-function TPasSemaTyper.IsConstName(N: Integer): Boolean;
+function TPasSemaTyper.IsConstName(N: Integer; ATrueOnly: Boolean): Boolean;
 begin
   N := PeelParens(T, N);
   if (N <> NIL_NODE) and (Kind(N) = nkMember) then
     N := T.LastChild(N);
   Result := (N <> NIL_NODE) and (Kind(N) = nkIdent) and
-    (M.RefMap[N] <> NIL_SYM) and (M.Symbols[M.RefMap[N]].Kind = skConst);
+    (M.RefMap[N] <> NIL_SYM) and (M.Symbols[M.RefMap[N]].Kind = skConst) and
+    (not ATrueOnly or (M.Symbols[M.RefMap[N]].TypeNode = NIL_NODE));
 end;
 
 function TPasSemaTyper.ConvKindSym(ASym, ANode: Integer; AArgSide: Boolean;
@@ -7818,11 +8281,12 @@ begin
     LArgC.Kind := ConvKindSym(AAt, LCore, True, LArgC.Facts);
     LArgC.StrConstName := (LArgC.Facts.Cat in [tcString, tcChar]) and
       (LArgC.Kind <> cnkStrLit) and (LArgC.Kind <> cnkCharLit) and
-      (LCore <> NIL_NODE) and IsConstName(LCore);
+      (LCore <> NIL_NODE) and IsConstName(LCore, True);
     if (LArgC.Kind <> cnkNone) and (LArgC.Facts.Cat = tcInteger) and
        not LArgC.Facts.IntConst and (LCore <> NIL_NODE) and
        (MayFoldConvConst(T, LCore) or IsConstName(LCore)) then
       FoldConvConst(T, LCore, ConstFacts(), OrdNameValue(), LArgC);
+    FConv.SubrangeConv(UX(AAt), LArgC);
     LConv := @LArgC;
   end;
   LParX := UX(APt);
@@ -7938,8 +8402,11 @@ begin
     if Kind(LCore) in [nkIdent, nkMember] then
     begin
       LSym := Head(LCore);
+      // A routine's name is one only as a function's call (`GI`), not a
+      // procedure (`G1`: E2250 for `array of Integer`; n8 Set L).
       LIsVar := (LSym <> NIL_SYM) and SingleElemShape(Kind(LCore),
-        M.Symbols[LSym].Kind, M.Symbols[LSym].TypeNode <> NIL_NODE);
+        M.Symbols[LSym].Kind, M.Symbols[LSym].TypeNode <> NIL_NODE) and
+        not ((M.Symbols[LSym].Kind = skRoutine) and (CatOf(AAt) = tcProc));
     end
     else
     begin
@@ -7982,7 +8449,7 @@ begin
   if IsParenthesizedCtor(T, ACtor) then
     Exit(-1);
   if Child(ACtor) = NIL_NODE then
-    Exit(CtorEmptyFit(ATarget));
+    Exit(CtorEmptyFit(ATarget, FConv.EmptyCtorGenerality(UX(AElem))));
   Result := 0;
   LOfConst := ATarget = ctArrayOfConst;
   LParChar := False;
@@ -8036,6 +8503,7 @@ begin
           if (LArgC.Facts.Cat = tcInteger) and not LArgC.Facts.IntConst and
              (MayFoldConvConst(T, LKid) or IsConstName(LKid)) then
             FoldConvConst(T, LKid, ConstFacts(), OrdNameValue(), LArgC);
+          FConv.SubrangeConv(UX(LAt), LArgC);
         end;
         LFit := CtorValueFit(LFit, LArgC, LParKind, LParPointer,
           (LCat = tcNil) or (LCat = tcPointer) and IsPointerSym(LAt), FWideExt);

@@ -12269,6 +12269,251 @@ begin
   end;
 end;
 
+// The conversion-rule leftovers of the type-conversion series (6.3.1,
+// local/type-conv-2026-11/lane-d): an integer subrange value ranks by its
+// range (LA-LC), a subrange parameter with the integers of its size (LD,
+// LE), an enumeration subrange goes to its host above an untyped parameter
+// (LF), a character subrange parameter is a Char (LG); a `[...]` reaches a
+// record only through an Implicit from a set type, below an untyped
+// parameter, and never TGUID or a static array (LH-LK); `var ShortString`
+// is an open string (LM, LN), a ShortString for a `string[10]` is lossy
+// (LP); `@S[1]` under {$T+} takes its string kind over its PChar (LR, LS),
+// `@P[1]` of a PChar Pointer alone (LT); `[]` takes the more general
+// element between two open arrays (LU, LV). The overload dcc picks is
+// declared second, returning TRW: the fixture compiles with dcc64
+// (lane-d/smoke), so `.W` binds there.
+procedure TestLeftoverRanking;
+const
+  SRC_UNIT =
+    'unit LdR;'#10 +
+    ''#10 +
+    'interface'#10 +
+    ''#10 +
+    'type'#10 +
+    '  TRA = record A: Integer; end;'#10 +
+    '  TRW = record W: Integer; end;'#10 +
+    '  TCls = class end;'#10 +
+    '  TClsD = class(TCls) end;'#10 +
+    '  TE = (e1, e2, e3);'#10 +
+    '  TSE = set of TE;'#10 +
+    '  TSub = 1..10;'#10 +
+    '  TSubN = -5..5;'#10 +
+    '  TSubB = 0..255;'#10 +
+    '  TSubE = e1..e2;'#10 +
+    '  TSubC = ''a''..''z'';'#10 +
+    '  TS10 = string[10];'#10 +
+    '  TSA = array[0..1] of Integer;'#10 +
+    '  TRset = record X: Integer; class operator Implicit(const A: TSE): TRset; end;'#10 +
+    ''#10 +
+    'function LA(A: Variant): TRA; overload;'#10 +
+    'function LA(const A): TRW; overload;'#10 +
+    'function LB(A: Integer): TRA; overload;'#10 +
+    'function LB(A: Byte): TRW; overload;'#10 +
+    'function LC(A: Cardinal): TRA; overload;'#10 +
+    'function LC(A: Single): TRW; overload;'#10 +
+    'function LD(A: ShortInt): TRA; overload;'#10 +
+    'function LD(A: TSubB): TRW; overload;'#10 +
+    'function LE(A: TSub): TRA; overload;'#10 +
+    'function LE(A: Word): TRW; overload;'#10 +
+    'function LF(const A): TRA; overload;'#10 +
+    'function LF(A: TE): TRW; overload;'#10 +
+    'function LG(A: string): TRA; overload;'#10 +
+    'function LG(A: TSubC): TRW; overload;'#10 +
+    'function LH(A: TRset): TRA; overload;'#10 +
+    'function LH(const A): TRW; overload;'#10 +
+    'function LJ(A: TGUID): TRA; overload;'#10 +
+    'function LJ(const A): TRW; overload;'#10 +
+    'function LK(A: TSA): TRA; overload;'#10 +
+    'function LK(A: TRset): TRW; overload;'#10 +
+    'function LM(var A: ShortString): TRA; overload;'#10 +
+    'function LM(A: ShortString): TRW; overload;'#10 +
+    'function LN(A: ShortString): TRA; overload;'#10 +
+    'function LN(var A: ShortString): TRW; overload;'#10 +
+    'function LP(A: TS10): TRA; overload;'#10 +
+    'function LP(A: AnsiString): TRW; overload;'#10 +
+    'function LR(A: PChar): TRA; overload;'#10 +
+    'function LR(A: string): TRW; overload;'#10 +
+    'function LS(A: PAnsiChar): TRA; overload;'#10 +
+    'function LS(A: AnsiString): TRW; overload;'#10 +
+    'function LT(A: PChar): TRA; overload;'#10 +
+    'function LT(A: Pointer): TRW; overload;'#10 +
+    'function LU(const A: array of Integer): TRA; overload;'#10 +
+    'function LU(const A: array of Int64): TRW; overload;'#10 +
+    'function LV(const A: array of TClsD): TRA; overload;'#10 +
+    'function LV(const A: array of TCls): TRW; overload;'#10 +
+    ''#10 +
+    'implementation'#10 +
+    ''#10 +
+    'class operator TRset.Implicit(const A: TSE): TRset; begin Result.X := 1; end;'#10 +
+    'function LA(A: Variant): TRA; begin Result.A := 0; end;'#10 +
+    'function LA(const A): TRW; begin Result.W := 0; end;'#10 +
+    'function LB(A: Integer): TRA; begin Result.A := 0; end;'#10 +
+    'function LB(A: Byte): TRW; begin Result.W := 0; end;'#10 +
+    'function LC(A: Cardinal): TRA; begin Result.A := 0; end;'#10 +
+    'function LC(A: Single): TRW; begin Result.W := 0; end;'#10 +
+    'function LD(A: ShortInt): TRA; begin Result.A := 0; end;'#10 +
+    'function LD(A: TSubB): TRW; begin Result.W := 0; end;'#10 +
+    'function LE(A: TSub): TRA; begin Result.A := 0; end;'#10 +
+    'function LE(A: Word): TRW; begin Result.W := 0; end;'#10 +
+    'function LF(const A): TRA; begin Result.A := 0; end;'#10 +
+    'function LF(A: TE): TRW; begin Result.W := 0; end;'#10 +
+    'function LG(A: string): TRA; begin Result.A := 0; end;'#10 +
+    'function LG(A: TSubC): TRW; begin Result.W := 0; end;'#10 +
+    'function LH(A: TRset): TRA; begin Result.A := 0; end;'#10 +
+    'function LH(const A): TRW; begin Result.W := 0; end;'#10 +
+    'function LJ(A: TGUID): TRA; begin Result.A := 0; end;'#10 +
+    'function LJ(const A): TRW; begin Result.W := 0; end;'#10 +
+    'function LK(A: TSA): TRA; begin Result.A := 0; end;'#10 +
+    'function LK(A: TRset): TRW; begin Result.W := 0; end;'#10 +
+    'function LM(var A: ShortString): TRA; begin Result.A := 0; end;'#10 +
+    'function LM(A: ShortString): TRW; begin Result.W := 0; end;'#10 +
+    'function LN(A: ShortString): TRA; begin Result.A := 0; end;'#10 +
+    'function LN(var A: ShortString): TRW; begin Result.W := 0; end;'#10 +
+    'function LP(A: TS10): TRA; begin Result.A := 0; end;'#10 +
+    'function LP(A: AnsiString): TRW; begin Result.W := 0; end;'#10 +
+    'function LR(A: PChar): TRA; begin Result.A := 0; end;'#10 +
+    'function LR(A: string): TRW; begin Result.W := 0; end;'#10 +
+    'function LS(A: PAnsiChar): TRA; begin Result.A := 0; end;'#10 +
+    'function LS(A: AnsiString): TRW; begin Result.W := 0; end;'#10 +
+    'function LT(A: PChar): TRA; begin Result.A := 0; end;'#10 +
+    'function LT(A: Pointer): TRW; begin Result.W := 0; end;'#10 +
+    'function LU(const A: array of Integer): TRA; begin Result.A := 0; end;'#10 +
+    'function LU(const A: array of Int64): TRW; begin Result.W := 0; end;'#10 +
+    'function LV(const A: array of TClsD): TRA; begin Result.A := 0; end;'#10 +
+    'function LV(const A: array of TCls): TRW; begin Result.W := 0; end;'#10 +
+    ''#10 +
+    'end.'#10;
+  SRC_PROG =
+    'program LdRP;'#10 +
+    '{$APPTYPE CONSOLE}'#10 +
+    'uses LdR;'#10 +
+    'var K: Integer; vSub: TSub; vSubN: TSubN; vB: Byte; vI: Integer; vSubE: TSubE; vCh: Char;'#10 +
+    '  vSS: ShortString; vS10: TS10; vS: string; vAS: AnsiString; vPC: PChar;'#10 +
+    'begin'#10 +
+    '  K := LA(vSub).W;'#10 +
+    '  K := LB(vSub).W;'#10 +
+    '  K := LC(vSubN).W;'#10 +
+    '  K := LD(vB).W;'#10 +
+    '  K := LE(vI).W;'#10 +
+    '  K := LF(vSubE).W;'#10 +
+    '  K := LG(vCh).W;'#10 +
+    '  K := LH([e1]).W;'#10 +
+    '  K := LJ([1]).W;'#10 +
+    '  K := LK([e1]).W;'#10 +
+    '  K := LM(vSS).W;'#10 +
+    '  K := LN(vS10).W;'#10 +
+    '  K := LP(vSS).W;'#10 +
+    '  {$T+}K := LR(@vS[1]).W;{$T-}'#10 +
+    '  {$T+}K := LS(@vAS[1]).W;{$T-}'#10 +
+    '  {$T+}K := LT(@vPC[1]).W;{$T-}'#10 +
+    '  K := LU([]).W;'#10 +
+    '  K := LV([]).W;'#10 +
+    '  Writeln(K);'#10 +
+    'end.'#10;
+var
+  LDir, LName: string;
+begin
+  LDir := FreshDir('pastree_sema_leftoverrank');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    '  IInterface = interface end;'#10 +
+    '  TVarRec = record VType: Byte; end;'#10 +
+    '  TArray<T> = array of T;'#10 +
+    '  TGUID = record D1: Cardinal; end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'LdR.pas'), SRC_UNIT);
+  TFile.WriteAllText(TPath.Combine(LDir, 'LdRP.dpr'), SRC_PROG);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'LdRP.dpr'));
+    LName := '';
+    for var LD in ModelByName('ldrp').Diags do
+      if LD.Code = 'E2003' then
+        LName := LName + ' line ' + IntToStr(LD.Line);
+    Ok('conversion leftovers: every call binds dcc''s overload - no E2003 [' +
+      LName + ' ]', DiagCount(ModelByName('ldrp'), 'E2003') = 0);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+// E2251 where PasTree's ranking ties two candidates of the calling unit's own
+// plain overload set (CheckTies, the reliable subset of CheckNoFits): an
+// Integer for PA(Single) / PA(Currency) - Single = Currency in 6.3.1's
+// ranking - is dcc64's E2251; TieOk's calls each compile (lane-d/smoke).
+procedure TestOverloadTies;
+const
+  SRC_BAD =
+    'program TieBad;'#10 +
+    '{$APPTYPE CONSOLE}'#10 +
+    'procedure PA(A: Single); overload; begin end;'#10 +
+    'procedure PA(A: Currency); overload; begin end;'#10 +
+    'procedure PC(A: Integer); overload; begin end;'#10 +
+    'procedure PC(A: Int64); overload; begin end;'#10 +
+    'var vI: Integer;'#10 +
+    'begin'#10 +
+    '  PA(vI);'#10 +
+    '  PC(vI);'#10 +
+    'end.'#10;
+  SRC_OK =
+    'program TieOk;'#10 +
+    '{$APPTYPE CONSOLE}'#10 +
+    'procedure PA(A: Single); overload; begin end;'#10 +
+    'procedure PA(A: Currency); overload; begin end;'#10 +
+    'procedure PA(A: Int64); overload; begin end;'#10 +
+    'procedure PB(const A: string; B: Integer); overload; begin end;'#10 +
+    'procedure PB(const A: string; B: Cardinal); overload; begin end;'#10 +
+    'var vI: Integer; vW: Word; vS: string; vC: Cardinal;'#10 +
+    'begin'#10 +
+    '  PA(vI);'#10 +
+    '  PB(vS, vI);'#10 +
+    '  PB(vS, vC);'#10 +
+    'end.'#10;
+var
+  LDir: string;
+  LBad, LOk: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_ties');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'TieBad.dpr'), SRC_BAD);
+  TFile.WriteAllText(TPath.Combine(LDir, 'TieOk.dpr'), SRC_OK);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'TieBad.dpr'));
+    LBad := ModelByName('tiebad');
+    Ok('overload ties: TieBad reports one E2251 [' +
+      IntToStr(DiagCount(LBad, 'E2251')) + ']', DiagCount(LBad, 'E2251') = 1);
+    for var LD in LBad.Diags do
+      if LD.Code = 'E2251' then
+      begin
+        Ok('overload ties: E2251 at PA(vI), line 9 [' + IntToStr(LD.Line) +
+          ']', LD.Line = 9);
+        Ok('overload ties: dcc''s message [' + LD.Msg + ']',
+          LD.Msg = 'E2251 Ambiguous overloaded call to ''PA''');
+        Ok('overload ties: the note names the tied pair [' + LD.Note + ']',
+          LD.Note = 'candidates: PA(Single), PA(Currency)');
+      end;
+  finally
+    GProj.Free;
+  end;
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'TieOk.dpr'));
+    LOk := ModelByName('tieok');
+    Ok('overload ties: TieOk (compiled by dcc64) reports none [' +
+      IntToStr(DiagCount(LOk, 'E2251')) + ']', DiagCount(LOk, 'E2251') = 0);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
 // E2010 at an assignment through the one conversion test (5.1.1, 2.6.1;
 // local/type-conv-2026-11/m2): the project's cross pass decides it
 // (CheckAssigns over XConvX), the unit typer leaves it alone in a project.
@@ -19488,6 +19733,8 @@ begin
   TestArrConvRanking;
   TestPtrConvRanking;
   TestModeConvRanking;
+  TestLeftoverRanking;
+  TestOverloadTies;
   TestAssignConv;
   TestConvDiags;
   TestHelperOverloadSet;

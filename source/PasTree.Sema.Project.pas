@@ -1568,7 +1568,8 @@ type
     { Is ANode of model AMid (parentheses peeled) a name or a member access
       bound to a constant (skConst)? The one name shape FoldConvConst may
       fold (`Integer.MaxValue`), asked before its closures are made. }
-    function IsConstNameX(AMid, ANode: Integer): Boolean;
+    function IsConstNameX(AMid, ANode: Integer;
+      ATrueOnly: Boolean = False): Boolean;
     { The conversion kind of a parameter of type AX (ConvKindOf over
       OpFactsX; a PChar / PAnsiChar by ConvPtrKindX). }
     function ParConvKindX(const AX: TSemaXType): TSemaConvKind;
@@ -2828,6 +2829,8 @@ type
     function GuidType(const AFrom: TSemaXType;
       out AGuid: TSemaXType): Integer; override;
     function IsGuidType(const AX: TSemaXType): Boolean; override;
+    function OrdRange(const AX: TSemaXType; out ALo, AHi: Int64): Boolean;
+      override;
   end;
 
 constructor TPasProjectConvView.Create(AProject: TPasSemaProject);
@@ -3011,6 +3014,24 @@ end;
 function TPasProjectConvView.IsGuidType(const AX: TSemaXType): Boolean;
 begin
   Result := FP.IsGuidTypeX(AX);
+end;
+
+function TPasProjectConvView.OrdRange(const AX: TSemaXType; out ALo,
+  AHi: Int64): Boolean;
+var
+  LF: TSemaOrdFacts;
+begin
+  ALo := 0;
+  AHi := 0;
+  if not XValid(AX) then
+    Exit(False);
+  LF := FP.OrdFactsX(AX.UnitId, NIL_NODE, AX);
+  Result := LF.HasRange;
+  if Result then
+  begin
+    ALo := LF.Lo;
+    AHi := LF.Hi;
+  end;
 end;
 
 const
@@ -14574,7 +14595,7 @@ begin
     end
     else if UntypedConstShapeRejects(LCoreKind, AHeadKind,
             (LCoreKind = nkStrLit) and IsCharLiteralExpr(ATree, ACore),
-            False, False) then
+            False, False, True, False) then
       Exit(-1);
   end;
   // An UNTYPED parameter ranks just above the argument's Variant line
@@ -14885,7 +14906,7 @@ begin
   if not XValid(ACanonElemX) or OpenX(ACanonElemX) then
     Exit;
   if ATree.Nodes[ACtor].FirstChild = NIL_NODE then
-    Exit(CtorEmptyFit(ATarget));
+    Exit(CtorEmptyFit(ATarget, FConv.EmptyCtorGenerality(ACanonElemX)));
   LOfConst := ATarget = ctArrayOfConst;
   LParChar := False;
   LParString := False;
@@ -15269,7 +15290,8 @@ begin
   Result := FConv.ParConvKind(AX);
 end;
 
-function TPasSemaProject.IsConstNameX(AMid, ANode: Integer): Boolean;
+function TPasSemaProject.IsConstNameX(AMid, ANode: Integer;
+  ATrueOnly: Boolean): Boolean;
 var
   LNode, LBMid, LBSym: Integer;
 begin
@@ -15279,7 +15301,8 @@ begin
   Result := (LNode <> NIL_NODE) and
     (FModels[AMid].Tree.Nodes[LNode].Kind in [nkIdent, nkMember]) and
     DesignatorSymX(AMid, LNode, LBMid, LBSym) and
-    (FModels[LBMid].Symbols[LBSym].Kind = skConst);
+    (FModels[LBMid].Symbols[LBSym].Kind = skConst) and
+    (not ATrueOnly or (FModels[LBMid].Symbols[LBSym].TypeNode = NIL_NODE));
 end;
 
 function TPasSemaProject.ArgConvX(AMid, ANode: Integer;
@@ -15307,7 +15330,7 @@ begin
         Result.Kind := ConvArgKindOf(Result.Facts);
         Result.StrConstName := (Result.Facts.Cat in [tcString, tcChar]) and
           (Result.Kind <> cnkStrLit) and (Result.Kind <> cnkCharLit) and
-          (ANode <> NIL_NODE) and IsConstNameX(AMid, ANode);
+          (ANode <> NIL_NODE) and IsConstNameX(AMid, ANode, True);
         if (Result.Facts.Cat = tcInteger) and not Result.Facts.IntConst and
            (ANode <> NIL_NODE) and
            (MayFoldConvConst(FModels[AMid].Tree, ANode) or
@@ -15331,6 +15354,8 @@ begin
               Result.Kind := cnkCurrency;
           end;
         end;
+        // A subrange value: by its range, a character one as a Char.
+        FConv.SubrangeConv(LX, Result);
       end;
     tcPointer:
       Result.Kind := ConvPtrKindX(LX);
@@ -15942,6 +15967,13 @@ var
   // each: the call, its callee node, the set head's unit and symbol -
   // CheckNoFits' E2250.
   LNoFit: TArray<Integer>;
+  // Calls bound in the calling unit's own unit-level overload set (pass
+  // mode), four entries each like LNoFit's - CheckTies' E2251.
+  LTieCand: TArray<Integer>;
+  // The candidates the last SelectCallTarget found best alike with a fit
+  // above no evidence (ConsiderChain), the best first - CheckTies' note.
+  LSelTie0, LSelTie1: TPasExtRef;
+  LSelTieN: Integer;
   // Inferred types of this model's own untyped declarations, held OUT of
   // SymTypeX until the parallel phase is over (see FXNewSymType). The nkIdent
   // case reads this before SymTypeX so a later use in the same walk sees it.
@@ -16568,9 +16600,13 @@ var
           // A variable, a parameter, a field, a typed constant, a property, a
           // function's result: one value of the element type is a
           // one-element array (6.2.6, SingleElemShape).
+          // A routine's name only as a function's call (`GI`), not a
+          // procedure (`G1`: E2250 for `array of Integer`; n8 Set L).
           LArrArg.IsVar := SingleElemShape(LM.Tree.Nodes[ACore].Kind,
             FModels[LMid].Symbols[LSym].Kind,
-            FModels[LMid].Symbols[LSym].TypeNode <> NIL_NODE);
+            FModels[LMid].Symbols[LSym].TypeNode <> NIL_NODE) and
+            not ((FModels[LMid].Symbols[LSym].Kind = skRoutine) and
+                 (not XValid(AArgX) or (XCatOf(CanonTypeX(AArgX)) = tcProc)));
         end
         // ...and so is an element, a dereference, a call or a cast, and `@P`
         // of a procedural variable (ProcVarAddr).
@@ -16813,8 +16849,11 @@ var
     // `var` / `out` parameter (ByRefShapeRejects' note)? One between two
     // scalars that changes the size (TypeSizeOf of the type and of its
     // operand's), or a string's to a character pointer (a conversion); a
-    // size not known passes.
-    function ByRefCastRejects(ACall, ATypeMid, ATypeSym: Integer): Boolean;
+    // size not known passes. AWidenOnly: an untyped `const` parameter's
+    // question - it takes a narrowing cast (`Byte(I)`) and refuses a widening
+    // one (`Integer(B)`: E2036; n8 Set L).
+    function ByRefCastRejects(ACall, ATypeMid, ATypeSym: Integer;
+      AWidenOnly: Boolean = False): Boolean;
     var
       LOpd: Integer;
       LOpdX, LCastX: TSemaXType;
@@ -16843,7 +16882,8 @@ var
       Result := (XCatOf(LOpdX) in [tcInteger, tcFloat, tcChar, tcBoolean,
         tcEnum]) and (XCatOf(LCastX) in [tcInteger, tcFloat, tcChar,
         tcBoolean, tcEnum]) and TypeSizeOf(LCastX.UnitId, LCastX.Sym, LTo) and
-        TypeSizeOf(LOpdX.UnitId, LOpdX.Sym, LFrom) and (LTo <> LFrom);
+        TypeSizeOf(LOpdX.UnitId, LOpdX.Sym, LFrom) and (LTo <> LFrom) and
+        (not AWidenOnly or (LTo > LFrom));
     end;
 
     // One argument against the parameter type AParX: AArg its node, or
@@ -16901,7 +16941,7 @@ var
           LTrueConst := (LHeadKind = skConst) and
             (FModels[LHMid].Symbols[LHSym].TypeNode = NIL_NODE);
         end
-        else if (LCoreKind = nkCall) and AByRef and
+        else if (LCoreKind = nkCall) and
                 (LM.Tree.Nodes[LCore].FirstChild <> NIL_NODE) and
                 TargetSym(PeelParens(LM.Tree, LM.Tree.Nodes[LCore].FirstChild),
                   LHMid, LHSym) then
@@ -16927,7 +16967,17 @@ var
                 LTrueConst and XValid(LArgX) and
                 not (XCatOf(CanonTypeX(LArgX)) = tcString),
                 IsAddrOfExpr(LM.Tree, LCore, LAddrOpd) and
-                (LM.Tree.Nodes[LAddrOpd].Kind = nkIndex)) then
+                (LM.Tree.Nodes[LAddrOpd].Kind = nkIndex) and
+                (LM.Tree.Nodes[LAddrOpd].FirstChild <> NIL_NODE) and
+                IsDynArrayTypeX(CanonTypeX(GetX(
+                  LM.Tree.Nodes[LAddrOpd].FirstChild))),
+                (LCoreKind <> nkSetCtor) or IsConstArgX(AId, LCore),
+                (LCoreKind = nkCall) and
+                ((LHeadKind = skRoutine) and
+                 (sfBuiltin in FModels[LHMid].Symbols[LHSym].Flags) and
+                 (FModels[LHMid].Symbols[LHSym].NameLower = 'addr') or
+                 (LHeadKind in [skType, skBuiltinType]) and
+                 ByRefCastRejects(LCore, LHMid, LHSym, True))) then
           Exit(-1);
       end;
       // An UNTYPED parameter ranks just above the argument's Variant line
@@ -16935,6 +16985,10 @@ var
       // Variant, above Variant, the user and the lossy conversions.
       if AUntyped then
       begin
+        // A constant `[...]`: below every constructor fit (a set's, an
+        // array's), above a record's Implicit (CUntypedCtorFit).
+        if LCoreKind = nkSetCtor then
+          Exit(CUntypedCtorFit);
         if (LCore = NIL_NODE) or not XValid(LArgX) then
           Exit;
         if LArgConvCore <> LCore then
@@ -17029,6 +17083,19 @@ var
           if (LParCat = tcUnknown) and IsDynArrayTypeX(LCanonParX) then
             LParCat := tcArray;
         end;
+        // A `[...]` for a record: through its Implicit from a set type the
+        // elements fit (SetCtorRecordOp), a user conversion's rank.
+        if (LParCat = tcRecord) and (LCoreKind = nkSetCtor) then
+        begin
+          var LQ: TSemaXType;
+          if FConv.SetCtorRecordOp(LCanonParX, LQ) = 1 then
+          begin
+            ReadSetArg(LCore);
+            if SetCtorFitX(LQ, LSetArg^) > 0 then
+              Exit(ScaledFit(2, CCtorUserRank));
+            Exit(-1);
+          end;
+        end;
         if (LParCat = tcSet) or
            (LParCat = tcArray) and (LCoreKind <> nkSetCtor) then
         begin
@@ -17076,6 +17143,44 @@ var
         if LOpd <> NIL_NODE then
         begin
           var LOMid, LOSym: Integer;
+          // `@S[I]` of a string is a PChar (PAnsiChar for an Ansi or short
+          // string) that takes its string kind over its own pointer type and
+          // the other string kind last, below a record's Implicit from Pointer;
+          // `@P[I]` of a PChar reaches Pointer alone among the pointers, and
+          // such a record (6.3.1; lane-d Set T, n7 Sets B, C).
+          var LIdx := PeelParens(LM.Tree, LOpd);
+          if (LM.Tree.Nodes[LIdx].Kind = nkIndex) and
+             (LM.Tree.Nodes[LIdx].FirstChild <> NIL_NODE) then
+          begin
+            var LBaseX := CanonTypeX(GetX(LM.Tree.Nodes[LIdx].FirstChild));
+            case XCatOf(LBaseX) of
+              tcString:
+                begin
+                  var LOwn := cnkUString;
+                  var LOther := cnkAnsiString;
+                  if ParConvKindX(LBaseX) in [cnkAnsiString, cnkCodePage,
+                     cnkRawByteString, cnkShortString] then
+                  begin
+                    LOwn := cnkAnsiString;
+                    LOther := cnkUString;
+                  end;
+                  var LPK := ParConvKindX(LCanonParX);
+                  if LPK = LOwn then
+                    Exit(ScaledFit(2, RefConvRank(rcTypedSameBase, 0) + 2))
+                  else if LPK = LOther then
+                    Exit(ScaledFit(2, 0));
+                end;
+              tcPointer:
+                if ParConvKindX(LBaseX) in [cnkPChar, cnkPAnsiChar] then
+                begin
+                  if (XCatOf(LCanonParX) = tcPointer) and
+                     IsUntypedPointerX(LCanonParX) then
+                    Exit(ScaledFit(2, RefConvRank(rcTypedPointer, 0)));
+                  if not (XCatOf(LCanonParX) in [tcUnknown, tcRecord]) then
+                    Exit(-1);
+                end;
+            end;
+          end;
           var LRoutine := TargetSym(PeelParens(LM.Tree, LOpd), LOMid, LOSym) and
             (FModels[LOMid].Symbols[LOSym].Kind = skRoutine);
           LFit := AddrArgFitX(LCanonParX, GetX(LOpd), LRoutine, LRank);
@@ -17100,6 +17205,11 @@ var
       LFit := ArgFitCanonX(LArgX, LParX, LCanonArgX, LCanonParX, LM.Tree,
         LCore, (LCore <> NIL_NODE) and not LClassRef and XValid(LParX) and
         IsProcedureDesignator(LCore), LClassRef, LConv, LRank);
+      // A `var` ShortString is an open string (OpenStringFit).
+      if AByRef and (ParamModeOf(LPM, LPList[LPos]) <> 3) and
+         FConv.OpenStringFit(LCanonParX, LCanonArgX,
+         LFit, LRank) then
+        Exit(ScaledFit(2 * LFit, LRank));
       // A `var` / `out` parameter takes its own type alone (ByRefFitRejects;
       // E2033 alone, out in an overload set): `FormatBuf(Buffer^, ...)` for a
       // Char takes the untyped `var Buffer` overload, not `var Buffer:
@@ -17347,10 +17457,19 @@ var
             ABestSym := LCand;
             ABestCtx := AFrame;
             AAmbiguous := False;
+            LSelTie0 := LRef;
+            LSelTieN := 1;
           end
-          else if (LScore >= 0) and (LScore = LBestScore) and
-                  not SameResult(ABestMid, ABestSym, AMid, LCand) then
-            AAmbiguous := True;
+          else if (LScore >= 0) and (LScore = LBestScore) then
+          begin
+            if not SameResult(ABestMid, ABestSym, AMid, LCand) then
+              AAmbiguous := True;
+            if (LScore > 0) and (LSelTieN = 1) then
+            begin
+              LSelTie1 := LRef;
+              LSelTieN := 2;
+            end;
+          end;
         end;
         LCand := FModels[AMid].Symbols[LCand].NextOverload;
       end;
@@ -17508,6 +17627,7 @@ var
     ABestSym := NIL_SYM;
     ABestCtx := ACtx;
     AAmbiguous := False;
+    LSelTieN := 0;
     LTypeArgs := -1;
     if LM.Tree.Nodes[ACalleeNode].Kind in [nkTypeArgs, nkAmbiguous] then
       LTypeArgs := WrittenTypeArgCount(ACalleeNode);
@@ -18858,7 +18978,18 @@ var
                     LExt.UnitId := LBestMid;
                     LExt.Sym := LBestSym;
                     if LProbe = nil then
+                    begin
                       LM.CallTargetX.AddOrSetValue(N, LExt);
+                      // A unit-level set of this unit: CheckTies asks it.
+                      if (LMemMid = AId) and (FModels[AId].Symbols[LMemSym].Scope <>
+                         NIL_SCOPE) and (FModels[AId].Scopes[FModels[AId].Symbols[
+                         LMemSym].Scope].StructSym = NIL_SYM) and
+                         (FModels[AId].Symbols[LMemSym].NextOverload <> NIL_SYM) and
+                         (LSelTieN = 2) and (LSelTie0.UnitId = AId) and
+                         (LSelTie1.UnitId = AId) then
+                        LTieCand := LTieCand + [N, LBase, LMemMid, LMemSym,
+                          LSelTie0.Sym, LSelTie1.Sym];
+                    end;
                     // ...and RE-POINT the callee NAME at it, so the maps agree
                     // with the selection instead of still holding the chain
                     // HEAD. Everything that reads a binding rather than
@@ -19393,15 +19524,116 @@ var
     unit's set: a set another level completes is one this check cannot see
     whole); every argument is a variable, a field, a literal or an element,
     typed, by no overload choice, no type name. The note lists the set. }
-  procedure CheckNoFits;
+  // The reliable subset both overload diagnostics are asked in: the call
+  // ACall's set (head AHMid.AHSym) is the calling unit's own unit-level
+  // chain of two or more plain routines and every argument a plain typed
+  // value - see CheckNoFits. ANames: each candidate as `Name(T1, T2)`.
+  function ReliableOverloadCall(ACall, AHMid, AHSym: Integer;
+    out ANames: TArray<string>): Boolean;
   var
-    LIdx, LCall, LCallee, LHMid, LHSym, LCand, LCount, LArg, LCore: Integer;
+    LCand, LArg, LCore: Integer;
     LAMid, LASym: Integer;
     LPar, LPDecl: Integer;
     LArgX: TSemaXType;
     LOk: Boolean;
-    LList, LName: string;
+    LName: string;
     LOm: TPasSemaModel;
+  begin
+    Result := False;
+    ANames := nil;
+    if (AHMid < 0) or (AHSym = NIL_SYM) or InUntypedWith(ACall) then
+      Exit;
+    LOm := FModels[AHMid];
+    // A member of a struct: its ancestors' and helpers' sets may join.
+    if (LOm.Symbols[AHSym].Scope <> NIL_SCOPE) and
+       (LOm.Scopes[LOm.Symbols[AHSym].Scope].StructSym <> NIL_SYM) then
+      Exit;
+    // A unit-level name: another used unit's set may join (the walk's
+    // UsesByName merge) - only the calling unit's own routines here.
+    if AHMid <> AId then
+      Exit;
+    // The set: two or more plain routines.
+    LOk := True;
+    LCand := AHSym;
+    while LOk and (LCand <> NIL_SYM) do
+    begin
+      if (LOm.Symbols[LCand].Kind <> skRoutine) or
+         (GenericParamCount(AHMid, LCand) > 0) or
+         IsConstructorSym(AHMid, LCand) or
+         (sfVarArgs in LOm.Symbols[LCand].Flags) then
+        Exit;
+      LName := '';
+      for LPar in XParamSyms(AHMid, LCand) do
+      begin
+        if (LOm.Symbols[LPar].TypeNode = NIL_NODE) or
+           (LOm.Tree.Nodes[LOm.Symbols[LPar].TypeNode].Kind = nkArrayType) or
+           not XValid(DeclTypeX(AHMid, LPar)) or
+           OpenX(DeclTypeX(AHMid, LPar)) or
+           (XCatOf(CanonTypeX(DeclTypeX(AHMid, LPar))) = tcUnknown) then
+          Exit;
+        LPDecl := LOm.Symbols[LPar].DeclNode;
+        while (LPDecl <> NIL_NODE) and
+              (LOm.Tree.Nodes[LPDecl].Kind <> nkParam) do
+          LPDecl := LOm.Tree.Nodes[LPDecl].Parent;
+        if (LPDecl <> NIL_NODE) and
+           (LOm.Tree.Nodes[LPDecl].Flags * [nfVar, nfOut] <> []) then
+          Exit;
+        if LName <> '' then
+          LName := LName + ', ';
+        LName := LName + XTypeText(DeclTypeX(AHMid, LPar));
+      end;
+      ANames := ANames + [LOm.Symbols[LCand].Name + '(' + LName + ')'];
+      LCand := LOm.Symbols[LCand].NextOverload;
+    end;
+    if Length(ANames) < 2 then
+      Exit;
+    // The arguments: plain values, typed reliably.
+    LArg := CallFirstArg(LM.Tree, ACall);
+    while LOk and (LArg <> NIL_NODE) do
+    begin
+      LCore := PeelParens(LM.Tree, LArg);
+      LArgX := GetX(LArg);
+      LOk := (LCore <> NIL_NODE) and
+        (LM.Tree.Nodes[LCore].Kind in [nkIdent, nkMember, nkIndex,
+           nkIntLit, nkStrLit, nkRealLit]) and
+        XValid(LArgX) and (XCatOf(LArgX) <> tcNil) and
+        (XCatOf(CanonTypeX(LArgX)) <> tcUnknown) and
+        not ((LM.Tree.Nodes[LCore].Kind in [nkIdent, nkMember]) and
+             (IsTypeDesignator(LCore) or
+              LM.Tree.NodeTextEquals(LCore, 'Self'))) and
+        not Unreliable(ACall, LArg, LArgX);
+      if LOk and (LM.Tree.Nodes[LCore].Kind in [nkIdent, nkMember]) and
+         TargetSym(LCore, LAMid, LASym) and
+         (FModels[LAMid].Symbols[LASym].Kind = skRoutine) then
+        LOk := False;   // a routine named: called, or its address
+      LArg := LM.Tree.Nodes[LArg].NextSibling;
+    end;
+    Result := LOk;
+  end;
+
+  // The first four names of AList, joined (`, ...` past them).
+  function CandidateList(const AList: TArray<string>): string;
+  var
+    LI: Integer;
+  begin
+    Result := '';
+    for LI := 0 to High(AList) do
+    begin
+      if LI = 4 then
+      begin
+        Result := Result + ', ...';
+        Break;
+      end;
+      if Result <> '' then
+        Result := Result + ', ';
+      Result := Result + AList[LI];
+    end;
+  end;
+
+  procedure CheckNoFits;
+  var
+    LIdx, LCall, LCallee, LHMid, LHSym: Integer;
+    LNames: TArray<string>;
   begin
     LIdx := 0;
     while LIdx + 3 <= High(LNoFit) do
@@ -19411,96 +19643,48 @@ var
       LHMid := LNoFit[LIdx + 2];
       LHSym := LNoFit[LIdx + 3];
       Inc(LIdx, 4);
-      if (LHMid < 0) or (LHSym = NIL_SYM) or InUntypedWith(LCall) then
+      if not ReliableOverloadCall(LCall, LHMid, LHSym, LNames) then
         Continue;
-      LOm := FModels[LHMid];
-      // A member of a struct: its ancestors' and helpers' sets may join.
-      if (LOm.Symbols[LHSym].Scope <> NIL_SCOPE) and
-         (LOm.Scopes[LOm.Symbols[LHSym].Scope].StructSym <> NIL_SYM) then
-        Continue;
-      // A unit-level name: another used unit's set may join (the walk's
-      // UsesByName merge) - only the calling unit's own routines here.
-      if LHMid <> AId then
-        Continue;
-      // The set: two or more plain routines.
-      LOk := True;
-      LCount := 0;
-      LList := '';
-      LCand := LHSym;
-      while LOk and (LCand <> NIL_SYM) do
-      begin
-        if (LOm.Symbols[LCand].Kind <> skRoutine) or
-           (GenericParamCount(LHMid, LCand) > 0) or
-           IsConstructorSym(LHMid, LCand) or
-           (sfVarArgs in LOm.Symbols[LCand].Flags) then
-        begin
-          LOk := False;
-          Break;
-        end;
-        LName := '';
-        for LPar in XParamSyms(LHMid, LCand) do
-        begin
-          if (LOm.Symbols[LPar].TypeNode = NIL_NODE) or
-             (LOm.Tree.Nodes[LOm.Symbols[LPar].TypeNode].Kind = nkArrayType) or
-             not XValid(DeclTypeX(LHMid, LPar)) or
-             OpenX(DeclTypeX(LHMid, LPar)) then
-          begin
-            LOk := False;
-            Break;
-          end;
-          LPDecl := LOm.Symbols[LPar].DeclNode;
-          while (LPDecl <> NIL_NODE) and
-                (LOm.Tree.Nodes[LPDecl].Kind <> nkParam) do
-            LPDecl := LOm.Tree.Nodes[LPDecl].Parent;
-          if (LPDecl <> NIL_NODE) and
-             (LOm.Tree.Nodes[LPDecl].Flags * [nfVar, nfOut] <> []) then
-          begin
-            LOk := False;
-            Break;
-          end;
-          if LName <> '' then
-            LName := LName + ', ';
-          LName := LName + XTypeText(DeclTypeX(LHMid, LPar));
-        end;
-        if not LOk then
-          Break;
-        if LCount < 4 then
-        begin
-          if LList <> '' then
-            LList := LList + ', ';
-          LList := LList + LOm.Symbols[LCand].Name + '(' + LName + ')';
-        end;
-        Inc(LCount);
-        LCand := LOm.Symbols[LCand].NextOverload;
-      end;
-      if not LOk or (LCount < 2) then
-        Continue;
-      // The arguments: plain values, typed reliably.
-      LArg := CallFirstArg(LM.Tree, LCall);
-      while LOk and (LArg <> NIL_NODE) do
-      begin
-        LCore := PeelParens(LM.Tree, LArg);
-        LArgX := GetX(LArg);
-        LOk := (LCore <> NIL_NODE) and
-          (LM.Tree.Nodes[LCore].Kind in [nkIdent, nkMember, nkIndex,
-             nkIntLit, nkStrLit, nkRealLit]) and
-          XValid(LArgX) and (XCatOf(LArgX) <> tcNil) and
-          not ((LM.Tree.Nodes[LCore].Kind in [nkIdent, nkMember]) and
-               (IsTypeDesignator(LCore) or
-                LM.Tree.NodeTextEquals(LCore, 'Self'))) and
-          not Unreliable(LCall, LArg, LArgX);
-        if LOk and (LM.Tree.Nodes[LCore].Kind in [nkIdent, nkMember]) and
-           TargetSym(LCore, LAMid, LASym) and
-           (FModels[LAMid].Symbols[LASym].Kind = skRoutine) then
-          LOk := False;   // a routine named: called, or its address
-        LArg := LM.Tree.Nodes[LArg].NextSibling;
-      end;
-      if not LOk then
-        Continue;
-      if LCount > 4 then
-        LList := LList + ', ...';
       EmitAt(LM, LCallee, 'E2250', Format(SE2250_NoOverload,
-        [LOm.Symbols[LHSym].Name]), 'candidates: ' + LList);
+        [FModels[LHMid].Symbols[LHSym].Name]), 'candidates: ' +
+        CandidateList(LNames));
+    end;
+  end;
+
+  { E2251 at a call two candidates of its set fit best alike (6.3.1): the
+    selection's own tie (LSelTie0 / LSelTie1, two fits above no evidence), in
+    CheckNoFits' reliable subset alone (ReliableOverloadCall). The note
+    names the first two tied candidates. }
+  procedure CheckTies;
+  var
+    LIdx, LCall, LCallee, LHMid, LHSym, LCand, LK: Integer;
+    LNames, LTied: TArray<string>;
+  begin
+    LIdx := 0;
+    while LIdx + 5 <= High(LTieCand) do
+    begin
+      LCall := LTieCand[LIdx];
+      LCallee := LTieCand[LIdx + 1];
+      LHMid := LTieCand[LIdx + 2];
+      LHSym := LTieCand[LIdx + 3];
+      Inc(LIdx, 6);
+      if not ReliableOverloadCall(LCall, LHMid, LHSym, LNames) then
+        Continue;
+      LTied := nil;
+      LK := 0;
+      LCand := LHSym;
+      while (LCand <> NIL_SYM) and (LK <= High(LNames)) do
+      begin
+        if (LCand = LTieCand[LIdx - 2]) or (LCand = LTieCand[LIdx - 1]) then
+          LTied := LTied + [LNames[LK]];
+        Inc(LK);
+        LCand := FModels[LHMid].Symbols[LCand].NextOverload;
+      end;
+      if Length(LTied) < 2 then
+        Continue;
+      EmitAt(LM, LCallee, 'E2251', Format(SE2251_AmbiguousOverload,
+        [FModels[LHMid].Symbols[LHSym].Name]), 'candidates: ' +
+        CandidateList(LTied));
     end;
   end;
 
@@ -19760,6 +19944,7 @@ begin
       begin
         CheckAssigns;
         CheckNoFits;
+        CheckTies;
       end;
     end;
     BindAggregateLabelsX(AId, LNewExt);
