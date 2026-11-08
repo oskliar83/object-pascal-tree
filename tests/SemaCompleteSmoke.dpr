@@ -3379,10 +3379,12 @@ begin
   // `is` / `as` after a class: types alone - a descendant fits, the type
   // itself and an ancestor lead, an unrelated class is wrong (E2010), an
   // interface is wrong after `is` (E2015) and fits after `as`; a
-  // class-reference value fits; no other value, no routine, no scalar
-  // type. `not` is offered right after `is` (Delphi 13's `is not`).
-  TypCase('if A is | then;', '', 'TDog,TBall,ExtClass,ExtClassOf', 'TCar,EFoo,IShape',
-    'I,C,A,D,ExtOwner,ExtErr,ExtReset,ExtCount,TColor2,TLocalEnum,clRed,TGuid2,ExtErrOf', 'TAnimal');
+  // class-reference value leads (dcc 37 takes `O is C`, below the types);
+  // no other value, no routine, no scalar type. `not` is offered right
+  // after `is` (Delphi 13's `is not`).
+  TypCase('if A is | then;', '', 'TDog,TBall', 'TCar,EFoo,IShape',
+    'I,C,A,D,ExtOwner,ExtErr,ExtReset,ExtCount,TColor2,TLocalEnum,clRed,TGuid2,ExtErrOf',
+    'TAnimal,ExtClass,ExtClassOf');
   GCounter.Ok('type position: `not` after `is`', Has('not') and not Has('and'));
   TypCase('if A is not | then;', '', 'TDog', 'TCar,IShape', 'I,ExtReset,not',
     'TAnimal');
@@ -3399,6 +3401,29 @@ begin
   TypCase('if I is | then;', '', '', '', 'I,ExtReset,TColor2');
   GCounter.Ok('type position: `I is |` still lists the classes',
     Has('TDog') and Has('IShape'));
+  // Alex's IDE test of 0.169.0: `if AObject is | then` in a method listed
+  // Self's inherited `ClassType` / `ClassParent` first, then a unit's
+  // string constant, then the types - every constant passed the filter.
+  // Now a constant only of a class-reference type, and a class-reference
+  // value (a method of Self's too) leads, below the types; a function of
+  // another type, a plain constant and a string constant are not listed.
+  TypSrc(EXP_HEAD_A +
+    '  TIsBase = class'#10'    function ClassType: TAnimalClass;'#10 +
+    '    function ClassParent: TAnimalClass;'#10 +
+    '    function GetName: string;'#10'  end;'#10 +
+    '  TIsObj = class(TIsBase)'#10'    procedure Go(AObject: TAnimal);'#10 +
+    '  end;'#10'const'#10'  SSorry = ''Sorry'';'#10'  CTen = 10;'#10 +
+    '  CText: string = ''x'';'#10'  CDogClass: TAnimalClass = TDog;'#10 +
+    'implementation'#10'procedure TIsObj.Go(AObject: TAnimal);'#10 +
+    'begin'#10'  if AObject is | then'#10'    Exit;'#10'end;'#10'end.'#10,
+    '', 'TDog,TBall', 'TCar',
+    'SSorry,CTen,CText,GetName,AObject,Go,ExtReset,TColor2,TLocalEnum',
+    'TAnimal,ClassType,ClassParent,CDogClass,ExtClass,ExtClassOf',
+    'a method body, `if AObject is | then`');
+  TypSrc(EXP_HEAD_A + 'const'#10'  SSorry = ''Sorry'';'#10 +
+    'implementation'#10'procedure P(AObject: TAnimal);'#10 +
+    'begin'#10'  if AObject is S| then'#10'    Exit;'#10'end;'#10'end.'#10,
+    '', '', '', 'SSorry', '', '`is S|` with a string constant SSorry');
   // An exception handler: an Exception's descendant fits, another class is
   // wrong; no value, no non-class type.
   TypSrc(EXP_HEAD_A + 'implementation'#10'procedure P;'#10'begin'#10 +

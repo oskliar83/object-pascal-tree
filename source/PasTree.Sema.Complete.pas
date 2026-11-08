@@ -3617,7 +3617,11 @@ begin
           if FTypeAfterType or (LM.Symbols[ASym].TypeNode <> NIL_NODE) then
             Exit;
         end
-        else if FTypePos <> tpIsAs then
+        // After `is` / `as` a constant only of a class-reference type: the
+        // filter above passes every constant for a subrange's sake, and a
+        // unit's string constant reached `O is |` (0.169.0).
+        else if (FTypePos <> tpIsAs) or
+           not IsClassRefValue(AMid, ASym, ACtx) then
           Exit;
       skType, skBuiltinType:
         begin
@@ -8839,7 +8843,7 @@ end;
     non-nil value), an unrelated class is wrong (E2010); after an
     interface any class fits. An interface fits after `as` and is wrong
     after `is` (dcc 37: E2015 whatever the left side). A class-reference
-    value fits.
+    value leads.
   - a handler, an attribute: a descendant of Exception / TCustomAttribute
     fits, another class is wrong.
   - a generic argument: what every constraint of its parameter admits fits
@@ -8928,9 +8932,11 @@ begin
   if not (AItem.Kind in [skType, skBuiltinType]) then
   begin
     // A class-reference value after `is` / `as` - AddSym lets no other
-    // value into a type position.
+    // value into a type position. dcc 37 takes it (`O is C`, `O is
+    // ClassType`), but it leads: the types come first - a method's own
+    // inherited `ClassType` / `ClassParent` topped the list otherwise.
     if FTypePos = tpIsAs then
-      Result := cmCompatible
+      Result := cmLeads
     // A type declaration's subrange bound (`T = clRed..clBlue`): an
     // ordinal constant leads to a type, another is wrong - judged as a
     // `case` selector judges a value (OrdinalFit), the fit taken down one.
