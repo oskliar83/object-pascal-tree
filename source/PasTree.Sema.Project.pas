@@ -2105,6 +2105,19 @@ type
       (TPasCompletion: a candidate of the type the left side wants first). }
     function XCatOf(const AX: TSemaXType): TSemaTypeCat;
     function XSameType(const A, B: TSemaXType): Boolean;
+    { The type of binary operator AOp over operands of types AL and AR, with
+      no tree nodes behind them - OperatorResultX's table (4.2.1, a record's
+      `class operator`) for operands read from tokens: no literal or
+      constant facts, so `A + 'x'` takes string rather than A's own string
+      type. And the types a record's binary operator AOp takes on the right
+      when the left operand is of type AL - each overload's second
+      parameter, where its first is AL's record itself; nil when AL is no
+      record or declares none. Promoted for the completion engine's operand
+      ranking (`X := A + |`). }
+    function BinaryResultX(AMid: Integer; AOp: TPasTokenKind;
+      const AL, AR: TSemaXType): TSemaXType;
+    function RecordOperatorRightsX(AOp: TPasTokenKind;
+      const AL: TSemaXType): TArray<TSemaXType>;
     { The element of a dynamic array type (canonical) - XNil for anything
       else. Promoted for the same ranking: an array whose element fits starts
       `A[I]`. }
@@ -24119,6 +24132,113 @@ begin
     Result := XNil
   else
     Result := LWin;
+end;
+
+function TPasSemaProject.BinaryResultX(AMid: Integer; AOp: TPasTokenKind;
+  const AL, AR: TSemaXType): TSemaXType;
+var
+  LL, LR: TSemaXType;
+  LcL, LcR: TSemaTypeCat;
+begin
+  Result := XNil;
+  if AMid < 0 then
+    Exit;
+  if AOp in [tkEqual, tkNotEqual, tkLess, tkLessEqual, tkGreater,
+     tkGreaterEqual, tkIn, tkIs] then
+    Exit(BuiltinX(AMid, 'boolean'));
+  if not XValid(AL) or not XValid(AR) then
+    Exit;
+  LL := CanonTypeX(AL);
+  LR := CanonTypeX(AR);
+  LcL := XCatOf(LL);
+  LcR := XCatOf(LR);
+  if (LcL = tcRecord) or (LcR = tcRecord) then
+    Exit(RecordOperatorX(AOp, False, LL, LR));
+  if (LcL in [tcClass, tcInterface, tcVariant]) or
+     (LcR in [tcClass, tcInterface, tcVariant]) then
+    Exit;
+  Result := OpAnswerX(AMid, OperatorAnswer(AOp, False,
+    OpFactsX(AMid, NIL_NODE, LL), OpFactsX(AMid, NIL_NODE, LR),
+    XSameType(LL, LR), FInfo.Is64Bit), LL, LR, False);
+  // Dynamic-array concatenation of two arrays of one type.
+  if not XValid(Result) and (AOp = tkPlus) and (LcL = tcArray) and
+     IsDynArrayTypeX(LL) and XSameType(LL, LR) then
+    Result := LL;
+end;
+
+function TPasSemaProject.RecordOperatorRightsX(AOp: TPasTokenKind;
+  const AL: TSemaXType): TArray<TSemaXType>;
+var
+  LL, LFirst, LSecond: TSemaXType;
+  LOm: TPasSemaModel;
+  LScope, LSym, LIdx: Integer;
+  LParams: TArray<Integer>;
+  LNames: array[0..1] of string;
+  LDup: Boolean;
+begin
+  Result := nil;
+  LNames[0] := '';
+  LNames[1] := '';
+  case AOp of
+    tkPlus: LNames[0] := 'add';
+    tkMinus: LNames[0] := 'subtract';
+    tkStar: LNames[0] := 'multiply';
+    tkSlash: LNames[0] := 'divide';
+    tkDiv: LNames[0] := 'intdivide';
+    tkMod: LNames[0] := 'modulus';
+    tkShl: LNames[0] := 'leftshift';
+    tkShr: LNames[0] := 'rightshift';
+    tkAnd:
+      begin
+        LNames[0] := 'logicaland';
+        LNames[1] := 'bitwiseand';
+      end;
+    tkOr:
+      begin
+        LNames[0] := 'logicalor';
+        LNames[1] := 'bitwiseor';
+      end;
+    tkXor:
+      begin
+        LNames[0] := 'logicalxor';
+        LNames[1] := 'bitwisexor';
+      end;
+  end;
+  if (LNames[0] = '') or not XValid(AL) then
+    Exit;
+  LL := CanonTypeX(AL);
+  if XCatOf(LL) <> tcRecord then
+    Exit;
+  LOm := FModels[LL.UnitId];
+  LScope := LOm.Symbols[LL.Sym].MemberScope;
+  if LScope = NIL_SCOPE then
+    Exit;
+  // In declaration order, as RecordOperatorX walks them: the operator is
+  // only in the order list when a member shares its name.
+  for LSym in LOm.Scopes[LScope].Symbols do
+  begin
+    if (LOm.Symbols[LSym].Kind <> skRoutine) or
+       (LOm.RoutineHead(LSym) <> rhOperator) or
+       ((LOm.Symbols[LSym].NameLower <> LNames[0]) and
+        ((LNames[1] = '') or (LOm.Symbols[LSym].NameLower <> LNames[1]))) then
+      Continue;
+    LParams := XParamSyms(LL.UnitId, LSym);
+    if Length(LParams) <> 2 then
+      Continue;
+    LFirst := SubstX(DeclTypeX(LL.UnitId, LParams[0]), LL.Inst, 0);
+    if not XValid(LFirst) or not XSameType(CanonTypeX(LFirst), LL) then
+      Continue;
+    LSecond := SubstX(DeclTypeX(LL.UnitId, LParams[1]), LL.Inst, 0);
+    if not XValid(LSecond) then
+      Continue;
+    LSecond := CanonTypeX(LSecond);
+    LDup := False;
+    for LIdx := 0 to High(Result) do
+      if XSameType(Result[LIdx], LSecond) then
+        LDup := True;
+    if not LDup then
+      Result := Result + [LSecond];
+  end;
 end;
 
 { The type dcc gives a LITERAL where a type is inferred from it (3.1.3, 3.2.1)
