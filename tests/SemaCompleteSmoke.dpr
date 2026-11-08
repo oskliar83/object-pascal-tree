@@ -1127,7 +1127,10 @@ const
     'procedure ExtOpen(const A: array of Integer);'#10 +
     'procedure ExtOnEvent(N: TNotify);'#10 +
     'function ExtPick(S: TShape2): TColor2;'#10 +
+    // A constructor taking an argument: a call, never a cast.
+    'type TPen = class constructor Create(AColor: TColor2); end;'#10 +
     'implementation'#10 +
+    'constructor TPen.Create(AColor: TColor2);'#10'begin'#10'end;'#10 +
     'procedure ExtOne(A: TColor2);'#10'begin'#10'end;'#10 +
     'procedure ExtTake(A: TColor2; B: Integer);'#10'begin'#10'end;'#10 +
     'procedure ExtTake(A: TAnimal; B: TShape2);'#10'begin'#10'end;'#10 +
@@ -2918,12 +2921,11 @@ begin
   ExpCase('ExtOpen(|);', '', '', 'I,C', 'ExtReset');
   ExpCase('TUtil.Max(|);', '', '', 'I,C', 'ExtReset');
   ExpCase('FillChar(|);', '', '', 'I,C', 'clRed,ExtColorOf,ExtReset');
-  // A grouping paren, a set constructor and a cast are no argument.
+  // A grouping paren and a set constructor are no argument; a cast is its
+  // own context (below).
   ExpCase('I := (|);', '', '', 'I,C', '');
   GCounter.Ok('expected type: a grouping paren keeps the procedures',
     Has('ExtReset'));
-  ExpCase('ExtOne(TColor2(|));', '', '', 'I,C', '');
-  GCounter.Ok('expected type: a cast keeps the procedures', Has('ExtReset'));
   ExpCase('ExtOwner.|;', '', '', 'Color,Pet', '');
   GCounter.Ok('expected type: members in a statement keep the procedures',
     Has('Reset'));
@@ -3060,6 +3062,24 @@ begin
   ExpCase('ExtOpen([|]);', 'I,ExtCount', '', 'C', 'ExtReset');
   ExpCase('ExtOpen([1, |]);', 'I,ExtCount', '', 'C', 'ExtReset');
   ExpCase('Arr := [|];', 'I,ExtCount', '', 'C', '');
+  // A value typecast ranks by the cast's family, not its type: any ordinal
+  // for an ordinal type, any reference for a class or a pointer type; a
+  // procedure is never its operand. A constructor's `(` is a call.
+  ExpCase('I := Int64(|);', '', 'I,C,ExtCount,clRed,B', 'F,ExtStr',
+    'ExtReset,LocalProc', '', 'ExtOwner');
+  ExpCase('I := Byte(|);', '', 'I,C,clRed', 'F,ExtStr', 'ExtReset');
+  ExpCase('ExtOne(TColor2(|));', '', 'I,C,shRound,S', 'F,ExtStr', 'ExtReset');
+  ExpCase('C := TColor2(|);', '', 'I,C,shRound', 'F,ExtStr', 'ExtReset');
+  ExpCase('C := TLocalEnum(|);', '', 'I,LE,C', 'F,ExtStr', 'ExtReset');
+  ExpCase('A := TAnimal(|);', '', 'A,D,K,ExtOwner,ExtPtr,N,nil', 'F,C,ExtStr,B',
+    'ExtReset,LocalProc', '', 'I,ExtCount');
+  ExpCase('A := TAnimal(Ext|);', '', 'ExtOwner,ExtPtr', 'ExtColor,ExtStr',
+    'ExtReset', '', 'ExtCount');
+  ExpCase('ExtP := PChar(|);', '', 'ExtStr,ExtPtr,A,Arr', 'F,C',
+    'ExtReset', '', 'I');
+  ExpCase('ExtPtr := Pointer(|);', '', 'Arr,ExtStr,A,nil', 'F,C', 'ExtReset');
+  ExpCase('F := Double(|);', '', '', '', 'ExtReset,LocalProc');
+  ExpCase('A := TPen.Create(|);', 'C,clRed', '', 'I,shRound', 'ExtReset');
   // `in` as the set operator is no for-in.
   ProjCase(EXP_HEAD_A + EXP_HEAD_B + '  if C in | then;'#10 + PROJ_TAIL);
   GCounter.Ok('expected type: the set operator `in` is no for-in',
