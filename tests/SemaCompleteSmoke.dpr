@@ -1042,6 +1042,11 @@ const
     '  TSub = -5..5;'#10 +
     '  TBig = Low(Integer)..High(Integer);'#10 +
     '  TVal = record class operator Implicit(A: Integer): TVal; end;'#10 +
+    // An operand of an operator: a record's own `class operator`s.
+    '  TVec = record X: string;'#10 +
+    '    class operator Add(const A, B: TVec): TVec;'#10 +
+    '    class operator Multiply(const A: TVec; K: Double): TVec;'#10 +
+    '  end;'#10 +
     '  THuge = -$7FFFFFFF-1..$7FFFFFFF;'#10 +
     '  TQual = extexp.THuge;'#10 +
     '  TOwner = class'#10 +
@@ -1121,6 +1126,8 @@ const
     '  ExtSet: TColorSet;'#10 +
     '  ExtBag: TBag;'#10 +
     '  ExtStr: string;'#10 +
+    '  ExtCh: Char;'#10 +
+    '  ExtVec: TVec;'#10 +
     '  ExtByColor: TColorIdx;'#10 +
     '  ExtGrid: TGrid;'#10 +
     '  ExtDict: TDict2;'#10 +
@@ -1236,6 +1243,9 @@ const
     'function ExtSubOf(const S: string): TSub;'#10'begin'#10'  Result := 0;'#10'end;'#10 +
     'function ExtIntOf(const S: string): Integer;'#10'begin'#10'  Result := 0;'#10'end;'#10 +
     'class operator TVal.Implicit(A: Integer): TVal;'#10'begin'#10'end;'#10 +
+    'class operator TVec.Add(const A, B: TVec): TVec;'#10'begin'#10'end;'#10 +
+    'class operator TVec.Multiply(const A: TVec; K: Double): TVec;'#10 +
+    'begin'#10'end;'#10 +
     'function ExtColorOf: TColor2;'#10'begin'#10'  Result := clRed;'#10 +
     'end;'#10 +
     'procedure ExtReset;'#10'begin'#10'end;'#10 +
@@ -1659,7 +1669,7 @@ begin
   DotCase('M.Over(B.|, 1);', 'CF');
   DotCase('ImplVar := Ord(B.|);', 'CF');
   DotCase('ImplVar := B.| + 1;', 'CF');
-  DotCase('ImplVar := 1 + B.|;');
+  DotCase('ImplVar := 1 + B.|;', 'CF');
   // A condition expects a Boolean: the procedure Pub is no operand there.
   DotCase('if B.| then;', 'CF');
   DotCase('if not B.| then;', 'CF');
@@ -3023,14 +3033,13 @@ begin
   ExpCase('N := |;', '', 'nil', '', '');
   GCounter.Ok('expected type: N := | lists the procedures',
     Has('ExtReset') and Has('LocalProc') and Has('Str'));
-  // Past the first operand, or with a longer left operand, nothing is
-  // expected and nothing is filtered.
-  ExpCase('I := I + |;', '', '', 'I,F,C,clRed', '');
-  GCounter.Ok('expected type: I := I + | keeps the procedures',
-    Has('ExtReset'));
-  ExpCase('if I + 1 = | then;', '', '', 'I,F', '');
-  GCounter.Ok('expected type: I + 1 = | keeps the procedures',
-    Has('ExtReset'));
+  // An operand of an operator is ranked by its left operand (the operator
+  // rows below), and lists no procedure. A comparison's longer left side
+  // is typed as the expression it is: the sum, the concatenation.
+  ExpCase('I := I + |;', 'I', 'F', 'C,clRed', 'ExtReset');
+  ExpCase('if I + 1 = | then;', 'I,ExtCount', '', 'C,ExtStr', 'ExtReset');
+  ExpCase('if ExtStr + ExtCh <> | then;', 'ExtStr', 'ExtCh', 'I', 'ExtReset');
+  ExpCase('if 1 < | then;', 'I', '', 'ExtStr', 'ExtReset');
   // The seeded True and False are Booleans; nil fits a dynamic array; a
   // dynamic array whose element fits starts `A[I]`.
   // A comparison makes a Boolean of any value: nothing is wrong there.
@@ -3103,6 +3112,79 @@ begin
   ExpCase('B := not |;', 'B', '', '', 'ExtReset');
   ExpCase('I := not |;', 'I', '', '', 'ExtReset');
   ExpCase('Assert(not |);', 'B', '', '', 'ExtReset');
+  // An operand of an arithmetic operator, ranked by the left operand's
+  // family, no procedure listed. A number: after `+` `-` `*` `/` the left
+  // one's own type first, any integer or float fits; `div` `mod` `shl`
+  // `shr` want an integer, a float is wrong there.
+  ExpCase('I := I + |;', 'I,ExtCount', 'F', 'B,C,ExtStr,ExtSet',
+    'ExtReset,LocalProc');
+  ExpCase('F := F * |;', 'F', 'I,ExtCount', 'B,ExtStr', 'ExtReset');
+  ExpCase('F := I / |;', 'I', 'F', 'B', 'ExtReset');
+  ExpCase('F := F - |;', 'F', 'I', 'ExtCh', 'ExtReset');
+  ExpCase('I := I div |;', 'I,ExtCount', '', 'F,B', 'ExtReset,LocalProc');
+  ExpCase('I := I mod |;', 'I', '', 'F', 'ExtReset');
+  ExpCase('I := I shl |;', 'I', '', 'F', 'ExtReset');
+  ExpCase('I := I shr |;', 'I', '', 'F', 'ExtReset');
+  ExpCase('I := I + ExtOwner.|;', 'Count,Total', '', 'Color', 'Reset');
+  // A string or a Char after `+`: a string, a Char converts.
+  ExpCase('ExtStr := ExtStr + |;', 'ExtStr', 'ExtCh', 'I,F,C',
+    'ExtReset,LocalProc');
+  ExpCase('ExtStr := ExtCh + |;', 'ExtStr', 'ExtCh', 'I', 'ExtReset');
+  // A set after `+` `-` `*`: the set; `S + [|` is the set-element context.
+  ExpCase('ExtSet := ExtSet + |;', 'ExtSet', '', 'I,C', 'ExtReset');
+  ExpCase('ExtSet := ExtSet - [|];', 'C,clRed,ExtColor', '', 'I,ExtSet',
+    'ExtReset,LocalProc');
+  ExpCase('ExtSet := ExtSet * [clRed, |];', 'C,clGreen', '', 'I',
+    'ExtReset');
+  ExpCase('if C in ExtSet + [|] then;', 'C', '', 'I', 'ExtReset');
+  // A dynamic array after `+`: its own type, its element inside `[`.
+  ExpCase('Arr := Arr + |;', 'Arr,ExtFlags', '', 'I', 'ExtReset');
+  ExpCase('Arr := Arr + [|];', 'I,ExtCount', '', 'C', 'ExtReset');
+  // A typed pointer after `+` `-`: an integer (dcc 37 takes `P + I` for a
+  // PChar); an untyped Pointer takes no arithmetic and ranks nothing.
+  ExpCase('ExtP := ExtP + |;', 'I,ExtCount', '', 'F,ExtStr', 'ExtReset');
+  ExpCase('ExtP := ExtP - |;', 'I', '', 'F', 'ExtReset');
+  ExpCase('ExtPtr := ExtPtr + |;', '', '', '', 'ExtReset,LocalProc');
+  GCounter.Ok('operator: an untyped Pointer ranks nothing',
+    Has('I') and (ItemNamed('I').Match = cmOther));
+  // A record: its `class operator`'s right parameter for that operator -
+  // Add takes a TVec, Multiply a Double.
+  ExpCase('ExtVec := ExtVec + |;', 'ExtVec', '', 'I,F,ExtStr', 'ExtReset');
+  ExpCase('ExtVec := ExtVec * |;', 'F', 'I', 'ExtStr', 'ExtReset');
+  // No family the operator takes: nothing is ranked, no procedure listed.
+  ExpCase('I := B + |;', '', '', '', 'ExtReset,LocalProc');
+  GCounter.Ok('operator: a Boolean left of `+` ranks nothing',
+    Has('B') and (ItemNamed('B').Match = cmOther));
+  ExpCase('ExtStr := ExtStr - |;', '', '', '', 'ExtReset');
+  GCounter.Ok('operator: a string left of `-` ranks nothing',
+    Has('ExtStr') and (ItemNamed('ExtStr').Match = cmOther));
+  ExpCase('F := F div |;', '', '', '', 'ExtReset');
+  GCounter.Ok('operator: a float left of `div` ranks nothing',
+    Has('I') and (ItemNamed('I').Match = cmOther));
+  // Precedence (5.2.1): the left operand of `*` in `F + I * |` is I, of `+`
+  // in `B = I + |` is I (`=` binds loosest), of `+` in `I - F + |` the
+  // difference (left-associative: Extended, so neither I nor F is exact).
+  ExpCase('F := F + I * |;', 'I', 'F', 'B', 'ExtReset');
+  ExpCase('if B = I + | then;', 'I', 'F', 'B', 'ExtReset');
+  ExpCase('F := I - F + |;', '', 'I,F', 'B', 'ExtReset');
+  ExpCase('F := (I + F) * |;', '', 'I,F', 'B', 'ExtReset');
+  ExpCase('I := (I) + |;', 'I', 'F', 'B', 'ExtReset');
+  ExpCase('I := 2 * I + |;', 'I', 'F', 'B', 'ExtReset');
+  ExpCase('F := 1.5 + |;', '', 'I,F', 'B', 'ExtReset');
+  ExpCase('ExtStr := ''a'' + |;', 'ExtStr', 'ExtCh', 'I', 'ExtReset');
+  ExpCase('ExtStr := ''ab'' + |;', 'ExtStr', 'ExtCh', 'I', 'ExtReset');
+  // A left operand longer than a designator for `and` / `or` / `xor`: the
+  // product, the conjunction; `and` binds tighter than `>`, so in
+  // `I + 1 > I and |` the left operand is I.
+  ExpCase('I := I * I and |;', 'I', '', 'B', 'ExtReset');
+  ExpCase('if (I > 0) and B or | then;', 'B', '', '', 'ExtReset');
+  ExpCase('if I + 1 > I and | then;', 'I', '', '', 'ExtReset');
+  // A sign stands where its position puts it: an integer as it is (a float
+  // is wrong for `I := -|`), a float with any number fitting.
+  ExpCase('I := -|;', 'I', '', 'F', 'ExtReset,LocalProc');
+  ExpCase('F := -|;', 'F', 'I', 'B', 'ExtReset');
+  ExpCase('I := I + -|;', 'I', 'F', 'B', 'ExtReset');
+  ExpCase('I := I * -I + |;', 'I', 'F', 'B', 'ExtReset');
   ExpCase('if C = ExtOwner.Co| then;', 'Color', '', 'Count', 'Reset');
   // A member access as an argument is no value of the left side's type:
   // the argument's own parameter decides - Ord's is untyped, so nothing is

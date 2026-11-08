@@ -387,6 +387,12 @@ type
     // and any other class leading. A category again (RaiseFit).
     FExpectRaise: Boolean;
     FRaiseBase: TSemaXType;
+    // An arithmetic operand (`X := A + |`, `-|`) where any number fits:
+    // FExpect is the left operand's number type, the same type is fit 0,
+    // any other integer or float fit 1 (NumberFit). `div` / `mod` / `shl`
+    // / `shr` want an integer and leave this off: FExpect's own ranking
+    // makes a float wrong there.
+    FExpectNumber: Boolean;
     // A type position (TypePosAt): FTypeAs - `as` rather than `is`;
     // FTypeAfterIs - the caret right after `is` (`not` may follow);
     // FTypeLeft / FTypeLeftCat - the static type of `is` / `as`'s left side;
@@ -570,6 +576,14 @@ type
     function OperandExpect(AOp, AScope, ADepth: Integer): TPasComplTypeRef;
     function NotOperandExpect(const AOuter: TPasComplTypeRef): TPasComplTypeRef;
     function LogicalOperandExpect(AOp: Integer): TPasComplTypeRef;
+    function ArithOperandExpect(AOp: Integer): TPasComplTypeRef;
+    function SignOperandExpect(AOp, AScope, ADepth: Integer): TPasComplTypeRef;
+    function IsUnarySign(ASign: Integer): Boolean;
+    function LeftOperandType(AOp: Integer): TPasComplTypeRef;
+    function ExprTypeEndingAt(AEndRaw, AMinPrec, ADepth: Integer;
+      out ABeforeRaw: Integer): TPasComplTypeRef;
+    function OperandEndingAt(AEndRaw, ADepth: Integer;
+      out ABeforeRaw: Integer): TPasComplTypeRef;
     function IsGroupingParen(AParen: Integer): Boolean;
     function IsWithListComma(AComma: Integer): Boolean;
     function ProcValueFit(const AItem: TPasComplItem): Integer;
@@ -5296,9 +5310,10 @@ end;
   element inside brackets (BracketExpect); otherwise the caret
   starts the right side of `:=` or of a comparison (`=`, `<>`, `<`, `>`,
   `<=`, `>=`), and the left side is a designator - a name, a member chain, a call, an index, a
-  dereference - that the engine types. Only the FIRST operand right of the
-  operator: `X := A + |` expects nothing here, since the sum's other operand
-  decides as much as X does.
+  dereference - that the engine types. The right operand of an arithmetic
+  operator is ranked by its left operand (ArithOperandExpect: `X := A + |`
+  by A's family, not X's), a sign's by its own position
+  (SignOperandExpect).
 
   The left side is found by tokens and the tree together: the designator
   node ending on the token before the operator, grown up its parents while
@@ -5384,6 +5399,15 @@ begin
   // Boolean or an integer (LogicalOperandExpect).
   if LTS.Tokens[LOp].Kind in [tkAnd, tkOr, tkXor] then
     Exit(LogicalOperandExpect(LOp));
+  // A sign (`X := -|`, `Foo(-|`) stands for what its own position expects
+  // (SignOperandExpect); the right operand of an arithmetic operator
+  // (`X := A + |`, `A div |`) is ranked by the left operand's family
+  // (ArithOperandExpect).
+  if (LTS.Tokens[LOp].Kind in [tkPlus, tkMinus]) and IsUnarySign(LOp) then
+    Exit(SignOperandExpect(LOp, AScope, ADepth));
+  if LTS.Tokens[LOp].Kind in [tkPlus, tkMinus, tkStar, tkSlash, tkDiv, tkMod,
+     tkShl, tkShr] then
+    Exit(ArithOperandExpect(LOp));
   // A grouping paren (`if (|`, `if (A) and (|`, `X := (|`): the
   // parenthesized expression - whose first operand starts at the caret -
   // stands where the `(` does. A call's or a cast's `(` is ArgExpectAt's.
@@ -5555,38 +5579,372 @@ begin
 end;
 
 { The right operand of the `and` / `or` / `xor` at raw token AOp: the left
-  operand's type when that is a Boolean (a logical operator) or an integer
-  (a bitwise one), else nothing. The left operand is the designator ending
-  before AOp (a `not` before it changes no type) when nothing binding
-  tighter than AOp stands before that: an expression or statement opener,
-  a relational operator, another `and` / `or` / `xor`, or `+` / `-` -
-  `if A = B and |` is `A = (B and |)` (`and` is multiplicative, 5.2.1),
-  so B decides. `X * Y and |` - the left operand a product - expects
-  nothing. Never a procedure, typed or not (FArgNoProcs). }
+  operand's type (LeftOperandType) when that is a Boolean (a logical
+  operator) or an integer (a bitwise one), else nothing. `and` is
+  multiplicative (5.2.1): in `if A = B and |` B decides, in `X * Y and |`
+  the product does. Never a procedure, typed or not (FArgNoProcs). }
 function TPasCompletion.LogicalOperandExpect(AOp: Integer): TPasComplTypeRef;
-const
-  BEFORE_LEFT = [tkIf, tkWhile, tkUntil, tkLParen, tkLBracket, tkComma,
-    tkSemicolon, tkColon, tkAssign, tkBegin, tkThen, tkElse, tkDo,
-    tkRepeat, tkTry, tkFinally, tkExcept, tkOf, tkFor, tkTo, tkDownto,
-    tkCase, tkEqual, tkNotEqual, tkLess, tkGreater, tkLessEqual,
-    tkGreaterEqual, tkIn, tkAnd, tkOr, tkXor, tkPlus, tkMinus];
+begin
+  FArgNoProcs := True;
+  Result := LeftOperandType(AOp);
+  if not (RefCatOf(Result) in [tcBoolean, tcInteger]) then
+    Result := ComplNilRef;
+end;
+
+{ The precedence of binary operator AKind (5.2.1): 2 multiplicative (`*`
+  `/` `div` `mod` `and` `shl` `shr`), 1 additive (`+` `-` `or` `xor`), 0
+  relational (`=` `<>` `<` `>` `<=` `>=` `in` `is`); -1 for anything else -
+  `as` too, whose right side is a type the operand walk does not type. }
+function BinaryOpPrec(AKind: TPasTokenKind): Integer;
+begin
+  case AKind of
+    tkStar, tkSlash, tkDiv, tkMod, tkAnd, tkShl, tkShr:
+      Result := 2;
+    tkPlus, tkMinus, tkOr, tkXor:
+      Result := 1;
+    tkEqual, tkNotEqual, tkLess, tkGreater, tkLessEqual, tkGreaterEqual,
+    tkIn, tkIs:
+      Result := 0;
+  else
+    Result := -1;
+  end;
+end;
+
+{ Is the `+` / `-` at raw token ASign a sign rather than a binary operator?
+  A binary one follows an operand's last token - a name, a literal, `)`,
+  `]`, `^`, `nil`; anything else (an opener, an operator, `:=`) makes it a
+  sign. }
+function TPasCompletion.IsUnarySign(ASign: Integer): Boolean;
 var
-  LTS: TPasTokenStream;
-  LNode, LBefore: Integer;
+  LPrev: Integer;
+begin
+  LPrev := PrevVisibleRaw(ASign - 1);
+  Result := (LPrev < 0) or not (FModel.Tree.Source.Files[0].Tokens[LPrev].Kind
+    in [tkIdentifier, tkIntLiteral, tkRealLiteral, tkStringLiteral,
+        tkControlChar, tkCaretChar, tkRParen, tkRBracket, tkCaret, tkNil,
+        tkString]);
+end;
+
+{ The operand of the sign at raw token AOp (`X := -|`, `Foo(-|`, `A * -|`):
+  the sign stands where its position puts it, so that position's number
+  type is expected - an integer as it is, a float with any number fitting
+  (FExpectNumber). Where nothing or a category is expected that is kept;
+  where something else is (a string), no sign fits and nothing is ranked.
+  A signed value is never a variable (FArgByRef off) nor a procedure. }
+function TPasCompletion.SignOperandExpect(AOp, AScope,
+  ADepth: Integer): TPasComplTypeRef;
+var
+  LOuter: TPasComplTypeRef;
+begin
+  Result := ComplNilRef;
+  LOuter := OperandExpect(PrevVisibleRaw(AOp - 1), AScope, ADepth + 1);
+  FArgNoProcs := True;
+  FArgByRef := False;
+  FArgOpenElem := ComplNilRef;
+  case RefCatOf(LOuter) of
+    tcInteger:
+      Result := LOuter;
+    tcFloat:
+      begin
+        Result := LOuter;
+        FExpectNumber := True;
+      end;
+    tcUnknown:
+      Result := LOuter;
+  end;
+  Result.IsTypeRef := False;
+end;
+
+{ The right operand of the arithmetic operator at raw token AOp (`+` `-`
+  `*` `/` `div` `mod` `shl` `shr`), by the left operand's family
+  (LeftOperandType - precedence applied, `A + B * |` is B's):
+  - a number: after `+` `-` `*` `/` any integer or float fits, the left
+    operand's own type first (FExpectNumber); `div` `mod` `shl` `shr` want
+    an integer - the left one's type, a float is wrong there;
+  - a string or a Char after `+`: a string (the left one's string type) -
+    a Char converts;
+  - a set after `+` `-` `*`: the set's type;
+  - a typed pointer after `+` `-`: an integer (pointer arithmetic, dcc 37
+    takes `P + I` / `P - I` for PChar and PByte and under the POINTERMATH
+    directive; whether the type allows it is not told apart - PInteger ranks the
+    same, though `PI + 1` is E2015 without POINTERMATH); an untyped Pointer
+    nothing (`Q + 1` is E2015);
+  - a dynamic array after `+`: its own type (concatenation);
+  - a record: its `class operator`'s right parameter, when the left
+    operand is its first and one type is taken there (several overloads
+    taking different types rank nothing).
+  Never a procedure, whatever the left side is (FArgNoProcs). }
+function TPasCompletion.ArithOperandExpect(AOp: Integer): TPasComplTypeRef;
+var
+  LKind: TPasTokenKind;
+  LLeft: TPasComplTypeRef;
+  LX: TSemaXType;
+  LOv, LMid, LSym: Integer;
+  LRights: TArray<TSemaXType>;
 begin
   Result := ComplNilRef;
   FArgNoProcs := True;
+  LKind := FModel.Tree.Source.Files[0].Tokens[AOp].Kind;
+  LLeft := LeftOperandType(AOp);
+  if not ComplValid(LLeft) then
+    Exit;
+  LLeft.IsTypeRef := False;
+  case RefCatOf(LLeft) of
+    tcInteger:
+      begin
+        Result := LLeft;
+        FExpectNumber := LKind in [tkPlus, tkMinus, tkStar, tkSlash];
+      end;
+    tcFloat:
+      if LKind in [tkPlus, tkMinus, tkStar, tkSlash] then
+      begin
+        Result := LLeft;
+        FExpectNumber := True;
+      end;
+    tcString:
+      if LKind = tkPlus then
+        Result := LLeft;
+    tcChar:
+      if (LKind = tkPlus) and BridgeName('string', LMid, LSym) then
+        Result.X := XPlain(LMid, LSym);
+    tcSet:
+      if LKind in [tkPlus, tkMinus, tkStar] then
+        Result := LLeft;
+    tcPointer:
+      begin
+        // An untyped Pointer takes no arithmetic (dcc 37: `Q + 1` is E2015).
+        LX := RefValueX(LLeft, LOv);
+        if (LKind in [tkPlus, tkMinus]) and XValid(LX) and
+           not (BridgeName('pointer', LMid, LSym) and
+                FProj.XSameType(FProj.CanonTypeX(LX),
+                  FProj.CanonTypeX(XPlain(LMid, LSym)))) and
+           BridgeName('integer', LMid, LSym) then
+          Result.X := XPlain(LMid, LSym);
+      end;
+    tcArray:
+      begin
+        LX := RefValueX(LLeft, LOv);
+        if (LKind = tkPlus) and XValid(LX) and FProj.IsDynArrayTypeX(LX) then
+          Result := LLeft;
+      end;
+    tcRecord:
+      begin
+        LX := RefValueX(LLeft, LOv);
+        if XValid(LX) then
+        begin
+          LRights := FProj.RecordOperatorRightsX(LKind, LX);
+          if Length(LRights) = 1 then
+            Result.X := LRights[0];
+        end;
+      end;
+  end;
+end;
+
+{ The type of the left operand of the binary operator at raw token AOp:
+  the expression ending before it, of the operators binding at least as
+  tightly (left-associative, 5.2.1) - `A - B + |` is the difference, in
+  `A + B * |` it is B, in `if A = B + |` B. It must start where an
+  expression does: after an opener or an operator binding more loosely.
+  ComplNilRef when it cannot be typed (ExprTypeEndingAt). }
+function TPasCompletion.LeftOperandType(AOp: Integer): TPasComplTypeRef;
+const
+  OPENERS = [tkIf, tkWhile, tkUntil, tkLParen, tkLBracket, tkComma,
+    tkSemicolon, tkColon, tkAssign, tkBegin, tkThen, tkElse, tkDo,
+    tkRepeat, tkTry, tkFinally, tkExcept, tkOf, tkFor, tkTo, tkDownto,
+    tkCase, tkDotDot];
+var
+  LTS: TPasTokenStream;
+  LPrec, LBefore: Integer;
+begin
+  Result := ComplNilRef;
   LTS := FModel.Tree.Source.Files[0];
-  LNode := DesignatorEndingAt(PrevVisibleRaw(AOp - 1), LBefore);
-  if LNode = NIL_NODE then
+  if (FProj = nil) or (AOp < 1) then
     Exit;
-  while (LBefore >= 0) and (LTS.Tokens[LBefore].Kind = tkNot) do
-    LBefore := PrevVisibleRaw(LBefore - 1);
-  if (LBefore < 0) or not (LTS.Tokens[LBefore].Kind in BEFORE_LEFT) then
+  LPrec := BinaryOpPrec(LTS.Tokens[AOp].Kind);
+  if LPrec < 0 then
     Exit;
-  Result := DesignatorType(LNode, 0);
-  if Result.IsTypeRef or not (RefCatOf(Result) in [tcBoolean, tcInteger]) then
+  Result := ExprTypeEndingAt(PrevVisibleRaw(AOp - 1), LPrec, 0, LBefore);
+  if (LBefore < 0) or
+     not ((LTS.Tokens[LBefore].Kind in OPENERS) or
+          (BinaryOpPrec(LTS.Tokens[LBefore].Kind) >= 0)) or
+     Result.IsTypeRef then
     Result := ComplNilRef;
+end;
+
+{ The type of the expression ending on raw token AEndRaw that chains
+  operands with binary operators of precedence AMinPrec or tighter
+  (BinaryOpPrec), walked back from its end; ABeforeRaw is the token before
+  it. Each operand is OperandEndingAt's; the chain is folded by precedence,
+  left to right within a level, through the analysis's operator table
+  (TPasSemaProject.BinaryResultX - 4.2.1, a record's `class operator`).
+  ComplNilRef when an operand or a step cannot be typed. }
+function TPasCompletion.ExprTypeEndingAt(AEndRaw, AMinPrec, ADepth: Integer;
+  out ABeforeRaw: Integer): TPasComplTypeRef;
+var
+  LTS: TPasTokenStream;
+  LRefs: TArray<TPasComplTypeRef>;
+  LOps: TArray<TPasTokenKind>;
+  LXs: TArray<TSemaXType>;
+  LRef: TPasComplTypeRef;
+  LRaw, LBefore, LI, LOv, LLevel: Integer;
+  LKind: TPasTokenKind;
+begin
+  Result := ComplNilRef;
+  ABeforeRaw := -1;
+  if (FProj = nil) or (ADepth > 8) then
+    Exit;
+  LTS := FModel.Tree.Source.Files[0];
+  LRefs := nil;
+  LOps := nil;
+  LRaw := AEndRaw;
+  while True do
+  begin
+    LRef := OperandEndingAt(LRaw, ADepth, LBefore);
+    if not ComplValid(LRef) or LRef.IsTypeRef or (Length(LRefs) > 64) then
+      Exit;
+    LRefs := [LRef] + LRefs;
+    if LBefore < 0 then
+      Exit;
+    LKind := LTS.Tokens[LBefore].Kind;
+    if BinaryOpPrec(LKind) < AMinPrec then
+      Break;
+    LOps := [LKind] + LOps;
+    LRaw := PrevVisibleRaw(LBefore - 1);
+  end;
+  ABeforeRaw := LBefore;
+  if LOps = nil then
+    Exit(LRefs[0]);
+  SetLength(LXs, Length(LRefs));
+  for LI := 0 to High(LRefs) do
+  begin
+    LXs[LI] := RefValueX(LRefs[LI], LOv);
+    if not XValid(LXs[LI]) then
+      Exit;
+  end;
+  for LLevel := 2 downto AMinPrec do
+  begin
+    LI := 0;
+    while LI <= High(LOps) do
+      if BinaryOpPrec(LOps[LI]) = LLevel then
+      begin
+        LXs[LI] := FProj.BinaryResultX(FProjMid, LOps[LI], LXs[LI],
+          LXs[LI + 1]);
+        if not XValid(LXs[LI]) then
+          Exit;
+        Delete(LXs, LI + 1, 1);
+        Delete(LOps, LI, 1);
+      end
+      else
+        Inc(LI);
+  end;
+  Result.X := LXs[0];
+end;
+
+{ The type of the one operand ending on raw token AEndRaw - a literal (an
+  integer one Integer, a real one Extended, a text one a Char when it is
+  one character, else a string; adjacent ones `'a'#13` are one), a grouping
+  paren (its expression, ExprTypeEndingAt), or a designator (DesignatorType)
+  - with the `not` and the signs before it, which change no type. A type
+  (`TFoo` alone) is answered as one: the caller declines it. ABeforeRaw is
+  the token before the operand. }
+function TPasCompletion.OperandEndingAt(AEndRaw, ADepth: Integer;
+  out ABeforeRaw: Integer): TPasComplTypeRef;
+var
+  LTS: TPasTokenStream;
+  LBefore, LMid, LSym, LCount, LOpen, LLevel, LInner, LNode: Integer;
+  LChar: Boolean;
+begin
+  Result := ComplNilRef;
+  ABeforeRaw := -1;
+  if AEndRaw < 0 then
+    Exit;
+  LTS := FModel.Tree.Source.Files[0];
+  LBefore := -1;
+  case LTS.Tokens[AEndRaw].Kind of
+    tkIntLiteral:
+      begin
+        if BridgeName('integer', LMid, LSym) then
+          Result.X := XPlain(LMid, LSym);
+        LBefore := PrevVisibleRaw(AEndRaw - 1);
+      end;
+    tkRealLiteral:
+      begin
+        if BridgeName('extended', LMid, LSym) then
+          Result.X := XPlain(LMid, LSym);
+        LBefore := PrevVisibleRaw(AEndRaw - 1);
+      end;
+    tkStringLiteral, tkControlChar, tkCaretChar:
+      begin
+        LCount := 0;
+        LChar := True;
+        LBefore := AEndRaw;
+        while (LBefore >= 0) and (LTS.Tokens[LBefore].Kind in
+          [tkStringLiteral, tkControlChar, tkCaretChar]) do
+        begin
+          if (LTS.Tokens[LBefore].Kind = tkStringLiteral) and
+             (LTS.Tokens[LBefore].Len <> 3) then
+            LChar := False;
+          Inc(LCount);
+          LBefore := PrevVisibleRaw(LBefore - 1);
+        end;
+        if LChar and (LCount = 1) then
+        begin
+          if BridgeName('char', LMid, LSym) then
+            Result.X := XPlain(LMid, LSym);
+        end
+        else if BridgeName('string', LMid, LSym) then
+          Result.X := XPlain(LMid, LSym);
+      end;
+  else
+    // A grouping paren: the expression inside, whole.
+    LOpen := -1;
+    if LTS.Tokens[AEndRaw].Kind = tkRParen then
+    begin
+      LLevel := 0;
+      LOpen := AEndRaw;
+      while LOpen >= 0 do
+      begin
+        case LTS.Tokens[LOpen].Kind of
+          tkRParen, tkRBracket:
+            Inc(LLevel);
+          tkLParen, tkLBracket:
+            begin
+              Dec(LLevel);
+              if LLevel = 0 then
+                Break;
+            end;
+        end;
+        LOpen := PrevVisibleRaw(LOpen - 1);
+      end;
+      if (LOpen >= 0) and ((LTS.Tokens[LOpen].Kind <> tkLParen) or
+         not IsGroupingParen(LOpen)) then
+        LOpen := -1;
+    end;
+    if LOpen >= 0 then
+    begin
+      Result := ExprTypeEndingAt(PrevVisibleRaw(AEndRaw - 1), 0, ADepth + 1,
+        LInner);
+      if LInner <> LOpen then
+        Exit(ComplNilRef);
+      LBefore := PrevVisibleRaw(LOpen - 1);
+    end
+    else
+    begin
+      LNode := DesignatorEndingAt(AEndRaw, LBefore);
+      if LNode = NIL_NODE then
+        Exit;
+      Result := DesignatorType(LNode, 0);
+    end;
+  end;
+  // A prefix `not` or sign keeps the operand's type.
+  while LBefore >= 0 do
+    if (LTS.Tokens[LBefore].Kind = tkNot) or
+       ((LTS.Tokens[LBefore].Kind in [tkPlus, tkMinus]) and
+        IsUnarySign(LBefore)) then
+      LBefore := PrevVisibleRaw(LBefore - 1)
+    else
+      Break;
+  ABeforeRaw := LBefore;
 end;
 
 { Is the `(` at raw token AParen a grouping paren rather than a call's or a
@@ -5732,7 +6090,13 @@ begin
   LNode := DesignatorEndingAt(PrevVisibleRaw(AOp - 1), LBefore);
   if (LNode = NIL_NODE) or (LBefore < 0) or
      not (LTS.Tokens[LBefore].Kind in OPENERS) then
+  begin
+    // A comparison's longer left side - `I + 1 = |`, `X and Y = |`, a
+    // literal - is typed as the expression it is (`=` binds loosest).
+    if LTS.Tokens[AOp].Kind <> tkAssign then
+      Result := LeftOperandType(AOp);
     Exit;
+  end;
   Result := DesignatorType(LNode, 0);
   if Result.IsTypeRef then
   begin
@@ -5844,6 +6208,14 @@ begin
     tkAssign, tkEqual, tkNotEqual, tkLessEqual, tkGreaterEqual:
       begin
         Result := SetElementRef(OperatorLeftType(LPrev, False), LIsSet);
+        FArgNoProcs := LIsSet;
+      end;
+    // An operand of a set operator (`S + [|`, `S - [A, |`, `S * [|`) or of
+    // an array concatenation (`Arr + [|`): the left operand's element.
+    tkPlus, tkMinus, tkStar:
+      if not IsUnarySign(LPrev) then
+      begin
+        Result := SetElementRef(LeftOperandType(LPrev), LIsSet);
         FArgNoProcs := LIsSet;
       end;
     tkLParen, tkComma:
@@ -7116,6 +7488,30 @@ var
       Result := cmLeads;
   end;
 
+  // An arithmetic operand's fit (FExpectNumber) for a value of category
+  // ACat and type AX: the left operand's own type is fit 0, any other
+  // integer or float fits, a Variant converts; any other scalar is wrong;
+  // a value with members may hold a number (ValueReaches), one that cannot
+  // be typed leads.
+  function NumberFit(ACat: TSemaTypeCat; const AX: TSemaXType): TPasComplMatch;
+  begin
+    if ACat in [tcInteger, tcFloat] then
+    begin
+      Result := cmCompatible;
+      if XValid(AX) and XValid(FExpect) and
+         FProj.XSameType(FProj.CanonTypeX(AX), FProj.CanonTypeX(FExpect)) then
+        Result := cmExact;
+    end
+    else if ACat = tcVariant then
+      Result := cmCompatible
+    else if ACat in NOTHING_TO_REACH then
+      Result := cmOther
+    else if (ACat <> tcUnknown) and XValid(AX) and not ValueReaches(AX, 0) then
+      Result := cmOther
+    else
+      Result := cmLeads;
+  end;
+
 begin
   // A type position ranks its types by rules of its own.
   if FTypePos <> tpNone then
@@ -7203,7 +7599,8 @@ begin
     // A `with` item or a raised object through a type name: a class's
     // (`with TFoo do` names its class members, `raise EFoo.Create`)
     // judged by its category, a scalar type's is wrong.
-    if (FExpectWith or FExpectRaise) and (AItem.Sym <> NIL_SYM) then
+    if (FExpectWith or FExpectRaise or FExpectNumber) and
+       (AItem.Sym <> NIL_SYM) then
     begin
       LX := XNil;
       if AItem.Mid >= 0 then
@@ -7219,6 +7616,16 @@ begin
         Exit;
       if FExpectRaise then
         Exit(RaiseFit(LCat, LX));
+      // A number type's name is a cast to it (`I + Integer(P)`); another
+      // scalar type's is wrong, a class's leads (`TFoo.Count`).
+      if FExpectNumber then
+      begin
+        if LCat in [tcInteger, tcFloat] then
+          Result := cmCompatible
+        else if LCat in NOTHING_TO_REACH then
+          Result := cmOther;
+        Exit;
+      end;
       // A class's name has class members; a record's or a scalar's has
       // no value, only a cast (`TRec(X)`) leads to one.
       if LCat = tcClass then
@@ -7345,6 +7752,17 @@ begin
     if FExpectWith then
       Exit(WithFit(LCat));
     Exit(RaiseFit(LCat, LX));
+  end;
+  if FExpectNumber then
+  begin
+    // A type the overlay alone declares has no project type: its category.
+    if XValid(LX) then
+      LCat := FProj.XCatOf(FProj.CanonTypeX(LX))
+    else if LOv <> NIL_SYM then
+      LCat := FModel.Symbols[LOv].TypeCat
+    else
+      LCat := tcUnknown;
+    Exit(NumberFit(LCat, LX));
   end;
   if FExpectEnum then
   begin
@@ -9351,6 +9769,7 @@ begin
   FExpectWith := False;
   FExpectRaise := False;
   FRaiseBase := XNil;
+  FExpectNumber := False;
   FArgOpenElem := ComplNilRef;
   // A ranked type position (`is` / `as`, a handler, a generic argument or
   // constraint, an attribute) is a type position whatever the token rules
