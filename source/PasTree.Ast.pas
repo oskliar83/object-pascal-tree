@@ -576,6 +576,12 @@ type
   function PasPropertyHasParams(const ATree: TPasTree;
     ANameNode: Integer): Boolean;
 
+  { The type node of the AIndex-th (0-based) index parameter of the property
+    whose NAME node is ANameNode - one per name, `A, B: T` giving T twice;
+    NIL_NODE when it declares fewer, or the parameter writes no type. }
+  function PasPropertyParamTypeNode(const ATree: TPasTree;
+    ANameNode, AIndex: Integer): Integer;
+
   { Is ANode an attribute's type reference - the FIRST child of an
     nkAttribute (`[Table]`; its `(...)` arguments are not), or a name or
     dotted name heading an interface's nkGuid (`[Mark]`, looked up as an
@@ -867,6 +873,43 @@ begin
     if ATree.Nodes[LChild].Kind = nkParams then
       Exit(True);
     LChild := ATree.Nodes[LChild].NextSibling;
+  end;
+end;
+
+function PasPropertyParamTypeNode(const ATree: TPasTree;
+  ANameNode, AIndex: Integer): Integer;
+var
+  LDecl, LParams, LParam, LName, LCount: Integer;
+begin
+  Result := NIL_NODE;
+  if (ANameNode = NIL_NODE) or (AIndex < 0) then
+    Exit;
+  LDecl := ATree.Nodes[ANameNode].Parent;
+  if (LDecl = NIL_NODE) or (ATree.Nodes[LDecl].Kind <> nkPropertyDecl) then
+    Exit;
+  LParams := ATree.Nodes[LDecl].FirstChild;
+  while (LParams <> NIL_NODE) and (ATree.Nodes[LParams].Kind <> nkParams) do
+    LParams := ATree.Nodes[LParams].NextSibling;
+  if LParams = NIL_NODE then
+    Exit;
+  LParam := ATree.Nodes[LParams].FirstChild;
+  while LParam <> NIL_NODE do
+  begin
+    if ATree.Nodes[LParam].Kind = nkParam then
+    begin
+      LCount := 0;
+      LName := PasSkipAttrGroups(ATree, ATree.Nodes[LParam].FirstChild);
+      while (LName <> NIL_NODE) and (nfName in ATree.Nodes[LName].Flags) do
+      begin
+        Inc(LCount);
+        LName := PasSkipAttrGroups(ATree, ATree.Nodes[LName].NextSibling);
+      end;
+      // LName is now the type written after the names, if any.
+      if AIndex < LCount then
+        Exit(LName);
+      Dec(AIndex, LCount);
+    end;
+    LParam := ATree.Nodes[LParam].NextSibling;
   end;
 end;
 

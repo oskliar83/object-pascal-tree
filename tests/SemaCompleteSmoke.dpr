@@ -1075,6 +1075,16 @@ const
     '    property Current: TColor2 read GetCurrent;'#10 +
     '  end;'#10 +
     '  TBag = class function GetEnumerator: TBagEnum; end;'#10 +
+    // Indexes: a static array over an enumeration, a two-dimensional one,
+    // array properties - a default one and a named one of two parameters.
+    '  TColorIdx = array[TColor2] of Integer;'#10 +
+    '  TGrid = array[0..3, TShape2] of Integer;'#10 +
+    '  TDict2 = class'#10 +
+    '    function GetItem(AColor: TColor2): Integer;'#10 +
+    '    function GetNamed(const S: string; N: TShape2): Integer;'#10 +
+    '    property Items[AColor: TColor2]: Integer read GetItem; default;'#10 +
+    '    property Named[const S: string; N: TShape2]: Integer read GetNamed;'#10 +
+    '  end;'#10 +
     'const'#10 +
     '  CRed = clRed;'#10 +
     '  CGreenT: TColor2 = clGreen;'#10 +
@@ -1099,6 +1109,9 @@ const
     '  ExtSet: TColorSet;'#10 +
     '  ExtBag: TBag;'#10 +
     '  ExtStr: string;'#10 +
+    '  ExtByColor: TColorIdx;'#10 +
+    '  ExtGrid: TGrid;'#10 +
+    '  ExtDict: TDict2;'#10 +
     'function ExtGuidOf(const S: string): TGuid2;'#10 +
     'function ExtColorOf: TColor2;'#10 +
     'procedure ExtReset;'#10 +
@@ -1138,6 +1151,10 @@ const
     'function TBagEnum.GetCurrent: TColor2;'#10'begin'#10'  Result := clRed;'#10'end;'#10 +
     'function TBag.GetEnumerator: TBagEnum;'#10'begin'#10'  Result := nil;'#10'end;'#10 +
     'function TOwner.Car: TCar;'#10'begin'#10'  Result := nil;'#10'end;'#10 +
+    'function TDict2.GetItem(AColor: TColor2): Integer;'#10'begin'#10 +
+    '  Result := 0;'#10'end;'#10 +
+    'function TDict2.GetNamed(const S: string; N: TShape2): Integer;'#10 +
+    'begin'#10'  Result := 0;'#10'end;'#10 +
     'end.'#10;
   EXP_HEAD_A =                      // TYPES_HERE marks the overlay's extras
     'unit mainu;'#10 +
@@ -1427,7 +1444,8 @@ begin
   DotCase('while B.| do;', 'CF');
   DotCase('if (B.|) then;');
   DotCase('if (ImplVar = 1) and (B.|) then;');
-  DotCase('Arr[B.|] := nil;');
+  // An index takes a value: the procedure Pub is none.
+  DotCase('Arr[B.|] := nil;', 'CF');
   DotCase('ImplVar := [B.|];');
   DotCase('with B.| do;');
   // A case selector takes an ordinal: the procedure Pub is none.
@@ -3011,6 +3029,37 @@ begin
     'procedure P;'#10'var'#10'  Ch: Char;'#10'begin'#10 +
     '  for Ch in | do;'#10'end;'#10, 'ExtStr', '', 'ExtCount,ExtColor',
     'ExtReset', 'ExtFlags,ExtSet');
+  // An index: Integer for a dynamic array and a string, the declared type
+  // of a static array's dimension, an array property's parameter (a default
+  // one through the bare brackets); never a procedure.
+  ExpCase('I := Arr[|];', 'I,ExtCount', '', 'F,C', 'ExtReset');
+  ExpCase('I := ExtStr[|];', 'I,ExtCount', '', 'F,C', 'ExtReset');
+  ExpCase('I := ExtByColor[|];', 'clRed,C,ExtColor', '', 'shSquare,I',
+    'ExtReset');
+  ExpCase('I := ExtGrid[|, shRound];', 'I,ExtCount', '', 'C', 'ExtReset');
+  ExpCase('I := ExtGrid[0, |];', 'shRound,S', '', 'clRed,I', 'ExtReset');
+  ExpCase('I := ExtDict[|];', 'clRed,C', '', 'shSquare,I', 'ExtReset');
+  ExpCase('I := ExtDict.Items[|];', 'clRed,C', '', 'shSquare,I', 'ExtReset');
+  ExpCase('I := ExtDict.Named[ExtStr, |];', 'shRound,S', '', 'clRed,I',
+    'ExtReset');
+  ExpCase('Arr[|] := 0;', 'I,ExtCount', '', 'C', 'ExtReset');
+  ExpCase('I := Arr[ExtOwner.|];', 'Count', '', 'Color', 'Reset');
+  ExpCase('I := GLA[|];', 'leOne,LE', '', 'clRed,I', 'ExtReset',
+    '  TLocalArr = array[TLocalEnum] of Integer;'#10'var GLA: TLocalArr;'#10);
+  // A set element: the set's base - after `,` and `..` too; for `in` the
+  // left operand's type; Include's second argument; an open array
+  // argument's element.
+  ExpCase('ExtSet := [|];', 'clRed,C,ExtColor', '', 'shSquare,I', 'ExtReset');
+  ExpCase('ExtSet := [clRed, |];', 'clGreen,C', '', 'shSquare,I', 'ExtReset');
+  ExpCase('ExtSet := [clRed..|];', 'clGreen,C', '', 'shSquare,I', 'ExtReset');
+  ExpCase('if C in [|] then;', 'clRed,C', '', 'shSquare,I', 'ExtReset');
+  ExpCase('if C in [clRed, |] then;', 'clGreen,C', '', 'shSquare,I',
+    'ExtReset');
+  ExpCase('if ExtSet = [|] then;', 'clRed,C', '', 'shSquare,I', 'ExtReset');
+  ExpCase('Include(ExtSet, |);', 'clRed,C', '', 'shSquare,I', 'ExtReset');
+  ExpCase('ExtOpen([|]);', 'I,ExtCount', '', 'C', 'ExtReset');
+  ExpCase('ExtOpen([1, |]);', 'I,ExtCount', '', 'C', 'ExtReset');
+  ExpCase('Arr := [|];', 'I,ExtCount', '', 'C', '');
   // `in` as the set operator is no for-in.
   ProjCase(EXP_HEAD_A + EXP_HEAD_B + '  if C in | then;'#10 + PROJ_TAIL);
   GCounter.Ok('expected type: the set operator `in` is no for-in',

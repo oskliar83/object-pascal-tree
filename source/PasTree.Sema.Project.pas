@@ -2116,6 +2116,19 @@ type
       Promoted for the completion engine's `for X in |` ranking. }
     function ForInElementOfX(AFromMid: Integer;
       const ACollX: TSemaXType): TSemaXType;
+    { The type an index of a static array takes, for its index type node
+      ANode of model AMid (a child of an nkArrayType): a named ordinal type
+      as written, a subrange by its low bound's type - Char for a character
+      range, Integer for a numeric one, the enumeration of its constants.
+      XNil when that is not read. Promoted for the completion engine's
+      `A[|]`. }
+    function IndexTypeNodeX(AMid, ANode, AInst: Integer): TSemaXType;
+    { The type of the AIndex-th (0-based) index parameter of the array
+      property ASym of model AMid - its redeclaration root's - closed over
+      AInst (the frame the property was found in: a dictionary's TKey). XNil
+      when it declares fewer. Promoted for the completion engine's
+      `Dict[|]`. }
+    function ArrayPropParamX(AMid, ASym, AIndex, AInst: Integer): TSemaXType;
     { Whether AX declares `class operator Implicit` - not which types it
       takes (UserConvX reads that). `Explicit` never converts implicitly
       (9.3.1). }
@@ -14990,10 +15003,6 @@ begin
   end;
 end;
 
-{ The element type of the DYNAMIC-array parameter type ACanonParX -
-  `TArray<string>`, `TStringDynArray`, a named `array of T` - closed over
-  its frame (ArrayElemX); XNil for any other type, a static array among
-  them, which a `[...]` is no argument for. }
 function TPasSemaProject.ForInElementOfX(AFromMid: Integer;
   const ACollX: TSemaXType): TSemaXType;
 begin
@@ -15002,6 +15011,62 @@ begin
     Result := ForInElementX(AFromMid, NIL_NODE, ACollX);
 end;
 
+function TPasSemaProject.IndexTypeNodeX(AMid, ANode,
+  AInst: Integer): TSemaXType;
+var
+  LTree: TPasTree;
+  LBound: Integer;
+begin
+  Result := XNil;
+  if (AMid < 0) or (AMid >= FModels.Count) or (ANode = NIL_NODE) then
+    Exit;
+  LTree := FModels[AMid].Tree;
+  case LTree.Nodes[ANode].Kind of
+    nkIdent, nkMember, nkTypeArgs:
+      begin
+        Result := ResolveTypeExpr(AMid, ANode);
+        if (AInst <> NIL_INST) and XValid(Result) then
+          Result := SubstX(Result, AInst, 0);
+      end;
+    nkSubrange:
+      begin
+        LBound := LTree.Nodes[ANode].FirstChild;
+        if LBound = NIL_NODE then
+          Exit;
+        if IsCharLiteralExpr(LTree, LBound) then
+          Result := BuiltinX(AMid, 'char')
+        else
+          Result := UntypedInitTypeX(AMid, LBound, True);
+      end;
+  end;
+  if XValid(Result) then
+    Result := CanonTypeX(Result);
+end;
+
+function TPasSemaProject.ArrayPropParamX(AMid, ASym, AIndex,
+  AInst: Integer): TSemaXType;
+var
+  LMid, LSym, LType: Integer;
+begin
+  Result := XNil;
+  if (AMid < 0) or (AMid >= FModels.Count) or (ASym = NIL_SYM) then
+    Exit;
+  PropertyRedeclRoot(AMid, ASym, LMid, LSym);
+  LType := PasPropertyParamTypeNode(FModels[LMid].Tree,
+    FModels[LMid].Symbols[LSym].DeclNode, AIndex);
+  if LType = NIL_NODE then
+    Exit;
+  Result := ResolveTypeExpr(LMid, LType);
+  if (AInst <> NIL_INST) and XValid(Result) then
+    Result := SubstX(Result, AInst, 0);
+  if XValid(Result) then
+    Result := CanonTypeX(Result);
+end;
+
+{ The element type of the DYNAMIC-array parameter type ACanonParX -
+  `TArray<string>`, `TStringDynArray`, a named `array of T` - closed over
+  its frame (ArrayElemX); XNil for any other type, a static array among
+  them, which a `[...]` is no argument for. }
 function TPasSemaProject.DynArrayElemX(
   const ACanonParX: TSemaXType): TSemaXType;
 begin

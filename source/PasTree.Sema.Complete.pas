@@ -356,6 +356,9 @@ type
     // ranks first, one whose element only converts next.
     FExpectEnum: Boolean;
     FEnumElem: TSemaXType;
+    // ArgExpectAt's answer for an open-array parameter (`Foo([|])`): its
+    // element, which the parameter's own type cannot carry.
+    FArgOpenElem: TPasComplTypeRef;
     // ValueReaches' answers per record type for one ranking (RankItems):
     // 0 being walked, 1 reaches nothing, 2 may reach. FReachCycle: a walk
     // met a record still being walked, so what it found is not final.
@@ -499,6 +502,17 @@ type
     function ForInStart(AIn: Integer; out AVarRaw: Integer;
       out AInline: Boolean): Boolean;
     function RawDesignatorType(ARaw: Integer): TPasComplTypeRef;
+    function DesignatorEndingAt(AEndRaw: Integer;
+      out ABeforeRaw: Integer): Integer;
+    function OperatorLeftType(AOp: Integer;
+      AAllowIn: Boolean): TPasComplTypeRef;
+    function BracketOpenOf(ARaw: Integer; out AIndex: Integer): Integer;
+    function BracketExpect(AOpen, AIndex, AScope: Integer): TPasComplTypeRef;
+    function IndexTypeOf(const ABase: TPasComplTypeRef;
+      AIndex: Integer): TPasComplTypeRef;
+    function ArrayPropIndexType(ANode, AIndex: Integer): TPasComplTypeRef;
+    function SetElementRef(const ASet: TPasComplTypeRef;
+      out AIsSet: Boolean): TPasComplTypeRef;
     function RefValueX(const ARef: TPasComplTypeRef;
       out AOvSym: Integer): TSemaXType;
     function MatchOf(const AItem: TPasComplItem): TPasComplMatch;
@@ -5083,7 +5097,8 @@ end;
   `case` (FExpectOrdinal, no one type); the selector's type in a `case`
   label (CaseLabelOf, FConstOnly); its parameter's
   where it starts a call's argument (`F(|`, `F(A, |`: ArgExpectAt), the
-  routine's result in `Exit(|` (ExitExpect); otherwise the caret
+  routine's result in `Exit(|` (ExitExpect); an index's type or a set's
+  element inside brackets (BracketExpect); otherwise the caret
   starts the right side of `:=` or of a comparison (`=`, `<>`, `<`, `>`,
   `<=`, `>=`), and the left side is a designator - a name, a member chain, a call, an index, a
   dereference - that the engine types. Only the FIRST operand right of the
@@ -5104,14 +5119,8 @@ end;
 function TPasCompletion.ExpectedTypeAt(
   const AInfo: TPasCaretInfo): TPasComplTypeRef;
 const
-  OPERATORS = [tkAssign, tkEqual, tkNotEqual, tkLess, tkGreater,
-    tkLessEqual, tkGreaterEqual];
   DESIGNATORS = [nkIdent, nkMember, nkCall, nkIndex, nkDeref, nkParen,
     nkTypeArgs];
-  // What may stand before an operand that starts its expression.
-  OPENERS = [tkIf, tkWhile, tkUntil, tkLParen, tkLBracket, tkComma,
-    tkSemicolon, tkColon, tkAssign, tkBegin, tkThen, tkElse, tkDo,
-    tkRepeat, tkTry, tkFinally, tkExcept, tkOf, tkFor];
 var
   LTS: TPasTokenStream;
   LOp, LEnd, LVis, LNode, LParent, LLeft, LBefore: Integer;
@@ -5169,6 +5178,15 @@ begin
     FExpectOrdinal := True;
     Exit;
   end;
+  // Inside brackets - right after `[`, or a `,` or `..` of their list - an
+  // index (`A[|]`, `M[I, |]`) or a set or array constructor's element
+  // (`S := [|]`, `K in [A, |`): BracketExpect.
+  if LTS.Tokens[LOp].Kind in [tkLBracket, tkComma, tkDotDot] then
+  begin
+    LBefore := BracketOpenOf(LOp, LVis);
+    if LBefore >= 0 then
+      Exit(BracketExpect(LBefore, LVis, AInfo.Scope));
+  end;
   // A `case` label - right after `of`, a `,` or `..` of a label list, or the
   // `;` ending an arm - is a constant of the selector's type (CaseLabelOf).
   if LTS.Tokens[LOp].Kind in [tkOf, tkComma, tkDotDot, tkSemicolon] then
@@ -5224,31 +5242,74 @@ begin
   // list - expects its parameter's type (ArgExpectAt).
   if LTS.Tokens[LOp].Kind in [tkLParen, tkComma] then
     Exit(ArgExpectAt(LOp, AInfo.Scope));
-  if not (LTS.Tokens[LOp].Kind in OPERATORS) then
+  Result := OperatorLeftType(LOp, False);
+end;
+
+{ The designator node that ends on raw token AEndRaw, grown up its parents
+  while they end there too (a member chain, a call, an index) - NIL_NODE
+  when no designator ends there. ABeforeRaw is the raw token before its
+  leftmost token (-1 when that is in another file). }
+function TPasCompletion.DesignatorEndingAt(AEndRaw: Integer;
+  out ABeforeRaw: Integer): Integer;
+const
+  DESIGNATORS = [nkIdent, nkMember, nkCall, nkIndex, nkDeref, nkParen,
+    nkTypeArgs];
+var
+  LVis, LParent, LLeft: Integer;
+begin
+  Result := NIL_NODE;
+  ABeforeRaw := -1;
+  if AEndRaw < 0 then
     Exit;
-  LEnd := PrevVisibleRaw(LOp - 1);
-  if LEnd < 0 then
+  LVis := FVisOfRaw[AEndRaw];
+  if LVis < 0 then
     Exit;
-  LVis := FVisOfRaw[LEnd];
-  LNode := InnermostNodeAt(LVis);
-  if (LNode = NIL_NODE) or
-     not (FModel.Tree.Nodes[LNode].Kind in DESIGNATORS) then
-    Exit;
+  Result := InnermostNodeAt(LVis);
+  if (Result = NIL_NODE) or
+     not (FModel.Tree.Nodes[Result].Kind in DESIGNATORS) then
+    Exit(NIL_NODE);
   while True do
   begin
-    LParent := FModel.Tree.Nodes[LNode].Parent;
+    LParent := FModel.Tree.Nodes[Result].Parent;
     if (LParent = NIL_NODE) or
        (FModel.Tree.Nodes[LParent].LastToken <> LVis) or
        not (FModel.Tree.Nodes[LParent].Kind in DESIGNATORS) then
       Break;
-    LNode := LParent;
+    Result := LParent;
   end;
-  LLeft := FModel.Tree.NodeLeftmostVis(LNode);
+  LLeft := FModel.Tree.NodeLeftmostVis(Result);
   if (LLeft < 0) or (LLeft > High(FModel.Tree.Source.Visible)) or
      (FModel.Tree.Source.Visible[LLeft].FileId <> 0) then
+    Exit(NIL_NODE);
+  ABeforeRaw := PrevVisibleRaw(
+    FModel.Tree.Source.Visible[LLeft].TokenIndex - 1);
+end;
+
+{ The type of the left side of the operator at raw token AOp - `:=` or a
+  comparison, and `in` when AAllowIn (`K in [|`: K's type) - when that left
+  side is a designator starting the expression (ExpectedTypeAt's comment).
+  ComplNilRef otherwise. }
+function TPasCompletion.OperatorLeftType(AOp: Integer;
+  AAllowIn: Boolean): TPasComplTypeRef;
+const
+  OPERATORS = [tkAssign, tkEqual, tkNotEqual, tkLess, tkGreater,
+    tkLessEqual, tkGreaterEqual];
+  // What may stand before an operand that starts its expression.
+  OPENERS = [tkIf, tkWhile, tkUntil, tkLParen, tkLBracket, tkComma,
+    tkSemicolon, tkColon, tkAssign, tkBegin, tkThen, tkElse, tkDo,
+    tkRepeat, tkTry, tkFinally, tkExcept, tkOf, tkFor];
+var
+  LTS: TPasTokenStream;
+  LNode, LBefore: Integer;
+begin
+  Result := ComplNilRef;
+  LTS := FModel.Tree.Source.Files[0];
+  if (AOp < 1) or not ((LTS.Tokens[AOp].Kind in OPERATORS) or
+     AAllowIn and (LTS.Tokens[AOp].Kind = tkIn)) then
     Exit;
-  LBefore := PrevVisibleRaw(FModel.Tree.Source.Visible[LLeft].TokenIndex - 1);
-  if (LBefore < 0) or not (LTS.Tokens[LBefore].Kind in OPENERS) then
+  LNode := DesignatorEndingAt(PrevVisibleRaw(AOp - 1), LBefore);
+  if (LNode = NIL_NODE) or (LBefore < 0) or
+     not (LTS.Tokens[LBefore].Kind in OPENERS) then
     Exit;
   Result := DesignatorType(LNode, 0);
   if Result.IsTypeRef then
@@ -5262,6 +5323,382 @@ begin
     else
       Result := ComplNilRef;
   end;
+end;
+
+{ The `[` whose list the operand after raw token ARaw (a `[`, `,` or `..`)
+  stands in, and in AIndex its position there (the commas before it at the
+  list's level). The walk goes back as ArgExpectAt's does - nested `()` /
+  `[]` skipped - and a `(` or a statement boundary first means it is no
+  bracket's (a call's argument, a case label); -1 then. }
+function TPasCompletion.BracketOpenOf(ARaw: Integer;
+  out AIndex: Integer): Integer;
+var
+  LTS: TPasTokenStream;
+  LDepth, LSteps: Integer;
+begin
+  Result := -1;
+  AIndex := 0;
+  LTS := FModel.Tree.Source.Files[0];
+  LDepth := 0;
+  LSteps := 0;
+  while (ARaw >= 0) and (LSteps < 4096) do
+  begin
+    case LTS.Tokens[ARaw].Kind of
+      tkRParen, tkRBracket:
+        Inc(LDepth);
+      tkLBracket:
+        if LDepth = 0 then
+          Exit(ARaw)
+        else
+          Dec(LDepth);
+      tkLParen:
+        if LDepth = 0 then
+          Exit
+        else
+          Dec(LDepth);
+      tkComma:
+        if LDepth = 0 then
+          Inc(AIndex);
+      tkSemicolon, tkBegin, tkEnd, tkThen, tkDo, tkElse, tkOf, tkIf,
+      tkWhile, tkUntil, tkRepeat, tkAssign:
+        if LDepth = 0 then
+          Exit;
+    end;
+    ARaw := PrevVisibleRaw(ARaw - 1);
+    Inc(LSteps);
+  end;
+end;
+
+{ What the operand at position AIndex of the brackets opened at raw token
+  AOpen expects. After a designator (a name, `)`, `]`, `^`) they index it:
+  the index type (IndexTypeOf; an array property's parameter,
+  ArrayPropIndexType). Otherwise they construct a set or an array: after
+  `:=` or a comparison its element, of the left side's type (a set's base, a
+  dynamic array's element - SetElementRef); after `in` the left operand's
+  own type (`K in [|`); as a call's argument the parameter's (an open
+  array's element, a set's base, ArgExpectAt). An index and a set's element
+  never take a procedure, typed or not (FArgNoProcs); an array's element
+  may (an array of procedural values), so it is left to the type. Any other
+  `[` - an attribute - expects nothing. }
+function TPasCompletion.BracketExpect(AOpen, AIndex,
+  AScope: Integer): TPasComplTypeRef;
+var
+  LTS: TPasTokenStream;
+  LPrev, LNode, LBefore: Integer;
+  LBase: TPasComplTypeRef;
+  LIsSet: Boolean;
+begin
+  Result := ComplNilRef;
+  LTS := FModel.Tree.Source.Files[0];
+  LPrev := PrevVisibleRaw(AOpen - 1);
+  if LPrev < 1 then
+    Exit;
+  case LTS.Tokens[LPrev].Kind of
+    tkIdentifier, tkRParen, tkRBracket, tkCaret:
+      begin
+        LNode := DesignatorEndingAt(LPrev, LBefore);
+        if LNode = NIL_NODE then
+          Exit;
+        FArgNoProcs := True;
+        if IsArrayPropertyDesignator(LNode, 0) then
+          Exit(ArrayPropIndexType(LNode, AIndex));
+        LBase := DesignatorType(LNode, 0);
+        if ComplValid(LBase) and not LBase.IsTypeRef then
+          Result := IndexTypeOf(LBase, AIndex);
+      end;
+    tkIn:
+      begin
+        FArgNoProcs := True;
+        Result := OperatorLeftType(LPrev, True);
+      end;
+    tkAssign, tkEqual, tkNotEqual, tkLessEqual, tkGreaterEqual:
+      begin
+        Result := SetElementRef(OperatorLeftType(LPrev, False), LIsSet);
+        FArgNoProcs := LIsSet;
+      end;
+    tkLParen, tkComma:
+      begin
+        FArgOpenElem := ComplNilRef;
+        LBase := ArgExpectAt(LPrev, AScope);
+        // The brackets are the argument, never a variable of a `var` one.
+        FArgByRef := False;
+        if ComplValid(FArgOpenElem) then
+          Result := FArgOpenElem
+        else
+        begin
+          Result := SetElementRef(LBase, LIsSet);
+          if LIsSet then
+            FArgNoProcs := True;
+        end;
+      end;
+  end;
+end;
+
+{ The type index AIndex (0-based) of brackets applied to a value of type
+  ABase takes - ElementTypeOf's walk, one dimension per index: an array's
+  index type for that dimension, Integer for a dynamic or open one (and the
+  dimensions past it to its element's); Integer for a string and a pointer;
+  a class or record with a default array property its parameter. }
+function TPasCompletion.IndexTypeOf(const ABase: TPasComplTypeRef;
+  AIndex: Integer): TPasComplTypeRef;
+var
+  LCur, LNext: TPasComplTypeRef;
+  LM: TPasSemaModel;
+  LHop, LDef, LKid, LIdxCount, LDims, LStep, LMid, LSym, LBound: Integer;
+  LX, LOwner: TSemaXType;
+
+  function IntegerRef: TPasComplTypeRef;
+  var
+    LIMid, LISym: Integer;
+  begin
+    Result := ComplNilRef;
+    if BridgeName('integer', LIMid, LISym) then
+      Result.X := XPlain(LIMid, LISym);
+  end;
+
+  // The type of the overlay's index type node ANode.
+  function OverlayIndexRef(ANode: Integer): TPasComplTypeRef;
+  var
+    LBMid, LBSym: Integer;
+  begin
+    Result := ComplNilRef;
+    case FModel.Tree.Nodes[ANode].Kind of
+      nkIdent, nkMember, nkTypeArgs:
+        begin
+          Result := ResolveTypeRefNode(ANode, 1);
+          Result.IsTypeRef := False;
+        end;
+      nkSubrange:
+        begin
+          LBound := FModel.Tree.Nodes[ANode].FirstChild;
+          if LBound = NIL_NODE then
+            Exit;
+          if IsCharLiteralExpr(FModel.Tree, LBound) then
+          begin
+            if BridgeName('char', LBMid, LBSym) then
+              Result.X := XPlain(LBMid, LBSym);
+          end
+          else if FModel.Tree.Nodes[LBound].Kind in [nkIdent, nkMember] then
+          begin
+            Result := DesignatorType(LBound, 1);
+            if Result.IsTypeRef then
+              Result := ComplNilRef;
+          end
+          else
+            Result := IntegerRef;
+        end;
+    end;
+  end;
+
+begin
+  Result := ComplNilRef;
+  if AIndex < 0 then
+    Exit;
+  LCur := ABase;
+  LCur.IsTypeRef := False;
+  for LHop := 1 to 64 do
+  begin
+    // An array definition in hand: AIndex within its dimensions is one of
+    // its index types, past them its element's.
+    if LCur.ArrNode <> NIL_NODE then
+    begin
+      if not SymModelOf(LCur.ArrMid, 'IndexTypeOf', LM) then
+        Exit;
+      LIdxCount := 0;
+      if LM.Tree.Nodes[LCur.ArrNode].Aux <> 1 then
+        LIdxCount := PasArrayDims(LM.Tree, LCur.ArrNode);
+      // `array of T` writes no index type: one dimension, Integer.
+      if (LIdxCount = 1) and
+         (LM.Tree.Nodes[LM.Tree.Nodes[LCur.ArrNode].FirstChild].NextSibling =
+          NIL_NODE) then
+        LIdxCount := 0;
+      LDims := LIdxCount;
+      if LDims = 0 then
+        LDims := 1;
+      Dec(LDims, LCur.ArrSkip);
+      if AIndex >= LDims then
+      begin
+        Dec(AIndex, LDims);
+        LCur := ArrayElemRef(LCur.ArrMid, LCur.ArrNode, LCur.ArrCtx, 1);
+        Continue;
+      end;
+      if LIdxCount = 0 then
+        Exit(IntegerRef);
+      LKid := LM.Tree.Nodes[LCur.ArrNode].FirstChild;
+      for LStep := 1 to LCur.ArrSkip + AIndex do
+        if LKid <> NIL_NODE then
+          LKid := LM.Tree.Nodes[LKid].NextSibling;
+      if LKid = NIL_NODE then
+        Exit;
+      if LCur.ArrMid < 0 then
+        Exit(OverlayIndexRef(LKid));
+      Result.X := FProj.IndexTypeNodeX(LCur.ArrMid, LKid, LCur.ArrCtx);
+      Exit;
+    end;
+    // An inline `^T` value: indexing it is pointer indexing.
+    if LCur.ViaPointer then
+    begin
+      if AIndex = 0 then
+        Exit(IntegerRef);
+      LCur.ViaPointer := False;
+      Dec(AIndex);
+      Continue;
+    end;
+    if LCur.OvSym <> NIL_SYM then
+    begin
+      LDef := OverlayStructDef(LCur.OvSym);
+      if LDef = NIL_NODE then
+        Exit;
+      case FModel.Tree.Nodes[LDef].Kind of
+        nkArrayType:
+          LCur := ComplArrRef(-1, LDef, 0, NIL_INST);
+        nkPointerType:
+          begin
+            if AIndex = 0 then
+              Exit(IntegerRef);
+            LCur := ResolveTypeRefNode(FModel.Tree.Nodes[LDef].FirstChild, 1);
+            LCur.IsTypeRef := False;
+            Dec(AIndex);
+          end;
+        nkIdent, nkMember, nkTypeArgs:
+          begin
+            LNext := ResolveTypeRefNode(LDef, 1);
+            if LNext.OvSym = LCur.OvSym then
+              Exit;
+            LCur := LNext;
+          end;
+        nkClassType, nkRecordType, nkObjectType, nkInterfaceType:
+          begin
+            // A default array property: asked of the last-good twin.
+            LX := OwnModelTypeX(LCur.OvSym);
+            if not XValid(LX) then
+              Exit;
+            LCur := ComplNilRef;
+            LCur.X := LX;
+          end;
+      else
+        Exit;
+      end;
+      Continue;
+    end;
+    if (FProj = nil) or not XValid(LCur.X) then
+      Exit;
+    LM := ProjModel(LCur.X.UnitId, 'IndexTypeOf');
+    // A string, a character pointer: indexed by an Integer, one level.
+    if XValid(FProj.StringElementX(LCur.X.UnitId, LCur.X)) or
+       (LM.Symbols[LCur.X.Sym].Kind = skBuiltinType) then
+    begin
+      if AIndex = 0 then
+        Exit(IntegerRef);
+      Exit;
+    end;
+    LDef := ProjectTypeDef(LCur.X);
+    if LDef = NIL_NODE then
+      Exit;
+    case LM.Tree.Nodes[LDef].Kind of
+      nkArrayType:
+        LCur := ComplArrRef(LCur.X.UnitId, LDef, 0, LCur.X.Inst);
+      nkPointerType:
+        begin
+          if AIndex = 0 then
+            Exit(IntegerRef);
+          LX := FProj.PointeeX(LCur.X);
+          LCur := ComplNilRef;
+          LCur.X := LX;
+          Dec(AIndex);
+        end;
+      nkIdent, nkMember, nkTypeArgs:
+        begin
+          LX := FProj.ResolveTypeExpr(LCur.X.UnitId, LDef);
+          if (LCur.X.Inst <> NIL_INST) and XValid(LX) then
+            LX := FProj.SubstX(LX, LCur.X.Inst, 0);
+          if not XValid(LX) or ((LX.UnitId = LCur.X.UnitId) and
+             (LX.Sym = LCur.X.Sym)) then
+            Exit;
+          LCur := ComplNilRef;
+          LCur.X := LX;
+        end;
+      nkClassType, nkRecordType, nkObjectType, nkInterfaceType:
+        begin
+          // `L[I]` is L.Items[I]: the default property's parameter, in the
+          // frame it was found in (a dictionary's TKey).
+          if FProj.DefaultArrayPropX(LCur.X, LMid, LSym, LOwner) then
+            Result.X := FProj.ArrayPropParamX(LMid, LSym, AIndex, LOwner.Inst);
+          Exit;
+        end;
+    else
+      Exit;
+    end;
+  end;
+end;
+
+{ The type of index AIndex of the array property the designator ANode
+  names (`Obj.Items[|`): its parameter, closed over the frame of the value
+  it is read from (`Dict.Items[|` - a dictionary's TKey). }
+function TPasCompletion.ArrayPropIndexType(ANode,
+  AIndex: Integer): TPasComplTypeRef;
+var
+  LMid, LSym, LInst, LType: Integer;
+  LOwner: TPasComplTypeRef;
+begin
+  Result := ComplNilRef;
+  if not DesignatorSymOf(ANode, 0, LMid, LSym) then
+    Exit;
+  if LMid >= 0 then
+  begin
+    LInst := NIL_INST;
+    if FModel.Tree.Nodes[ANode].Kind = nkMember then
+    begin
+      LOwner := DesignatorType(FModel.Tree.Nodes[ANode].FirstChild, 0);
+      if XValid(LOwner.X) then
+        LInst := LOwner.X.Inst;
+    end;
+    Result.X := FProj.ArrayPropParamX(LMid, LSym, AIndex, LInst);
+  end
+  else if FIsProjectModel then
+    Result.X := FProj.ArrayPropParamX(FProjMid, LSym, AIndex, NIL_INST)
+  else
+  begin
+    LType := PasPropertyParamTypeNode(FModel.Tree,
+      FModel.Symbols[LSym].DeclNode, AIndex);
+    if LType = NIL_NODE then
+      Exit;
+    Result := ResolveTypeRefNode(LType, 1);
+    Result.IsTypeRef := False;
+  end;
+end;
+
+{ The element a `[...]` constructs for a slot of type ASet: a set's base
+  (AIsSet), a dynamic array's element; ComplNilRef for anything else. }
+function TPasCompletion.SetElementRef(const ASet: TPasComplTypeRef;
+  out AIsSet: Boolean): TPasComplTypeRef;
+var
+  LX, LElem: TSemaXType;
+  LOv, LFrom: Integer;
+begin
+  Result := ComplNilRef;
+  AIsSet := False;
+  if not ComplValid(ASet) or (FProj = nil) then
+    Exit;
+  LX := RefValueX(ASet, LOv);
+  if not XValid(LX) then
+    Exit;
+  case FProj.XCatOf(LX) of
+    tcSet:
+      begin
+        AIsSet := True;
+        LFrom := FProjMid;
+        if LFrom < 0 then
+          LFrom := LX.UnitId;
+        LElem := FProj.ForInElementOfX(LFrom, LX);
+      end;
+    tcArray:
+      LElem := FProj.DynArrayElemX(LX);
+  else
+    Exit;
+  end;
+  if XValid(LElem) then
+    Result.X := LElem;
 end;
 
 { Parameter AIndex of an intrinsic's display signature (TPasBuiltinSig.
@@ -5356,9 +5793,11 @@ var
   LParams: TArray<Integer>;
   LOpenArr, LOfConst: Boolean;
   LX: TSemaXType;
+  LCommaRaw: Integer;
 begin
   Result := ComplNilRef;
   LTS := FModel.Tree.Source.Files[0];
+  LCommaRaw := ARaw;
   LDepth := 0;
   LArgs := 0;
   LSteps := 0;
@@ -5428,6 +5867,25 @@ begin
         Result := ExitExpect(AScope);
       Exit;
     end;
+    // `Include(S, |)`, `Exclude(S, |)`: an element of S's set type - the
+    // table's `Element` is untyped.
+    if ((LM.Symbols[LSym].NameLower = 'include') or
+        (LM.Symbols[LSym].NameLower = 'exclude')) and (LArgs = 1) then
+    begin
+      var LIsSet: Boolean;
+      var LBefore: Integer;
+      FArgNoProcs := True;
+      LNode := DesignatorEndingAt(PrevVisibleRaw(LCommaRaw - 1), LBefore);
+      if (LNode <> NIL_NODE) and (LBefore = ARaw) then
+      begin
+        Result := DesignatorType(LNode, 0);
+        if Result.IsTypeRef then
+          Result := ComplNilRef
+        else
+          Result := SetElementRef(Result, LIsSet);
+      end;
+      Exit;
+    end;
     if not PasBuiltinSignature(LM.Symbols[LSym].NameLower, LSig) or
        not BuiltinParamAt(LSig.Params, LArgs, LByRef, LType) then
       Exit;
@@ -5457,6 +5915,9 @@ begin
      (LM.Tree.Nodes[LTypeNode].Kind = nkArrayType) then
   begin
     FArgNoProcs := True;
+    // `Foo([|])`: the open array's element (`array of const` none).
+    if LM.Tree.Nodes[LTypeNode].Aux <> 1 then
+      FArgOpenElem := ArrayElemRef(LMid, LTypeNode, LCtx, 1);
     Exit;
   end;
   if LMid >= 0 then
@@ -7209,6 +7670,7 @@ begin
   FConstOnly := False;
   FExpectEnum := False;
   FEnumElem := XNil;
+  FArgOpenElem := ComplNilRef;
   if FContext in [ccExpression, ccMember] then
   begin
     FExpect := RefValueX(ExpectedTypeAt(LInfo), FExpectOv);
