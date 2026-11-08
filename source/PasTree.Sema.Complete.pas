@@ -361,6 +361,15 @@ type
     // tcUnknown otherwise - a family, FExpect stays XNil and MatchOf asks
     // RefCastFit. A cast to an ordinal type sets FExpectOrdinal instead.
     FCastRef: TSemaTypeCat;
+    // A `with` item (`with | do`, `with A, |`): a value with members fits -
+    // a class, a record, an interface, a class reference; a scalar is
+    // wrong. A category, FExpect stays XNil and MatchOf asks WithFit.
+    FExpectWith: Boolean;
+    // A raised object (`raise |`): an instance of a class, FRaiseBase's
+    // descendants (Exception, when the caret's unit can name it) fitting
+    // and any other class leading. A category again (RaiseFit).
+    FExpectRaise: Boolean;
+    FRaiseBase: TSemaXType;
     // ArgExpectAt's answer for an open-array parameter (`Foo([|])`): its
     // element, which the parameter's own type cannot carry.
     FArgOpenElem: TPasComplTypeRef;
@@ -502,6 +511,8 @@ type
     function NotOperandExpect(const AOuter: TPasComplTypeRef): TPasComplTypeRef;
     function LogicalOperandExpect(AOp: Integer): TPasComplTypeRef;
     function IsGroupingParen(AParen: Integer): Boolean;
+    function IsWithListComma(AComma: Integer): Boolean;
+    function ProcValueFit(const AItem: TPasComplItem): Integer;
     function RefCatOf(const ARef: TPasComplTypeRef): TSemaTypeCat;
     function ArgExpectAt(ARaw, AScope: Integer): TPasComplTypeRef;
     procedure CastExpect(AMid, ASym: Integer);
@@ -4910,10 +4921,10 @@ begin
       else
         Result := ccStatement;
     // Words that open or continue an EXPRESSION - a condition, a bound, a
-    // selector, a raised object, an operand (audit A1-33: `if no|` never
+    // selector, a raised object, a `with` item, an operand (audit A1-33: `if no|` never
     // offered `not`).
-    tkIf, tkWhile, tkUntil, tkTo, tkDownto, tkCase, tkRaise, tkAnd, tkOr,
-    tkXor, tkNot, tkDiv, tkMod, tkShl, tkShr, tkIn:
+    tkIf, tkWhile, tkUntil, tkTo, tkDownto, tkCase, tkRaise, tkWith, tkAnd,
+    tkOr, tkXor, tkNot, tkDiv, tkMod, tkShl, tkShr, tkIn:
       Result := ccExpression;
   else
     // A reserved word (interface/implementation/var/type/...) opens a
@@ -5216,6 +5227,28 @@ begin
     FExpectOrdinal := True;
     Exit;
   end;
+  // A `with` item - right after `with`, or a `,` of its list - is a value
+  // whose members the body names: a category, FExpectWith.
+  if (LTS.Tokens[LOp].Kind = tkWith) or
+     ((LTS.Tokens[LOp].Kind = tkComma) and IsWithListComma(LOp)) then
+  begin
+    FExpectWith := True;
+    Exit;
+  end;
+  // A raised object: a class instance, an Exception's above the rest
+  // (FExpectRaise; FRaiseBase is Exception when the caret's unit names a
+  // class of that name, as it does through SysUtils).
+  if LTS.Tokens[LOp].Kind = tkRaise then
+  begin
+    FExpectRaise := True;
+    if BridgeName('exception', LLeft, LEnd) then
+    begin
+      FRaiseBase := FProj.CanonTypeX(XPlain(LLeft, LEnd));
+      if not XValid(FRaiseBase) or (FProj.XCatOf(FRaiseBase) <> tcClass) then
+        FRaiseBase := XNil;
+    end;
+    Exit;
+  end;
   // Inside brackets - right after `[`, or a `,` or `..` of their list - an
   // index (`A[|]`, `M[I, |]`) or a set or array constructor's element
   // (`S := [|]`, `K in [A, |`): BracketExpect.
@@ -5406,6 +5439,44 @@ begin
   Result := True;
 end;
 
+{ Does the `,` at raw token AComma separate the items of a `with` list
+  (`with A, |`)? The walk goes back over nested `()` / `[]`; a `with` at
+  the outer level says yes, a `(` or `[` there (an argument list, a set) or
+  a statement boundary first says no. }
+function TPasCompletion.IsWithListComma(AComma: Integer): Boolean;
+var
+  LTS: TPasTokenStream;
+  LRaw, LDepth, LSteps: Integer;
+begin
+  Result := False;
+  LTS := FModel.Tree.Source.Files[0];
+  LDepth := 0;
+  LSteps := 0;
+  LRaw := PrevVisibleRaw(AComma - 1);
+  while (LRaw >= 0) and (LSteps < 4096) do
+  begin
+    case LTS.Tokens[LRaw].Kind of
+      tkRParen, tkRBracket:
+        Inc(LDepth);
+      tkLParen, tkLBracket:
+        if LDepth = 0 then
+          Exit
+        else
+          Dec(LDepth);
+      tkWith:
+        if LDepth = 0 then
+          Exit(True);
+      tkSemicolon, tkBegin, tkEnd, tkThen, tkDo, tkElse, tkOf, tkIf,
+      tkWhile, tkUntil, tkRepeat, tkAssign, tkTry, tkFinally, tkExcept,
+      tkColon:
+        if LDepth = 0 then
+          Exit;
+    end;
+    LRaw := PrevVisibleRaw(LRaw - 1);
+    Inc(LSteps);
+  end;
+end;
+
 { The designator node that ends on raw token AEndRaw, grown up its parents
   while they end there too (a member chain, a call, an index) - NIL_NODE
   when no designator ends there. ABeforeRaw is the raw token before its
@@ -5480,7 +5551,15 @@ begin
     // the variable's would be in `X := |`. Any other type name (a type
     // declaration's `T = |`) expects nothing.
     if LTS.Tokens[LBefore].Kind = tkColon then
-      Result.IsTypeRef := False
+    begin
+      Result.IsTypeRef := False;
+      // After `=` it is a typed constant's value, a parameter's default or
+      // an initialized global's: a constant expression - no variable, no
+      // function (FConstOnly, as a `case` label). Except of a procedural
+      // type, whose constant is a routine (`const P: TProc = Foo`).
+      if (LTS.Tokens[AOp].Kind = tkEqual) and (RefCatOf(Result) <> tcProc) then
+        FConstOnly := True;
+    end
     else
       Result := ComplNilRef;
   end;
@@ -6809,6 +6888,44 @@ var
       Result := cmLeads;
   end;
 
+  // A `with` item's fit (FExpectWith) for a value or a type of category
+  // ACat: one with members - a class, a record, an interface, a class
+  // reference - fits; a scalar is wrong; a pointer or an array leads (`P^`,
+  // `A[I]`), as does what cannot be typed.
+  function WithFit(ACat: TSemaTypeCat): TPasComplMatch;
+  begin
+    if ACat in [tcClass, tcRecord, tcInterface, tcClassOf] then
+      Result := cmCompatible
+    else if ACat in NOTHING_TO_REACH then
+      Result := cmOther
+    else
+      Result := cmLeads;
+  end;
+
+  // A raised object's fit (FExpectRaise) for a value, or a type name, of
+  // category ACat and type AX: a class descending from FRaiseBase fits (an
+  // exception variable; `EFoo.Create` through its class), any class where
+  // no Exception is known or the ancestry cannot be followed; another
+  // class leads (it may be raised, and it may hold an exception); a scalar
+  // is wrong.
+  function RaiseFit(ACat: TSemaTypeCat; const AX: TSemaXType): TPasComplMatch;
+  var
+    LDist: Integer;
+  begin
+    if ACat = tcClass then
+    begin
+      Result := cmCompatible;
+      if XValid(FRaiseBase) and XValid(AX) and
+         (FProj.XDescentDistX(FProj.CanonTypeX(AX), FRaiseBase, LDist) =
+          xdNo) then
+        Result := cmLeads;
+    end
+    else if ACat in NOTHING_TO_REACH then
+      Result := cmOther
+    else
+      Result := cmLeads;
+  end;
+
 begin
   Result := cmOther;
   // `nil` - a keyword or a seeded constant, whichever list it came from -
@@ -6877,6 +6994,33 @@ begin
         Result := cmOther;
       Exit;
     end;
+    // A `with` item or a raised object through a type name: a class's
+    // (`with TFoo do` names its class members, `raise EFoo.Create`)
+    // judged by its category, a scalar type's is wrong.
+    if (FExpectWith or FExpectRaise) and (AItem.Sym <> NIL_SYM) then
+    begin
+      LX := XNil;
+      if AItem.Mid >= 0 then
+        LX := FProj.CanonTypeX(XPlain(AItem.Mid, AItem.Sym))
+      else if (AItem.Kind = skBuiltinType) and
+         BridgeName(FModel.Symbols[AItem.Sym].NameLower, LOv, LBridged) then
+        LX := FProj.CanonTypeX(XPlain(LOv, LBridged));
+      if XValid(LX) then
+        LCat := FProj.XCatOf(LX)
+      else
+        LCat := FModel.Symbols[AItem.Sym].TypeCat;
+      if LCat = tcUnknown then
+        Exit;
+      if FExpectRaise then
+        Exit(RaiseFit(LCat, LX));
+      // A class's name has class members; a record's or a scalar's has
+      // no value, only a cast (`TRec(X)`) leads to one.
+      if LCat = tcClass then
+        Result := cmCompatible
+      else if LCat in NOTHING_TO_REACH then
+        Result := cmOther;
+      Exit;
+    end;
     if (AItem.Sym = NIL_SYM) or not XValid(FExpect) then
       Exit;
     // A builtin type the overlay seeds (`string`, `Integer`) is judged as
@@ -6898,6 +7042,33 @@ begin
      not (AItem.Kind in [skVar, skParam, skField, skConst, skProperty,
        skEnumValue, skRoutine]) then
     Exit;
+  // A routine where a procedural value is expected (`OnClick := |`, a
+  // procedural parameter): its own signature decides - one that the type
+  // takes (ProcValueFit: `of object` a method, a plain type a plain
+  // routine, `reference to` both) is the value meant; a procedure that
+  // does not fit is wrong; a function that does not may still return one.
+  if (AItem.Kind = skRoutine) and (FExpectCat = tcProc) and
+     XValid(FExpect) and not FArgByRef then
+    case ProcValueFit(AItem) of
+      1:
+        Exit(cmExact);
+      -1:
+        begin
+          if AItem.Mid < 0 then
+            LM := FModel
+          else
+            LM := ProjModel(AItem.Mid, 'MatchOf');
+          if sfBuiltin in LM.Symbols[AItem.Sym].Flags then
+          begin
+            var LSig: TPasBuiltinSig;
+            if not PasBuiltinSignature(LM.Symbols[AItem.Sym].NameLower,
+               LSig) or not LSig.IsFunction then
+              Exit(cmOther);
+          end
+          else if LM.RoutineHead(AItem.Sym) <> rhFunction then
+            Exit(cmOther);
+        end;
+    end;
   // From here a value; one the engine cannot type leads somewhere.
   Result := cmLeads;
   LOv := NIL_SYM;
@@ -6953,6 +7124,21 @@ begin
        (FProj.XCatOf(FProj.CanonTypeX(LX)) in NOTHING_TO_REACH) then
       Exit(cmOther);
     Exit(cmLeads);
+  end;
+  if FExpectWith or FExpectRaise then
+  begin
+    // A type the overlay alone declares has no project type: its category.
+    if XValid(LX) then
+      LCat := FProj.XCatOf(FProj.CanonTypeX(LX))
+    else if LOv <> NIL_SYM then
+      LCat := FModel.Symbols[LOv].TypeCat
+    else
+      LCat := tcUnknown;
+    if LCat = tcUnknown then
+      Exit(cmLeads);
+    if FExpectWith then
+      Exit(WithFit(LCat));
+    Exit(RaiseFit(LCat, LX));
   end;
   if FExpectEnum then
   begin
@@ -7038,6 +7224,57 @@ begin
     Exit;
   end;
   Result := FitOf(LX, cmExact);
+end;
+
+{ Does a routine item - any overload of its family - fit the procedural
+  type FExpect (6.6.1: the same parameters, result and calling convention;
+  `of object` a method, a plain type a plain routine or a static class
+  method, `reference to` either - TPasSemaProject.ProcSigFitX)? 1 one
+  does, -1 none does, 0 when nothing could be compared: no signature of
+  FExpect, or an overlay routine the last analysis does not know yet. An
+  intrinsic has no address to take: -1. }
+function TPasCompletion.ProcValueFit(const AItem: TPasComplItem): Integer;
+var
+  LDst, LSrc: TPasProcSig;
+  LM: TPasSemaModel;
+  LSym, LProj, LRank, LHop: Integer;
+begin
+  Result := 0;
+  if (FProj = nil) or (AItem.Sym = NIL_SYM) or
+     not FProj.ProcTypeSigX(FExpect, LDst) then
+    Exit;
+  if AItem.Mid < 0 then
+    LM := FModel
+  else
+    LM := ProjModel(AItem.Mid, 'ProcValueFit');
+  if sfBuiltin in LM.Symbols[AItem.Sym].Flags then
+    Exit(-1);
+  LSym := AItem.Sym;
+  for LHop := 1 to 64 do
+  begin
+    if (LSym = NIL_SYM) or (LM.Symbols[LSym].Kind <> skRoutine) then
+      Break;
+    if AItem.Mid >= 0 then
+    begin
+      if FProj.RoutineSigX(AItem.Mid, LSym, LSrc) then
+      begin
+        if FProj.ProcSigFitX(LDst, LSrc, LRank) > 0 then
+          Exit(1);
+        Result := -1;
+      end;
+    end
+    else
+    begin
+      LProj := OwnModelRoutine(LSym);
+      if (LProj <> NIL_SYM) and FProj.RoutineSigX(FProjMid, LProj, LSrc) then
+      begin
+        if FProj.ProcSigFitX(LDst, LSrc, LRank) > 0 then
+          Exit(1);
+        Result := -1;
+      end;
+    end;
+    LSym := LM.Symbols[LSym].NextOverload;
+  end;
 end;
 
 // Every collected item against the expected type (see MatchOf).
@@ -7917,6 +8154,9 @@ begin
   FExpectEnum := False;
   FEnumElem := XNil;
   FCastRef := tcUnknown;
+  FExpectWith := False;
+  FExpectRaise := False;
+  FRaiseBase := XNil;
   FArgOpenElem := ComplNilRef;
   if FContext in [ccExpression, ccMember] then
   begin
@@ -7926,7 +8166,8 @@ begin
     else if FExpectOv <> NIL_SYM then
       FExpectCat := FModel.Symbols[FExpectOv].TypeCat;
     FNoProcedures := not (FExpectCat in [tcUnknown, tcProc]) or FArgNoProcs or
-      FExpectOrdinal or FConstOnly or FExpectEnum or (FCastRef <> tcUnknown);
+      FExpectOrdinal or FConstOnly or FExpectEnum or (FCastRef <> tcUnknown) or
+      FExpectWith or FExpectRaise;
   end;
   case FContext of
     ccNone:
@@ -8033,7 +8274,7 @@ begin
     end;
   end;
   if XValid(FExpect) or (FExpectOv <> NIL_SYM) or FExpectOrdinal or
-     FExpectEnum or (FCastRef <> tcUnknown) then
+     FExpectEnum or (FCastRef <> tcUnknown) or FExpectWith or FExpectRaise then
     RankItems;
   SetLength(FItems, FCount);
   AItems := FItems;
