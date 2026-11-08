@@ -115,7 +115,9 @@ end;
 { Like CaretCase, but BRIDGED: the overlay is parsed against the mini-project
   built in the main block (GProj/GProjMid), and the whole CompleteAt pipeline
   runs - context classification plus candidate collection. }
-procedure ProjCase(const ASource: string);
+{ AVirtual: the caret stands that many columns right of the marker, past the
+  line's end - an editor's virtual space, the blanks it does not keep. }
+procedure ProjCase(const ASource: string; AVirtual: Integer = 0);
 var
   LAt, LIdx, LLine, LCol: Integer;
   LClean: string;
@@ -134,6 +136,7 @@ begin
       Inc(LLine);
       LCol := LAt - LIdx;
     end;
+  Inc(LCol, AVirtual);
 
   GComp.Free;
   GComp := nil;
@@ -2818,8 +2821,13 @@ begin
   TDirectory.CreateDirectory(GDir);
   var LSelfMain :=
     'unit mainu;'#10'interface'#10'type'#10 +
-    '  TSelfK = class'#10'  public'#10'    Name: string;'#10 +
-    '    procedure Inst;'#10'    class procedure Cls;'#10'  end;'#10 +
+    '  TSelfBase = class'#10'  public'#10 +
+    '    function GetInProgress: Boolean; virtual;'#10 +
+    '    procedure BaseProc;'#10 +
+    '    property Busy: Boolean read GetInProgress;'#10'  end;'#10 +
+    '  TSelfK = class(TSelfBase)'#10'  public'#10'    Name: string;'#10 +
+    '    procedure Inst;'#10'    class procedure Cls;'#10 +
+    '    function GetInProgress: Boolean; override;'#10'  end;'#10 +
     '  TSelfKClass = class of TSelfK;'#10 +
     '  TSelfR = record'#10'    S: string;'#10'    procedure RInst;'#10 +
     '  end;'#10 +
@@ -2828,6 +2836,10 @@ begin
     'procedure TSelfK.Inst;'#10'begin'#10'  //INST'#10'end;'#10 +
     'class procedure TSelfK.Cls;'#10'begin'#10'  //CLS'#10'end;'#10 +
     'procedure TSelfR.RInst;'#10'begin'#10'  //REC'#10'end;'#10 +
+    'function TSelfBase.GetInProgress: Boolean;'#10'begin'#10'end;'#10 +
+    'procedure TSelfBase.BaseProc;'#10'begin'#10'end;'#10 +
+    'function TSelfK.GetInProgress: Boolean;'#10'begin'#10 +
+    '  Result := False;'#10'  //FN'#10'end;'#10 +
     'end.'#10;
   TFile.WriteAllText(TPath.Combine(GDir, 'mainu.pas'), LSelfMain);
   GProj := TPasSemaProject.Create(pfWin32, [GDir], []);
@@ -2873,6 +2885,39 @@ begin
         Ord(ItemNamed('Self').Match), ' class=',
         Ord(ItemNamed('TSelfK').Match));
     end);
+
+  // `inherited |` as a function's last statement, unterminated, `end;` on
+  // the next line - and the same with the blank after `inherited` only an
+  // editor's virtual space: RAD Studio keeps no trailing blank, so the
+  // buffer held `  inherited` with the caret a column right of it, and the
+  // whole statement list came back (an IDE test, 2026-11-08).
+  for var LVirtual := 0 to 1 do
+  begin
+    if LVirtual = 0 then
+      ProjCase(StringReplace(LSelfMain, '//FN', 'inherited |', []))
+    else
+      ProjCase(StringReplace(LSelfMain, '//FN', 'inherited|', []), 1);
+    GCounter.Ok(Format('inherited: a function''s unterminated last ' +
+      'statement lists the ancestors'' methods and properties, its own ' +
+      'name first (virtual space %d)', [LVirtual]),
+      GHit and (GCtx = ccInherited) and
+      Has('GetInProgress') and (ItemNamed('GetInProgress').Match = cmExact) and
+      Has('BaseProc') and (ItemNamed('BaseProc').Match = cmCompatible) and
+      Has('Busy') and (ItemNamed('Busy').Match = cmCompatible) and
+      not Has('Self') and not Has('Result') and not Has('Name') and
+      not Has('GK') and not Has('TSelfK') and not Has('Inst'),
+      procedure
+      begin
+        Writeln('    hit=', GHit, ' ctx=', Ord(GCtx), ' items=',
+          Length(GItems), ' self=', Has('Self'), ' result=', Has('Result'),
+          ' own=', Ord(ItemNamed('GetInProgress').Match));
+      end);
+  end;
+  // A caret in virtual space after a dot is still a member list, and the
+  // blanks reach no other line.
+  ProjCase(StringReplace(LSelfMain, '//FN', 'GK.|', []), 2);
+  GCounter.Ok('virtual space after `GK.` still lists its members',
+    GHit and (GCtx = ccMember) and Has('BaseProc'));
   GComp.Free;
   GComp := nil;
   GProj.Free;
