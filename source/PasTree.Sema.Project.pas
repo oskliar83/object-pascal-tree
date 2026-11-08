@@ -2109,6 +2109,13 @@ type
       else. Promoted for the same ranking: an array whose element fits starts
       `A[I]`. }
     function DynArrayElemX(const ACanonParX: TSemaXType): TSemaXType;
+    { What a for-in over a value of type ACollX walks (ForInElementX with no
+      node): a string's character, a set's base, an array's element, a
+      class's or record's GetEnumerator.Current - XNil when it cannot be
+      enumerated. AFromMid is the unit asking (visibility, helpers).
+      Promoted for the completion engine's `for X in |` ranking. }
+    function ForInElementOfX(AFromMid: Integer;
+      const ACollX: TSemaXType): TSemaXType;
     { Whether AX declares `class operator Implicit` - not which types it
       takes (UserConvX reads that). `Explicit` never converts implicitly
       (9.3.1). }
@@ -14987,6 +14994,14 @@ end;
   `TArray<string>`, `TStringDynArray`, a named `array of T` - closed over
   its frame (ArrayElemX); XNil for any other type, a static array among
   them, which a `[...]` is no argument for. }
+function TPasSemaProject.ForInElementOfX(AFromMid: Integer;
+  const ACollX: TSemaXType): TSemaXType;
+begin
+  Result := XNil;
+  if XValid(ACollX) and (AFromMid >= 0) and (AFromMid < FModels.Count) then
+    Result := ForInElementX(AFromMid, NIL_NODE, ACollX);
+end;
+
 function TPasSemaProject.DynArrayElemX(
   const ACanonParX: TSemaXType): TSemaXType;
 begin
@@ -24576,7 +24591,8 @@ var
 
 begin
   Result := XNil;
-  if ACollNode = NIL_NODE then
+  // No node: a collection known by its type alone (ForInElementOfX).
+  if (ACollNode = NIL_NODE) and not XValid(ACollX) then
     Exit;
   LProbe := nil;
   try
@@ -24636,7 +24652,7 @@ begin
             if LM.Tree.Nodes[LDef].Aux <> 1 then
               Result := SubstX(ResolveTypeExprNested(LCur.UnitId,
                 PasArrayInnermostElem(LM.Tree, LDef)), LCur.Inst, 0);
-            if not XValid(Result) then
+            if not XValid(Result) and (ACollNode <> NIL_NODE) then
               Result := ElementX(AMid, ACollNode, Probe);
             Exit;
           end;

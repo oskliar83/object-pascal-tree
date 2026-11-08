@@ -1067,6 +1067,14 @@ const
     '  THasColor = record Tag: Integer; Color: TColor2; end;'#10 +
     '  TNested = record G: TGuid2; H: THasColor; end;'#10 +
     '  TWithObj = record Count: Integer; Owner: TOwner; end;'#10 +
+    // For-in collections: a set, a class enumerated through GetEnumerator.
+    '  TColorSet = set of TColor2;'#10 +
+    '  TBagEnum = class'#10 +
+    '    function MoveNext: Boolean;'#10 +
+    '    function GetCurrent: TColor2;'#10 +
+    '    property Current: TColor2 read GetCurrent;'#10 +
+    '  end;'#10 +
+    '  TBag = class function GetEnumerator: TBagEnum; end;'#10 +
     'const'#10 +
     '  CRed = clRed;'#10 +
     '  CGreenT: TColor2 = clGreen;'#10 +
@@ -1088,6 +1096,9 @@ const
     '  ExtNested: TNested;'#10 +
     '  ExtWithObj: TWithObj;'#10 +
     '  ExtPtr: Pointer;'#10 +
+    '  ExtSet: TColorSet;'#10 +
+    '  ExtBag: TBag;'#10 +
+    '  ExtStr: string;'#10 +
     'function ExtGuidOf(const S: string): TGuid2;'#10 +
     'function ExtColorOf: TColor2;'#10 +
     'procedure ExtReset;'#10 +
@@ -1123,6 +1134,9 @@ const
     'end;'#10 +
     'procedure ExtReset;'#10'begin'#10'end;'#10 +
     'procedure TOwner.Reset;'#10'begin'#10'end;'#10 +
+    'function TBagEnum.MoveNext: Boolean;'#10'begin'#10'  Result := False;'#10'end;'#10 +
+    'function TBagEnum.GetCurrent: TColor2;'#10'begin'#10'  Result := clRed;'#10'end;'#10 +
+    'function TBag.GetEnumerator: TBagEnum;'#10'begin'#10'  Result := nil;'#10'end;'#10 +
     'function TOwner.Car: TCar;'#10'begin'#10'  Result := nil;'#10'end;'#10 +
     'end.'#10;
   EXP_HEAD_A =                      // TYPES_HERE marks the overlay's extras
@@ -1418,7 +1432,8 @@ begin
   DotCase('with B.| do;');
   // A case selector takes an ordinal: the procedure Pub is none.
   DotCase('case B.| of 1: ; end;', 'CF');
-  DotCase('for ImplVar := B.| to 1 do;');
+  // A for bound takes the counter's type: the procedure Pub is no bound.
+  DotCase('for ImplVar := B.| to 1 do;', 'CF');
   DotCase('raise B.|;');
   DotCase('var V := B.|;');
   DotCase('ImplVar := Ord(Assigned(B.|));', 'CF');
@@ -2965,6 +2980,41 @@ begin
     '  case C of clRed: ; else I := 1; | end;'#10 + PROJ_TAIL);
   GCounter.Ok('expected type: the case''s else part lists variables',
     (GCtx = ccStatement) and Has('I') and Has('ExtReset'));
+  // `for` bounds expect the counter's type - the first, after `to`, after
+  // `downto`; an enumeration counter takes its constants.
+  ExpCase('for I := | to 10 do;', 'I,ExtCount', '', 'F,C', 'ExtReset');
+  ExpCase('for I := 0 to | do;', 'I,ExtCount', '', 'F,C', 'ExtReset');
+  ExpCase('for I := 10 downto | do;', 'I,ExtCount', '', 'F,C', 'ExtReset');
+  ExpCase('for I := Length(Arr) - 1 downto | do;', 'I', '', 'C', 'ExtReset');
+  ExpCase('for C := | to clGreen do;', 'clRed,C,ExtColor', '', 'shSquare,I',
+    'ExtReset');
+  ExpCase('for C := clRed to | do;', 'clGreen,C', '', 'shSquare,I',
+    'ExtReset');
+  // An inline counter: a declared type is expected, an inferred one is not
+  // known yet - no procedure either way.
+  ExpCase('for var J: Integer := | to 10 do;', 'I,ExtCount', '', 'C',
+    'ExtReset');
+  ExpCase('for var J := | to 10 do;', '', '', '', 'ExtReset');
+  ExpCase('for var J := 0 to | do;', '', '', '', 'ExtReset');
+  // For-in: what can be enumerated - an array, a set, a string, a class
+  // with GetEnumerator - its element of the counter's type first; a value
+  // with members leads, a scalar is wrong.
+  ExpCase('for I in | do;', 'Arr,ExtFlags', '', 'I,F,C,ExtCount', 'ExtReset',
+    '', 'ExtColors,ExtSet,ExtBag,ExtOwner');
+  ExpCase('for C in | do;', 'ExtColors,ExtSet,ExtBag', '', 'I,C,ExtCount',
+    'ExtReset', '', 'Arr,ExtOwner');
+  ExpCase('for var X in | do;', '', 'Arr,ExtFlags,ExtColors,ExtSet,ExtBag,ExtStr',
+    'I,F,C,ExtCount', 'ExtReset', '', 'ExtOwner');
+  ExpCase('for C in Ext| do;', 'ExtColors,ExtSet,ExtBag', '', 'ExtCount',
+    'ExtReset', '', 'ExtFlags');
+  ExpRoutines('for Ch in |',
+    'procedure P;'#10'var'#10'  Ch: Char;'#10'begin'#10 +
+    '  for Ch in | do;'#10'end;'#10, 'ExtStr', '', 'ExtCount,ExtColor',
+    'ExtReset', 'ExtFlags,ExtSet');
+  // `in` as the set operator is no for-in.
+  ProjCase(EXP_HEAD_A + EXP_HEAD_B + '  if C in | then;'#10 + PROJ_TAIL);
+  GCounter.Ok('expected type: the set operator `in` is no for-in',
+    Has('ExtReset'));
   GComp.Free;
   GComp := nil;
   GProj.Free;

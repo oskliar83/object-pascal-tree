@@ -349,6 +349,13 @@ type
     // procedure (CaseLabelOf); FExpect is the selector's type, if known.
     FExpectOrdinal: Boolean;
     FConstOnly: Boolean;
+    // A for-in collection (`for X in |`): what can be enumerated fits - a
+    // category again, FExpect stays XNil and MatchOf asks EnumFit.
+    // FEnumElem is the loop variable's type when it has a declared one
+    // (`for var X in` has none): a collection whose element is that type
+    // ranks first, one whose element only converts next.
+    FExpectEnum: Boolean;
+    FEnumElem: TSemaXType;
     // ValueReaches' answers per record type for one ranking (RankItems):
     // 0 being walked, 1 reaches nothing, 2 may reach. FReachCycle: a walk
     // met a record still being walked, so what it found is not final.
@@ -488,6 +495,10 @@ type
     function CaseLabelOf(ARaw: Integer): Integer;
     function CaseOfStart(AOf: Integer): Integer;
     function CaseSelectorType(AOf: Integer): TPasComplTypeRef;
+    function ForAssignOf(ATo: Integer): Integer;
+    function ForInStart(AIn: Integer; out AVarRaw: Integer;
+      out AInline: Boolean): Boolean;
+    function RawDesignatorType(ARaw: Integer): TPasComplTypeRef;
     function RefValueX(const ARef: TPasComplTypeRef;
       out AOvSym: Integer): TSemaXType;
     function MatchOf(const AItem: TPasComplItem): TPasComplMatch;
@@ -5100,10 +5111,11 @@ const
   // What may stand before an operand that starts its expression.
   OPENERS = [tkIf, tkWhile, tkUntil, tkLParen, tkLBracket, tkComma,
     tkSemicolon, tkColon, tkAssign, tkBegin, tkThen, tkElse, tkDo,
-    tkRepeat, tkTry, tkFinally, tkExcept, tkOf];
+    tkRepeat, tkTry, tkFinally, tkExcept, tkOf, tkFor];
 var
   LTS: TPasTokenStream;
   LOp, LEnd, LVis, LNode, LParent, LLeft, LBefore: Integer;
+  LInline: Boolean;
 begin
   Result := ComplNilRef;
   if (FProj = nil) or (AInfo.Kind = ckNone) then
@@ -5166,6 +5178,46 @@ begin
     begin
       FConstOnly := True;
       Exit(CaseSelectorType(LBefore));
+    end;
+  end;
+  // A for-in collection (`for X in |`): what can be enumerated, its element
+  // ranked against X's declared type (ForInStart, MatchOf's EnumFit).
+  if (LTS.Tokens[LOp].Kind = tkIn) and ForInStart(LOp, LBefore, LInline) then
+  begin
+    FExpectEnum := True;
+    if not LInline then
+    begin
+      FEnumElem := RefValueX(RawDesignatorType(LBefore), LEnd);
+      if XValid(FEnumElem) then
+        FEnumElem := FProj.CanonTypeX(FEnumElem);
+    end;
+    Exit;
+  end;
+  // A `for` bound after `to` / `downto` expects the counter's type, as the
+  // first bound does: typed through the loop's `:=` (ForAssignOf).
+  if LTS.Tokens[LOp].Kind in [tkTo, tkDownto] then
+  begin
+    LOp := ForAssignOf(LOp);
+    if LOp < 0 then
+      Exit;
+  end;
+  // An inline counter with no declared type (`for var I := |`) is typed by
+  // its bounds: nothing to expect, but a value stands there - no procedure.
+  if LTS.Tokens[LOp].Kind = tkAssign then
+  begin
+    LBefore := PrevVisibleRaw(LOp - 1);
+    if (LBefore >= 1) and (LTS.Tokens[LBefore].Kind = tkIdentifier) then
+    begin
+      LBefore := PrevVisibleRaw(LBefore - 1);
+      if (LBefore >= 1) and (LTS.Tokens[LBefore].Kind = tkVar) then
+      begin
+        LBefore := PrevVisibleRaw(LBefore - 1);
+        if (LBefore >= 0) and (LTS.Tokens[LBefore].Kind = tkFor) then
+        begin
+          FArgNoProcs := True;
+          Exit;
+        end;
+      end;
     end;
   end;
   // A call's argument - the operand right after its `(` or a `,` of its
@@ -5673,6 +5725,106 @@ begin
     Result := ComplNilRef;
 end;
 
+{ The `:=` of the `for` loop whose `to` / `downto` is ATo: walked back over
+  the first bound, nested `()` / `[]` skipped, to a `:=` at its level, and
+  from there over the counter (`I`, `var I`, `var I: T`) to the `for`.
+  -1 when the walk meets anything else - a statement boundary first. }
+function TPasCompletion.ForAssignOf(ATo: Integer): Integer;
+const
+  // What may stand between `for` and `:=`.
+  COUNTER = [tkIdentifier, tkVar, tkColon, tkDot, tkLess, tkGreater,
+    tkComma];
+  // Where a first bound cannot reach past.
+  STOPS = [tkSemicolon, tkBegin, tkEnd, tkDo, tkThen, tkElse, tkOf, tkTo,
+    tkDownto, tkFor, tkRepeat, tkUntil, tkTry, tkExcept, tkFinally, tkIn];
+var
+  LTS: TPasTokenStream;
+  LRaw, LDepth, LSteps: Integer;
+begin
+  Result := -1;
+  LTS := FModel.Tree.Source.Files[0];
+  LRaw := ATo;
+  LDepth := 0;
+  LSteps := 0;
+  while True do
+  begin
+    LRaw := PrevVisibleRaw(LRaw - 1);
+    Inc(LSteps);
+    if (LRaw < 0) or (LSteps > 4096) then
+      Exit;
+    case LTS.Tokens[LRaw].Kind of
+      tkRParen, tkRBracket:
+        Inc(LDepth);
+      tkLParen, tkLBracket:
+        if LDepth = 0 then
+          Exit
+        else
+          Dec(LDepth);
+      tkAssign:
+        if LDepth = 0 then
+          Break;
+    else
+      if (LDepth = 0) and (LTS.Tokens[LRaw].Kind in STOPS) then
+        Exit;
+    end;
+  end;
+  Result := LRaw;
+  LSteps := 0;
+  while True do
+  begin
+    LRaw := PrevVisibleRaw(LRaw - 1);
+    Inc(LSteps);
+    if (LRaw < 0) or (LSteps > 32) then
+      Exit(-1);
+    if LTS.Tokens[LRaw].Kind = tkFor then
+      Exit;
+    if not (LTS.Tokens[LRaw].Kind in COUNTER) then
+      Exit(-1);
+  end;
+end;
+
+{ Whether the `in` AIn is a for-in's (`for X in`, `for var X in`) rather
+  than the set membership operator: AVarRaw the loop variable's token,
+  AInline for an inline `var` (no declared type). }
+function TPasCompletion.ForInStart(AIn: Integer; out AVarRaw: Integer;
+  out AInline: Boolean): Boolean;
+var
+  LTS: TPasTokenStream;
+  LRaw: Integer;
+begin
+  Result := False;
+  AInline := False;
+  LTS := FModel.Tree.Source.Files[0];
+  AVarRaw := PrevVisibleRaw(AIn - 1);
+  if (AVarRaw < 1) or (LTS.Tokens[AVarRaw].Kind <> tkIdentifier) then
+    Exit;
+  LRaw := PrevVisibleRaw(AVarRaw - 1);
+  if (LRaw >= 1) and (LTS.Tokens[LRaw].Kind = tkVar) then
+  begin
+    AInline := True;
+    LRaw := PrevVisibleRaw(LRaw - 1);
+  end;
+  Result := (LRaw >= 0) and (LTS.Tokens[LRaw].Kind = tkFor);
+end;
+
+{ The value type of the plain name at raw token ARaw (a for-in's loop
+  variable): ComplNilRef for a type name or what the engine cannot type. }
+function TPasCompletion.RawDesignatorType(ARaw: Integer): TPasComplTypeRef;
+var
+  LVis, LNode: Integer;
+begin
+  Result := ComplNilRef;
+  LVis := FVisOfRaw[ARaw];
+  if LVis < 0 then
+    Exit;
+  LNode := InnermostNodeAt(LVis);
+  if (LNode = NIL_NODE) or (FModel.Tree.Nodes[LNode].Kind <> nkIdent) then
+    Exit;
+  Result := DesignatorType(LNode, 0);
+  if Result.IsTypeRef then
+    Result := ComplNilRef;
+end;
+
 { A value's type as one canonical project-space type (CanonTypeX: aliases
   followed), for comparing two of them - XNil for what has no such name: a
   type reference, a unit, an inline array, a pointer the slot spells `^T`.
@@ -5926,6 +6078,43 @@ var
       Result := cmLeads;
   end;
 
+  // A for-in collection's fit (FExpectEnum): what a for-in walks fits - its
+  // element of the loop variable's type first, one that converts to it
+  // next, any element where the variable has no declared type; one whose
+  // element does not convert, or no collection but a value with members
+  // (an object holding a list), leads; a scalar is wrong.
+  function EnumFit(const AX: TSemaXType): TPasComplMatch;
+  var
+    LC, LElem: TSemaXType;
+    LFrom: Integer;
+  begin
+    if not XValid(AX) then
+      Exit(cmLeads);
+    LC := FProj.CanonTypeX(AX);
+    LFrom := FProjMid;
+    if LFrom < 0 then
+      LFrom := LC.UnitId;
+    LElem := FProj.ForInElementOfX(LFrom, LC);
+    if XValid(LElem) then
+    begin
+      if not XValid(FEnumElem) then
+        Exit(cmCompatible);
+      case FProj.XConvX(FEnumElem, FProj.CanonTypeX(LElem)) of
+        scIdentical:
+          Result := cmExact;
+        scImplicit:
+          Result := cmCompatible;
+      else
+        Result := cmLeads;
+      end;
+      Exit;
+    end;
+    if FProj.XCatOf(LC) in NOTHING_TO_REACH then
+      Result := cmOther
+    else
+      Result := cmLeads;
+  end;
+
 begin
   Result := cmOther;
   // `nil` - a keyword or a seeded constant, whichever list it came from -
@@ -5980,6 +6169,16 @@ begin
       else if FModel.Symbols[AItem.Sym].TypeCat in [tcInteger, tcChar,
          tcBoolean, tcEnum] then
         Result := cmCompatible;
+      Exit;
+    end;
+    // A type is no collection (`for X in TColors` does not compile); a
+    // class name still leads (`TFoo.Create.Items`), a scalar's is wrong.
+    if FExpectEnum then
+    begin
+      if (AItem.Sym <> NIL_SYM) and (AItem.Mid >= 0) and
+         (FProj.XCatOf(FProj.CanonTypeX(XPlain(AItem.Mid, AItem.Sym))) in
+          NOTHING_TO_REACH) then
+        Result := cmOther;
       Exit;
     end;
     if (AItem.Sym = NIL_SYM) or not XValid(FExpect) then
@@ -6058,6 +6257,19 @@ begin
        (FProj.XCatOf(FProj.CanonTypeX(LX)) in NOTHING_TO_REACH) then
       Exit(cmOther);
     Exit(cmLeads);
+  end;
+  if FExpectEnum then
+  begin
+    // A type the overlay alone declares has no project type: its category.
+    if not XValid(LX) and (LOv <> NIL_SYM) and
+       (FModel.Symbols[LOv].TypeCat <> tcUnknown) then
+    begin
+      if FModel.Symbols[LOv].TypeCat in [tcString, tcSet, tcArray] then
+        Exit(cmCompatible);
+      if FModel.Symbols[LOv].TypeCat in NOTHING_TO_REACH then
+        Exit(cmOther);
+    end;
+    Exit(EnumFit(LX));
   end;
   if FExpectOrdinal then
   begin
@@ -6995,6 +7207,8 @@ begin
   FArgByRef := False;
   FExpectOrdinal := False;
   FConstOnly := False;
+  FExpectEnum := False;
+  FEnumElem := XNil;
   if FContext in [ccExpression, ccMember] then
   begin
     FExpect := RefValueX(ExpectedTypeAt(LInfo), FExpectOv);
@@ -7003,7 +7217,7 @@ begin
     else if FExpectOv <> NIL_SYM then
       FExpectCat := FModel.Symbols[FExpectOv].TypeCat;
     FNoProcedures := not (FExpectCat in [tcUnknown, tcProc]) or FArgNoProcs or
-      FExpectOrdinal or FConstOnly;
+      FExpectOrdinal or FConstOnly or FExpectEnum;
   end;
   case FContext of
     ccNone:
@@ -7109,7 +7323,8 @@ begin
       AddContextKeywords(LInfo);
     end;
   end;
-  if XValid(FExpect) or (FExpectOv <> NIL_SYM) or FExpectOrdinal then
+  if XValid(FExpect) or (FExpectOv <> NIL_SYM) or FExpectOrdinal or
+     FExpectEnum then
     RankItems;
   SetLength(FItems, FCount);
   AItems := FItems;
