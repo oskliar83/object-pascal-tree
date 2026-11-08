@@ -230,9 +230,13 @@ type
     handler's class (`on E: |`, `on |`), a generic argument (`TList<|>`,
     `Foo<|>(`), a generic constraint (`<T: |>`) and an attribute's name
     (`[|]` before a declaration). Each lists types alone - and the
-    categories that can stand there - and ranks them (TypePosFit). }
+    categories that can stand there - and ranks them (TypePosFit). The
+    declaration contexts too: a property's `implements |`, a helper's
+    `class helper for |` / `record helper for |`, a type declaration's
+    right side (`T = |`, `T = type |`; a subrange's low bound stays
+    listed there). }
   TPasComplTypePos = (tpNone, tpIsAs, tpHandler, tpGenArg, tpConstraint,
-    tpAttribute);
+    tpAttribute, tpImplements, tpHelper, tpTypeDecl);
 
   TPasCallInfo = record
     OpenLine: Integer;    // 1-based position of the call's '('
@@ -398,6 +402,13 @@ type
     FGenCtor: Boolean;
     FGenBases: TArray<TSemaXType>;
     FGenOpenBase: Boolean;
+    // The declaration contexts: FImplFirst - the interfaces an `implements`
+    // ranks first (the class's own heritage list, the property's type);
+    // FHelperRecord - `record helper for`, not `class helper for`;
+    // FTypeAfterType - `T = type |`, a type identifier alone.
+    FImplFirst: TArray<TSemaXType>;
+    FHelperRecord: Boolean;
+    FTypeAfterType: Boolean;
     // ArgExpectAt's answer for an open-array parameter (`Foo([|])`): its
     // element, which the parameter's own type cannot carry.
     FArgOpenElem: TPasComplTypeRef;
@@ -586,6 +597,14 @@ type
     function TypeItemX(const AItem: TPasComplItem;
       out ACat: TSemaTypeCat): TSemaXType;
     function TypePosFit(const AItem: TPasComplItem): TPasComplMatch;
+    // declaration contexts
+    function ImplementsAt(const AInfo: TPasCaretInfo; APrev: Integer): Boolean;
+    procedure ImplementsFirstOf(const AInfo: TPasCaretInfo);
+    function TypeNodeX(ANode: Integer): TSemaXType;
+    function HelperAt(APrev: Integer): Boolean;
+    function IsArrayBoundOp(ARaw: Integer): Boolean;
+    function IsSubrangeHighOp(ARaw: Integer): Boolean;
+    function BoundLeftType(ADotDot: Integer): TPasComplTypeRef;
   public
     constructor Create(AModel: TPasSemaModel;
       AProject: TPasSemaProject = nil; AProjectMid: Integer = -1);
@@ -3550,16 +3569,40 @@ begin
   // of the categories that can stand there (TypePosAdmits): a class or an
   // interface after `is` / `as` and in a constraint, a class in a handler
   // and an attribute (pastree-lsp COMPLETION.md, "Type positions").
+  // A type declaration's right side (`T = |`) keeps a subrange's low bound:
+  // an enumeration value, a true constant - no typed one (E2026); not after
+  // `= type`, which names a type (E2029).
   if FTypePos <> tpNone then
     case LM.Symbols[ASym].Kind of
       skEnumValue:
-        Exit;
+        if (FTypePos <> tpTypeDecl) or FTypeAfterType then
+          Exit;
       skConst:
-        if FTypePos <> tpIsAs then
+        if FTypePos = tpTypeDecl then
+        begin
+          if FTypeAfterType or (LM.Symbols[ASym].TypeNode <> NIL_NODE) then
+            Exit;
+        end
+        else if FTypePos <> tpIsAs then
           Exit;
       skType, skBuiltinType:
-        if not TypePosAdmits(LM.Symbols[ASym].TypeCat) then
-          Exit;
+        begin
+          if not TypePosAdmits(LM.Symbols[ASym].TypeCat) then
+            Exit;
+          // A record helper extends a dynamic array, never a static one
+          // (E2474).
+          if (FTypePos = tpHelper) and FHelperRecord and
+             (LM.Symbols[ASym].TypeCat = tcArray) and (FProj <> nil) then
+          begin
+            var LArrX: TSemaXType;
+            if AMid >= 0 then
+              LArrX := FProj.CanonTypeX(XPlain(AMid, ASym))
+            else
+              LArrX := OwnModelTypeX(ASym);
+            if XValid(LArrX) and not FProj.IsDynArrayTypeX(LArrX) then
+              Exit;
+          end;
+        end;
     end;
   // ... except where the type must be NAMED: `procedure P(A: 1..2)` and
   // `function F: 1..2` are E2029, `(A: K)` E2005 (local/probe-cc P5a-P5e).
@@ -4952,8 +4995,11 @@ begin
         Result := ccExpression;
     tkLParen, tkComma:
       // A heritage list (`= class(|`, `class(A, |`) or a generic parameter
-      // list is a type position; any other paren/comma is an argument.
-      if UpChainKind(AInfo.Node, [nkClassType, nkInterfaceType,
+      // list is a type position; any other paren/comma is an argument - a
+      // static array's next bound too (`F: array[TKind, |]` in a class).
+      if (LKind = tkComma) and IsArrayBoundOp(LPrev) then
+        Result := ccExpression
+      else if UpChainKind(AInfo.Node, [nkClassType, nkInterfaceType,
         nkGenericParams, nkCall, nkParen, nkSetCtor]) in
         [nkClassType, nkInterfaceType, nkGenericParams] then
         Result := ccType
@@ -5151,7 +5197,14 @@ begin
         if (FTypePos = tpIsAs) and FTypeAfterIs then
           AddKeywords(['not'])
         else if FTypePos = tpConstraint then
-          AddKeywords(['class', 'record', 'constructor']);
+          AddKeywords(['class', 'record', 'constructor'])
+        // A type declaration's `T = |` takes a type constructor and the
+        // `type` of a distinct type; `T = type |` a type identifier alone.
+        else if (FTypePos = tpTypeDecl) and not FTypeAfterType then
+        begin
+          AddKeywords(TYPE_WORDS);
+          AddKeywords(['type']);
+        end;
       end
       // A heritage list names declared types only - no type constructor.
       else if FHeritage <> nkError then
@@ -5327,6 +5380,18 @@ begin
   // (`S := [|]`, `K in [A, |`): BracketExpect.
   if LTS.Tokens[LOp].Kind in [tkLBracket, tkComma, tkDotDot] then
   begin
+    // A static array's bound (`array[|]`, `array[TKind, |]`, `array[0..|]`)
+    // is a constant expression of an ordinal type, as a `case` label is:
+    // any ordinal, after `..` the low bound's type (FConstOnly).
+    if IsArrayBoundOp(LOp) then
+    begin
+      FConstOnly := True;
+      if LTS.Tokens[LOp].Kind = tkDotDot then
+        Result := BoundLeftType(LOp);
+      if not ComplValid(Result) then
+        FExpectOrdinal := True;
+      Exit;
+    end;
     LBefore := BracketOpenOf(LOp, LVis);
     if LBefore >= 0 then
       Exit(BracketExpect(LBefore, LVis, AScope));
@@ -5341,6 +5406,16 @@ begin
       FConstOnly := True;
       Exit(CaseSelectorType(LBefore));
     end;
+  end;
+  // A subrange type's high bound (`T = clRed..|`, `var X: 0..|`): a
+  // constant of the low bound's type, else any ordinal.
+  if IsSubrangeHighOp(LOp) then
+  begin
+    FConstOnly := True;
+    Result := BoundLeftType(LOp);
+    if not ComplValid(Result) then
+      FExpectOrdinal := True;
+    Exit;
   end;
   // A for-in collection (`for X in |`): what can be enumerated, its element
   // ranked against X's declared type (ForInStart, MatchOf's EnumFit).
@@ -8203,6 +8278,43 @@ begin
     IsAsLeftOf(LOp);
     Exit(tpIsAs);
   end;
+  // A property's `implements |`, `implements IA, |`: an interface.
+  if ImplementsAt(AInfo, LPrev) then
+  begin
+    ImplementsFirstOf(AInfo);
+    FTypeRank := True;
+    Exit(tpImplements);
+  end;
+  // `class helper for |`, `record helper for |` (FHelperRecord).
+  if (LKind = tkFor) and HelperAt(LPrev) then
+  begin
+    FTypeRank := True;
+    Exit(tpHelper);
+  end;
+  // A type declaration's right side: `T = |` (ClassifyAt made it ccType),
+  // `T = type |` (a reserved word: ccStatement) - a type identifier there.
+  if (LKind = tkEqual) and (FContext = ccType) then
+  begin
+    FTypeRank := True;
+    Exit(tpTypeDecl);
+  end;
+  if (LKind = tkType) and (LPrev > 0) then
+  begin
+    LOp := PrevVisibleRaw(LPrev - 1);
+    if (LOp >= 0) and (LTS.Tokens[LOp].Kind = tkEqual) and
+       (UpChainKind(AInfo.Node, [nkTypeDecl, nkConstDecl, nkVarDecl,
+         nkParam, nkBlock]) in [nkTypeDecl, nkError]) then
+    begin
+      LOp := PrevVisibleRaw(LOp - 1);
+      if (LOp >= 0) and (LTS.Tokens[LOp].Kind in [tkIdentifier, tkGreater])
+      then
+      begin
+        FTypeAfterType := True;
+        FTypeRank := True;
+        Exit(tpTypeDecl);
+      end;
+    end;
+  end;
   // An attribute's name: right after the group's `[` or a `,` of it - the
   // parser made the brackets an nkAttrGroup (before a declaration), not a
   // set constructor or an index; a name being typed is the nkAttribute's
@@ -8591,6 +8703,18 @@ begin
       Result := ACat in [tcUnknown, tcClass, tcInterface];
     tpHandler, tpAttribute:
       Result := ACat in [tcUnknown, tcClass];
+    // `implements` names an interface (E2205 for a class).
+    tpImplements:
+      Result := ACat in [tcUnknown, tcInterface];
+    // A class helper a class (E2021); a record helper a record or a simple
+    // type (E2474 for a procedural type, an interface, a class, a class
+    // reference; a static array AddSym drops).
+    tpHelper:
+      if FHelperRecord then
+        Result := not (ACat in [tcClass, tcInterface, tcClassOf, tcProc,
+          tcFile])
+      else
+        Result := ACat in [tcUnknown, tcClass];
   else
     Result := True;
   end;
@@ -8739,8 +8863,12 @@ begin
   Result := cmOther;
   if AItem.Bucket = cbKeyword then
   begin
+    // A constraint's keywords first; a type declaration's words introduce
+    // a type as a name does.
     if FTypePos = tpConstraint then
-      Result := cmExact;
+      Result := cmExact
+    else if FTypePos = tpTypeDecl then
+      Result := cmCompatible;
     Exit;
   end;
   if (AItem.Bucket = cbUnitName) or
@@ -8751,13 +8879,41 @@ begin
     // A class-reference value after `is` / `as` - AddSym lets no other
     // value into a type position.
     if FTypePos = tpIsAs then
-      Result := cmCompatible;
+      Result := cmCompatible
+    // A type declaration's subrange bound (`T = clRed..clBlue`): an
+    // ordinal constant leads to a type, another is wrong - judged as a
+    // `case` selector judges a value (OrdinalFit), the fit taken down one.
+    else if FTypePos = tpTypeDecl then
+    begin
+      FTypePos := tpNone;
+      FExpectOrdinal := True;
+      try
+        Result := MatchOf(AItem);
+      finally
+        FExpectOrdinal := False;
+        FTypePos := tpTypeDecl;
+      end;
+      if Result in [cmExact, cmCompatible] then
+        Result := cmLeads;
+    end;
     Exit;
   end;
   LX := TypeItemX(AItem, LCat);
   if LCat = tcUnknown then
     Exit(cmLeads);
   case FTypePos of
+    // `implements`: the class's heritage list and the property's type
+    // first, any other interface after them.
+    tpImplements:
+      begin
+        Result := cmCompatible;
+        if XValid(LX) then
+          for var LFirst in FImplFirst do
+            if FProj.XSameType(LX, LFirst) then
+              Exit(cmExact);
+      end;
+    tpHelper, tpTypeDecl:
+      Result := cmCompatible;
     tpConstraint:
       Result := cmCompatible;
     tpHandler, tpAttribute:
@@ -8806,6 +8962,262 @@ begin
         for var LBaseX in FGenBases do
           Result := Worse(Result, BaseFit(LBaseX));
       end;
+  end;
+end;
+
+{ ---- declaration contexts (pastree-lsp COMPLETION.md) ---- }
+
+{ A property's `implements` list: the caret right after the word, or after
+  a `,` of its list (`implements IA, |`), in a `property` declaration - the
+  tokens decide, a half-typed property parses in pieces. }
+function TPasCompletion.ImplementsAt(const AInfo: TPasCaretInfo;
+  APrev: Integer): Boolean;
+var
+  LTS: TPasTokenStream;
+  LRaw, LSteps: Integer;
+
+  function IsWordAt(ARaw: Integer; const AWord: string): Boolean;
+  begin
+    Result := (LTS.Tokens[ARaw].Kind = tkIdentifier) and
+      SameText(Copy(LTS.Source, LTS.Tokens[ARaw].Start + 1,
+        LTS.Tokens[ARaw].Len), AWord);
+  end;
+
+begin
+  Result := False;
+  LTS := FModel.Tree.Source.Files[0];
+  LRaw := APrev;
+  LSteps := 0;
+  // Back over the list written so far to the word.
+  if LTS.Tokens[LRaw].Kind = tkComma then
+    while True do
+    begin
+      LRaw := PrevVisibleRaw(LRaw - 1);
+      Inc(LSteps);
+      if (LRaw < 0) or (LSteps > 256) then
+        Exit;
+      if IsWordAt(LRaw, 'implements') then
+        Break;
+      if not (LTS.Tokens[LRaw].Kind in [tkIdentifier, tkDot, tkComma, tkLess,
+         tkGreater]) then
+        Exit;
+    end
+  else if not IsWordAt(LRaw, 'implements') then
+    Exit;
+  // ... and back from the word to its `property`, inside one declaration.
+  LSteps := 0;
+  while True do
+  begin
+    LRaw := PrevVisibleRaw(LRaw - 1);
+    Inc(LSteps);
+    if (LRaw < 0) or (LSteps > 1024) then
+      Exit;
+    case LTS.Tokens[LRaw].Kind of
+      tkProperty:
+        Exit(True);
+      tkSemicolon, tkBegin, tkEnd, tkAssign, tkClass, tkRecord,
+      tkInterface, tkImplementation:
+        Exit;
+    end;
+  end;
+end;
+
+{ The interfaces an `implements` ranks first: those the class's own
+  heritage list names (dcc reports E2265 for any other) and the property's
+  own type, into FImplFirst. }
+procedure TPasCompletion.ImplementsFirstOf(const AInfo: TPasCaretInfo);
+var
+  LProp, LClass, LKid: Integer;
+  LX: TSemaXType;
+begin
+  if FProj = nil then
+    Exit;
+  LProp := UpChainNode(AInfo.Node, nkPropertyDecl);
+  if LProp = NIL_NODE then
+    Exit;
+  // The property's type: the child after its name and index parameters
+  // that is no specifier.
+  LKid := FModel.Tree.Nodes[LProp].FirstChild;
+  if LKid <> NIL_NODE then
+    LKid := FModel.Tree.Nodes[LKid].NextSibling;
+  if (LKid <> NIL_NODE) and (FModel.Tree.Nodes[LKid].Kind = nkParams) then
+    LKid := FModel.Tree.Nodes[LKid].NextSibling;
+  if (LKid <> NIL_NODE) and (FModel.Tree.Nodes[LKid].Kind <> nkPropSpec) then
+  begin
+    LX := TypeNodeX(LKid);
+    if XValid(LX) and (FProj.XCatOf(LX) = tcInterface) then
+      FImplFirst := FImplFirst + [LX];
+  end;
+  // The class's heritage list: its leading type references.
+  LClass := UpChainNode(LProp, nkClassType);
+  if LClass = NIL_NODE then
+    Exit;
+  LKid := FModel.Tree.Nodes[LClass].FirstChild;
+  while (LKid <> NIL_NODE) and
+        (FModel.Tree.Nodes[LKid].Kind in [nkIdent, nkMember, nkTypeArgs]) do
+  begin
+    LX := TypeNodeX(LKid);
+    if XValid(LX) and (FProj.XCatOf(LX) = tcInterface) then
+      FImplFirst := FImplFirst + [LX];
+    LKid := FModel.Tree.Nodes[LKid].NextSibling;
+  end;
+end;
+
+// The type an overlay type reference ANode names, canonical; XNil when
+// it does not resolve (one declared since the last analysis included).
+function TPasCompletion.TypeNodeX(ANode: Integer): TSemaXType;
+var
+  LRef: TPasComplTypeRef;
+begin
+  Result := XNil;
+  if FProj = nil then
+    Exit;
+  LRef := ResolveTypeRefNode(ANode, 0);
+  Result := LRef.X;
+  if not XValid(Result) and (LRef.OvSym <> NIL_SYM) then
+    Result := OwnModelTypeX(LRef.OvSym);
+  if XValid(Result) then
+    Result := FProj.CanonTypeX(Result);
+end;
+
+{ A helper's extended type: APrev is the `for` of `class helper for |` or
+  `record helper for |` (an ancestor helper between: `helper(THlp) for`).
+  Sets FHelperRecord. }
+function TPasCompletion.HelperAt(APrev: Integer): Boolean;
+var
+  LTS: TPasTokenStream;
+  LRaw, LSteps: Integer;
+begin
+  Result := False;
+  LTS := FModel.Tree.Source.Files[0];
+  LRaw := PrevVisibleRaw(APrev - 1);
+  if (LRaw >= 0) and (LTS.Tokens[LRaw].Kind = tkRParen) then
+  begin
+    LSteps := 0;
+    repeat
+      LRaw := PrevVisibleRaw(LRaw - 1);
+      Inc(LSteps);
+      if (LRaw < 0) or (LSteps > 64) then
+        Exit;
+    until LTS.Tokens[LRaw].Kind = tkLParen;
+    LRaw := PrevVisibleRaw(LRaw - 1);
+  end;
+  if (LRaw < 1) or (LTS.Tokens[LRaw].Kind <> tkIdentifier) or
+     not SameText(Copy(LTS.Source, LTS.Tokens[LRaw].Start + 1,
+       LTS.Tokens[LRaw].Len), 'helper') then
+    Exit;
+  LRaw := PrevVisibleRaw(LRaw - 1);
+  if (LRaw < 0) or not (LTS.Tokens[LRaw].Kind in [tkClass, tkRecord]) then
+    Exit;
+  FHelperRecord := LTS.Tokens[LRaw].Kind = tkRecord;
+  Result := True;
+end;
+
+{ A static array's bound: the operand after raw token ARaw - a `[`, `,`
+  or `..` - stands in the brackets of `array[...]` (`packed array` too),
+  not a value's index or a set constructor. }
+function TPasCompletion.IsArrayBoundOp(ARaw: Integer): Boolean;
+var
+  LOpen, LIdx: Integer;
+begin
+  Result := False;
+  if (ARaw < 1) or not (FModel.Tree.Source.Files[0].Tokens[ARaw].Kind in
+     [tkLBracket, tkComma, tkDotDot]) then
+    Exit;
+  LOpen := BracketOpenOf(ARaw, LIdx);
+  if LOpen < 1 then
+    Exit;
+  LOpen := PrevVisibleRaw(LOpen - 1);
+  Result := (LOpen >= 0) and
+    (FModel.Tree.Source.Files[0].Tokens[LOpen].Kind = tkArray);
+end;
+
+{ A subrange type's high bound: raw token ARaw is the `..` of a subrange
+  written as a declaration's type - after a type declaration's `=` or a
+  declaration's `:` (`T = clRed..|`, `var X: 0..|`). }
+function TPasCompletion.IsSubrangeHighOp(ARaw: Integer): Boolean;
+var
+  LTS: TPasTokenStream;
+  LPrev, LBefore: Integer;
+begin
+  Result := False;
+  LTS := FModel.Tree.Source.Files[0];
+  if (ARaw < 1) or (LTS.Tokens[ARaw].Kind <> tkDotDot) then
+    Exit;
+  LPrev := PrevVisibleRaw(ARaw - 1);
+  if LPrev < 0 then
+    Exit;
+  if LTS.Tokens[LPrev].Kind in [tkIntLiteral, tkStringLiteral, tkControlChar,
+    tkCaretChar] then
+  begin
+    LBefore := PrevVisibleRaw(LPrev - 1);
+    if (LBefore >= 0) and (LTS.Tokens[LBefore].Kind in [tkMinus, tkPlus]) then
+      LBefore := PrevVisibleRaw(LBefore - 1);
+  end
+  else if DesignatorEndingAt(LPrev, LBefore) = NIL_NODE then
+    Exit;
+  Result := (LBefore >= 0) and (LTS.Tokens[LBefore].Kind in [tkEqual, tkColon]);
+end;
+
+{ The type of a bound's low side, before the `..` at raw token ADotDot: an
+  integer literal's Integer, a one-character literal's Char, a designator's
+  type (a constant, an enumeration value, `Ord('A')`). ComplNilRef when it
+  is none of them - the caller then expects any ordinal. }
+function TPasCompletion.BoundLeftType(ADotDot: Integer): TPasComplTypeRef;
+var
+  LTS: TPasTokenStream;
+  LPrev, LNode, LBefore, LMid, LSym: Integer;
+  LM: TPasSemaModel;
+begin
+  Result := ComplNilRef;
+  if FProj = nil then
+    Exit;
+  LTS := FModel.Tree.Source.Files[0];
+  LPrev := PrevVisibleRaw(ADotDot - 1);
+  if LPrev < 0 then
+    Exit;
+  case LTS.Tokens[LPrev].Kind of
+    tkIntLiteral:
+      if BridgeName('integer', LMid, LSym) then
+        Result.X := XPlain(LMid, LSym);
+    tkControlChar, tkCaretChar, tkStringLiteral:
+      if ((LTS.Tokens[LPrev].Kind <> tkStringLiteral) or
+          (LTS.Tokens[LPrev].Len = 3)) and BridgeName('char', LMid, LSym) then
+        Result.X := XPlain(LMid, LSym);
+  else
+    LNode := DesignatorEndingAt(LPrev, LBefore);
+    if LNode <> NIL_NODE then
+    begin
+      Result := DesignatorType(LNode, 0);
+      if Result.IsTypeRef then
+        Result := ComplNilRef;
+    end;
+    // A declaration's bound has no binding of its own in the overlay: a
+    // constant or an enumeration value of another unit, by its name.
+    if not ComplValid(Result) and (LTS.Tokens[LPrev].Kind = tkIdentifier) and
+       (LNode <> NIL_NODE) and (FModel.Tree.Nodes[LNode].Kind = nkIdent) and
+       BridgeName(LowerCase(Copy(LTS.Source, LTS.Tokens[LPrev].Start + 1,
+         LTS.Tokens[LPrev].Len)), LMid, LSym) then
+    begin
+      LM := ProjModel(LMid, 'BoundLeftType');
+      case LM.Symbols[LSym].Kind of
+        skEnumValue:
+          if LM.Symbols[LSym].TypeSym <> NIL_SYM then
+            Result.X := FProj.CanonTypeX(XPlain(LMid,
+              LM.Symbols[LSym].TypeSym));
+        skConst:
+          begin
+            Result := TypeOfProjectSym(LMid, LSym, -1, 0);
+            if not ComplValid(Result) then
+            begin
+              Result := ComplNilRef;
+              Result.X := FProj.DeclTypeX(LMid, LSym);
+              if XValid(Result.X) then
+                Result.X := FProj.CanonTypeX(Result.X);
+            end;
+          end;
+      end;
+    end;
   end;
 end;
 
@@ -8897,6 +9309,9 @@ begin
   FGenCtor := False;
   FGenBases := nil;
   FGenOpenBase := False;
+  FImplFirst := nil;
+  FHelperRecord := False;
+  FTypeAfterType := False;
   if FContext in [ccExpression, ccType, ccStatement] then
   begin
     if not CaretOffset(ALine, ACol, LOff) then

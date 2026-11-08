@@ -1163,6 +1163,10 @@ const
     '  TPair2<K; V: class> = class end;'#10 +
     '  TFree<T> = class end;'#10 +
     '  TPick = class class function Get<T: TAnimal>: T; static; end;'#10 +
+    '  IPaint = interface end;'#10 +
+    'const'#10 +
+    '  CMax = 9;'#10 +
+    '  CName = ''abc'';'#10 +
     'var'#10 +
     '  ExtClass: TAnimalClass;'#10 +
     '  ExtShape: IShape;'#10 +
@@ -3358,6 +3362,108 @@ begin
     'implementation'#10'end.'#10);
   GCounter.Ok('type position: an attribute''s argument is an expression',
     (GCtx = ccExpression) and Has('ExtCount'));
+  // ======== declaration contexts (pastree-lsp COMPLETION.md) ==============
+  // `implements |`: interfaces alone; those the class's own heritage list
+  // names and the property's own type first (fit 0), any other interface
+  // fit 1 (dcc: E2265 until the heritage list names it); no class (E2205),
+  // no other type, no value.
+  TypDecl('  TMyI = class(TAnimal, IShape)'#10'    FS: IRound;'#10 +
+    '    property S: IRound read FS implements |;'#10'  end;', 'IShape,IRound',
+    'IPaint', '', 'TAnimal,TDog,TBall,TColor2,TGuid2,Integer,clRed,CMax,' +
+    'ExtCount,ExtReset,ExtShape,FS');
+  TypDecl('  TMyI = class(TAnimal, IShape)'#10'    FS: IRound;'#10 +
+    '    property S: IRound read FS implements IShape, |;'#10'  end;',
+    'IShape,IRound', 'IPaint', '', 'TAnimal,clRed,ExtCount');
+  TypDecl('  TMyI = class(TAnimal, IShape)'#10'    FS: IRound;'#10 +
+    '    property S: IRound read FS implements I|;'#10'  end;', 'IShape',
+    'IPaint', '', 'Integer,TAnimal');
+  // A class-typed property: its type is no interface - the heritage list's
+  // lead.
+  TypDecl('  TMyI = class(TAnimal, IPaint)'#10'    FB: TBall;'#10 +
+    '    property B: TBall read FB implements |;'#10'  end;', 'IPaint',
+    'IShape,IRound', '', 'TBall,TAnimal,ExtReset');
+  // `read |` / `write |` keep their own context.
+  ProjCase(EXP_HEAD_A + '  TMyI = class(TAnimal, IShape)'#10'    FS: IRound;'#10 +
+    '    property S: IRound read |;'#10'  end;'#10'implementation'#10'end.'#10);
+  GCounter.Ok('declaration: `read |` is no implements', Has('FS') and
+    not Has('IPaint'));
+  // `class helper for |`: classes alone; `record helper for |`: a record
+  // or a simple type - an ordinal, a float, a string, a set, a pointer, a
+  // dynamic array, a Variant (dcc: E2474 for a static array, a procedural
+  // type, an interface, a class or a class reference). No value, no
+  // routine, no keyword.
+  TypDecl('  TMyH = class helper for |'#10'  end;',
+    '', 'TAnimal,TDog,TCar,EFoo,TBall', '',
+    'IShape,TColor2,TGuid2,Integer,string,TAnimalClass,TClick,clRed,CMax,' +
+    'ExtCount,ExtReset,ExtErrOf,class,record');
+  TypDecl('  TMyH = class helper for TD|'#10'  end;', '', 'TDog', '',
+    'TColor2');
+  TypDecl('  TMyH = record helper for |'#10'  end;', '',
+    'TGuid2,TColor2,TLocalEnum,Integer,Double,string,TSub,TColorSet,TIntArr,' +
+    'Pointer,Boolean', '',
+    'TAnimal,TDog,IShape,TAnimalClass,TColorIdx,TGrid,TClick,TNotify,clRed,' +
+    'CMax,ExtCount,ExtReset,ExtColorOf,class,array');
+  TypDecl('  TMyH = record helper for TC|'#10'  end;', '', 'TColor2,TColorSet',
+    '', 'TCar,TClick');
+  // A type declaration's right side: types and the words that introduce a
+  // type (fit 1), a constant or an enumeration value that can start a
+  // subrange (`= Low..High`) after them (fit 2), a constant of no ordinal
+  // type wrong (fit 3); no variable, typed constant or routine (E2026).
+  TypDecl('  TMyT = |;', '', 'TAnimal,TColor2,Integer,IShape,TGuid2,class,' +
+    'record,array,set,type,interface,procedure,reference,packed', 'CName',
+    'CGreenT,ExtCount,ExtReset,ExtColorOf,ExtShape', 'clRed,CRed,CMax,leOne');
+  TypDecl('  TMyT = T|;', '', 'TAnimal,TColor2', '', 'ExtColorOf');
+  // `= type |` names a type: no constant, no keyword (`type 1..5` and
+  // `type array of` are E2029).
+  TypDecl('  TMyT = type |;', '', 'TAnimal,TColor2,Integer', '',
+    'clRed,CRed,CMax,CGreenT,ExtCount,ExtReset,class,record,array,type');
+  // After a subrange's `..` a constant of the low bound's type: the
+  // case-label rules.
+  ExpSrc(EXP_HEAD_A + '  TMyT = clRed..|;'#10'implementation'#10'end.'#10,
+    'clGreen,CRed', '', 'leOne,shRound', 'ExtColor,ExtColorOf,CGreenT,' +
+    'ExtReset,ExtCount', '', 'TMyT = clRed..|');
+  ExpSrc(EXP_HEAD_A + '  TMyT = 0..|;'#10'implementation'#10'end.'#10,
+    'CMax', '', 'clRed,CName', 'ExtCount,ExtReset,ExtIntOf,CGreenT', '',
+    'TMyT = 0..|');
+  ExpSrc(EXP_HEAD_A + '  TMyT = leOne..|;'#10'implementation'#10'end.'#10,
+    'leTwo', '', 'clRed', 'ExtColor,ExtReset', '', 'TMyT = leOne..| (own)');
+  ExpSrc(EXP_HEAD_A + 'var V1: clRed..|;'#10'implementation'#10'end.'#10,
+    'clGreen,CRed', '', 'leOne', 'ExtColor,CGreenT,ExtReset', '',
+    'var V1: clRed..|');
+  TypDecl('  TMyH = class helper(TObject) for |'#10'  end;', '', 'TAnimal', '',
+    'TColor2,IShape,clRed');
+  // A static array's bounds: a constant expression of an ordinal type -
+  // an ordinal type or an ordinal constant fits, a type or a constant of
+  // another scalar kind is wrong; the intrinsics a constant expression may
+  // call stay; no variable, typed constant, function or procedure.
+  ExpSrc(EXP_HEAD_A + 'var V1: array[|] of Integer;'#10'implementation'#10 +
+    'end.'#10, '', 'TColor2,TSub,Integer,Boolean,TLocalEnum,clRed,CRed,CMax',
+    'Double,CName', 'ExtCount,ExtColor,CGreenT,ExtReset,ExtColorOf,ExtIntOf',
+    '', 'var V1: array[|] of Integer');
+  GCounter.Ok('declaration: an array bound offers High', Has('High') and
+    Has('SizeOf'));
+  ExpSrc(EXP_HEAD_A + 'var V1: array[TColor2, |] of Integer;'#10 +
+    'implementation'#10'end.'#10, '', 'TShape2,CMax', 'CName',
+    'ExtCount,CGreenT,ExtReset', '', 'array[TColor2, |]');
+  ExpSrc(EXP_HEAD_A + 'var V1: array[0..|] of Integer;'#10'implementation'#10 +
+    'end.'#10, 'CMax', '', 'clRed,CName', 'ExtCount,CGreenT,ExtReset,ExtIntOf',
+    '', 'array[0..|]');
+  ExpSrc(EXP_HEAD_A + '  TArrT = array[clRed..|] of Integer;'#10 +
+    'implementation'#10'end.'#10, 'clGreen,CRed', '', 'leOne',
+    'ExtColor,CGreenT,ExtReset', '', 'array[clRed..|]');
+  ExpSrc(EXP_HEAD_A + '  TArrT = packed array[|] of Integer;'#10 +
+    'implementation'#10'end.'#10, '', 'TColor2,CMax', 'CName',
+    'ExtCount,ExtReset', '', 'packed array[|]');
+  ExpSrc(EXP_HEAD_A + '  TMyA = class'#10'    F: array[TColor2, |] of Byte;'#10 +
+    '  end;'#10'implementation'#10'end.'#10, '', 'TShape2,CMax', '',
+    'ExtCount,CGreenT,ExtReset', '', 'a field''s array[TColor2, |]');
+  ExpSrc(EXP_HEAD_A + EXP_HEAD_B + '  var L: array[|] of Integer;'#10 +
+    PROJ_TAIL, '', 'TColor2,CMax', '', 'I,C,ExtCount,ExtReset,LocalProc', '',
+    'an inline var''s array[|]');
+  // A value's index and a set constructor keep their contexts.
+  ExpCase('I := ExtByColor[|];', 'clRed,C,ExtColor', '', 'shSquare,I',
+    'ExtReset');
+  ExpCase('I := Arr[|];', 'I,ExtCount', '', '', 'ExtReset');
   ExpCase('ExtSet := [|];', 'clRed,C,ExtColor', '', 'shSquare,I', 'ExtReset');
   // `in` as the set operator is no for-in.
   ProjCase(EXP_HEAD_A + EXP_HEAD_B + '  if C in | then;'#10 + PROJ_TAIL);
