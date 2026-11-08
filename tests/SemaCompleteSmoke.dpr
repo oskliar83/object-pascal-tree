@@ -1052,6 +1052,11 @@ const
     '    Next: TOwner;'#10 +
     '    procedure Reset;'#10 +
     '    function Car: TCar;'#10 +
+    '    procedure Paint(AColor: TColor2);'#10 +
+    '    property Total: Integer read Count;'#10 +
+    '  end;'#10 +
+    '  TUtil = class'#10 +
+    '    class function Max<T>(A, B: T): T; static;'#10 +
     '  end;'#10 +
     '  TGuid2 = record'#10 +
     '    D1: Cardinal;'#10 +
@@ -1087,7 +1092,27 @@ const
     'procedure ExtReset;'#10 +
     'function ExtSubOf(const S: string): TSub;'#10 +
     'function ExtIntOf(const S: string): Integer;'#10 +
+    // Call arguments: overloads, `var` parameters, an untyped and an open
+    // array one, a procedural one, a function to nest.
+    'procedure ExtOne(A: TColor2);'#10 +
+    'procedure ExtTake(A: TColor2; B: Integer); overload;'#10 +
+    'procedure ExtTake(A: TAnimal; B: TShape2); overload;'#10 +
+    'procedure ExtSwap(var A: TColor2; out B: Integer);'#10 +
+    'procedure ExtUntyped(const X; N: Integer);'#10 +
+    'procedure ExtOpen(const A: array of Integer);'#10 +
+    'procedure ExtOnEvent(N: TNotify);'#10 +
+    'function ExtPick(S: TShape2): TColor2;'#10 +
     'implementation'#10 +
+    'procedure ExtOne(A: TColor2);'#10'begin'#10'end;'#10 +
+    'procedure ExtTake(A: TColor2; B: Integer);'#10'begin'#10'end;'#10 +
+    'procedure ExtTake(A: TAnimal; B: TShape2);'#10'begin'#10'end;'#10 +
+    'procedure ExtSwap(var A: TColor2; out B: Integer);'#10'begin'#10'end;'#10 +
+    'procedure ExtUntyped(const X; N: Integer);'#10'begin'#10'end;'#10 +
+    'procedure ExtOpen(const A: array of Integer);'#10'begin'#10'end;'#10 +
+    'procedure ExtOnEvent(N: TNotify);'#10'begin'#10'end;'#10 +
+    'function ExtPick(S: TShape2): TColor2;'#10'begin'#10'  Result := clRed;'#10'end;'#10 +
+    'procedure TOwner.Paint(AColor: TColor2);'#10'begin'#10'end;'#10 +
+    'class function TUtil.Max<T>(A, B: T): T;'#10'begin'#10'  Result := A;'#10'end;'#10 +
     'class function TGuid2.Make: TGuid2;'#10'begin'#10'end;'#10 +
     'function ExtGuidOf(const S: string): TGuid2;'#10'begin'#10'end;'#10 +
     'function ExtSubOf(const S: string): TSub;'#10'begin'#10'  Result := 0;'#10'end;'#10 +
@@ -1356,12 +1381,14 @@ begin
   GCounter.Ok('next-line theft: list still holds the members',
     GHit and (GCtx = ccMember) and Has('Pub'));
 
-  DotCase('if Assigned(B.|) then;');
-  DotCase('if Assigned(B.|');
-  DotCase('if Assigned(B.Pu|) then;');
+  // A call argument takes a value: the procedure Pub is none (an
+  // intrinsic's untyped parameter, an overload's typed one).
+  DotCase('if Assigned(B.|) then;', 'CF');
+  DotCase('if Assigned(B.|', 'CF');
+  DotCase('if Assigned(B.Pu|) then;', 'CF');
   DotCase('M.Over(1, B.|);');
-  DotCase('M.Over(B.|, 1);');
-  DotCase('ImplVar := Ord(B.|);');
+  DotCase('M.Over(B.|, 1);', 'CF');
+  DotCase('ImplVar := Ord(B.|);', 'CF');
   DotCase('ImplVar := B.| + 1;', 'CF');
   DotCase('ImplVar := 1 + B.|;');
   // A condition expects a Boolean: the procedure Pub is no operand there.
@@ -1377,8 +1404,8 @@ begin
   DotCase('for ImplVar := B.| to 1 do;');
   DotCase('raise B.|;');
   DotCase('var V := B.|;');
-  DotCase('ImplVar := Ord(Assigned(B.|));');
-  DotCase('M.Over(TBase(B).|);');
+  DotCase('ImplVar := Ord(Assigned(B.|));', 'CF');
+  DotCase('M.Over(TBase(B).|);', 'CF');
   DotCase('Writeln(B.|);');
 
   // Instance of the OWN class: own members + bridged inherited ones.
@@ -2785,10 +2812,68 @@ begin
   ExpCase('if ExtOwner.| then;', '', '', '', 'Reset', '', 'Color,Count');
   ExpCase('I := |;', 'SizeOf', '', '', 'ExtReset');
   ExpCase('if C = ExtOwner.Co| then;', 'Color', '', 'Count', 'Reset');
-  // A member access as an argument is no value of the left side's type.
-  ExpCase('I := Ord(ExtOwner.|);', '', '', 'Color,Pet', '');
-  GCounter.Ok('expected type: members in an argument keep the procedures',
-    Has('Reset'));
+  // A member access as an argument is no value of the left side's type:
+  // the argument's own parameter decides - Ord's is untyped, so nothing is
+  // ranked, but a procedure is no argument.
+  ExpCase('I := Ord(ExtOwner.|);', '', '', 'Color,Pet', 'Reset');
+  // A call argument expects its parameter's type; no procedure is listed.
+  ExpCase('ExtOne(|);', 'clRed,C,ExtColor,ExtColorOf,CRed', 'TColor2',
+    'shRound,I', 'ExtReset,LocalProc', '', 'A,ExtOwner');
+  ExpCase('ExtOne(cl|);', 'clRed,clGreen', '', '', 'ExtReset');
+  // Overloads: the best fit for the arguments already written, among
+  // those taking this many; with none written, the first declared.
+  ExpCase('ExtTake(|);', 'clRed,C', '', 'shRound', 'ExtReset');
+  ExpCase('ExtTake(C, |);', 'I,ExtCount', '', 'C,shRound', 'ExtReset');
+  ExpCase('ExtTake(A, |);', 'shRound,S', '', 'clRed,I', 'ExtReset');
+  ExpCase('ExtTake(D, |);', 'shSquare,S', '', 'clRed', 'ExtReset');
+  // A later argument written after the caret counts as well (the caret on
+  // a name: an empty first argument, `(, X)`, parses as no call).
+  ExpCase('ExtTake(A|, S);', 'A', '', '', 'ExtReset');
+  ExpCase('ExtTake(C|, S);', 'A', '', '', 'ExtReset');
+  ExpCase('ExtTake(C|, I);', 'C', '', '', 'ExtReset');
+  // A method; a member after a dot inside the argument.
+  ExpCase('ExtOwner.Paint(|);', 'clRed,C', '', 'I', 'ExtReset');
+  ExpCase('ExtOne(ExtOwner.|);', 'Color', '', 'Count', 'Reset', '',
+    'Pet,Car');
+  ExpCase('ExtTake(A, ExtOwner.Next.|);', '', '', 'Color,Count', 'Reset', '',
+    'Pet');
+  // Nested calls: the innermost argument list decides; an argument typed
+  // by a call picks the overload.
+  ExpCase('ExtOne(ExtPick(|));', 'shRound,S', '', 'clRed', 'ExtReset');
+  ExpCase('ExtTake(ExtPick(S), |);', 'I', '', 'shRound', 'ExtReset');
+  ExpCase('ExtTake(ExtPick(|), 1);', 'shRound', '', 'clRed', 'ExtReset');
+  // A procedural parameter takes a procedure.
+  ExpCase('ExtOnEvent(|);', '', 'nil', '', '');
+  GCounter.Ok('expected type: a procedural argument lists the procedures',
+    Has('ExtReset') and Has('LocalProc'));
+  // A `var` / `out` argument: a variable of exactly that type; no constant,
+  // no function, no procedure; a value that converts is wrong, a class may
+  // reach one, a property is no variable.
+  ExpCase('ExtSwap(|);', 'C,ExtColor', '', 'I,S', 'clRed,CRed,ExtColorOf,' +
+    'ExtReset,True,ExtPick', '', 'ExtOwner,A');
+  ExpCase('ExtSwap(C, |);', 'I,ExtCount', '', 'ExtSub,F,C', 'ExtIntOf,' +
+    'ExtReset,clRed');
+  ExpCase('ExtSwap(C, ExtOwner.|);', 'Count', '', 'Color,Total', 'Car,Reset',
+    '', 'Next');
+  // An intrinsic's `var` parameter: no constant, function or procedure, and
+  // no type to rank by (Inc takes any ordinal variable).
+  ExpCase('Inc(|);', '', '', 'I,C', 'clRed,CRed,ExtColorOf,ExtReset,True');
+  // An intrinsic's typed value parameter is ranked by the table.
+  ExpCase('Assert(|);', 'B,True', '', '', 'ExtReset');
+  ExpCase('Odd(|);', 'I', '', 'C', 'ExtReset');
+  // An untyped, an open-array or a generic parameter expects no type, and
+  // still takes no procedure.
+  ExpCase('ExtUntyped(|);', '', '', 'I,C,clRed', 'ExtReset,LocalProc');
+  ExpCase('ExtUntyped(C, |);', 'I', '', 'C', 'ExtReset');
+  ExpCase('ExtOpen(|);', '', '', 'I,C', 'ExtReset');
+  ExpCase('TUtil.Max(|);', '', '', 'I,C', 'ExtReset');
+  ExpCase('FillChar(|);', '', '', 'I,C', 'clRed,ExtColorOf,ExtReset');
+  // A grouping paren, a set constructor and a cast are no argument.
+  ExpCase('I := (|);', '', '', 'I,C', '');
+  GCounter.Ok('expected type: a grouping paren keeps the procedures',
+    Has('ExtReset'));
+  ExpCase('ExtOne(TColor2(|));', '', '', 'I,C', '');
+  GCounter.Ok('expected type: a cast keeps the procedures', Has('ExtReset'));
   ExpCase('ExtOwner.|;', '', '', 'Color,Pet', '');
   GCounter.Ok('expected type: members in a statement keep the procedures',
     Has('Reset'));
