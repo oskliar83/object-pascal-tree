@@ -225,6 +225,15 @@ type
     is in, and what the callee resolves to. Targets may be EMPTY with CallAt
     still True - a real call whose name nothing can resolve is an honest
     empty, the same contract as CompleteAt's empty list. }
+  { A type position a context ranks (pastree-lsp COMPLETION.md, "Type
+    positions"): the right side of `is` / `is not` / `as`, an exception
+    handler's class (`on E: |`, `on |`), a generic argument (`TList<|>`,
+    `Foo<|>(`), a generic constraint (`<T: |>`) and an attribute's name
+    (`[|]` before a declaration). Each lists types alone - and the
+    categories that can stand there - and ranks them (TypePosFit). }
+  TPasComplTypePos = (tpNone, tpIsAs, tpHandler, tpGenArg, tpConstraint,
+    tpAttribute);
+
   TPasCallInfo = record
     OpenLine: Integer;    // 1-based position of the call's '('
     OpenCol: Integer;
@@ -370,6 +379,25 @@ type
     // and any other class leading. A category again (RaiseFit).
     FExpectRaise: Boolean;
     FRaiseBase: TSemaXType;
+    // A type position (TypePosAt): FTypeAs - `as` rather than `is`;
+    // FTypeAfterIs - the caret right after `is` (`not` may follow);
+    // FTypeLeft / FTypeLeftCat - the static type of `is` / `as`'s left side;
+    // FTypeBase - Exception for a handler, TCustomAttribute for an
+    // attribute; FTypeRank - something to rank by. A generic argument's
+    // constraints: FGenClass / FGenRecord / FGenCtor the keywords, FGenBases
+    // the class and interface types, FGenOpenBase one that did not resolve.
+    FTypePos: TPasComplTypePos;
+    FTypeAs: Boolean;
+    FTypeAfterIs: Boolean;
+    FTypeLeft: TSemaXType;
+    FTypeLeftCat: TSemaTypeCat;
+    FTypeBase: TSemaXType;
+    FTypeRank: Boolean;
+    FGenClass: Boolean;
+    FGenRecord: Boolean;
+    FGenCtor: Boolean;
+    FGenBases: TArray<TSemaXType>;
+    FGenOpenBase: Boolean;
     // ArgExpectAt's answer for an open-array parameter (`Foo([|])`): its
     // element, which the parameter's own type cannot carry.
     FArgOpenElem: TPasComplTypeRef;
@@ -543,6 +571,21 @@ type
     function MemberValueX(AMid, ASym, ACtx: Integer;
       out AX: TSemaXType): Boolean;
     procedure RankItems;
+    // type positions
+    function TypePosAt(const AInfo: TPasCaretInfo;
+      ACaretOff: Integer): TPasComplTypePos;
+    procedure IsAsLeftOf(AOp: Integer);
+    function IsConstraintAt(const AInfo: TPasCaretInfo;
+      APrev: Integer): Boolean;
+    function GenericArgAt(const AInfo: TPasCaretInfo; APrev,
+      ACaretOff: Integer): Boolean;
+    procedure GenericConstraintsOf(AMid, ASym, AIndex: Integer);
+    function NamedClassX(const AKey: string): TSemaXType;
+    function TypePosAdmits(ACat: TSemaTypeCat): Boolean;
+    function IsClassRefValue(AMid, ASym, ACtx: Integer): Boolean;
+    function TypeItemX(const AItem: TPasComplItem;
+      out ACat: TSemaTypeCat): TSemaXType;
+    function TypePosFit(const AItem: TPasComplItem): TPasComplMatch;
   public
     constructor Create(AModel: TPasSemaModel;
       AProject: TPasSemaProject = nil; AProjectMid: Integer = -1);
@@ -3496,8 +3539,28 @@ begin
   // (`TVCLElements = teCategoryButtons..teTextLabel`, 2.2.5).
   if (FContext = ccType) and not (LM.Symbols[ASym].Kind in
     [skType, skBuiltinType, skUnitRef, skGenericParam, skConst,
-     skEnumValue]) then
+     skEnumValue]) and
+     // ... and on the right of `is` / `as`, a class-reference value
+     // (`O is AClass`, a function returning one) - dcc takes it there.
+     not ((FTypePos = tpIsAs) and (LM.Symbols[ASym].Kind in [skVar, skParam,
+       skField, skProperty, skConst, skRoutine]) and
+       IsClassRefValue(AMid, ASym, ACtx)) then
     Exit;
+  // A ranked type position (TypePosAt) names a type - no subrange bound -
+  // of the categories that can stand there (TypePosAdmits): a class or an
+  // interface after `is` / `as` and in a constraint, a class in a handler
+  // and an attribute (pastree-lsp COMPLETION.md, "Type positions").
+  if FTypePos <> tpNone then
+    case LM.Symbols[ASym].Kind of
+      skEnumValue:
+        Exit;
+      skConst:
+        if FTypePos <> tpIsAs then
+          Exit;
+      skType, skBuiltinType:
+        if not TypePosAdmits(LM.Symbols[ASym].TypeCat) then
+          Exit;
+    end;
   // ... except where the type must be NAMED: `procedure P(A: 1..2)` and
   // `function F: 1..2` are E2029, `(A: K)` E2005 (local/probe-cc P5a-P5e).
   if FTypeNameOnly and (LM.Symbols[ASym].Kind in [skConst, skEnumValue]) then
@@ -5080,8 +5143,18 @@ begin
     ccExpression:
       AddKeywords(EXPR_WORDS);
     ccType:
+      // A ranked type position: `not` right after `is` (Delphi 13's
+      // `is not`), the constraint keywords in a constraint, nothing else -
+      // a type name stands there, never a type constructor.
+      if FTypePos <> tpNone then
+      begin
+        if (FTypePos = tpIsAs) and FTypeAfterIs then
+          AddKeywords(['not'])
+        else if FTypePos = tpConstraint then
+          AddKeywords(['class', 'record', 'constructor']);
+      end
       // A heritage list names declared types only - no type constructor.
-      if FHeritage <> nkError then
+      else if FHeritage <> nkError then
       else if FTypeNameOnly then
         AddKeywords(PARAM_TYPE_WORDS)
       else
@@ -6927,6 +7000,9 @@ var
   end;
 
 begin
+  // A type position ranks its types by rules of its own.
+  if FTypePos <> tpNone then
+    Exit(TypePosFit(AItem));
   Result := cmOther;
   // `nil` - a keyword or a seeded constant, whichever list it came from -
   // fits every reference.
@@ -8085,13 +8161,661 @@ begin
   Result := True;
 end;
 
+{ ---- type positions (pastree-lsp COMPLETION.md, "Type positions") ---- }
+
+{ Which ranked type position the caret stands in, its context set up (the
+  fields TypePosFit reads); tpNone for any other position. Token-first, the
+  overlay tree consulted where a token is ambiguous - a `[` or `,` of an
+  attribute against a set constructor's or an index's, a `,` of a
+  constraint list against one of a parameter's names. ACaretOff is the
+  caret's offset into Files[0] (-1 when unknown). }
+function TPasCompletion.TypePosAt(const AInfo: TPasCaretInfo;
+  ACaretOff: Integer): TPasComplTypePos;
+var
+  LTS: TPasTokenStream;
+  LPrev, LOp, LNode: Integer;
+  LKind: TPasTokenKind;
+  LAttr: Boolean;
+begin
+  Result := tpNone;
+  if AInfo.Kind = ckIdent then
+    LPrev := PrevVisibleRaw(AInfo.RawToken - 1)
+  else
+    LPrev := AInfo.RawToken;
+  if LPrev < 0 then
+    Exit;
+  LTS := FModel.Tree.Source.Files[0];
+  LKind := LTS.Tokens[LPrev].Kind;
+  // `X is |`, `X as |`, and Delphi 13's `X is not |`.
+  LOp := -1;
+  if LKind in [tkIs, tkAs] then
+    LOp := LPrev
+  else if LKind = tkNot then
+  begin
+    LOp := PrevVisibleRaw(LPrev - 1);
+    if (LOp >= 0) and (LTS.Tokens[LOp].Kind <> tkIs) then
+      LOp := -1;
+  end;
+  if LOp >= 0 then
+  begin
+    FTypeAs := LTS.Tokens[LOp].Kind = tkAs;
+    FTypeAfterIs := LKind = tkIs;
+    IsAsLeftOf(LOp);
+    Exit(tpIsAs);
+  end;
+  // An attribute's name: right after the group's `[` or a `,` of it - the
+  // parser made the brackets an nkAttrGroup (before a declaration), not a
+  // set constructor or an index; a name being typed is the nkAttribute's
+  // first child (its arguments follow it, and are expressions).
+  if LKind in [tkLBracket, tkComma] then
+  begin
+    if AInfo.Kind = ckIdent then
+    begin
+      LNode := FModel.Tree.Nodes[AInfo.Node].Parent;
+      LAttr := (LNode <> NIL_NODE) and
+        (FModel.Tree.Nodes[LNode].Kind = nkAttribute) and
+        (FModel.Tree.Nodes[LNode].FirstChild = AInfo.Node);
+    end
+    else
+      LAttr := UpChainKind(AInfo.Node, [nkAttrGroup, nkAttribute, nkSetCtor,
+        nkIndex, nkCall, nkParen, nkGuid]) = nkAttrGroup;
+    if LAttr then
+    begin
+      FTypeBase := NamedClassX('tcustomattribute');
+      FTypeRank := XValid(FTypeBase);
+      Exit(tpAttribute);
+    end;
+  end;
+  // An exception handler's class: `on E: |`, or `on |` with no name.
+  if ((LKind = tkColon) and (FContext = ccType) and
+      (UpChainKind(AInfo.Node, [nkExceptOn, nkInlineVar, nkInlineConst,
+        nkVarDecl, nkConstDecl, nkParam, nkAnonMethod, nkRoutine,
+        nkTypeDecl]) = nkExceptOn)) or
+     ((LKind = tkIdentifier) and
+      SameText(Copy(LTS.Source, LTS.Tokens[LPrev].Start + 1,
+        LTS.Tokens[LPrev].Len), 'on') and
+      (UpChainKind(AInfo.Node, [nkExceptOn, nkExceptPart, nkTryStmt]) =
+       nkExceptOn)) then
+  begin
+    FTypeBase := NamedClassX('exception');
+    FTypeRank := XValid(FTypeBase);
+    Exit(tpHandler);
+  end;
+  if IsConstraintAt(AInfo, LPrev) then
+  begin
+    FTypeRank := True;   // the keywords first
+    Exit(tpConstraint);
+  end;
+  if (LKind in [tkLess, tkNotEqual, tkComma]) and
+     GenericArgAt(AInfo, LPrev, ACaretOff) then
+    Result := tpGenArg;
+end;
+
+{ The static type of `is` / `as`'s left side at the raw operator AOp - the
+  designator ending before it - into FTypeLeft / FTypeLeftCat; ranked only
+  when it is a class or an interface. }
+procedure TPasCompletion.IsAsLeftOf(AOp: Integer);
+var
+  LNode, LBefore, LOv: Integer;
+  LRef: TPasComplTypeRef;
+  LX: TSemaXType;
+begin
+  if FProj = nil then
+    Exit;
+  LNode := DesignatorEndingAt(PrevVisibleRaw(AOp - 1), LBefore);
+  if LNode = NIL_NODE then
+    Exit;
+  LRef := DesignatorType(LNode, 0);
+  if not ComplValid(LRef) or LRef.IsTypeRef then
+    Exit;
+  LX := RefValueX(LRef, LOv);
+  if XValid(LX) then
+  begin
+    FTypeLeft := FProj.CanonTypeX(LX);
+    FTypeLeftCat := FProj.XCatOf(FTypeLeft);
+  end
+  else if LOv <> NIL_SYM then
+    FTypeLeftCat := FModel.Symbols[LOv].TypeCat;
+  FTypeRank := FTypeLeftCat in [tcClass, tcInterface];
+end;
+
+{ A generic constraint: the caret after a type parameter's `:` (`<T: |>`),
+  inside a constraint being typed, or after a `,` of a constraint list
+  (`<T: class, |>`) - not a `,` between the parameters' names (`<A, |>`),
+  which names a new one. }
+function TPasCompletion.IsConstraintAt(const AInfo: TPasCaretInfo;
+  APrev: Integer): Boolean;
+var
+  LTS: TPasTokenStream;
+  LRaw, LDepth: Integer;
+begin
+  Result := False;
+  if FContext <> ccType then
+    Exit;
+  case UpChainKind(AInfo.Node, [nkConstraint, nkGenericParam, nkGenericParams,
+    nkTypeArgs, nkParams]) of
+    nkConstraint:
+      Exit(True);
+    nkGenericParam:
+      ;
+  else
+    Exit;
+  end;
+  LTS := FModel.Tree.Source.Files[0];
+  case LTS.Tokens[APrev].Kind of
+    tkColon:
+      Exit(True);
+    tkComma:
+      ;
+  else
+    Exit;
+  end;
+  // Back to the group's `:` (a constraint list) or its start (a name list).
+  LDepth := 0;
+  LRaw := PrevVisibleRaw(APrev - 1);
+  while LRaw >= 0 do
+  begin
+    case LTS.Tokens[LRaw].Kind of
+      tkColon:
+        Exit(LDepth = 0);
+      tkGreater:
+        Inc(LDepth);
+      tkLess:
+        if LDepth = 0 then
+          Exit
+        else
+          Dec(LDepth);
+      tkSemicolon:
+        if LDepth = 0 then
+          Exit;
+      tkIdentifier, tkDot, tkComma, tkClass, tkRecord, tkConstructor,
+      tkString:
+        ;
+    else
+      Exit;
+    end;
+    LRaw := PrevVisibleRaw(LRaw - 1);
+  end;
+end;
+
+{ A generic argument: the caret right after a type argument list's `<` - or
+  inside an empty `<>`, which the lexer reads as one token - or after a `,`
+  of the list, whose `<` a walk back finds. The name before the `<` must
+  name a generic (a type, or a routine: `Foo<|>(`) unless the parse already
+  made the list type arguments (a declaration's `TList<|`); a plain
+  `X < |` is a comparison. Sets the constraints of the parameter the caret
+  stands for (GenericConstraintsOf). }
+function TPasCompletion.GenericArgAt(const AInfo: TPasCaretInfo; APrev,
+  ACaretOff: Integer): Boolean;
+var
+  LTS: TPasTokenStream;
+  LOpen, LIdx, LDepth, LRaw, LHead, LNode, LBefore, LMid, LSym, LArity,
+    LLast: Integer;
+  LKey: string;
+  LM: TPasSemaModel;
+  LParsed: Boolean;
+  LX: TSemaXType;
+begin
+  Result := False;
+  // A type declaration's own parameter list (`TB<A, |`) names parameters.
+  if UpChainKind(AInfo.Node, [nkGenericParams, nkTypeArgs]) = nkGenericParams
+  then
+    Exit;
+  LTS := FModel.Tree.Source.Files[0];
+  LOpen := -1;
+  LIdx := 0;
+  case LTS.Tokens[APrev].Kind of
+    tkLess:
+      LOpen := APrev;
+    tkNotEqual:
+      if (AInfo.Kind = ckFresh) and
+         (ACaretOff = LTS.Tokens[APrev].Start + 1) then
+        LOpen := APrev;
+    tkComma:
+      begin
+        LDepth := 0;
+        LIdx := 1;
+        LRaw := PrevVisibleRaw(APrev - 1);
+        while (LRaw >= 0) and (LOpen < 0) do
+        begin
+          case LTS.Tokens[LRaw].Kind of
+            tkGreater:
+              Inc(LDepth);
+            tkLess:
+              if LDepth = 0 then
+                LOpen := LRaw
+              else
+                Dec(LDepth);
+            tkComma:
+              if LDepth = 0 then
+                Inc(LIdx);
+            tkIdentifier, tkDot, tkString:
+              ;
+          else
+            Exit;
+          end;
+          if LOpen < 0 then
+            LRaw := PrevVisibleRaw(LRaw - 1);
+        end;
+      end;
+  end;
+  if LOpen < 0 then
+    Exit;
+  LHead := PrevVisibleRaw(LOpen - 1);
+  if (LHead < 0) or (LTS.Tokens[LHead].Kind <> tkIdentifier) then
+    Exit;
+  LParsed := UpChainKind(AInfo.Node, [nkTypeArgs, nkCall, nkParen, nkSetCtor,
+    nkIndex, nkBinaryOp]) = nkTypeArgs;
+  // The arguments written after the caret count for the arity (16.1.2).
+  LArity := LIdx + 1;
+  if LTS.Tokens[APrev].Kind <> tkNotEqual then
+  begin
+    LDepth := 0;
+    LLast := High(FVisOfRaw);
+    LRaw := APrev + 1;
+    if AInfo.Kind = ckIdent then
+      LRaw := AInfo.RawToken + 1;
+    while LRaw <= LLast do
+    begin
+      if FVisOfRaw[LRaw] >= 0 then
+      begin
+        case LTS.Tokens[LRaw].Kind of
+          tkLess:
+            Inc(LDepth);
+          tkGreater:
+            if LDepth = 0 then
+              Break
+            else
+              Dec(LDepth);
+          tkComma:
+            if LDepth = 0 then
+              Inc(LArity);
+          tkIdentifier, tkDot, tkString:
+            ;
+        else
+          Break;
+        end;
+      end;
+      Inc(LRaw);
+    end;
+  end;
+  // The generic the name before `<` names: the tree's binding, else the
+  // name looked up from the caret's scope, then through the project.
+  LKey := LowerCase(Copy(LTS.Source, LTS.Tokens[LHead].Start + 1,
+    LTS.Tokens[LHead].Len));
+  LNode := DesignatorEndingAt(LHead, LBefore);
+  if (LNode = NIL_NODE) or not DesignatorSymOf(LNode, 0, LMid, LSym) then
+  begin
+    LMid := -1;
+    LSym := FModel.ResolveAt(AInfo.Scope, LKey, -1);
+  end;
+  // An overlay type that is not this generic (`TList` beside `TList<T>`),
+  // or none: the project's declaration of the written arity.
+  if (LMid < 0) and ((LSym = NIL_SYM) or
+     ((FModel.Symbols[LSym].Kind in [skType, skBuiltinType]) and
+      (TPasSemaProject.GenericParamCountOf(FModel, LSym) <> LArity))) then
+  begin
+    LMid := -1;
+    if not BridgeName(LKey, LMid, LSym) then
+    begin
+      LMid := -1;
+      LSym := NIL_SYM;
+    end;
+  end;
+  if (LSym <> NIL_SYM) and (LMid >= 0) and (FProjMid >= 0) and
+     (ProjModel(LMid, 'GenericArgAt').Symbols[LSym].Kind = skType) then
+  begin
+    LX := FProj.TypeAtArityX(FProjMid, XPlain(LMid, LSym), LArity, NIL_NODE,
+      LKey);
+    if XValid(LX) then
+    begin
+      LMid := LX.UnitId;
+      LSym := LX.Sym;
+    end;
+  end;
+  if LSym = NIL_SYM then
+    Exit(LParsed);
+  if LMid < 0 then
+    LM := FModel
+  else
+    LM := ProjModel(LMid, 'GenericArgAt');
+  if TPasSemaProject.GenericParamCountOf(LM, LSym) = 0 then
+    Exit(LParsed);
+  Result := True;
+  GenericConstraintsOf(LMid, LSym, LIdx);
+end;
+
+{ The constraints of type parameter AIndex of the generic (AMid, ASym) -
+  AMid -1 for one the overlay declares - into FGenClass / FGenRecord /
+  FGenCtor (the keywords) and FGenBases (the class and interface types);
+  FGenOpenBase when a constraint type does not resolve. Constraints are
+  declared per group (`<K; V: class, constructor>`). }
+procedure TPasCompletion.GenericConstraintsOf(AMid, ASym, AIndex: Integer);
+var
+  LM: TPasSemaModel;
+  LGen, LParam, LP, LCount, LBase, LChild: Integer;
+  LWord: Byte;
+  LX: TSemaXType;
+  LRef: TPasComplTypeRef;
+begin
+  if AMid < 0 then
+    LM := FModel
+  else
+    LM := ProjModel(AMid, 'GenericConstraintsOf');
+  LGen := TPasSemaProject.GenericParamsNodeOf(LM, ASym);
+  if LGen = NIL_NODE then
+    Exit;
+  LBase := 0;
+  LParam := LM.Tree.Nodes[LGen].FirstChild;
+  while LParam <> NIL_NODE do
+  begin
+    if LM.Tree.Nodes[LParam].Kind = nkGenericParam then
+    begin
+      // Leading idents are the names; the nkConstraint nodes follow them.
+      LCount := 0;
+      LP := PasSkipAttrGroups(LM.Tree, LM.Tree.Nodes[LParam].FirstChild);
+      while (LP <> NIL_NODE) and (LM.Tree.Nodes[LP].Kind = nkIdent) do
+      begin
+        Inc(LCount);
+        LP := PasSkipAttrGroups(LM.Tree, LM.Tree.Nodes[LP].NextSibling);
+      end;
+      if AIndex < LBase + LCount then
+      begin
+        while LP <> NIL_NODE do
+        begin
+          if LM.Tree.Nodes[LP].Kind = nkConstraint then
+          begin
+            LChild := LM.Tree.Nodes[LP].FirstChild;
+            if LChild <> NIL_NODE then
+            begin
+              LX := XNil;
+              if FProj <> nil then
+                if AMid >= 0 then
+                  LX := FProj.ResolveTypeExpr(AMid, LChild)
+                else
+                begin
+                  LRef := ResolveTypeRefNode(LChild, 0);
+                  LX := LRef.X;
+                  if not XValid(LX) and (LRef.OvSym <> NIL_SYM) then
+                    LX := OwnModelTypeX(LRef.OvSym);
+                end;
+              if XValid(LX) then
+                FGenBases := FGenBases + [FProj.CanonTypeX(LX)]
+              else
+                FGenOpenBase := True;
+            end
+            else if LM.KeywordConstraints.TryGetValue(LP, LWord) then
+              case TPasTokenKind(LWord) of
+                tkClass:
+                  FGenClass := True;
+                tkRecord:
+                  FGenRecord := True;
+                tkConstructor:
+                  FGenCtor := True;
+              end;
+          end;
+          LP := LM.Tree.Nodes[LP].NextSibling;
+        end;
+        Break;
+      end;
+      Inc(LBase, LCount);
+    end;
+    LParam := LM.Tree.Nodes[LParam].NextSibling;
+  end;
+  FTypeRank := FGenClass or FGenRecord or FGenCtor or FGenOpenBase or
+    (Length(FGenBases) > 0);
+end;
+
+// The class the caret's unit can name AKey (Exception, TCustomAttribute),
+// canonical; XNil when it names none, or not a class.
+function TPasCompletion.NamedClassX(const AKey: string): TSemaXType;
+var
+  LMid, LSym: Integer;
+begin
+  Result := XNil;
+  if (FProj = nil) or not BridgeName(AKey, LMid, LSym) then
+    Exit;
+  Result := FProj.CanonTypeX(XPlain(LMid, LSym));
+  if not XValid(Result) or (FProj.XCatOf(Result) <> tcClass) then
+    Result := XNil;
+end;
+
+{ Whether a type of category ACat can stand in the type position at all: a
+  class or an interface on the right of `is` / `as` and in a constraint, a
+  class in a handler and an attribute; anything in a generic argument. A
+  category not known stays listed rather than be wrongly hidden. }
+function TPasCompletion.TypePosAdmits(ACat: TSemaTypeCat): Boolean;
+begin
+  case FTypePos of
+    tpIsAs, tpConstraint:
+      Result := ACat in [tcUnknown, tcClass, tcInterface];
+    tpHandler, tpAttribute:
+      Result := ACat in [tcUnknown, tcClass];
+  else
+    Result := True;
+  end;
+end;
+
+// A value whose type is a class reference (`O is AClass`, `O as AClass`;
+// a function returning one too).
+function TPasCompletion.IsClassRefValue(AMid, ASym, ACtx: Integer): Boolean;
+var
+  LRef: TPasComplTypeRef;
+  LX: TSemaXType;
+  LOv: Integer;
+begin
+  Result := False;
+  if FProj = nil then
+    Exit;
+  if AMid < 0 then
+    LRef := TypeOfOverlaySym(ASym, 0)
+  else
+    LRef := TypeOfProjectSym(AMid, ASym, ACtx, 0);
+  // A class-reference value is typed as its class, class-side.
+  if LRef.IsTypeRef then
+  begin
+    if XValid(LRef.X) then
+      Exit(FProj.XCatOf(FProj.CanonTypeX(LRef.X)) = tcClass);
+    Exit((LRef.OvSym <> NIL_SYM) and
+      (FModel.Symbols[LRef.OvSym].TypeCat = tcClass));
+  end;
+  LX := RefValueX(LRef, LOv);
+  if XValid(LX) then
+    Result := FProj.XCatOf(FProj.CanonTypeX(LX)) = tcClassOf
+  else if LOv <> NIL_SYM then
+    Result := FModel.Symbols[LOv].TypeCat = tcClassOf;
+end;
+
+// A type item's own type, canonical, and its category: a project type, a
+// builtin through its System twin, an overlay type through its last-good
+// twin - or, declared since the last analysis, its category alone.
+function TPasCompletion.TypeItemX(const AItem: TPasComplItem;
+  out ACat: TSemaTypeCat): TSemaXType;
+var
+  LMid, LSym: Integer;
+begin
+  Result := XNil;
+  ACat := tcUnknown;
+  if AItem.Sym = NIL_SYM then
+    Exit;
+  if FProj <> nil then
+  begin
+    if AItem.Mid >= 0 then
+      Result := XPlain(AItem.Mid, AItem.Sym)
+    else if AItem.Kind = skBuiltinType then
+    begin
+      if BridgeName(FModel.Symbols[AItem.Sym].NameLower, LMid, LSym) then
+        Result := XPlain(LMid, LSym);
+    end
+    else
+      Result := OwnModelTypeX(AItem.Sym);
+    if XValid(Result) then
+      Result := FProj.CanonTypeX(Result);
+  end;
+  if XValid(Result) then
+    ACat := FProj.XCatOf(Result)
+  else if AItem.Mid < 0 then
+    ACat := FModel.Symbols[AItem.Sym].TypeCat;
+end;
+
+{ An item's fit in a type position (MatchOf's answer there):
+  - `is` / `as` after a class: a descendant of the left side's type fits,
+    the type itself and its ancestors lead (the test is true of any
+    non-nil value), an unrelated class is wrong (E2010); after an
+    interface any class fits. An interface fits after `as` and is wrong
+    after `is` (dcc 37: E2015 whatever the left side). A class-reference
+    value fits.
+  - a handler, an attribute: a descendant of Exception / TCustomAttribute
+    fits, another class is wrong.
+  - a generic argument: what every constraint of its parameter admits fits
+    - `class` a class, `record` a value type (a record, an ordinal, a float,
+    a set), `constructor` a class (dcc 37 accepts every class, whatever its
+    own Create takes), a class type its descendants, an interface type the
+    classes listing it (others lead: an interface they implement may
+    descend from it) and its descendants; what one rejects is wrong.
+  - a constraint: the keywords first (fit 0), then the classes and the
+    interfaces.
+  A generic parameter, a unit name and a type whose category is not known
+  lead. }
+function TPasCompletion.TypePosFit(const AItem: TPasComplItem): TPasComplMatch;
+const
+  // dcc-verified accepted categories for `T: record` (CheckConstraints).
+  VALUE_CATS = [tcRecord, tcInteger, tcFloat, tcBoolean, tcChar, tcEnum,
+    tcSet];
+var
+  LX: TSemaXType;
+  LCat: TSemaTypeCat;
+  LDist: Integer;
+
+  function Worse(A, B: TPasComplMatch): TPasComplMatch;
+  begin
+    if Ord(B) > Ord(A) then
+      Result := B
+    else
+      Result := A;
+  end;
+
+  function DescentFit(const ADesc, ABase: TSemaXType): TPasComplMatch;
+  begin
+    case FProj.XDescentDistX(ADesc, ABase, LDist) of
+      xdYes:
+        Result := cmCompatible;
+      xdNo:
+        Result := cmOther;
+    else
+      Result := cmLeads;
+    end;
+  end;
+
+  // The item against one constraint type ABase.
+  function BaseFit(const ABase: TSemaXType): TPasComplMatch;
+  begin
+    if not XValid(LX) then
+      Exit(cmLeads);
+    case FProj.XCatOf(ABase) of
+      tcClass:
+        if LCat <> tcClass then
+          Result := cmOther
+        else
+          Result := DescentFit(LX, ABase);
+      tcInterface:
+        if LCat = tcClass then
+        begin
+          if FProj.XImplementsX(LX, ABase) = xdYes then
+            Result := cmCompatible
+          else
+            Result := cmLeads;
+        end
+        else if LCat = tcInterface then
+          Result := DescentFit(LX, ABase)
+        else
+          Result := cmOther;
+    else
+      Result := cmLeads;
+    end;
+  end;
+
+begin
+  Result := cmOther;
+  if AItem.Bucket = cbKeyword then
+  begin
+    if FTypePos = tpConstraint then
+      Result := cmExact;
+    Exit;
+  end;
+  if (AItem.Bucket = cbUnitName) or
+     (AItem.Kind in [skGenericParam, skUnitRef]) then
+    Exit(cmLeads);
+  if not (AItem.Kind in [skType, skBuiltinType]) then
+  begin
+    // A class-reference value after `is` / `as` - AddSym lets no other
+    // value into a type position.
+    if FTypePos = tpIsAs then
+      Result := cmCompatible;
+    Exit;
+  end;
+  LX := TypeItemX(AItem, LCat);
+  if LCat = tcUnknown then
+    Exit(cmLeads);
+  case FTypePos of
+    tpConstraint:
+      Result := cmCompatible;
+    tpHandler, tpAttribute:
+      if LCat <> tcClass then
+        Result := cmOther
+      else if not XValid(LX) then
+        Result := cmLeads
+      else
+        Result := DescentFit(LX, FTypeBase);
+    tpIsAs:
+      if LCat = tcInterface then
+      begin
+        if FTypeAs then
+          Result := cmCompatible;
+      end
+      else if LCat <> tcClass then
+        Result := cmOther
+      else if FTypeLeftCat = tcInterface then
+        Result := cmCompatible
+      else if not XValid(LX) or not XValid(FTypeLeft) then
+        Result := cmLeads
+      else
+        case FProj.XDescentDistX(LX, FTypeLeft, LDist) of
+          xdYes:
+            if LDist > 0 then
+              Result := cmCompatible
+            else
+              Result := cmLeads;
+          xdNo:
+            if FProj.XDescentDistX(FTypeLeft, LX, LDist) = xdNo then
+              Result := cmOther
+            else
+              Result := cmLeads;
+        else
+          Result := cmLeads;
+        end;
+    tpGenArg:
+      begin
+        Result := cmCompatible;
+        if (FGenClass or FGenCtor) and (LCat <> tcClass) then
+          Result := cmOther;
+        if FGenRecord and not (LCat in VALUE_CATS) then
+          Result := cmOther;
+        if FGenOpenBase then
+          Result := Worse(Result, cmLeads);
+        for var LBaseX in FGenBases do
+          Result := Worse(Result, BaseFit(LBaseX));
+      end;
+  end;
+end;
+
 function TPasCompletion.CompleteAt(ALine, ACol: Integer;
   out ACaret: TPasCaretInfo; out AContext: TPasComplContext;
   out AItems: TArray<TPasComplItem>): Boolean;
 var
   LInfo: TPasCaretInfo;
   LRef: TPasComplTypeRef;
-  LNode: Integer;
+  LNode, LOff: Integer;
 begin
   AContext := ccNone;
   AItems := nil;
@@ -8158,6 +8882,35 @@ begin
   FExpectRaise := False;
   FRaiseBase := XNil;
   FArgOpenElem := ComplNilRef;
+  // A ranked type position (`is` / `as`, a handler, a generic argument or
+  // constraint, an attribute) is a type position whatever the token rules
+  // made of it: `O is |` and `[|]` read as expressions, `on |` too.
+  FTypePos := tpNone;
+  FTypeAs := False;
+  FTypeAfterIs := False;
+  FTypeLeft := XNil;
+  FTypeLeftCat := tcUnknown;
+  FTypeBase := XNil;
+  FTypeRank := False;
+  FGenClass := False;
+  FGenRecord := False;
+  FGenCtor := False;
+  FGenBases := nil;
+  FGenOpenBase := False;
+  if FContext in [ccExpression, ccType, ccStatement] then
+  begin
+    if not CaretOffset(ALine, ACol, LOff) then
+      LOff := -1;
+    FTypePos := TypePosAt(LInfo, LOff);
+    if FTypePos <> tpNone then
+    begin
+      FContext := ccType;
+      AContext := FContext;
+      FTypeNameOnly := False;
+      FHeritage := nkError;
+      FHeritageDecl := NIL_NODE;
+    end;
+  end;
   if FContext in [ccExpression, ccMember] then
   begin
     FExpect := RefValueX(ExpectedTypeAt(LInfo), FExpectOv);
@@ -8274,7 +9027,8 @@ begin
     end;
   end;
   if XValid(FExpect) or (FExpectOv <> NIL_SYM) or FExpectOrdinal or
-     FExpectEnum or (FCastRef <> tcUnknown) or FExpectWith or FExpectRaise then
+     FExpectEnum or (FCastRef <> tcUnknown) or FExpectWith or FExpectRaise or
+     FTypeRank then
     RankItems;
   SetLength(FItems, FCount);
   AItems := FItems;

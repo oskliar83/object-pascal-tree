@@ -1146,6 +1146,27 @@ const
     'function ExtPick(S: TShape2): TColor2;'#10 +
     // A constructor taking an argument: a call, never a cast.
     'type TPen = class constructor Create(AColor: TColor2); end;'#10 +
+    // Type positions: interfaces and an implementer, a class reference,
+    // attributes, generics under each kind of constraint, a generic method.
+    'type'#10 +
+    '  IShape = interface end;'#10 +
+    '  IRound = interface(IShape) end;'#10 +
+    '  TBall = class(TAnimal, IShape) end;'#10 +
+    '  TAnimalClass = class of TAnimal;'#10 +
+    '  TCustomAttribute = class end;'#10 +
+    '  TableAttribute = class(TCustomAttribute) end;'#10 +
+    '  TBoxC<T: class> = class end;'#10 +
+    '  TBoxR<T: record> = class end;'#10 +
+    '  TBoxK<T: constructor> = class end;'#10 +
+    '  TBoxA<T: TAnimal> = class end;'#10 +
+    '  TBoxI<T: IShape> = class end;'#10 +
+    '  TPair2<K; V: class> = class end;'#10 +
+    '  TFree<T> = class end;'#10 +
+    '  TPick = class class function Get<T: TAnimal>: T; static; end;'#10 +
+    'var'#10 +
+    '  ExtClass: TAnimalClass;'#10 +
+    '  ExtShape: IShape;'#10 +
+    'function ExtClassOf: TAnimalClass;'#10 +
     'implementation'#10 +
     'constructor TPen.Create(AColor: TColor2);'#10'begin'#10'end;'#10 +
     'procedure ExtOne(A: TColor2);'#10'begin'#10'end;'#10 +
@@ -1162,6 +1183,8 @@ const
     'function ExtPick(S: TShape2): TColor2;'#10'begin'#10'  Result := clRed;'#10'end;'#10 +
     'procedure TOwner.Paint(AColor: TColor2);'#10'begin'#10'end;'#10 +
     'class function TUtil.Max<T>(A, B: T): T;'#10'begin'#10'  Result := A;'#10'end;'#10 +
+    'class function TPick.Get<T>: T;'#10'begin'#10'  Result := nil;'#10'end;'#10 +
+    'function ExtClassOf: TAnimalClass;'#10'begin'#10'  Result := nil;'#10'end;'#10 +
     'class function TGuid2.Make: TGuid2;'#10'begin'#10'end;'#10 +
     'function ExtGuidOf(const S: string): TGuid2;'#10'begin'#10'end;'#10 +
     'function ExtSubOf(const S: string): TSub;'#10'begin'#10'  Result := 0;'#10'end;'#10 +
@@ -1257,6 +1280,68 @@ procedure ExpCase(const ALine, AExact, ACompat, AOther, AAbsent: string;
 begin
   ExpSrc(EXP_HEAD_A + AExtra + EXP_HEAD_B + '  ' + ALine + #10 + PROJ_TAIL,
     AExact, ACompat, AOther, AAbsent, ALeads, ALine);
+end;
+
+{ A ranked type position (`is` / `as`, a handler, a generic argument or
+  constraint, an attribute): like ExpSrc, but the context must be ccType. }
+procedure TypSrc(const ASource, AExact, ACompat, AOther, AAbsent: string;
+  const ALeads: string = ''; const ATitle: string = '');
+var
+  LOk: Boolean;
+  LWhy: string;
+
+  procedure Want(const ANames: string; AMatch: TPasComplMatch);
+  begin
+    for var LName in ANames.Split([',']) do
+      if LName <> '' then
+        if not Has(LName) then
+        begin
+          LOk := False;
+          LWhy := LWhy + ' missing ' + LName;
+        end
+        else if ItemNamed(LName).Match <> AMatch then
+        begin
+          LOk := False;
+          LWhy := LWhy + Format(' %s=%d', [LName,
+            Ord(ItemNamed(LName).Match)]);
+        end;
+  end;
+
+begin
+  ProjCase(ASource);
+  LOk := GHit and (GCtx = ccType);
+  LWhy := '';
+  Want(AExact, cmExact);
+  Want(ACompat, cmCompatible);
+  Want(AOther, cmOther);
+  Want(ALeads, cmLeads);
+  for var LName in AAbsent.Split([',']) do
+    if (LName <> '') and Has(LName) then
+    begin
+      LOk := False;
+      LWhy := LWhy + ' has ' + LName;
+    end;
+  GCounter.Ok(Format('type position: %s', [ATitle]), LOk,
+    procedure
+    begin
+      Writeln('    ctx=', Ord(GCtx), ' items=', Length(GItems), ':', LWhy);
+    end);
+end;
+
+// A type position in Run's body (ALine with the caret marker).
+procedure TypCase(const ALine, AExact, ACompat, AOther, AAbsent: string;
+  const ALeads: string = '');
+begin
+  TypSrc(EXP_HEAD_A + EXP_HEAD_B + '  ' + ALine + #10 + PROJ_TAIL,
+    AExact, ACompat, AOther, AAbsent, ALeads, ALine);
+end;
+
+// A type position in the interface section (ADecl a declaration line).
+procedure TypDecl(const ADecl, AExact, ACompat, AOther, AAbsent: string;
+  const ALeads: string = '');
+begin
+  TypSrc(EXP_HEAD_A + ADecl + #10'implementation'#10'end.'#10, AExact,
+    ACompat, AOther, AAbsent, ALeads, Trim(ADecl));
 end;
 
 { An expected-type case in routines of its own: ARoutines is the whole
@@ -3177,6 +3262,103 @@ begin
   ExpSrc(EXP_HEAD_A + 'const CP: TNotify = |;'#10'implementation'#10'end.'#10,
     'ExtReset', '', 'ExtClickProc', '', '', 'const CP: TNotify = |');
   ExpCase('var V: Integer := |;', 'I,ExtCount', '', 'C', 'ExtReset');
+  // ======== type positions (pastree-lsp COMPLETION.md) =====================
+  // `is` / `as` after a class: types alone - a descendant fits, the type
+  // itself and an ancestor lead, an unrelated class is wrong (E2010), an
+  // interface is wrong after `is` (E2015) and fits after `as`; a
+  // class-reference value fits; no other value, no routine, no scalar
+  // type. `not` is offered right after `is` (Delphi 13's `is not`).
+  TypCase('if A is | then;', '', 'TDog,TBall,ExtClass,ExtClassOf', 'TCar,EFoo,IShape',
+    'I,C,A,D,ExtOwner,ExtErr,ExtReset,ExtCount,TColor2,TLocalEnum,clRed,TGuid2,ExtErrOf', 'TAnimal');
+  GCounter.Ok('type position: `not` after `is`', Has('not') and not Has('and'));
+  TypCase('if A is not | then;', '', 'TDog', 'TCar,IShape', 'I,ExtReset,not',
+    'TAnimal');
+  TypCase('if A is T| then;', '', 'TDog,TBall', 'TCar', 'TColor2,TLocalEnum');
+  TypCase('D := A as |;', '', 'TDog,IShape,IRound', 'TCar', 'I,ExtReset,not',
+    'TAnimal');
+  TypCase('(A as |).Free;', '', 'TDog', 'TCar', 'I,ExtReset');
+  TypCase('if D is | then;', '', '', 'TBall,TCar', '', 'TDog,TAnimal');
+  // After an interface any class fits; another interface only after `as`.
+  TypCase('if ExtShape is | then;', '', 'TCar,TDog', 'IRound', 'I,ExtReset');
+  TypCase('A := ExtShape as |;', '', 'TCar,IRound', '', 'I,ExtReset');
+  // A left side that is no class or interface ranks nothing, but the
+  // position is still a type position.
+  TypCase('if I is | then;', '', '', '', 'I,ExtReset,TColor2');
+  GCounter.Ok('type position: `I is |` still lists the classes',
+    Has('TDog') and Has('IShape'));
+  // An exception handler: an Exception's descendant fits, another class is
+  // wrong; no value, no non-class type.
+  TypSrc(EXP_HEAD_A + 'implementation'#10'procedure P;'#10'begin'#10 +
+    '  try'#10'  except'#10'    on E: | do ;'#10'  end;'#10'end;'#10'end.'#10,
+    '', 'EFoo,Exception', 'TCar,TAnimal,TableAttribute',
+    'ExtErr,ExtReset,TColor2,TLocalEnum,IShape,clRed', '', 'on E: |');
+  TypSrc(EXP_HEAD_A + 'implementation'#10'procedure P;'#10'begin'#10 +
+    '  try'#10'  except'#10'    on | do ;'#10'  end;'#10'end;'#10'end.'#10,
+    '', 'EFoo,Exception', 'TCar', 'ExtErr,ExtReset,TColor2', '', 'on |');
+  TypSrc(EXP_HEAD_A + 'implementation'#10'procedure P;'#10'begin'#10 +
+    '  try'#10'  except'#10'    on E: EFoo do ;'#10'    on X: E| do ;'#10 +
+    '  end;'#10'end;'#10'end.'#10, '', 'EFoo', '', 'ExtErr,ExtErrOf', '',
+    'on X: E| after another handler');
+  // A generic argument: what the parameter's constraint admits fits, what
+  // it rejects is wrong; no value. An empty `<>` is one token.
+  TypDecl('var V1: TBoxC<|>;', '', 'TAnimal,TDog,TCar,TPen', 'TColor2,IShape,TGuid2,Integer',
+    'clRed,ExtReset,ExtCount,CRed');
+  TypDecl('var V1: TBoxC<|;', '', 'TAnimal', 'TColor2', 'clRed');
+  TypDecl('var V1: TBoxR<|>;', '', 'TColor2,TGuid2,Integer,TLocalEnum',
+    'TAnimal,IShape', 'clRed');
+  TypDecl('var V1: TBoxK<|>;', '', 'TAnimal,TPen', 'TGuid2,TColor2', 'clRed');
+  TypDecl('var V1: TBoxA<|>;', '', 'TAnimal,TDog,TBall', 'TCar,TColor2,IShape',
+    'clRed');
+  TypDecl('var V1: TBoxI<|>;', '', 'TBall,IShape,IRound', 'TColor2', 'clRed',
+    'TCar');
+  TypDecl('var V1: TPair2<string, |>;', '', 'TAnimal', 'TColor2', 'clRed');
+  TypDecl('var V1: TPair2<|, TDog>;', '', '', '', 'clRed,ExtReset');
+  GCounter.Ok('type position: an unconstrained parameter lists every type',
+    Has('TColor2') and Has('TAnimal'));
+  // A generic the edited unit declares itself.
+  TypDecl('  TOwnC<T: class> = class end;'#10'var V1: TOwnC<|>;', '', 'TAnimal',
+    'TColor2', 'clRed');
+  TypDecl('var V1: TFree<|>;', '', '', '', 'clRed,ExtReset,ExtCount');
+  GCounter.Ok('type position: TFree<|> lists every type',
+    Has('TColor2') and Has('TAnimal') and Has('IShape'));
+  TypCase('var V := TBoxA<|>.Create;', '', 'TDog', 'TCar', 'I,ExtReset');
+  TypCase('A := TPick.Get<|>;', '', 'TDog', 'TCar,TColor2', 'I,ExtReset');
+  TypCase('A := TPick.Get<|', '', 'TDog', 'TCar', 'I,ExtReset');
+  // A comparison stays one: `I < |` is no generic argument.
+  ExpCase('if I < | then;', 'I,ExtCount', '', '', 'ExtReset');
+  // A generic constraint: the keywords first, then classes and interfaces;
+  // no other type, no value.
+  TypDecl('  TMyBox<T: |> = class end;', 'class,record,constructor',
+    'TAnimal,IShape,TDog', '', 'TColor2,Integer,clRed,ExtCount,TGuid2');
+  TypDecl('  TMyBox<T: class, |> = class end;', 'constructor', 'IShape', '',
+    'TColor2');
+  TypDecl('  TMyBox<A; B: I|> = class end;', '', 'IShape,IRound', '',
+    'Integer');
+  TypDecl('  TMyU = class procedure F<T: |>; end;', 'class,record',
+    'TAnimal', '', 'TColor2,string');
+  // `<A, |>` names a new parameter: no constraint there.
+  ProjCase(EXP_HEAD_A + '  TMyBox<A, |> = class end;'#10'implementation'#10 +
+    'end.'#10);
+  GCounter.Ok('type position: <A, |> is no constraint',
+    not Has('constructor'));
+  // An attribute: TCustomAttribute's descendants fit, another class is
+  // wrong; no value, no other type. Its arguments and a set constructor
+  // keep their own contexts.
+  TypDecl('  [|]'#10'  TMyA = class end;', '', 'TableAttribute', 'TAnimal,EFoo',
+    'TColor2,clRed,ExtCount,ExtReset,IShape,TLocalEnum');
+  TypDecl('  [Table|]'#10'  TMyA = class end;', '', 'TableAttribute', '',
+    'TColor2');
+  TypDecl('  [TableAttribute, |]'#10'  TMyA = class end;', '', 'TableAttribute',
+    'TAnimal', 'clRed');
+  TypDecl('  TMyA = class'#10'    [|]'#10'    F: Integer;'#10'  end;', '',
+    'TableAttribute', 'TAnimal', 'clRed,ExtCount');
+  TypDecl('  TMyA = class'#10'    procedure M([|] X: Integer);'#10'  end;', '',
+    'TableAttribute', 'TAnimal', 'clRed');
+  ProjCase(EXP_HEAD_A + '  [TableAttribute(|)]'#10'  TMyA = class end;'#10 +
+    'implementation'#10'end.'#10);
+  GCounter.Ok('type position: an attribute''s argument is an expression',
+    (GCtx = ccExpression) and Has('ExtCount'));
+  ExpCase('ExtSet := [|];', 'clRed,C,ExtColor', '', 'shSquare,I', 'ExtReset');
   // `in` as the set operator is no for-in.
   ProjCase(EXP_HEAD_A + EXP_HEAD_B + '  if C in | then;'#10 + PROJ_TAIL);
   GCounter.Ok('expected type: the set operator `in` is no for-in',
