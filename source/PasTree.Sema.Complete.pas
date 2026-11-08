@@ -498,6 +498,11 @@ type
     procedure AddContextKeywords(const AInfo: TPasCaretInfo);
     // expected-type ranking
     function ExpectedTypeAt(const AInfo: TPasCaretInfo): TPasComplTypeRef;
+    function OperandExpect(AOp, AScope, ADepth: Integer): TPasComplTypeRef;
+    function NotOperandExpect(const AOuter: TPasComplTypeRef): TPasComplTypeRef;
+    function LogicalOperandExpect(AOp: Integer): TPasComplTypeRef;
+    function IsGroupingParen(AParen: Integer): Boolean;
+    function RefCatOf(const ARef: TPasComplTypeRef): TSemaTypeCat;
     function ArgExpectAt(ARaw, AScope: Integer): TPasComplTypeRef;
     procedure CastExpect(AMid, ASym: Integer);
     function ExitExpect(AScope: Integer): TPasComplTypeRef;
@@ -5098,8 +5103,13 @@ begin
   end;
 end;
 
-{ The type the operand at the caret must fit: Boolean where it starts a
-  condition (`if |`, `while |`, `until |`, `if not |`); any ordinal after
+{ The type the operand at the caret must fit (the operand starts right after
+  raw token AOp; OperandExpect, ExpectedTypeAt finds AOp): Boolean where it
+  starts a condition (`if |`, `while |`, `until |`); after `not` what the
+  `not` expression's own position makes of it (NotOperandExpect: Boolean or
+  an integer type); the left operand's Boolean or integer type after `and`,
+  `or`, `xor` (LogicalOperandExpect); after a grouping `(` what the
+  parenthesized expression's position expects (`if (|`, `X := (|`); any ordinal after
   `case` (FExpectOrdinal, no one type); the selector's type in a `case`
   label (CaseLabelOf, FConstOnly); its parameter's
   where it starts a call's argument (`F(|`, `F(A, |`: ArgExpectAt), the
@@ -5128,14 +5138,11 @@ const
   DESIGNATORS = [nkIdent, nkMember, nkCall, nkIndex, nkDeref, nkParen,
     nkTypeArgs];
 var
-  LTS: TPasTokenStream;
-  LOp, LEnd, LVis, LNode, LParent, LLeft, LBefore: Integer;
-  LInline: Boolean;
+  LOp, LNode, LParent, LLeft: Integer;
 begin
   Result := ComplNilRef;
   if (FProj = nil) or (AInfo.Kind = ckNone) then
     Exit;
-  LTS := FModel.Tree.Source.Files[0];
   if (FContext = ccMember) and (AInfo.DotBase <> NIL_NODE) then
   begin
     // `X := Obj.Sub.|`: the operator stands before the whole chain. Climb
@@ -5162,22 +5169,47 @@ begin
     LOp := PrevVisibleRaw(AInfo.RawToken - 1)
   else
     LOp := AInfo.RawToken;
-  if LOp < 1 then
+  Result := OperandExpect(LOp, AInfo.Scope, 0);
+end;
+
+{ ExpectedTypeAt's answer for the operand starting right after raw token
+  AOp. ADepth bounds the recursion through `not` and grouping parens. }
+function TPasCompletion.OperandExpect(AOp, AScope,
+  ADepth: Integer): TPasComplTypeRef;
+var
+  LTS: TPasTokenStream;
+  LOp, LEnd, LVis, LLeft, LBefore: Integer;
+  LInline: Boolean;
+begin
+  Result := ComplNilRef;
+  LOp := AOp;
+  if (LOp < 1) or (ADepth > 32) then
     Exit;
-  // A condition - right after `if`, `while`, `until`, or a `not` right
-  // after one of them (`if not Assigned(|`) - is a Boolean: the operand
-  // starting there is the whole condition or its first operand, which a
-  // relational operator would still make Boolean of any value.
-  LBefore := LOp;
-  if LTS.Tokens[LBefore].Kind = tkNot then
-    LBefore := PrevVisibleRaw(LBefore - 1);
-  if (LBefore >= 1) and
-     (LTS.Tokens[LBefore].Kind in [tkIf, tkWhile, tkUntil]) then
+  LTS := FModel.Tree.Source.Files[0];
+  // `not |` (`if not |`, `X := not |`, `Foo(not |)`): the `not` expression
+  // stands where its own position puts it, and its operand is what makes
+  // that - a Boolean, or an integer for a bitwise not (NotOperandExpect).
+  if LTS.Tokens[LOp].Kind = tkNot then
+    Exit(NotOperandExpect(
+      OperandExpect(PrevVisibleRaw(LOp - 1), AScope, ADepth + 1)));
+  // A condition - right after `if`, `while`, `until` - is a Boolean: the
+  // operand starting there is the whole condition or its first operand,
+  // which a relational operator would still make Boolean of any value.
+  if LTS.Tokens[LOp].Kind in [tkIf, tkWhile, tkUntil] then
   begin
     if BridgeName('boolean', LLeft, LEnd) then
       Result.X := XPlain(LLeft, LEnd);
     Exit;
   end;
+  // The right operand of `and` / `or` / `xor`: the left one's type, a
+  // Boolean or an integer (LogicalOperandExpect).
+  if LTS.Tokens[LOp].Kind in [tkAnd, tkOr, tkXor] then
+    Exit(LogicalOperandExpect(LOp));
+  // A grouping paren (`if (|`, `if (A) and (|`, `X := (|`): the
+  // parenthesized expression - whose first operand starts at the caret -
+  // stands where the `(` does. A call's or a cast's `(` is ArgExpectAt's.
+  if (LTS.Tokens[LOp].Kind = tkLParen) and IsGroupingParen(LOp) then
+    Exit(OperandExpect(PrevVisibleRaw(LOp - 1), AScope, ADepth + 1));
   // A `case` selector takes any ordinal: a category, FExpectOrdinal.
   if LTS.Tokens[LOp].Kind = tkCase then
   begin
@@ -5191,7 +5223,7 @@ begin
   begin
     LBefore := BracketOpenOf(LOp, LVis);
     if LBefore >= 0 then
-      Exit(BracketExpect(LBefore, LVis, AInfo.Scope));
+      Exit(BracketExpect(LBefore, LVis, AScope));
   end;
   // A `case` label - right after `of`, a `,` or `..` of a label list, or the
   // `;` ending an arm - is a constant of the selector's type (CaseLabelOf).
@@ -5247,8 +5279,131 @@ begin
   // A call's argument - the operand right after its `(` or a `,` of its
   // list - expects its parameter's type (ArgExpectAt).
   if LTS.Tokens[LOp].Kind in [tkLParen, tkComma] then
-    Exit(ArgExpectAt(LOp, AInfo.Scope));
+    Exit(ArgExpectAt(LOp, AScope));
   Result := OperatorLeftType(LOp, False);
+end;
+
+{ The category of the value an expected-type reference stands for -
+  tcUnknown when it is none or untyped. }
+function TPasCompletion.RefCatOf(const ARef: TPasComplTypeRef): TSemaTypeCat;
+var
+  LX: TSemaXType;
+  LOv: Integer;
+begin
+  Result := tcUnknown;
+  if not ComplValid(ARef) then
+    Exit;
+  LX := RefValueX(ARef, LOv);
+  if XValid(LX) then
+    Result := FProj.XCatOf(LX)
+  else if LOv <> NIL_SYM then
+    Result := FModel.Symbols[LOv].TypeCat;
+end;
+
+{ The operand of a `not` whose own position expects AOuter. `not` makes a
+  Boolean of a Boolean and an integer of an integer (5.3): where an integer
+  is expected the operand is that integer (a bitwise not), where a Boolean
+  or nothing is expected a Boolean - `X := not |` with X untyped, `Foo(not
+  |)` with an untyped parameter. Where something else is expected (a
+  string) no `not` fits, and nothing is ranked. A `not` expression is never
+  a variable (FArgByRef off) and never a procedure (FArgNoProcs). A category
+  context (`case not |`: FExpectOrdinal) is kept as it is. }
+function TPasCompletion.NotOperandExpect(
+  const AOuter: TPasComplTypeRef): TPasComplTypeRef;
+var
+  LMid, LSym: Integer;
+begin
+  Result := ComplNilRef;
+  FArgNoProcs := True;
+  FArgByRef := False;
+  FArgOpenElem := ComplNilRef;
+  if FExpectOrdinal or FExpectEnum or (FCastRef <> tcUnknown) then
+    Exit;
+  case RefCatOf(AOuter) of
+    tcInteger, tcBoolean:
+      begin
+        Result := AOuter;
+        Result.IsTypeRef := False;
+      end;
+    tcUnknown:
+      if not ComplValid(AOuter) and BridgeName('boolean', LMid, LSym) then
+        Result.X := XPlain(LMid, LSym);
+  end;
+end;
+
+{ The right operand of the `and` / `or` / `xor` at raw token AOp: the left
+  operand's type when that is a Boolean (a logical operator) or an integer
+  (a bitwise one), else nothing. The left operand is the designator ending
+  before AOp (a `not` before it changes no type) when nothing binding
+  tighter than AOp stands before that: an expression or statement opener,
+  a relational operator, another `and` / `or` / `xor`, or `+` / `-` -
+  `if A = B and |` is `A = (B and |)` (`and` is multiplicative, 5.2.1),
+  so B decides. `X * Y and |` - the left operand a product - expects
+  nothing. Never a procedure, typed or not (FArgNoProcs). }
+function TPasCompletion.LogicalOperandExpect(AOp: Integer): TPasComplTypeRef;
+const
+  BEFORE_LEFT = [tkIf, tkWhile, tkUntil, tkLParen, tkLBracket, tkComma,
+    tkSemicolon, tkColon, tkAssign, tkBegin, tkThen, tkElse, tkDo,
+    tkRepeat, tkTry, tkFinally, tkExcept, tkOf, tkFor, tkTo, tkDownto,
+    tkCase, tkEqual, tkNotEqual, tkLess, tkGreater, tkLessEqual,
+    tkGreaterEqual, tkIn, tkAnd, tkOr, tkXor, tkPlus, tkMinus];
+var
+  LTS: TPasTokenStream;
+  LNode, LBefore: Integer;
+begin
+  Result := ComplNilRef;
+  FArgNoProcs := True;
+  LTS := FModel.Tree.Source.Files[0];
+  LNode := DesignatorEndingAt(PrevVisibleRaw(AOp - 1), LBefore);
+  if LNode = NIL_NODE then
+    Exit;
+  while (LBefore >= 0) and (LTS.Tokens[LBefore].Kind = tkNot) do
+    LBefore := PrevVisibleRaw(LBefore - 1);
+  if (LBefore < 0) or not (LTS.Tokens[LBefore].Kind in BEFORE_LEFT) then
+    Exit;
+  Result := DesignatorType(LNode, 0);
+  if Result.IsTypeRef or not (RefCatOf(Result) in [tcBoolean, tcInteger]) then
+    Result := ComplNilRef;
+end;
+
+{ Is the `(` at raw token AParen a grouping paren rather than a call's or a
+  value typecast's? A call or a cast follows a designator - a name, `)`,
+  `]`, `^`, the `string` keyword; a `>` is a generic's type arguments
+  (`Foo<T>(`) or a comparison (`A > (`), told apart by the tree. Anything
+  else - a keyword, an operator, another `(` - opens a grouping. A typed
+  constant's or variable's initializer (`const R: TRec = (`, an array
+  constant) is a record or array constant, no grouping. }
+function TPasCompletion.IsGroupingParen(AParen: Integer): Boolean;
+var
+  LTS: TPasTokenStream;
+  LPrev, LVis, LNode, LBefore: Integer;
+begin
+  Result := False;
+  LTS := FModel.Tree.Source.Files[0];
+  LPrev := PrevVisibleRaw(AParen - 1);
+  if LPrev < 0 then
+    Exit;
+  case LTS.Tokens[LPrev].Kind of
+    tkIdentifier, tkRParen, tkRBracket, tkCaret, tkString:
+      Exit;
+    tkGreater:
+      begin
+        LVis := FVisOfRaw[AParen];
+        if LVis < 0 then
+          Exit;
+        LNode := InnermostNodeAt(LVis);
+        Exit((LNode <> NIL_NODE) and
+          (FModel.Tree.Nodes[LNode].Kind = nkParen));
+      end;
+    tkEqual:
+      begin
+        if (DesignatorEndingAt(PrevVisibleRaw(LPrev - 1), LBefore) <>
+            NIL_NODE) and (LBefore >= 0) and
+           (LTS.Tokens[LBefore].Kind = tkColon) then
+          Exit;
+      end;
+  end;
+  Result := True;
 end;
 
 { The designator node that ends on raw token AEndRaw, grown up its parents

@@ -1445,8 +1445,8 @@ begin
   DotCase('if B.| then;', 'CF');
   DotCase('if not B.| then;', 'CF');
   DotCase('while B.| do;', 'CF');
-  DotCase('if (B.|) then;');
-  DotCase('if (ImplVar = 1) and (B.|) then;');
+  DotCase('if (B.|) then;', 'CF');
+  DotCase('if (ImplVar = 1) and (B.|) then;', 'CF');
   // An index takes a value: the procedure Pub is none.
   DotCase('Arr[B.|] := nil;', 'CF');
   DotCase('ImplVar := [B.|];');
@@ -2864,6 +2864,25 @@ begin
   ExpCase('repeat until |;', 'B', '', '', 'ExtReset');
   ExpCase('if ExtOwner.| then;', '', '', '', 'Reset', '', 'Color,Count');
   ExpCase('I := |;', 'SizeOf', '', '', 'ExtReset');
+  // An operand of `and` / `or` / `xor` takes the left one's type: a Boolean
+  // (logical), an integer (bitwise); `and` binds tighter than `=`, so in
+  // `I = I and |` the left operand is the second I. No procedure is listed.
+  ExpCase('if B and | then;', 'B,Assigned', '', '', 'ExtReset,LocalProc');
+  ExpCase('while (I > 0) or | do;', 'B', '', '', 'ExtReset');
+  ExpCase('B := B xor |;', 'B', '', '', 'ExtReset');
+  ExpCase('I := I and |;', 'I', '', '', 'ExtReset,LocalProc');
+  ExpCase('if I = I and | then;', 'I', '', '', 'ExtReset');
+  ExpCase('if B and not | then;', 'B', '', '', 'ExtReset');
+  // A grouping paren stands where the `(` does: a condition's is a Boolean.
+  ExpCase('if (| then;', 'B,Assigned', '', '', 'ExtReset,LocalProc');
+  ExpCase('if ((| then;', 'B', '', '', 'ExtReset');
+  ExpCase('if (B) and (| then;', 'B', '', '', 'ExtReset');
+  ExpCase('I := (|;', 'I', '', '', 'ExtReset');
+  // `not` elsewhere: a Boolean where a Boolean is expected, the integer
+  // where an integer is (a bitwise not).
+  ExpCase('B := not |;', 'B', '', '', 'ExtReset');
+  ExpCase('I := not |;', 'I', '', '', 'ExtReset');
+  ExpCase('Assert(not |);', 'B', '', '', 'ExtReset');
   ExpCase('if C = ExtOwner.Co| then;', 'Color', '', 'Count', 'Reset');
   // A member access as an argument is no value of the left side's type:
   // the argument's own parameter decides - Ord's is untyped, so nothing is
@@ -2921,11 +2940,10 @@ begin
   ExpCase('ExtOpen(|);', '', '', 'I,C', 'ExtReset');
   ExpCase('TUtil.Max(|);', '', '', 'I,C', 'ExtReset');
   ExpCase('FillChar(|);', '', '', 'I,C', 'clRed,ExtColorOf,ExtReset');
-  // A grouping paren and a set constructor are no argument; a cast is its
-  // own context (below).
-  ExpCase('I := (|);', '', '', 'I,C', '');
-  GCounter.Ok('expected type: a grouping paren keeps the procedures',
-    Has('ExtReset'));
+  // A grouping paren is no argument: it stands where its `(` does, here
+  // the right side of `:=` (no procedure); a cast is its own context
+  // (below).
+  ExpCase('I := (|);', 'I', '', 'C', 'ExtReset');
   ExpCase('ExtOwner.|;', '', '', 'Color,Pet', '');
   GCounter.Ok('expected type: members in a statement keep the procedures',
     Has('Reset'));
