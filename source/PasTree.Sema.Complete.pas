@@ -378,6 +378,20 @@ type
     // tcUnknown otherwise - a family, FExpect stays XNil and MatchOf asks
     // RefCastFit. A cast to an ordinal type sets FExpectOrdinal instead.
     FCastRef: TSemaTypeCat;
+    // A value typecast to a float or a record (`Double(|`, `TRec(|`):
+    // tcFloat / tcRecord, tcUnknown otherwise; FCastX the type cast to,
+    // FCastSize its SizeOf (-1 unknown). MatchOf asks ValueCastFit: dcc 37
+    // casts a number or a Variant to a float, and a value of exactly the
+    // target's size to a float or a record (E2089 otherwise). FSizes caches
+    // CastSizeOf's answers for one ranking.
+    FCastValue: TSemaTypeCat;
+    FCastX: TSemaXType;
+    FCastSize: Int64;
+    FSizes: TDictionary<TSemaXType, Int64>;
+    // `raise X at |`: an address - a pointer value (dcc 37: E2017 for
+    // anything else, an object and an integer included). MatchOf asks
+    // AddrFit.
+    FExpectAddr: Boolean;
     // A `with` item (`with | do`, `with A, |`): a value with members fits -
     // a class, a record, an interface, a class reference; a scalar is
     // wrong. A category, FExpect stays XNil and MatchOf asks WithFit.
@@ -436,6 +450,9 @@ type
     // `inherited` calls, ranked first (FInhRank).
     FInhName: string;
     FInhRank: Boolean;
+    // `inherited |` in a class method (FInhClass): an ancestor's instance
+    // method or property is wrong there (dcc 37: E2076, E2233).
+    FInhClass: Boolean;
     // ArgExpectAt's answer for an open-array parameter (`Foo([|])`): its
     // element, which the parameter's own type cannot carry.
     FArgOpenElem: TPasComplTypeRef;
@@ -590,6 +607,8 @@ type
     function RefCatOf(const ARef: TPasComplTypeRef): TSemaTypeCat;
     function ArgExpectAt(ARaw, AScope: Integer): TPasComplTypeRef;
     procedure CastExpect(AMid, ASym: Integer);
+    function CastSizeOf(const AX: TSemaXType): Int64;
+    function RaiseAtStart(AAt: Integer): Boolean;
     function ExitExpect(AScope: Integer): TPasComplTypeRef;
     function CaseLabelOf(ARaw: Integer): Integer;
     function CaseOfStart(AOf: Integer): Integer;
@@ -643,6 +662,7 @@ type
     // property accessors and `inherited`
     function PropSpecWordAt(ANode: Integer): string;
     procedure PropAccessorOf(const AInfo: TPasCaretInfo);
+    procedure InheritedPropType(const AInfo: TPasCaretInfo; AProp: Integer);
     procedure TypeNodeXOv(ANode: Integer; out AX: TSemaXType;
       out AOv: Integer);
     function ItemValueX(AMid, ASym, ACtx: Integer;
@@ -781,6 +801,7 @@ begin
   FUnitMids.Free;
   FSeen.Free;
   FReach.Free;
+  FSizes.Free;
   inherited;
 end;
 
@@ -1492,6 +1513,12 @@ begin
           Result.UnitMid := LM.UsesList[LIdx].UnitId;
           Break;
         end;
+    // An enumeration value has no declared type to read: its enumeration's.
+    // Without it an argument naming another unit's value (`Put(shRound, |`)
+    // picked no overload (ArgTypedOverload).
+    skEnumValue:
+      if LM.Symbols[ASym].TypeSym <> NIL_SYM then
+        Result.X := FProj.CanonTypeX(XPlain(AMid, LM.Symbols[ASym].TypeSym));
   else
     begin
       Result.X := FProj.SymDeclTypeX(AMid, ASym);
@@ -5430,6 +5457,12 @@ begin
   // A raised object: a class instance, an Exception's above the rest
   // (FExpectRaise; FRaiseBase is Exception when the caret's unit names a
   // class of that name, as it does through SysUtils).
+  // `raise X at |`: an address, a pointer value (FExpectAddr).
+  if RaiseAtStart(LOp) then
+  begin
+    FExpectAddr := True;
+    Exit;
+  end;
   if LTS.Tokens[LOp].Kind = tkRaise then
   begin
     FExpectRaise := True;
@@ -5564,7 +5597,8 @@ begin
   FArgNoProcs := True;
   FArgByRef := False;
   FArgOpenElem := ComplNilRef;
-  if FExpectOrdinal or FExpectEnum or (FCastRef <> tcUnknown) then
+  if FExpectOrdinal or FExpectEnum or (FCastRef <> tcUnknown) or
+     (FCastValue <> tcUnknown) or FExpectAddr then
     Exit;
   case RefCatOf(AOuter) of
     tcInteger, tcBoolean:
@@ -6227,6 +6261,7 @@ begin
         FArgByRef := False;
         FExpectOrdinal := False;
         FCastRef := tcUnknown;
+        FCastValue := tcUnknown;
         if ComplValid(FArgOpenElem) then
           Result := FArgOpenElem
         else
@@ -6775,8 +6810,12 @@ end;
   ordinal (FExpectOrdinal, as a `case` selector); one to a class, an
   interface, a pointer, a class reference or a procedural type any such
   reference, `nil` included (FCastRef, MatchOf's RefCastFit). A cast to a
-  float, a record or anything else ranks nothing - a same-size rule would
-  need sizes the ranking does not have. A procedure is never the operand. }
+  float or a record (FCastValue, MatchOf's ValueCastFit) takes what dcc 37
+  takes: a float any number, a Variant, and a value of exactly its size; a
+  record a value of exactly its size (`TRec4(I)`, `TRec4(S)` for a Single),
+  E2089 for any other - the size is the analysis's own SizeOf
+  (TPasSemaProject.TypeSizeOf); a record the ranking cannot measure ranks
+  nothing. Anything else ranks nothing. A procedure is never the operand. }
 procedure TPasCompletion.CastExpect(AMid, ASym: Integer);
 var
   LCat: TSemaTypeCat;
@@ -6803,6 +6842,82 @@ begin
       FExpectOrdinal := True;
     tcClass, tcInterface, tcPointer, tcClassOf, tcProc:
       FCastRef := LCat;
+    tcFloat, tcRecord:
+      if XValid(LX) then
+      begin
+        FCastSize := CastSizeOf(LX);
+        if (LCat = tcFloat) or (FCastSize > 0) then
+        begin
+          FCastValue := LCat;
+          FCastX := LX;
+        end;
+      end;
+  end;
+end;
+
+{ SizeOf of a value of type AX on the analyzed platform
+  (TPasSemaProject.TypeSizeOf, the `$IF SizeOf` oracle's layout walk), -1
+  where the walk refuses or the type is an instance of a generic. Cached for
+  the ranking in FSizes: a cast asks it of every item. }
+function TPasCompletion.CastSizeOf(const AX: TSemaXType): Int64;
+var
+  LX: TSemaXType;
+begin
+  Result := -1;
+  if (FProj = nil) or not XValid(AX) then
+    Exit;
+  LX := FProj.CanonTypeX(AX);
+  if not XValid(LX) or (LX.Inst <> NIL_INST) then
+    Exit;
+  if FSizes = nil then
+    FSizes := TDictionary<TSemaXType, Int64>.Create;
+  if FSizes.TryGetValue(LX, Result) then
+    Exit;
+  try
+    if not FProj.TypeSizeOf(LX.UnitId, LX.Sym, Result) then
+      Result := -1;
+  except
+    // A layout walk failing costs the rank, never the list.
+    Result := -1;
+  end;
+  FSizes.Add(LX, Result);
+end;
+
+{ Whether the identifier AAt is the `at` of `raise X at |` (12.6.1): a word
+  `at` after a `raise` of the same statement, at the same bracket depth. }
+function TPasCompletion.RaiseAtStart(AAt: Integer): Boolean;
+var
+  LTS: TPasTokenStream;
+  LRaw, LDepth, LSteps: Integer;
+begin
+  Result := False;
+  LTS := FModel.Tree.Source.Files[0];
+  if (AAt < 1) or (LTS.Tokens[AAt].Kind <> tkIdentifier) or
+     not SameText(Copy(LTS.Source, LTS.Tokens[AAt].Start + 1,
+       LTS.Tokens[AAt].Len), 'at') then
+    Exit;
+  LDepth := 0;
+  LRaw := AAt;
+  for LSteps := 1 to 512 do
+  begin
+    LRaw := PrevVisibleRaw(LRaw - 1);
+    if LRaw < 0 then
+      Exit;
+    case LTS.Tokens[LRaw].Kind of
+      tkRaise:
+        Exit(LDepth = 0);
+      tkRParen, tkRBracket:
+        Inc(LDepth);
+      tkLParen, tkLBracket:
+        begin
+          Dec(LDepth);
+          if LDepth < 0 then
+            Exit;
+        end;
+      tkSemicolon, tkBegin, tkEnd, tkThen, tkElse, tkDo, tkTry, tkExcept,
+      tkFinally, tkAssign, tkColon, tkOf, tkRepeat, tkUntil:
+        Exit;
+    end;
   end;
 end;
 
@@ -7488,6 +7603,72 @@ var
       Result := cmLeads;
   end;
 
+  // A float or record cast's operand (FCastValue) of category ACat and
+  // type AX, as dcc 37 takes it: a number or a Variant for a float; a value
+  // of exactly the target's size for either (`Single(R4)`, `TRec4(I)`,
+  // `Single(P)` on Win32, `Double(S)` on Win64) - E2089 otherwise, so a
+  // scalar of another size is wrong, and so is a true constant or an
+  // enumeration value for a record (`TRec4(K)` is E2089 too: it has no
+  // storage to reinterpret); a value with members of another size leads
+  // (one of its members may fit), as does what cannot be measured.
+  function ValueCastFit(ACat: TSemaTypeCat; const AX: TSemaXType;
+    AConstant: Boolean): TPasComplMatch;
+  var
+    LSize: Int64;
+  begin
+    if (FCastValue = tcFloat) and (ACat in [tcInteger, tcFloat, tcVariant]) then
+      Exit(cmCompatible);
+    if (FCastValue = tcRecord) and AConstant then
+      Exit(cmOther);
+    LSize := -1;
+    if XValid(AX) then
+      LSize := CastSizeOf(AX);
+    if (LSize > 0) and (LSize = FCastSize) then
+      Result := cmCompatible
+    else if (LSize > 0) and (ACat in NOTHING_TO_REACH) then
+      Result := cmOther
+    else
+      Result := cmLeads;
+  end;
+
+  // An address's fit (FExpectAddr, `raise X at |`): a pointer fits; any
+  // other scalar is wrong (E2017 - an integer too); a value with members
+  // leads.
+  function AddrFit(ACat: TSemaTypeCat): TPasComplMatch;
+  begin
+    if ACat = tcPointer then
+      Result := cmCompatible
+    else if ACat in NOTHING_TO_REACH then
+      Result := cmOther
+    else
+      Result := cmLeads;
+  end;
+
+  // A record type's name after `with`: dcc 37 rejects the bare name
+  // (`with TRec do` is E2029, a class member or none), so it only leads -
+  // through a member the type itself names (`with TRec.Make do`): a class
+  // var, a class or static method, a constructor, a class property. With
+  // none it is wrong. AModel / ASym: the record's declaration.
+  function RecordNameWithFit(AModel: TPasSemaModel;
+    ASym: Integer): TPasComplMatch;
+  var
+    LScope, LMem, LI: Integer;
+  begin
+    Result := cmOther;
+    if (AModel = nil) or (ASym = NIL_SYM) then
+      Exit(cmLeads);
+    LScope := AModel.Symbols[ASym].MemberScope;
+    if LScope = NIL_SCOPE then
+      Exit(cmLeads);
+    for LI := 0 to AModel.Scopes[LScope].Symbols.Count - 1 do
+    begin
+      LMem := AModel.Scopes[LScope].Symbols[LI];
+      if (AModel.Symbols[LMem].Kind in [skVar, skField, skRoutine,
+         skProperty]) and ClassSideMember(AModel, LMem) then
+        Exit(cmLeads);
+    end;
+  end;
+
   // An arithmetic operand's fit (FExpectNumber) for a value of category
   // ACat and type AX: the left operand's own type is fit 0, any other
   // integer or float fits, a Variant converts; any other scalar is wrong;
@@ -7522,9 +7703,16 @@ begin
   // `inherited |`: the enclosing method's own name is what a bare
   // `inherited` calls - the commonest use, `inherited Create(...)` in a
   // constructor included; any other method or property of an ancestor
-  // fits.
+  // fits. In a class method an instance method or property is wrong
+  // (dcc 37: E2076, E2233) - a class method, a static one, a class
+  // property and a constructor stay.
   if FInhRank then
   begin
+    if FInhClass and (AItem.Sym <> NIL_SYM) and
+       SymModelOf(AItem.Mid, 'MatchOf', LM, False) and
+       (LM.Symbols[AItem.Sym].Kind in [skRoutine, skProperty]) and
+       not ClassSideMember(LM, AItem.Sym) then
+      Exit(cmOther);
     if (FInhName <> '') and SameText(AItem.Name, FInhName) then
       Exit(cmExact);
     Exit(cmCompatible);
@@ -7536,8 +7724,10 @@ begin
   begin
     if FArgByRef then
       Exit;
-    if FCastRef <> tcUnknown then
+    if (FCastRef <> tcUnknown) or FExpectAddr then
       Exit(cmCompatible);
+    if FCastValue <> tcUnknown then
+      Exit;
     if (FExpectCat in [tcClass, tcInterface, tcPointer, tcProc, tcClassOf])
        or ((FExpectCat = tcArray) and XValid(FExpect) and
            FProj.IsDynArrayTypeX(FExpect)) then
@@ -7626,10 +7816,18 @@ begin
           Result := cmOther;
         Exit;
       end;
-      // A class's name has class members; a record's or a scalar's has
-      // no value, only a cast (`TRec(X)`) leads to one.
+      // A class's name is a class reference (`with TFoo do` compiles,
+      // class members or none); a record's leads only through a member the
+      // type names (RecordNameWithFit); a scalar's is wrong.
       if LCat = tcClass then
         Result := cmCompatible
+      else if LCat = tcRecord then
+      begin
+        if XValid(LX) then
+          Result := RecordNameWithFit(ProjModel(LX.UnitId, 'MatchOf'), LX.Sym)
+        else if AItem.Mid < 0 then
+          Result := RecordNameWithFit(FModel, AItem.Sym);
+      end
       else if LCat in NOTHING_TO_REACH then
         Result := cmOther;
       Exit;
@@ -7737,6 +7935,26 @@ begin
        (FProj.XCatOf(FProj.CanonTypeX(LX)) in NOTHING_TO_REACH) then
       Exit(cmOther);
     Exit(cmLeads);
+  end;
+  if (FCastValue <> tcUnknown) or FExpectAddr then
+  begin
+    // A type the overlay alone declares has no project type: its category.
+    if XValid(LX) then
+      LCat := FProj.XCatOf(FProj.CanonTypeX(LX))
+    else if LOv <> NIL_SYM then
+      LCat := FModel.Symbols[LOv].TypeCat
+    else
+      LCat := tcUnknown;
+    if LCat = tcUnknown then
+      Exit(cmLeads);
+    if FExpectAddr then
+      Exit(AddrFit(LCat));
+    if AItem.Mid < 0 then
+      LM := FModel
+    else
+      LM := ProjModel(AItem.Mid, 'MatchOf');
+    Exit(ValueCastFit(LCat, LX, (AItem.Kind = skEnumValue) or
+      ((AItem.Kind = skConst) and (LM.Symbols[AItem.Sym].TypeNode = NIL_NODE))));
   end;
   if FExpectWith or FExpectRaise then
   begin
@@ -9766,6 +9984,10 @@ begin
   FExpectEnum := False;
   FEnumElem := XNil;
   FCastRef := tcUnknown;
+  FCastValue := tcUnknown;
+  FCastX := XNil;
+  FCastSize := -1;
+  FExpectAddr := False;
   FExpectWith := False;
   FExpectRaise := False;
   FRaiseBase := XNil;
@@ -9799,6 +10021,7 @@ begin
   FPropClass := False;
   FInhName := '';
   FInhRank := False;
+  FInhClass := False;
   if FContext in [ccPropRead, ccPropWrite, ccPropStored] then
     PropAccessorOf(LInfo);
   if FContext = ccInherited then
@@ -9810,6 +10033,10 @@ begin
     begin
       FInhName := InheritedMethodName(LNode);
       FInhRank := True;
+      LOv := FModel.Scopes[LNode].OwnerNode;
+      FInhClass := (LOv <> NIL_NODE) and
+        (FModel.Tree.Nodes[LOv].Kind = nkRoutine) and
+        (FModel.Tree.Nodes[LOv].Aux = 1);
     end;
   end;
   if FContext in [ccExpression, ccType, ccStatement] then
@@ -9855,7 +10082,7 @@ begin
       FExpectCat := FModel.Symbols[FExpectOv].TypeCat;
     FNoProcedures := not (FExpectCat in [tcUnknown, tcProc]) or FArgNoProcs or
       FExpectOrdinal or FConstOnly or FExpectEnum or (FCastRef <> tcUnknown) or
-      FExpectWith or FExpectRaise;
+      (FCastValue <> tcUnknown) or FExpectAddr or FExpectWith or FExpectRaise;
   end;
   case FContext of
     ccNone:
@@ -9971,7 +10198,8 @@ begin
     end;
   end;
   if XValid(FExpect) or (FExpectOv <> NIL_SYM) or FExpectOrdinal or
-     FExpectEnum or (FCastRef <> tcUnknown) or FExpectWith or FExpectRaise or
+     FExpectEnum or (FCastRef <> tcUnknown) or (FCastValue <> tcUnknown) or
+     FExpectAddr or FExpectWith or FExpectRaise or
      FTypeRank or FPropRank or FInhRank then
     RankItems;
   SetLength(FItems, FCount);
@@ -10025,8 +10253,10 @@ end;
   parameters (type and mode per name), `index N`, `class property` - into
   FPropX / FPropOv, FPropIdxX / FPropIdxOv / FPropIdxMode, FPropIndexed,
   FPropClass; FPropRank when a project can type them. A property that
-  redeclares an inherited one without a type (`property Foo read |`) leaves
-  FPropX unknown. }
+  redeclares an inherited one without a type (`property Foo read |`, 13.1.1)
+  takes the inherited property's type - the nearest ancestor's member of
+  that name; an inherited ARRAY property leaves FPropX unknown (its index
+  parameters are not read from there), as does an ancestor not found. }
 procedure TPasCompletion.PropAccessorOf(const AInfo: TPasCaretInfo);
 var
   LProp, LKid, LParam, LPart, LNames, LMode, LTypeNode: Integer;
@@ -10097,7 +10327,47 @@ begin
     end;
     LKid := FModel.Tree.Nodes[LKid].NextSibling;
   end;
+  if not LTypeSeen and (Length(FPropIdxX) = 0) then
+    InheritedPropType(AInfo, LProp);
   FPropRank := True;
+end;
+
+{ The type of the property an ancestor of the caret's struct declares under
+  the name of the typeless property declaration AProp - what a redeclaration
+  (`property Foo read |`) keeps (13.1.1) - into FPropX / FPropOv. Nothing
+  for an array property, nor when no ancestor declares one. }
+procedure TPasCompletion.InheritedPropType(const AInfo: TPasCaretInfo;
+  AProp: Integer);
+var
+  LStruct, LName, LMid, LSym, LCtx: Integer;
+  LBase, LRef: TPasComplTypeRef;
+  LM: TPasSemaModel;
+begin
+  LName := FModel.Tree.Nodes[AProp].FirstChild;
+  if (LName = NIL_NODE) or (FModel.Tree.Nodes[LName].Kind <> nkIdent) then
+    Exit;
+  LStruct := EnclosingStructSym(AInfo.Scope);
+  if LStruct = NIL_SYM then
+    Exit;
+  LBase := OverlayHeritageRef(LStruct, 0);
+  if not ComplValid(LBase) or
+     not MemberSymOf(LBase, FModel.Tree.NodeNameLower(LName), 0, LMid, LSym,
+       LCtx) or not SymModelOf(LMid, 'InheritedPropType', LM, False) or
+     (LM.Symbols[LSym].Kind <> skProperty) then
+    Exit;
+  if LMid < 0 then
+  begin
+    if PasPropertyHasParams(FModel.Tree, FModel.Symbols[LSym].DeclNode) then
+      Exit;
+    LRef := TypeOfOverlaySym(LSym, 0);
+  end
+  else
+  begin
+    if FProj.IsArrayPropertySym(LMid, LSym) then
+      Exit;
+    LRef := TypeOfProjectSym(LMid, LSym, LCtx, 0);
+  end;
+  FPropX := RefValueX(LRef, FPropOv);
 end;
 
 // The declared type of a value, a parameter or a routine's result (Mid -1:
