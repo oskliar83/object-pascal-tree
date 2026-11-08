@@ -336,6 +336,12 @@ type
     // The operand of `:=` / a comparison whose left side is known and of no
     // procedural type: a procedure cannot stand there, and is not listed.
     FNoProcedures: Boolean;
+    // A call argument (ArgExpectAt): FArgNoProcs - a value stands there
+    // though no type is expected (an untyped, generic or open-array
+    // parameter, an intrinsic's); FArgByRef - a `var` / `out` parameter,
+    // which takes a variable alone, of exactly its type.
+    FArgNoProcs: Boolean;
+    FArgByRef: Boolean;
     // ValueReaches' answers per record type for one ranking (RankItems):
     // 0 being walked, 1 reaches nothing, 2 may reach. FReachCycle: a walk
     // met a record still being walked, so what it found is not final.
@@ -417,7 +423,7 @@ type
       out AMid, ASym, ACtx: Integer): Boolean;
     function IsResultRoutine(AMid, ASym: Integer): Boolean;
     function ArgTypedOverload(AMid, ASym, ACtx, ACall,
-      ADepth: Integer): Integer;
+      ADepth: Integer; ACaretArg: Integer = -1): Integer;
     function ArgValueX(const ARef: TPasComplTypeRef): TSemaXType;
     function ArrayArgOf(ACore: Integer; const ARef: TPasComplTypeRef;
       ADepth: Integer): TPasArrayArg;
@@ -470,6 +476,7 @@ type
     procedure AddContextKeywords(const AInfo: TPasCaretInfo);
     // expected-type ranking
     function ExpectedTypeAt(const AInfo: TPasCaretInfo): TPasComplTypeRef;
+    function ArgExpectAt(ARaw: Integer): TPasComplTypeRef;
     function RefValueX(const ARef: TPasComplTypeRef;
       out AOvSym: Integer): TSemaXType;
     function MatchOf(const AItem: TPasComplItem): TPasComplMatch;
@@ -2002,15 +2009,23 @@ end;
   which the unit typer counts as assignable to anything: `Pick(LB).` took
   `Pick(const S: string)` over `Pick(const L: TList<TCust>)` (audit C1).
   The analysis's own choice (CallTargetX) is kept, and so is the callee when
-  nothing fits or an argument is a comparison still undecided (16.3.1). }
+  nothing fits or an argument is a comparison still undecided (16.3.1).
+
+  ACaretArg >= 0 asks for the overload of a call still being written, whose
+  argument ACaretArg holds the caret (ArgExpectAt): that argument is not
+  scored, nor one the parse left missing or ambiguous; a candidate must take
+  at least as many arguments as are written - more may follow - and the
+  analysis's own choice, made over the unfinished call, is not kept. ACall
+  may then be NIL_NODE (a parse broken around the caret): nothing is scored
+  and the first overload taking ACaretArg + 1 arguments wins. }
 function TPasCompletion.ArgTypedOverload(AMid, ASym, ACtx, ACall,
-  ADepth: Integer): Integer;
+  ADepth: Integer; ACaretArg: Integer): Integer;
 var
   LM: TPasSemaModel;
   LCands, LParams, LCores: TArray<Integer>;
   LArgXs: TArray<TSemaXType>;
   LArrs: TArray<TPasArrayArg>;
-  LProcs, LRefs: TArray<Boolean>;
+  LProcs, LRefs, LSkip: TArray<Boolean>;
   LArgs, LCount, LTypeArgs, LCur, LHop, LIdx, LPass, LReq, LTot, LScore,
     LFit, LBestScore: Integer;
   LTrailing, LVariadic, LOpenArr, LOfConst: Boolean;
@@ -2043,17 +2058,31 @@ var
 
 begin
   Result := ASym;
-  if (FProj = nil) or (ASym = NIL_SYM) or (ACall = NIL_NODE) or
-     (ADepth > 16) or (FModel.Tree.Nodes[ACall].Kind <> nkCall) or
-     FModel.CallTargetX.ContainsKey(ACall) or
+  if (FProj = nil) or (ASym = NIL_SYM) or (ADepth > 16) or
      not SymModelOf(AMid, 'ArgTypedOverload', LM, False) or
      (LM.Symbols[ASym].Kind <> skRoutine) then
     Exit;
-  LArgs := CallArgCount(FModel, ACall, LTrailing);
+  if ACall = NIL_NODE then
+  begin
+    if ACaretArg < 0 then
+      Exit;
+  end
+  else if (FModel.Tree.Nodes[ACall].Kind <> nkCall) or
+          ((ACaretArg < 0) and FModel.CallTargetX.ContainsKey(ACall)) then
+    Exit;
+  LTrailing := False;
+  if ACall <> NIL_NODE then
+    LArgs := CallArgCount(FModel, ACall, LTrailing)
+  else
+    LArgs := 0;
   if LArgs < 0 then
     Exit;
+  if LArgs < ACaretArg + 1 then
+    LArgs := ACaretArg + 1;
   // The designator called, read by both walks below.
-  var LCallee := FModel.Tree.Nodes[ACall].FirstChild;
+  var LCallee: Integer := NIL_NODE;
+  if ACall <> NIL_NODE then
+    LCallee := FModel.Tree.Nodes[ACall].FirstChild;
   // The family in declaration order. A routine of the buffer's own: the
   // chain its NAME heads in the buffer - the callee's binding, which Phase 1
   // chose an overload of - and, after an implementation-section head, the
@@ -2110,16 +2139,30 @@ begin
   SetLength(LRefs, LArgs);
   SetLength(LConvs, LArgs);
   SetLength(LHeads, LArgs);
+  SetLength(LSkip, LArgs);
   LCount := 0;
   // The conversion facts of each argument (6.3.1's ranking: a literal's
   // value, a constant folded) are read off the buffer's nodes by a typer
   // over it - the buffer is no unit of the closure (BufferArgConvX).
   LTyper := TPasSemaTyper.Over(FModel, FProj.Platform);
   try
-    LNode := CallFirstArg(FModel.Tree, ACall);
-    while (LNode <> NIL_NODE) and (LCount < LArgs) and
-          (FModel.Tree.Nodes[LNode].Kind <> nkMissing) do
+    LNode := NIL_NODE;
+    if ACall <> NIL_NODE then
+      LNode := CallFirstArg(FModel.Tree, ACall);
+    while (LNode <> NIL_NODE) and (LCount < LArgs) do
     begin
+      // A call being written: the caret's own argument, and one the parse
+      // left missing or ambiguous, is not scored.
+      if (ACaretArg >= 0) and ((LCount = ACaretArg) or
+         (FModel.Tree.Nodes[LNode].Kind in [nkMissing, nkAmbiguous])) then
+      begin
+        LSkip[LCount] := True;
+        Inc(LCount);
+        LNode := FModel.Tree.Nodes[LNode].NextSibling;
+        Continue;
+      end;
+      if FModel.Tree.Nodes[LNode].Kind = nkMissing then
+        Break;
       if FModel.Tree.Nodes[LNode].Kind = nkAmbiguous then
         Exit;
       LCores[LCount] := PeelParens(FModel.Tree, LNode);
@@ -2140,7 +2183,9 @@ begin
   // The written type arguments' count, the 16.5.1 filter; when it leaves no
   // candidate the choice runs again without it, as SelectCallTarget's does.
   LTypeArgs := -1;
-  LNode := PeelParens(FModel.Tree, LCallee);
+  LNode := NIL_NODE;
+  if LCallee <> NIL_NODE then
+    LNode := PeelParens(FModel.Tree, LCallee);
   if (LNode <> NIL_NODE) and (FModel.Tree.Nodes[LNode].Kind = nkTypeArgs) then
     // The first child is the name they follow.
     LTypeArgs := PasChildCount(FModel.Tree, LNode) - 1;
@@ -2173,12 +2218,20 @@ begin
           Inc(LReq);
         LVariadic := sfVarArgs in LM.Symbols[LCur].Flags;
       end;
-      if not (LVariadic or TPasSemaTyper.ArityFits(LArgs, LReq, LTot,
+      if ACaretArg >= 0 then
+      begin
+        // More arguments may follow the caret's: enough parameters is all.
+        if not (LVariadic or (LTot >= LArgs)) then
+          Continue;
+      end
+      else if not (LVariadic or TPasSemaTyper.ArityFits(LArgs, LReq, LTot,
          LTrailing)) then
         Continue;
       LScore := 0;
       for LIdx := 0 to LCount - 1 do
       begin
+        if LSkip[LIdx] then
+          Continue;
         if LIdx > High(LParams) then
           Break;
         if AMid >= 0 then
@@ -3345,6 +3398,11 @@ begin
         Exit;
     end;
   end;
+  // A `var` / `out` argument takes a variable: no constant, no function,
+  // no procedure (a type or a unit name may still start one: `TFoo.Count`).
+  if FArgByRef and
+     (LM.Symbols[ASym].Kind in [skConst, skEnumValue, skRoutine]) then
+    Exit;
   // Type positions take what can name a type - consts and enum values
   // included, because a SUBRANGE type's bounds are constant expressions
   // (`TVCLElements = teCategoryButtons..teTextLabel`, 2.2.5).
@@ -4964,7 +5022,8 @@ begin
 end;
 
 { The type the operand at the caret must fit: Boolean where it starts a
-  condition (`if |`, `while |`, `until |`, `if not |`); otherwise the caret
+  condition (`if |`, `while |`, `until |`, `if not |`); its parameter's
+  where it starts a call's argument (`F(|`, `F(A, |`: ArgExpectAt); otherwise the caret
   starts the right side of `:=` or of a comparison (`=`, `<>`, `<`, `>`,
   `<=`, `>=`), and the left side is a designator - a name, a member chain, a call, an index, a
   dereference - that the engine types. Only the FIRST operand right of the
@@ -5043,6 +5102,10 @@ begin
       Result.X := XPlain(LLeft, LEnd);
     Exit;
   end;
+  // A call's argument - the operand right after its `(` or a `,` of its
+  // list - expects its parameter's type (ArgExpectAt).
+  if LTS.Tokens[LOp].Kind in [tkLParen, tkComma] then
+    Exit(ArgExpectAt(LOp));
   if not (LTS.Tokens[LOp].Kind in OPERATORS) then
     Exit;
   LEnd := PrevVisibleRaw(LOp - 1);
@@ -5080,6 +5143,227 @@ begin
       Result.IsTypeRef := False
     else
       Result := ComplNilRef;
+  end;
+end;
+
+{ Parameter AIndex of an intrinsic's display signature (TPasBuiltinSig.
+  Params, `(var X[; N])`): whether it is `var` / `out`, and its type's name
+  - '' for an untyped one or a shape the text describes (`<ordinal>`).
+  False where the text is no plain list: a leading optional parameter
+  (`([var F: Text;] Args)`, Exit's `([ExitValue])`) shifts every index, an
+  optional piece inside one (`X[: Width]`) or a `...` has no fixed place. }
+function BuiltinParamAt(const AParams: string; AIndex: Integer;
+  out AByRef: Boolean; out AType: string): Boolean;
+var
+  LText, LGroup, LNames, LType: string;
+  LIdx, LAt, LColon: Integer;
+begin
+  Result := False;
+  AByRef := False;
+  AType := '';
+  LText := Trim(AParams);
+  if (Length(LText) < 2) or (LText[1] <> '(') or
+     (LText[Length(LText)] <> ')') or (Pos('...', LText) > 0) then
+    Exit;
+  LText := Copy(LText, 2, Length(LText) - 2);
+  // An optional tail (`[; N]`, `[, Count]`) loses its brackets; a bracket
+  // opening anything else makes the text no list.
+  LGroup := '';
+  for LIdx := 1 to Length(LText) do
+    case LText[LIdx] of
+      '[':
+        if (LIdx = Length(LText)) or not CharInSet(LText[LIdx + 1], [';', ',']) then
+          Exit;
+      ']':
+        ;
+    else
+      LGroup := LGroup + LText[LIdx];
+    end;
+  LAt := 0;
+  for LText in LGroup.Split([';']) do
+  begin
+    LNames := Trim(LText);
+    LType := '';
+    LColon := Pos(':', LNames);
+    if LColon > 0 then
+    begin
+      LType := Trim(Copy(LNames, LColon + 1, MaxInt));
+      LNames := Trim(Copy(LNames, 1, LColon - 1));
+    end;
+    var LByRef := False;
+    if SameText(Copy(LNames, 1, 4), 'var ') or
+       SameText(Copy(LNames, 1, 4), 'out ') then
+    begin
+      LByRef := True;
+      LNames := Trim(Copy(LNames, 5, MaxInt));
+    end
+    else if SameText(Copy(LNames, 1, 6), 'const ') then
+      LNames := Trim(Copy(LNames, 7, MaxInt));
+    var LCount := Length(LNames.Split([',']));
+    if AIndex < LAt + LCount then
+    begin
+      AByRef := LByRef;
+      if (LType <> '') and (LType[1] <> '<') then
+        AType := LType;
+      Exit(True);
+    end;
+    Inc(LAt, LCount);
+  end;
+end;
+
+{ The type a call's argument expects: ARaw is the `(` or `,` the operand at
+  the caret follows. The walk goes back over the argument list - nested
+  `()` / `[]` skipped, commas at its level counted - to the `(` that opens
+  it; a `[` (a set or an index element), a grouping paren, a cast (a later
+  context of its own) or a statement boundary on the way means no call.
+
+  The overload is the one the arguments already written fit best, among
+  those taking at least this many (ArgTypedOverload with the caret's
+  argument left out); the parameter at the caret's index decides: its type,
+  ranked as the right side of `:=` would be. A `var` / `out` parameter sets
+  FArgByRef - a variable alone, of exactly its type, may stand there. An
+  untyped, an open-array or a generic parameter (`FillChar(X, |`,
+  `Max<T>(|`) expects no type, and sets FArgNoProcs: a procedure is still
+  no argument. An intrinsic has no declaration: its display signature
+  (PasBuiltinSignature) gives the shape - `var`, a named type for a value
+  parameter (`Assert(|` a Boolean), else none; a `var` one's type there is
+  a pseudo-type (`New(var P: Pointer)` takes any typed pointer) and is not
+  used. ComplNilRef when nothing is expected. }
+function TPasCompletion.ArgExpectAt(ARaw: Integer): TPasComplTypeRef;
+var
+  LTS: TPasTokenStream;
+  LDepth, LArgs, LSteps, LVis, LNode, LDesig, LCallNode, LPrev: Integer;
+  LMid, LSym, LCtx, LSel, LPar, LTypeNode, LBound: Integer;
+  LM: TPasSemaModel;
+  LParams: TArray<Integer>;
+  LOpenArr, LOfConst: Boolean;
+  LX: TSemaXType;
+begin
+  Result := ComplNilRef;
+  LTS := FModel.Tree.Source.Files[0];
+  LDepth := 0;
+  LArgs := 0;
+  LSteps := 0;
+  while True do
+  begin
+    if (ARaw < 0) or (LSteps >= 4096) then
+      Exit;
+    case LTS.Tokens[ARaw].Kind of
+      tkRParen, tkRBracket:
+        Inc(LDepth);
+      tkLBracket:
+        if LDepth = 0 then
+          Exit
+        else
+          Dec(LDepth);
+      tkLParen:
+        if LDepth = 0 then
+          Break
+        else
+          Dec(LDepth);
+      tkComma:
+        if LDepth = 0 then
+          Inc(LArgs);
+      tkSemicolon, tkBegin, tkEnd, tkThen, tkDo, tkElse, tkOf, tkIf,
+      tkWhile, tkUntil, tkRepeat, tkAssign:
+        if LDepth = 0 then
+          Exit;
+    end;
+    ARaw := PrevVisibleRaw(ARaw - 1);
+    Inc(LSteps);
+  end;
+  // The `(` opens a call: CallAt's two shapes - the nkCall owning it, or
+  // `ident(` in a parse broken around the caret.
+  LVis := FVisOfRaw[ARaw];
+  if LVis < 0 then
+    Exit;
+  LNode := InnermostNodeAt(LVis);
+  LDesig := NIL_NODE;
+  LCallNode := NIL_NODE;
+  if (LNode <> NIL_NODE) and (FModel.Tree.Nodes[LNode].Kind = nkCall) then
+  begin
+    LCallNode := LNode;
+    LDesig := FModel.Tree.Nodes[LNode].FirstChild;
+  end
+  else if (LNode = NIL_NODE) or
+          not (FModel.Tree.Nodes[LNode].Kind in [nkParen, nkParams]) then
+  begin
+    LPrev := PrevVisibleRaw(ARaw - 1);
+    if (LPrev >= 0) and (LTS.Tokens[LPrev].Kind = tkIdentifier) then
+      LDesig := DesignatorNodeAtVis(FVisOfRaw[LPrev]);
+  end;
+  if (LDesig = NIL_NODE) or
+     not CalleeSyms(LDesig, LCallNode, LMid, LSym, LCtx) or
+     IsTypeSym(LMid, LSym) or
+     not SymModelOf(LMid, 'ArgExpectAt', LM) or
+     (LM.Symbols[LSym].Kind <> skRoutine) then
+    Exit;
+  if sfBuiltin in LM.Symbols[LSym].Flags then
+  begin
+    var LSig: TPasBuiltinSig;
+    var LByRef: Boolean;
+    var LType: string;
+    if not PasBuiltinSignature(LM.Symbols[LSym].NameLower, LSig) or
+       not BuiltinParamAt(LSig.Params, LArgs, LByRef, LType) then
+      Exit;
+    FArgNoProcs := True;
+    FArgByRef := LByRef;
+    if not LByRef and (LType <> '') and
+       BridgeName(LowerCase(LType), LMid, LSym) then
+      Result.X := XPlain(LMid, LSym);
+    Exit;
+  end;
+  LSel := ArgTypedOverload(LMid, LSym, LCtx, LCallNode, 0, LArgs);
+  if LMid >= 0 then
+    LParams := FProj.XParamSyms(LMid, LSel)
+  else
+    LParams := OverlayParams(LSel);
+  if LArgs > High(LParams) then
+    Exit;
+  LPar := LParams[LArgs];
+  FArgByRef := ParamIsByRef(LM, LPar);
+  if ParamIsUntyped(LM, LPar) then
+  begin
+    FArgNoProcs := True;
+    Exit;
+  end;
+  LTypeNode := LM.Symbols[LPar].TypeNode;
+  if (LTypeNode <> NIL_NODE) and
+     (LM.Tree.Nodes[LTypeNode].Kind = nkArrayType) then
+  begin
+    FArgNoProcs := True;
+    Exit;
+  end;
+  if LMid >= 0 then
+  begin
+    LX := FProj.ParamFitTypeX(LMid, LPar, LCtx, LOpenArr, LOfConst);
+    if XValid(LX) and
+       (ProjModel(LX.UnitId, 'ArgExpectAt').Symbols[LX.Sym].Kind <>
+        skGenericParam) then
+    begin
+      Result.X := LX;
+      Exit;
+    end;
+  end
+  else
+  begin
+    Result := ResolveTypeRefNode(LTypeNode, 0);
+    if ComplValid(Result) and ((Result.OvSym = NIL_SYM) or
+       (FModel.Symbols[Result.OvSym].Kind <> skGenericParam)) then
+      Exit;
+    Result := ComplNilRef;
+  end;
+  // A generic parameter's type (`Max<T>(|`) is none to rank by; anything
+  // else the engine cannot type keeps the procedures, as an unknown left
+  // side of `:=` does - it may be a procedural type.
+  if (LTypeNode <> NIL_NODE) and
+     (LM.Tree.Nodes[LTypeNode].Kind = nkIdent) then
+  begin
+    LBound := NIL_SYM;
+    if LTypeNode < Length(LM.RefMap) then
+      LBound := LM.RefMap[LTypeNode];
+    if (LBound <> NIL_SYM) and (LM.Symbols[LBound].Kind = skGenericParam) then
+      FArgNoProcs := True;
   end;
 end;
 
@@ -5283,6 +5567,14 @@ var
   // name of `L := TFoo.Create`. It may still be cast there: cmLeads.
   function ImplicitFit(const AX: TSemaXType): TPasComplMatch;
   begin
+    // A `var` / `out` argument takes its own type alone: a value that
+    // converts is wrong there - a scalar has nothing to reach one through.
+    if FArgByRef then
+    begin
+      if FProj.XCatOf(FProj.CanonTypeX(AX)) in NOTHING_TO_REACH then
+        Exit(cmOther);
+      Exit(cmLeads);
+    end;
     Result := cmCompatible;
     if (FExpectCat in [tcClass, tcInterface, tcClassOf, tcProc, tcArray]) and
        (FProj.XCatOf(FProj.CanonTypeX(AX)) = tcPointer) then
@@ -5316,6 +5608,8 @@ begin
   // fits every reference.
   if SameText(AItem.Name, 'nil') then
   begin
+    if FArgByRef then
+      Exit;
     if (FExpectCat in [tcClass, tcInterface, tcPointer, tcProc, tcClassOf])
        or ((FExpectCat = tcArray) and XValid(FExpect) and
            FProj.IsDynArrayTypeX(FExpect)) then
@@ -5416,6 +5710,15 @@ begin
         LX := FProj.CanonTypeX(XPlain(LOv, LBridged));
       LOv := NIL_SYM;
     end;
+  end;
+  // A property is no variable a `var` / `out` argument takes (E2197); it
+  // may still reach one through a member.
+  if FArgByRef and (AItem.Kind = skProperty) then
+  begin
+    if XValid(LX) and
+       (FProj.XCatOf(FProj.CanonTypeX(LX)) in NOTHING_TO_REACH) then
+      Exit(cmOther);
+    Exit(cmLeads);
   end;
   // A type only the overlay knows (declared since the last analysis) has
   // no project type to convert to: its own values by identity, a scalar of
@@ -6335,6 +6638,8 @@ begin
   FExpectCat := tcUnknown;
   FExpectOv := NIL_SYM;
   FNoProcedures := False;
+  FArgNoProcs := False;
+  FArgByRef := False;
   if FContext in [ccExpression, ccMember] then
   begin
     FExpect := RefValueX(ExpectedTypeAt(LInfo), FExpectOv);
@@ -6342,7 +6647,7 @@ begin
       FExpectCat := FProj.XCatOf(FExpect)
     else if FExpectOv <> NIL_SYM then
       FExpectCat := FModel.Symbols[FExpectOv].TypeCat;
-    FNoProcedures := not (FExpectCat in [tcUnknown, tcProc]);
+    FNoProcedures := not (FExpectCat in [tcUnknown, tcProc]) or FArgNoProcs;
   end;
   case FContext of
     ccNone:
