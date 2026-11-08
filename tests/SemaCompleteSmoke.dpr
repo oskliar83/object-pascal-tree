@@ -1053,6 +1053,15 @@ const
     '    procedure Reset;'#10 +
     '    function Car: TCar;'#10 +
     '  end;'#10 +
+    '  TGuid2 = record'#10 +
+    '    D1: Cardinal;'#10 +
+    '    D4: array[0..7] of Byte;'#10 +
+    '    Name: string;'#10 +
+    '    class function Make: TGuid2; static;'#10 +
+    '  end;'#10 +
+    '  THasColor = record Tag: Integer; Color: TColor2; end;'#10 +
+    '  TNested = record G: TGuid2; H: THasColor; end;'#10 +
+    '  TWithObj = record Count: Integer; Owner: TOwner; end;'#10 +
     'const'#10 +
     '  CRed = clRed;'#10 +
     'var'#10 +
@@ -1068,11 +1077,19 @@ const
     '  ExtBig: TBig;'#10 +
     '  ExtHuge: THuge;'#10 +
     '  ExtQual: TQual;'#10 +
+    '  ExtGuid: TGuid2;'#10 +
+    '  ExtHas: THasColor;'#10 +
+    '  ExtNested: TNested;'#10 +
+    '  ExtWithObj: TWithObj;'#10 +
+    '  ExtPtr: Pointer;'#10 +
+    'function ExtGuidOf(const S: string): TGuid2;'#10 +
     'function ExtColorOf: TColor2;'#10 +
     'procedure ExtReset;'#10 +
     'function ExtSubOf(const S: string): TSub;'#10 +
     'function ExtIntOf(const S: string): Integer;'#10 +
     'implementation'#10 +
+    'class function TGuid2.Make: TGuid2;'#10'begin'#10'end;'#10 +
+    'function ExtGuidOf(const S: string): TGuid2;'#10'begin'#10'end;'#10 +
     'function ExtSubOf(const S: string): TSub;'#10'begin'#10'  Result := 0;'#10'end;'#10 +
     'function ExtIntOf(const S: string): Integer;'#10'begin'#10'  Result := 0;'#10'end;'#10 +
     'class operator TVal.Implicit(A: Integer): TVal;'#10'begin'#10'end;'#10 +
@@ -2717,8 +2734,9 @@ begin
   // dynamic array whose element fits starts `A[I]`.
   // A comparison makes a Boolean of any value: nothing is wrong there.
   ExpCase('B := |;', 'True,False,B', '', '', 'ExtReset', '', 'I,C');
-  ExpCase('Arr := |;', 'Arr,ExtFlags', 'nil', 'I', 'ExtReset', '',
-    'ExtColors');
+  // An array of enumerations reaches no array of integers - not itself,
+  // not through `[I]` (until ValueReaches it was taken as leading).
+  ExpCase('Arr := |;', 'Arr,ExtFlags', 'nil', 'I,ExtColors', 'ExtReset');
   ExpCase('I := |;', 'I', 'ExtFlags,Arr', 'ExtColors', 'ExtReset');
   ExpCase('C := |;', 'C', 'ExtColors', 'ExtFlags', 'ExtReset');
   // After a dot the same holds for the members: the operator stands before
@@ -2742,6 +2760,19 @@ begin
   ExpCase('ExtVal := |;', 'ExtVal', 'I,ExtCount', 'C', 'ExtReset');
   // A pointer leads where it points: to members, not to a Char.
   ExpCase('C := |;', '', '', 'ExtP', 'ExtReset', '', 'ExtPOwner');
+  // A record leads only where a member, an element of an array member, a
+  // static function's result does: TGuid2 (a TGUID - integers, an array of
+  // Byte, a string, itself) reaches no enumeration, THasColor and a record
+  // holding one do, a class member may reach anything. A type name is
+  // judged as its value: `TGuid2(...)` and the seeded `string` are wrong.
+  ExpCase('C := |;', '', '', 'ExtGuid,ExtGuidOf,TGuid2,string', 'ExtReset',
+    '', 'ExtHas,ExtNested,ExtWithObj');
+  ExpCase('I := |;', '', '', '', 'ExtReset', '', 'ExtGuid,ExtGuidOf');
+  // An untyped Pointer converts to a class (dcc takes `A := P`) but is no
+  // value anyone assigns there: it leads (a cast), below the fits.
+  ExpCase('A := |;', 'A', 'D', '', 'ExtReset', '', 'ExtPtr');
+  ExpCase('Arr := |;', '', '', '', 'ExtReset', '', 'ExtPtr');
+  ExpCase('ExtP := |;', '', 'ExtPtr', '', 'ExtReset');
   ExpCase('if C = ExtOwner.Co| then;', 'Color', '', 'Count', 'Reset');
   // A member access as an argument is no value of the left side's type.
   ExpCase('I := Ord(ExtOwner.|);', '', '', 'Color,Pet', '');
