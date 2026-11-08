@@ -356,6 +356,11 @@ type
     // ranks first, one whose element only converts next.
     FExpectEnum: Boolean;
     FEnumElem: TSemaXType;
+    // A value typecast to a class, an interface, a pointer, a class
+    // reference or a procedural type (`TFoo(|`, `PChar(|`): that category,
+    // tcUnknown otherwise - a family, FExpect stays XNil and MatchOf asks
+    // RefCastFit. A cast to an ordinal type sets FExpectOrdinal instead.
+    FCastRef: TSemaTypeCat;
     // ArgExpectAt's answer for an open-array parameter (`Foo([|])`): its
     // element, which the parameter's own type cannot carry.
     FArgOpenElem: TPasComplTypeRef;
@@ -494,6 +499,7 @@ type
     // expected-type ranking
     function ExpectedTypeAt(const AInfo: TPasCaretInfo): TPasComplTypeRef;
     function ArgExpectAt(ARaw, AScope: Integer): TPasComplTypeRef;
+    procedure CastExpect(AMid, ASym: Integer);
     function ExitExpect(AScope: Integer): TPasComplTypeRef;
     function CaseLabelOf(ARaw: Integer): Integer;
     function CaseOfStart(AOf: Integer): Integer;
@@ -5420,8 +5426,11 @@ begin
       begin
         FArgOpenElem := ComplNilRef;
         LBase := ArgExpectAt(LPrev, AScope);
-        // The brackets are the argument, never a variable of a `var` one.
+        // The brackets are the argument, never a variable of a `var` one,
+        // nor a cast's operand itself (`TColors([|` is the set's element).
         FArgByRef := False;
+        FExpectOrdinal := False;
+        FCastRef := tcUnknown;
         if ComplValid(FArgOpenElem) then
           Result := FArgOpenElem
         else
@@ -5779,7 +5788,9 @@ end;
   FArgByRef - a variable alone, of exactly its type, may stand there. An
   untyped, an open-array or a generic parameter (`FillChar(X, |`,
   `Max<T>(|`) expects no type, and sets FArgNoProcs: a procedure is still
-  no argument. An intrinsic has no declaration: its display signature
+  no argument. A type name before the `(` makes it a value typecast
+  (CastExpect), not a call; a constructor (`TFoo.Create(|`) is a call. An
+  intrinsic has no declaration: its display signature
   (PasBuiltinSignature) gives the shape - `var`, a named type for a value
   parameter (`Assert(|` a Boolean), else none; a `var` one's type there is
   a pseudo-type (`New(var P: Pointer)` takes any typed pointer) and is not
@@ -5850,9 +5861,17 @@ begin
       LDesig := DesignatorNodeAtVis(FVisOfRaw[LPrev]);
   end;
   if (LDesig = NIL_NODE) or
-     not CalleeSyms(LDesig, LCallNode, LMid, LSym, LCtx) or
-     IsTypeSym(LMid, LSym) or
-     not SymModelOf(LMid, 'ArgExpectAt', LM) or
+     not CalleeSyms(LDesig, LCallNode, LMid, LSym, LCtx) then
+    Exit;
+  // A type name before the `(` is a value typecast (`Int64(|`, `TFoo(|`):
+  // its one operand is ranked by the cast's family (CastExpect).
+  if IsTypeSym(LMid, LSym) then
+  begin
+    if LArgs = 0 then
+      CastExpect(LMid, LSym);
+    Exit;
+  end;
+  if not SymModelOf(LMid, 'ArgExpectAt', LM) or
      (LM.Symbols[LSym].Kind <> skRoutine) then
     Exit;
   if sfBuiltin in LM.Symbols[LSym].Flags then
@@ -5950,6 +5969,44 @@ begin
       LBound := LM.RefMap[LTypeNode];
     if (LBound <> NIL_SYM) and (LM.Symbols[LBound].Kind = skGenericParam) then
       FArgNoProcs := True;
+  end;
+end;
+
+{ The operand of a value typecast to the type (AMid, ASym) - `Int64(|`,
+  `TKind(|`, `TFoo(|`, `PChar(|` - is ranked by the cast's family, not by
+  the type itself, since a cast's whole point is a value of another type: a
+  cast to an ordinal type (integer, enumeration, Char, Boolean) takes any
+  ordinal (FExpectOrdinal, as a `case` selector); one to a class, an
+  interface, a pointer, a class reference or a procedural type any such
+  reference, `nil` included (FCastRef, MatchOf's RefCastFit). A cast to a
+  float, a record or anything else ranks nothing - a same-size rule would
+  need sizes the ranking does not have. A procedure is never the operand. }
+procedure TPasCompletion.CastExpect(AMid, ASym: Integer);
+var
+  LCat: TSemaTypeCat;
+  LX: TSemaXType;
+  LMid, LSym: Integer;
+begin
+  FArgNoProcs := True;
+  LCat := tcUnknown;
+  LX := XNil;
+  if AMid >= 0 then
+    LX := FProj.CanonTypeX(XPlain(AMid, ASym))
+  else if FModel.Symbols[ASym].Kind = skBuiltinType then
+  begin
+    // A builtin type the overlay seeds (`Byte`) is judged as its System twin.
+    if BridgeName(FModel.Symbols[ASym].NameLower, LMid, LSym) then
+      LX := FProj.CanonTypeX(XPlain(LMid, LSym));
+  end
+  else
+    LCat := FModel.Symbols[ASym].TypeCat;
+  if XValid(LX) then
+    LCat := FProj.XCatOf(LX);
+  case LCat of
+    tcInteger, tcChar, tcBoolean, tcEnum:
+      FExpectOrdinal := True;
+    tcClass, tcInterface, tcPointer, tcClassOf, tcProc:
+      FCastRef := LCat;
   end;
 end;
 
@@ -6539,6 +6596,27 @@ var
       Result := cmLeads;
   end;
 
+  // A reference cast's operand (FCastRef) of category ACat: a class, an
+  // interface, a pointer, a class reference or a procedural value fits; so
+  // does a string or a dynamic array where a pointer is the cast
+  // (`PChar(S)`, `Pointer(Arr)`); an integer leads (`TObject(Tag)`, a
+  // pointer kept as a number); any other scalar is wrong, a record or an
+  // array may hold one.
+  function RefCastFit(ACat: TSemaTypeCat; ADynArray: Boolean): TPasComplMatch;
+  begin
+    if ACat in [tcClass, tcInterface, tcPointer, tcClassOf, tcProc, tcNil] then
+      Result := cmCompatible
+    else if (FCastRef = tcPointer) and
+       ((ACat = tcString) or ((ACat = tcArray) and ADynArray)) then
+      Result := cmCompatible
+    else if ACat = tcInteger then
+      Result := cmLeads
+    else if ACat in NOTHING_TO_REACH then
+      Result := cmOther
+    else
+      Result := cmLeads;
+  end;
+
   // A for-in collection's fit (FExpectEnum): what a for-in walks fits - its
   // element of the loop variable's type first, one that converts to it
   // next, any element where the variable has no declared type; one whose
@@ -6584,6 +6662,8 @@ begin
   begin
     if FArgByRef then
       Exit;
+    if FCastRef <> tcUnknown then
+      Exit(cmCompatible);
     if (FExpectCat in [tcClass, tcInterface, tcPointer, tcProc, tcClassOf])
        or ((FExpectCat = tcArray) and XValid(FExpect) and
            FProj.IsDynArrayTypeX(FExpect)) then
@@ -6745,6 +6825,17 @@ begin
         Exit(cmOther);
     end;
     Exit(OrdinalFit(LX));
+  end;
+  if FCastRef <> tcUnknown then
+  begin
+    // A type the overlay alone declares has no project type: its category.
+    if not XValid(LX) and (LOv <> NIL_SYM) and
+       (FModel.Symbols[LOv].TypeCat <> tcUnknown) then
+      Exit(RefCastFit(FModel.Symbols[LOv].TypeCat, False));
+    if not XValid(LX) then
+      Exit(cmLeads);
+    LX := FProj.CanonTypeX(LX);
+    Exit(RefCastFit(FProj.XCatOf(LX), FProj.IsDynArrayTypeX(LX)));
   end;
   // A type only the overlay knows (declared since the last analysis) has
   // no project type to convert to: its own values by identity, a scalar of
@@ -7670,6 +7761,7 @@ begin
   FConstOnly := False;
   FExpectEnum := False;
   FEnumElem := XNil;
+  FCastRef := tcUnknown;
   FArgOpenElem := ComplNilRef;
   if FContext in [ccExpression, ccMember] then
   begin
@@ -7679,7 +7771,7 @@ begin
     else if FExpectOv <> NIL_SYM then
       FExpectCat := FModel.Symbols[FExpectOv].TypeCat;
     FNoProcedures := not (FExpectCat in [tcUnknown, tcProc]) or FArgNoProcs or
-      FExpectOrdinal or FConstOnly or FExpectEnum;
+      FExpectOrdinal or FConstOnly or FExpectEnum or (FCastRef <> tcUnknown);
   end;
   case FContext of
     ccNone:
@@ -7786,7 +7878,7 @@ begin
     end;
   end;
   if XValid(FExpect) or (FExpectOv <> NIL_SYM) or FExpectOrdinal or
-     FExpectEnum then
+     FExpectEnum or (FCastRef <> tcUnknown) then
     RankItems;
   SetLength(FItems, FCount);
   AItems := FItems;
