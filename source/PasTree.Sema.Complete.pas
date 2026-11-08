@@ -433,6 +433,12 @@ type
     FImplFirst: TArray<TSemaXType>;
     FHelperRecord: Boolean;
     FTypeAfterType: Boolean;
+    // `Self`, listed in a method body: the overlay's enclosing struct of
+    // that method (NIL_SYM where nothing lists Self) and whether the method
+    // is a class method, where Self is a class reference. MatchOf types the
+    // row by them, SelfTypeText shows the type.
+    FSelfOv: Integer;
+    FSelfClass: Boolean;
     // A property accessor's position (ccPropRead / ccPropWrite /
     // ccPropStored, PropAccessorOf): the property's type (FPropX, or FPropOv
     // for a type only the buffer declares), its index parameters' types and
@@ -480,6 +486,7 @@ type
     function MethodBodyScope(AScope: Integer): Integer;
     function IsOverrideSym(AMid, ASym: Integer): Boolean;
     function MethodHasSelf(AMethodScope: Integer): Boolean;
+    function SelfTypeX: TSemaXType;
     function TypeNameOnlyAt(const AInfo: TPasCaretInfo): Boolean;
     function ColonTypeAt(const AInfo: TPasCaretInfo): Boolean;
     function HeritageAt(const AInfo: TPasCaretInfo): TPasNodeKind;
@@ -729,6 +736,14 @@ type
       host's). '' for parameterless routines and non-routines. Builtins
       answer from the curated seed-table signatures (PasBuiltinSignature). }
     function ItemParamsText(const AItem: TPasComplItem): string;
+    { Is this the `Self` row - the one item with no symbol that names a
+      value (11.3.3: Self is declared nowhere)? }
+    function IsSelfItem(const AItem: TPasComplItem): Boolean;
+    { Self's type as display text, for the `Self` row's detail: the
+      enclosing type of the method whose body holds the caret - a helper's
+      extended type - or `class of T` in a class method. '' outside a
+      method with Self. }
+    function SelfTypeText: string;
     { Does calling this routine take at least one argument? SEMANTICS: an
       empty `()` declaration answers False - this drives a host's auto-
       parenthesis, and a parameterless routine must stay bare (which is why
@@ -4572,11 +4587,21 @@ begin
   end;
   FClassSide := False;
   // `Self` has no symbol (11.3.3), so no scope lists it: a method body with
-  // one names it beside its parameters (3.3.2 step 2).
+  // one names it beside its parameters (3.3.2 step 2). Its type is the
+  // method's struct, kept for MatchOf and the row's detail - without it the
+  // row was untyped, fit 3, and `if self|` listed it after every `SELF...`
+  // constant (an IDE test, 2026-11-08).
   LScope := MethodBodyScope(AInfo.Scope);
   if (FContext in [ccStatement, ccExpression]) and (LScope <> NIL_SCOPE) and
      MethodHasSelf(LScope) then
+  begin
+    FSelfOv := FModel.Scopes[LScope].StructSym;
+    LTarget := FModel.Scopes[LScope].OwnerNode;
+    FSelfClass := (LTarget <> NIL_NODE) and
+      (FModel.Tree.Nodes[LTarget].Kind = nkRoutine) and
+      (FModel.Tree.Nodes[LTarget].Aux = 1);
     AddItem('Self', 'self', skParam, cbLocal, -1, NIL_SYM, NIL_INST);
+  end;
   // 2. The lexical scope chain, deep (joined scopes included) - this is
   // exactly what unqualified lookup sees intra-unit: locals, params, the
   // enclosing struct's own members through the method-body join, enum
@@ -7445,6 +7470,8 @@ var
   LOv, LBridged: Integer;
   LCat: TSemaTypeCat;
   LM: TPasSemaModel;
+  LSelf: Boolean;
+  LSelfItem: TPasComplItem;
 
   // An implicit conversion of a value of type AX: cmCompatible, except an
   // untyped Pointer where a class, an interface, a class reference, a
@@ -7849,9 +7876,24 @@ begin
       Result := FitOf(LX, cmCompatible);
     Exit;
   end;
-  if (AItem.Sym = NIL_SYM) or
+  // `Self` in a class method is a class reference: judged as the class's
+  // name is, which names the same reference (`TFoo.Create`, `with TFoo`).
+  LSelf := IsSelfItem(AItem);
+  if LSelf and FSelfClass then
+  begin
+    LX := OwnModelTypeX(FSelfOv);
+    if not XValid(LX) then
+      Exit(cmLeads);
+    LSelfItem := AItem;
+    LSelfItem.Kind := skType;
+    LSelfItem.Mid := LX.UnitId;
+    LSelfItem.Sym := LX.Sym;
+    LSelfItem.Ctx := NIL_INST;
+    Exit(MatchOf(LSelfItem));
+  end;
+  if not LSelf and ((AItem.Sym = NIL_SYM) or
      not (AItem.Kind in [skVar, skParam, skField, skConst, skProperty,
-       skEnumValue, skRoutine]) then
+       skEnumValue, skRoutine])) then
     Exit;
   // A routine where a procedural value is expected (`OnClick := |`, a
   // procedural parameter): its own signature decides - one that the type
@@ -7884,7 +7926,15 @@ begin
   Result := cmLeads;
   LOv := NIL_SYM;
   LX := XNil;
-  if AItem.Mid < 0 then
+  if LSelf then
+  begin
+    // An instance method's Self: a value of the enclosing type (a
+    // helper's extended type), judged as any variable of it.
+    LX := SelfTypeX;
+    if not XValid(LX) then
+      LOv := FSelfOv;
+  end
+  else if AItem.Mid < 0 then
     LX := RefValueX(TypeOfOverlaySym(AItem.Sym, 0), LOv)
   else
   begin
@@ -9956,6 +10006,8 @@ begin
     FSeen := TDictionary<string, Integer>.Create;
   FAncestryBuilt := False;
   FClassSide := False;
+  FSelfOv := NIL_SYM;
+  FSelfClass := False;
   FFieldsOnly := False;
   FBaseOwnUnit := False;
   FInMethodBody := MethodBodyScope(LInfo.Scope) <> NIL_SCOPE;
@@ -10731,6 +10783,67 @@ begin
     end;
     LDecl := FModel.Symbols[LDecl].NextOverload;
   end;
+end;
+
+{ The type of an instance method's `Self` in the last-good project: the
+  enclosing struct (FSelfOv), or a helper's extended type - Self in a
+  `record helper for string` method is a string. XNil when the struct is
+  one only the buffer declares. }
+function TPasCompletion.SelfTypeX: TSemaXType;
+var
+  LExt: TSemaXType;
+begin
+  Result := OwnModelTypeX(FSelfOv);
+  if not XValid(Result) then
+    Exit;
+  LExt := FProj.HelperTargetX(Result.UnitId, Result.Sym);
+  if XValid(LExt) then
+    Result := LExt;
+  Result := FProj.CanonTypeX(Result);
+end;
+
+function TPasCompletion.IsSelfItem(const AItem: TPasComplItem): Boolean;
+begin
+  Result := (AItem.Sym = NIL_SYM) and (AItem.Bucket = cbLocal) and
+    (AItem.Kind = skParam) and (FSelfOv <> NIL_SYM) and
+    SameText(AItem.Name, 'Self');
+end;
+
+function TPasCompletion.SelfTypeText: string;
+var
+  LX: TSemaXType;
+  LParams: TArray<Integer>;
+  LIdent: Integer;
+  LNames: string;
+begin
+  Result := '';
+  if FSelfOv = NIL_SYM then
+    Exit;
+  if FSelfClass then
+    LX := OwnModelTypeX(FSelfOv)
+  else
+    LX := SelfTypeX;
+  if XValid(LX) then
+    Result := FProj.XTypeText(LX);
+  if Result = '' then
+    Result := FModel.Symbols[FSelfOv].Name;
+  // Inside a generic Self is the open type, `TBox<T>`: the declaration's
+  // own parameters, which the project's text of the plain type leaves out.
+  // (A helper, the one Self of another type, is never generic.)
+  LParams := TPasSemaProject.GenericParamIdentsOf(FModel, FSelfOv);
+  if (LParams <> nil) and not Result.Contains('<') then
+  begin
+    LNames := '';
+    for LIdent in LParams do
+    begin
+      if LNames <> '' then
+        LNames := LNames + ', ';
+      LNames := LNames + FModel.Tree.NodeText(LIdent);
+    end;
+    Result := Result + '<' + LNames + '>';
+  end;
+  if FSelfClass then
+    Result := 'class of ' + Result;
 end;
 
 end.

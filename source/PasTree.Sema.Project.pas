@@ -1533,7 +1533,6 @@ type
     procedure PublishHelper(AMid: Integer; const AReg: TPasHelperReg);
     procedure ClearHelperIdx;
     function HelperAncestorX(AMid, ASym: Integer): TSemaXType;
-    function HelperTargetX(AMid, ASym: Integer): TSemaXType;
     function IsDistinctTypeDef(AMid, ADef: Integer): Boolean;
     function HelperMemberHit(AFromMid: Integer; const ACur: TSemaXType;
       const AKey: TSemaKey; out AMemMid, AMemSym: Integer): Boolean;
@@ -2233,6 +2232,9 @@ type
       const AKey: TSemaKey;
       out AMemMid, AMemSym: Integer; out ACtx: Integer;
       ADepth: Integer = 0; ANoHelpers: Boolean = False): Boolean; overload;
+    { A helper's extended type (`class helper for TFoo` names TFoo), as
+      ASym of unit AMid declares it; XNil for a type that is no helper. }
+    function HelperTargetX(AMid, ASym: Integer): TSemaXType;
     { Where the lookup of an `inherited` in a method of AStruct starts
       (12.1.2): the ancestor of AStruct - but in a HELPER's method the
       extended type itself for a named `inherited X`, its ancestor for a bare

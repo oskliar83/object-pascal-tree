@@ -2808,6 +2808,78 @@ begin
   GProjMid := -1;
   TDirectory.Delete(GDir, True);
 
+  // ======== `Self` is typed (11.3.3: it has no symbol) ======================
+  // An IDE test (2026-11-08): `if self|` listed Self untyped, fit 3, after
+  // every `SELF...` constant, with no type in its row. Self is now a value
+  // of the method's type - a class reference in a class method.
+  GDir := TPath.Combine(TPath.GetTempPath, 'pastree_complete_self');
+  if TDirectory.Exists(GDir) then
+    TDirectory.Delete(GDir, True);
+  TDirectory.CreateDirectory(GDir);
+  var LSelfMain :=
+    'unit mainu;'#10'interface'#10'type'#10 +
+    '  TSelfK = class'#10'  public'#10'    Name: string;'#10 +
+    '    procedure Inst;'#10'    class procedure Cls;'#10'  end;'#10 +
+    '  TSelfKClass = class of TSelfK;'#10 +
+    '  TSelfR = record'#10'    S: string;'#10'    procedure RInst;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'var'#10'  GK: TSelfK;'#10'  GI: Integer;'#10'  GC: TSelfKClass;'#10 +
+    'procedure TSelfK.Inst;'#10'begin'#10'  //INST'#10'end;'#10 +
+    'class procedure TSelfK.Cls;'#10'begin'#10'  //CLS'#10'end;'#10 +
+    'procedure TSelfR.RInst;'#10'begin'#10'  //REC'#10'end;'#10 +
+    'end.'#10;
+  TFile.WriteAllText(TPath.Combine(GDir, 'mainu.pas'), LSelfMain);
+  GProj := TPasSemaProject.Create(pfWin32, [GDir], []);
+  GProjMid := GProj.AnalyzeProject(TPath.Combine(GDir, 'mainu.pas'));
+  ProjCase(StringReplace(LSelfMain, '//INST', 'if self| then;', []));
+  GCounter.Ok('Self: `if self|` lists Self as a value of the class, fit 2',
+    GHit and Has('Self') and (ItemNamed('Self').Match = cmLeads),
+    procedure
+    begin
+      Writeln('    hit=', GHit, ' has=', Has('Self'), ' match=',
+        Ord(ItemNamed('Self').Match));
+    end);
+  GCounter.Ok('Self: the row''s type is the class',
+    GComp.IsSelfItem(ItemNamed('Self')) and (GComp.SelfTypeText = 'TSelfK'),
+    procedure
+    begin
+      Writeln('    type=', GComp.SelfTypeText);
+    end);
+  ProjCase(StringReplace(LSelfMain, '//INST', 'GK := |;', []));
+  GCounter.Ok('Self: `X := |` with X of the class ranks Self fit 0',
+    GHit and Has('Self') and (ItemNamed('Self').Match = cmExact),
+    procedure
+    begin
+      Writeln('    match=', Ord(ItemNamed('Self').Match));
+    end);
+  ProjCase(StringReplace(LSelfMain, '//REC', 'GI := |;', []));
+  GCounter.Ok('Self: a record''s Self with nothing that reaches an ' +
+    'Integer is fit 3', GHit and Has('Self') and
+    (ItemNamed('Self').Match = cmOther) and (GComp.SelfTypeText = 'TSelfR'),
+    procedure
+    begin
+      Writeln('    match=', Ord(ItemNamed('Self').Match), ' type=',
+        GComp.SelfTypeText);
+    end);
+  ProjCase(StringReplace(LSelfMain, '//CLS', 'GC := |;', []));
+  GCounter.Ok('Self: in a class method Self is the class reference, ' +
+    'ranked as the class''s name', GHit and Has('Self') and
+    (GComp.SelfTypeText = 'class of TSelfK') and Has('TSelfK') and
+    (ItemNamed('Self').Match = ItemNamed('TSelfK').Match),
+    procedure
+    begin
+      Writeln('    type=', GComp.SelfTypeText, ' match=',
+        Ord(ItemNamed('Self').Match), ' class=',
+        Ord(ItemNamed('TSelfK').Match));
+    end);
+  GComp.Free;
+  GComp := nil;
+  GProj.Free;
+  GProj := nil;
+  GProjMid := -1;
+  TDirectory.Delete(GDir, True);
+
   // ======== 16.4.1: a lone `constructor` unlocks T.Create only ==============
   // (local/probe-ctor C1-C7: V.Free, V.ClassName, T.Create.Free are E2003.)
   GDir := TPath.Combine(TPath.GetTempPath, 'pastree_complete_ctor');
