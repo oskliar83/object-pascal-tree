@@ -4963,9 +4963,10 @@ begin
   end;
 end;
 
-{ The type the operand at the caret must fit: the caret starts the right
-  side of `:=` or of a comparison (`=`, `<>`, `<`, `>`, `<=`, `>=`), and the
-  left side is a designator - a name, a member chain, a call, an index, a
+{ The type the operand at the caret must fit: Boolean where it starts a
+  condition (`if |`, `while |`, `until |`, `if not |`); otherwise the caret
+  starts the right side of `:=` or of a comparison (`=`, `<>`, `<`, `>`,
+  `<=`, `>=`), and the left side is a designator - a name, a member chain, a call, an index, a
   dereference - that the engine types. Only the FIRST operand right of the
   operator: `X := A + |` expects nothing here, since the sum's other operand
   decides as much as X does.
@@ -5026,7 +5027,23 @@ begin
     LOp := PrevVisibleRaw(AInfo.RawToken - 1)
   else
     LOp := AInfo.RawToken;
-  if (LOp < 1) or not (LTS.Tokens[LOp].Kind in OPERATORS) then
+  if LOp < 1 then
+    Exit;
+  // A condition - right after `if`, `while`, `until`, or a `not` right
+  // after one of them (`if not Assigned(|`) - is a Boolean: the operand
+  // starting there is the whole condition or its first operand, which a
+  // relational operator would still make Boolean of any value.
+  LBefore := LOp;
+  if LTS.Tokens[LBefore].Kind = tkNot then
+    LBefore := PrevVisibleRaw(LBefore - 1);
+  if (LBefore >= 1) and
+     (LTS.Tokens[LBefore].Kind in [tkIf, tkWhile, tkUntil]) then
+  begin
+    if BridgeName('boolean', LLeft, LEnd) then
+      Result.X := XPlain(LLeft, LEnd);
+    Exit;
+  end;
+  if not (LTS.Tokens[LOp].Kind in OPERATORS) then
     Exit;
   LEnd := PrevVisibleRaw(LOp - 1);
   if LEnd < 0 then
@@ -5381,6 +5398,23 @@ begin
         if XValid(LX) then
           LX := FProj.CanonTypeX(LX);
       end;
+    end;
+  end;
+  // An intrinsic has no declaration to type it: its result is the table's
+  // fixed one (`Assigned` a Boolean, `SizeOf` an Integer), if any.
+  if not XValid(LX) and (LOv = NIL_SYM) and (AItem.Kind = skRoutine) then
+  begin
+    if AItem.Mid < 0 then
+      LM := FModel
+    else
+      LM := ProjModel(AItem.Mid, 'MatchOf');
+    if sfBuiltin in LM.Symbols[AItem.Sym].Flags then
+    begin
+      var LText := LowerCase(PasIntrinsicResultText(
+        PasIntrinsicResult(LM.Symbols[AItem.Sym].NameLower)));
+      if (LText <> '') and BridgeName(LText, LOv, LBridged) then
+        LX := FProj.CanonTypeX(XPlain(LOv, LBridged));
+      LOv := NIL_SYM;
     end;
   end;
   // A type only the overlay knows (declared since the last analysis) has
