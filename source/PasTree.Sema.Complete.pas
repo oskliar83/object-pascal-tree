@@ -342,6 +342,13 @@ type
     // which takes a variable alone, of exactly its type.
     FArgNoProcs: Boolean;
     FArgByRef: Boolean;
+    // A `case` selector (`case | of`): any ordinal fits - a category, not
+    // one type, so FExpect stays XNil and MatchOf asks OrdinalFit. A `case`
+    // label (`case K of |:`, after `,` / `..` in its list, on a later label
+    // line): a constant expression stands there - no variable, function or
+    // procedure (CaseLabelOf); FExpect is the selector's type, if known.
+    FExpectOrdinal: Boolean;
+    FConstOnly: Boolean;
     // ValueReaches' answers per record type for one ranking (RankItems):
     // 0 being walked, 1 reaches nothing, 2 may reach. FReachCycle: a walk
     // met a record still being walked, so what it found is not final.
@@ -476,7 +483,11 @@ type
     procedure AddContextKeywords(const AInfo: TPasCaretInfo);
     // expected-type ranking
     function ExpectedTypeAt(const AInfo: TPasCaretInfo): TPasComplTypeRef;
-    function ArgExpectAt(ARaw: Integer): TPasComplTypeRef;
+    function ArgExpectAt(ARaw, AScope: Integer): TPasComplTypeRef;
+    function ExitExpect(AScope: Integer): TPasComplTypeRef;
+    function CaseLabelOf(ARaw: Integer): Integer;
+    function CaseOfStart(AOf: Integer): Integer;
+    function CaseSelectorType(AOf: Integer): TPasComplTypeRef;
     function RefValueX(const ARef: TPasComplTypeRef;
       out AOvSym: Integer): TSemaXType;
     function MatchOf(const AItem: TPasComplItem): TPasComplMatch;
@@ -3362,6 +3373,21 @@ begin
   Result := FParamsOf[ARow];
 end;
 
+{ The intrinsics a constant expression may call (dcc's list: Abs, Chr, Hi,
+  High, Length, Lo, Low, Odd, Ord, Pred, Ptr, Round, SizeOf, Succ, Swap,
+  Trunc) - the routines a `case` label may name. }
+function IsConstIntrinsic(const ANameLower: string): Boolean;
+const
+  NAMES: array[0..15] of string = ('abs', 'chr', 'hi', 'high', 'length',
+    'lo', 'low', 'odd', 'ord', 'pred', 'ptr', 'round', 'sizeof', 'succ',
+    'swap', 'trunc');
+begin
+  for var LName in NAMES do
+    if LName = ANameLower then
+      Exit(True);
+  Result := False;
+end;
+
 procedure TPasCompletion.AddSym(AMid, ASym, ACtx: Integer;
   ABucket: TPasComplBucket);
 var
@@ -3403,6 +3429,21 @@ begin
   if FArgByRef and
      (LM.Symbols[ASym].Kind in [skConst, skEnumValue, skRoutine]) then
     Exit;
+  // A `case` label is a constant expression: no variable, no typed
+  // constant (E2026), no routine but the intrinsics a constant expression
+  // may call (`Ord('A')`, `High(TKind)`).
+  if FConstOnly then
+    case LM.Symbols[ASym].Kind of
+      skVar, skParam, skField, skProperty:
+        Exit;
+      skConst:
+        if LM.Symbols[ASym].TypeNode <> NIL_NODE then
+          Exit;
+      skRoutine:
+        if not (sfBuiltin in LM.Symbols[ASym].Flags) or
+           not IsConstIntrinsic(LM.Symbols[ASym].NameLower) then
+          Exit;
+    end;
   // Type positions take what can name a type - consts and enum values
   // included, because a SUBRANGE type's bounds are constant expressions
   // (`TVCLElements = teCategoryButtons..teTextLabel`, 2.2.5).
@@ -4819,7 +4860,12 @@ begin
       else
         Result := ccExpression;
     tkSemicolon, tkBegin, tkDo, tkRepeat, tkTry, tkFinally, tkExcept, tkEnd:
-      Result := ccStatement;
+      // The `;` ending a case arm starts the next arm's label - an
+      // expression (CaseLabelOf), not a statement.
+      if (LKind = tkSemicolon) and (CaseLabelOf(LPrev) >= 0) then
+        Result := ccExpression
+      else
+        Result := ccStatement;
     tkThen, tkElse:
       // The branches of an inline `if` are EXPRESSIONS (5.4.1).
       if UpChainKind(AInfo.Node, [nkInlineIf, nkIfStmt, nkCaseStmt]) =
@@ -5022,8 +5068,11 @@ begin
 end;
 
 { The type the operand at the caret must fit: Boolean where it starts a
-  condition (`if |`, `while |`, `until |`, `if not |`); its parameter's
-  where it starts a call's argument (`F(|`, `F(A, |`: ArgExpectAt); otherwise the caret
+  condition (`if |`, `while |`, `until |`, `if not |`); any ordinal after
+  `case` (FExpectOrdinal, no one type); the selector's type in a `case`
+  label (CaseLabelOf, FConstOnly); its parameter's
+  where it starts a call's argument (`F(|`, `F(A, |`: ArgExpectAt), the
+  routine's result in `Exit(|` (ExitExpect); otherwise the caret
   starts the right side of `:=` or of a comparison (`=`, `<>`, `<`, `>`,
   `<=`, `>=`), and the left side is a designator - a name, a member chain, a call, an index, a
   dereference - that the engine types. Only the FIRST operand right of the
@@ -5102,10 +5151,27 @@ begin
       Result.X := XPlain(LLeft, LEnd);
     Exit;
   end;
+  // A `case` selector takes any ordinal: a category, FExpectOrdinal.
+  if LTS.Tokens[LOp].Kind = tkCase then
+  begin
+    FExpectOrdinal := True;
+    Exit;
+  end;
+  // A `case` label - right after `of`, a `,` or `..` of a label list, or the
+  // `;` ending an arm - is a constant of the selector's type (CaseLabelOf).
+  if LTS.Tokens[LOp].Kind in [tkOf, tkComma, tkDotDot, tkSemicolon] then
+  begin
+    LBefore := CaseLabelOf(LOp);
+    if LBefore >= 0 then
+    begin
+      FConstOnly := True;
+      Exit(CaseSelectorType(LBefore));
+    end;
+  end;
   // A call's argument - the operand right after its `(` or a `,` of its
   // list - expects its parameter's type (ArgExpectAt).
   if LTS.Tokens[LOp].Kind in [tkLParen, tkComma] then
-    Exit(ArgExpectAt(LOp));
+    Exit(ArgExpectAt(LOp, AInfo.Scope));
   if not (LTS.Tokens[LOp].Kind in OPERATORS) then
     Exit;
   LEnd := PrevVisibleRaw(LOp - 1);
@@ -5229,7 +5295,7 @@ end;
   parameter (`Assert(|` a Boolean), else none; a `var` one's type there is
   a pseudo-type (`New(var P: Pointer)` takes any typed pointer) and is not
   used. ComplNilRef when nothing is expected. }
-function TPasCompletion.ArgExpectAt(ARaw: Integer): TPasComplTypeRef;
+function TPasCompletion.ArgExpectAt(ARaw, AScope: Integer): TPasComplTypeRef;
 var
   LTS: TPasTokenStream;
   LDepth, LArgs, LSteps, LVis, LNode, LDesig, LCallNode, LPrev: Integer;
@@ -5303,6 +5369,13 @@ begin
     var LSig: TPasBuiltinSig;
     var LByRef: Boolean;
     var LType: string;
+    // `Exit(|` returns the enclosing routine's result (ExitExpect).
+    if LM.Symbols[LSym].NameLower = 'exit' then
+    begin
+      if LArgs = 0 then
+        Result := ExitExpect(AScope);
+      Exit;
+    end;
     if not PasBuiltinSignature(LM.Symbols[LSym].NameLower, LSig) or
        not BuiltinParamAt(LSig.Params, LArgs, LByRef, LType) then
       Exit;
@@ -5365,6 +5438,239 @@ begin
     if (LBound <> NIL_SYM) and (LM.Symbols[LBound].Kind = skGenericParam) then
       FArgNoProcs := True;
   end;
+end;
+
+{ What `Exit(|` returns: the result type of the innermost routine holding
+  AScope - its implicit Result, a symbol of the routine's own scope with
+  no declaration (DeclareImplicitResult), whose type node is the heading's
+  result. A nested procedure inside a function has none of its own, and
+  neither has an anonymous procedure: no context there, as in a procedure
+  (where Exit takes no argument at all). }
+function TPasCompletion.ExitExpect(AScope: Integer): TPasComplTypeRef;
+var
+  LRes: Integer;
+begin
+  Result := ComplNilRef;
+  while (AScope <> NIL_SCOPE) and
+        (FModel.Scopes[AScope].Kind <> sckRoutine) do
+  begin
+    if FModel.Scopes[AScope].Kind in [sckStruct, sckUnit,
+       sckImplementation, sckSystem] then
+      Exit;
+    AScope := FModel.Scopes[AScope].Parent;
+  end;
+  if AScope = NIL_SCOPE then
+    Exit;
+  LRes := FModel.FindLocal(AScope, 'result');
+  if (LRes = NIL_SYM) or (FModel.Symbols[LRes].Kind <> skVar) or
+     (FModel.Symbols[LRes].DeclNode <> NIL_NODE) or
+     (FModel.Symbols[LRes].TypeNode = NIL_NODE) then
+    Exit;
+  Result := TypeOfOverlaySym(LRes, 0);
+  if Result.IsTypeRef then
+    Result := ComplNilRef;
+end;
+
+{ The `case` whose label the operand after ARaw starts: the raw index of
+  that case's `of`, or -1. ARaw is the token before the operand: `of`
+  itself (the first label line), a `,` or `..` of a label list - walked
+  back over the constant expressions before it to the `of` or the `;` the
+  list follows - or a `;` ending an arm. From a `;` the walk goes back over
+  the arm's statement, a nested `begin`/`case`/`try`/`asm` ... `end` and
+  `repeat` ... `until` skipped whole, to the case's `of`; a `begin`, a
+  `repeat`, a `try` it opens first means a statement list, not labels. An
+  `else` right after a `;`, or one no `then` before it takes, is the case's
+  own `else`: its statements are no labels either. }
+function TPasCompletion.CaseLabelOf(ARaw: Integer): Integer;
+const
+  // What a label's constant expression is made of, outside parentheses.
+  LABEL_TOKENS = [tkIdentifier, tkIntLiteral, tkRealLiteral, tkStringLiteral,
+    tkMultilineString, tkControlChar, tkCaretChar, tkComma, tkDotDot, tkDot,
+    tkPlus, tkMinus, tkStar, tkSlash, tkDiv, tkMod, tkShl, tkShr, tkAnd,
+    tkOr, tkXor, tkNot, tkNil];
+  // Where a walk back from an arm's `;` leaves statement code at its level.
+  NOT_ARMS = [tkBegin, tkRepeat, tkTry, tkAsm, tkExcept, tkFinally,
+    tkImplementation, tkInterface, tkInitialization, tkFinalization,
+    tkType, tkVar, tkConst, tkLabel, tkRecord, tkClass, tkObject, tkUnit,
+    tkProgram, tkLibrary, tkUses, tkThreadvar, tkResourcestring];
+var
+  LTS: TPasTokenStream;
+  LDepth, LSteps, LElse: Integer;
+begin
+  Result := -1;
+  LTS := FModel.Tree.Source.Files[0];
+  LSteps := 0;
+  if LTS.Tokens[ARaw].Kind in [tkComma, tkDotDot] then
+  begin
+    LDepth := 0;
+    while True do
+    begin
+      ARaw := PrevVisibleRaw(ARaw - 1);
+      Inc(LSteps);
+      if (ARaw < 0) or (LSteps > 4096) then
+        Exit;
+      case LTS.Tokens[ARaw].Kind of
+        tkRParen, tkRBracket:
+          Inc(LDepth);
+        tkLParen, tkLBracket:
+          if LDepth = 0 then
+            Exit
+          else
+            Dec(LDepth);
+        tkOf, tkSemicolon:
+          if LDepth = 0 then
+            Break;
+      else
+        if (LDepth = 0) and not (LTS.Tokens[ARaw].Kind in LABEL_TOKENS) then
+          Exit;
+      end;
+    end;
+  end;
+  if LTS.Tokens[ARaw].Kind = tkOf then
+  begin
+    if CaseOfStart(ARaw) >= 0 then
+      Result := ARaw;
+    Exit;
+  end;
+  if LTS.Tokens[ARaw].Kind <> tkSemicolon then
+    Exit;
+  LDepth := 0;
+  LElse := 0;
+  LSteps := 0;
+  while True do
+  begin
+    ARaw := PrevVisibleRaw(ARaw - 1);
+    Inc(LSteps);
+    if (ARaw < 0) or (LSteps > 65536) then
+      Exit;
+    case LTS.Tokens[ARaw].Kind of
+      tkEnd, tkUntil:
+        Inc(LDepth);
+      tkCase:
+        if LDepth = 0 then
+          Exit
+        else
+          Dec(LDepth);
+      tkElse:
+        if LDepth = 0 then
+        begin
+          var LBack := PrevVisibleRaw(ARaw - 1);
+          if (LBack < 0) or (LTS.Tokens[LBack].Kind = tkSemicolon) then
+            Exit;
+          Inc(LElse);
+        end;
+      tkThen:
+        if (LDepth = 0) and (LElse > 0) then
+          Dec(LElse);
+      tkOf:
+        if LDepth = 0 then
+        begin
+          if (LElse = 0) and (CaseOfStart(ARaw) >= 0) then
+            Result := ARaw;
+          Exit;
+        end;
+    else
+      if LTS.Tokens[ARaw].Kind in NOT_ARMS then
+      begin
+        if LDepth = 0 then
+          Exit;
+        // `begin`, `try`, `asm`, `repeat` close a nested block the walk
+        // entered at its `end` / `until`; `record` / `class` / `object`
+        // (an `end` of no statement) do too. The rest - `except` and
+        // `finally` inside a `try`, an inline `var` / `const` inside a
+        // `begin` - close nothing.
+        if LTS.Tokens[ARaw].Kind in [tkBegin, tkRepeat, tkTry, tkAsm,
+           tkRecord, tkClass, tkObject] then
+          Dec(LDepth);
+      end;
+    end;
+  end;
+end;
+
+{ The `case` token whose selector AOf (an `of`) ends: walked back over the
+  selector, nested `()` / `[]` skipped, to a `case`; anything that ends an
+  expression on the way (`array of`, `set of`, `class of`) means none: -1. }
+function TPasCompletion.CaseOfStart(AOf: Integer): Integer;
+var
+  LTS: TPasTokenStream;
+  LRaw, LDepth, LSteps: Integer;
+begin
+  Result := -1;
+  LTS := FModel.Tree.Source.Files[0];
+  LRaw := AOf;
+  LDepth := 0;
+  LSteps := 0;
+  while True do
+  begin
+    LRaw := PrevVisibleRaw(LRaw - 1);
+    Inc(LSteps);
+    if (LRaw < 0) or (LSteps > 4096) then
+      Exit;
+    case LTS.Tokens[LRaw].Kind of
+      tkRParen, tkRBracket:
+        Inc(LDepth);
+      tkLParen, tkLBracket:
+        if LDepth = 0 then
+          Exit
+        else
+          Dec(LDepth);
+      tkCase:
+        if LDepth = 0 then
+          Exit(LRaw);
+      tkIdentifier, tkIntLiteral, tkStringLiteral, tkControlChar,
+      tkCaretChar, tkDot, tkCaret, tkPlus, tkMinus, tkStar, tkSlash, tkDiv,
+      tkMod, tkShl, tkShr, tkAnd, tkOr, tkXor, tkNot, tkAt, tkComma, tkNil,
+      tkInherited, tkEqual, tkNotEqual, tkLess, tkGreater, tkLessEqual,
+      tkGreaterEqual, tkIn, tkIs, tkAs, tkDotDot:
+        ;
+    else
+      if LDepth = 0 then
+        Exit;
+    end;
+  end;
+end;
+
+{ The type of the selector of the `case` whose `of` is AOf: the designator
+  between `case` and `of` (a name, a member chain, a call, an index), typed
+  as the left side of `:=` is. A selector of any other shape (`case A + 1
+  of`) or a type name gives ComplNilRef - the labels are still constants. }
+function TPasCompletion.CaseSelectorType(AOf: Integer): TPasComplTypeRef;
+const
+  DESIGNATORS = [nkIdent, nkMember, nkCall, nkIndex, nkDeref, nkParen,
+    nkTypeArgs];
+var
+  LCase, LEnd, LVis, LNode, LParent, LLeft: Integer;
+begin
+  Result := ComplNilRef;
+  LCase := CaseOfStart(AOf);
+  LEnd := PrevVisibleRaw(AOf - 1);
+  if (LCase < 0) or (LEnd <= LCase) then
+    Exit;
+  LVis := FVisOfRaw[LEnd];
+  if LVis < 0 then
+    Exit;
+  LNode := InnermostNodeAt(LVis);
+  if (LNode = NIL_NODE) or
+     not (FModel.Tree.Nodes[LNode].Kind in DESIGNATORS) then
+    Exit;
+  while True do
+  begin
+    LParent := FModel.Tree.Nodes[LNode].Parent;
+    if (LParent = NIL_NODE) or
+       (FModel.Tree.Nodes[LParent].LastToken <> LVis) or
+       not (FModel.Tree.Nodes[LParent].Kind in DESIGNATORS) then
+      Break;
+    LNode := LParent;
+  end;
+  LLeft := FModel.Tree.NodeLeftmostVis(LNode);
+  if (LLeft < 0) or (LLeft > High(FModel.Tree.Source.Visible)) or
+     (FModel.Tree.Source.Visible[LLeft].FileId <> 0) or
+     (PrevVisibleRaw(FModel.Tree.Source.Visible[LLeft].TokenIndex - 1) <>
+      LCase) then
+    Exit;
+  Result := DesignatorType(LNode, 0);
+  if Result.IsTypeRef then
+    Result := ComplNilRef;
 end;
 
 { A value's type as one canonical project-space type (CanonTypeX: aliases
@@ -5602,6 +5908,24 @@ var
     end;
   end;
 
+  // A `case` selector's fit (FExpectOrdinal): an ordinal is one, a scalar
+  // of any other kind (a string, a float, a set) is wrong, a value with
+  // members or elements may lead to one; an untyped value leads.
+  function OrdinalFit(const AX: TSemaXType): TPasComplMatch;
+  var
+    LOrd: TSemaTypeCat;
+  begin
+    if not XValid(AX) then
+      Exit(cmLeads);
+    LOrd := FProj.XCatOf(FProj.CanonTypeX(AX));
+    if LOrd in [tcInteger, tcChar, tcBoolean, tcEnum] then
+      Result := cmCompatible
+    else if LOrd in NOTHING_TO_REACH then
+      Result := cmOther
+    else
+      Result := cmLeads;
+  end;
+
 begin
   Result := cmOther;
   // `nil` - a keyword or a seeded constant, whichever list it came from -
@@ -5627,7 +5951,9 @@ begin
     if sfBuiltin in LM.Symbols[AItem.Sym].Flags then
     begin
       if FExpectCat = tcBoolean then
-        Result := cmExact;
+        Result := cmExact
+      else if FExpectOrdinal then
+        Result := cmCompatible;
       Exit;
     end;
   end;
@@ -5643,6 +5969,19 @@ begin
   if AItem.Kind in [skType, skBuiltinType] then
   begin
     Result := cmLeads;
+    // An ordinal type's name is a cast to it (`Ord` aside, `Integer(X)`).
+    if FExpectOrdinal and (AItem.Sym <> NIL_SYM) then
+    begin
+      if AItem.Mid >= 0 then
+        Result := OrdinalFit(FProj.CanonTypeX(XPlain(AItem.Mid, AItem.Sym)))
+      else if (AItem.Kind = skBuiltinType) and
+         BridgeName(FModel.Symbols[AItem.Sym].NameLower, LOv, LBridged) then
+        Result := OrdinalFit(FProj.CanonTypeX(XPlain(LOv, LBridged)))
+      else if FModel.Symbols[AItem.Sym].TypeCat in [tcInteger, tcChar,
+         tcBoolean, tcEnum] then
+        Result := cmCompatible;
+      Exit;
+    end;
     if (AItem.Sym = NIL_SYM) or not XValid(FExpect) then
       Exit;
     // A builtin type the overlay seeds (`string`, `Integer`) is judged as
@@ -5719,6 +6058,20 @@ begin
        (FProj.XCatOf(FProj.CanonTypeX(LX)) in NOTHING_TO_REACH) then
       Exit(cmOther);
     Exit(cmLeads);
+  end;
+  if FExpectOrdinal then
+  begin
+    // A type the overlay alone declares has no project type: its category.
+    if not XValid(LX) and (LOv <> NIL_SYM) and
+       (FModel.Symbols[LOv].TypeCat <> tcUnknown) then
+    begin
+      if FModel.Symbols[LOv].TypeCat in [tcInteger, tcChar, tcBoolean,
+         tcEnum] then
+        Exit(cmCompatible);
+      if FModel.Symbols[LOv].TypeCat in NOTHING_TO_REACH then
+        Exit(cmOther);
+    end;
+    Exit(OrdinalFit(LX));
   end;
   // A type only the overlay knows (declared since the last analysis) has
   // no project type to convert to: its own values by identity, a scalar of
@@ -6640,6 +6993,8 @@ begin
   FNoProcedures := False;
   FArgNoProcs := False;
   FArgByRef := False;
+  FExpectOrdinal := False;
+  FConstOnly := False;
   if FContext in [ccExpression, ccMember] then
   begin
     FExpect := RefValueX(ExpectedTypeAt(LInfo), FExpectOv);
@@ -6647,7 +7002,8 @@ begin
       FExpectCat := FProj.XCatOf(FExpect)
     else if FExpectOv <> NIL_SYM then
       FExpectCat := FModel.Symbols[FExpectOv].TypeCat;
-    FNoProcedures := not (FExpectCat in [tcUnknown, tcProc]) or FArgNoProcs;
+    FNoProcedures := not (FExpectCat in [tcUnknown, tcProc]) or FArgNoProcs or
+      FExpectOrdinal or FConstOnly;
   end;
   case FContext of
     ccNone:
@@ -6753,7 +7109,7 @@ begin
       AddContextKeywords(LInfo);
     end;
   end;
-  if XValid(FExpect) or (FExpectOv <> NIL_SYM) then
+  if XValid(FExpect) or (FExpectOv <> NIL_SYM) or FExpectOrdinal then
     RankItems;
   SetLength(FItems, FCount);
   AItems := FItems;

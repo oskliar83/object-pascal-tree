@@ -1069,6 +1069,7 @@ const
     '  TWithObj = record Count: Integer; Owner: TOwner; end;'#10 +
     'const'#10 +
     '  CRed = clRed;'#10 +
+    '  CGreenT: TColor2 = clGreen;'#10 +
     'var'#10 +
     '  ExtColor: TColor2;'#10 +
     '  ExtCount: Integer;'#10 +
@@ -1152,8 +1153,8 @@ const
   the caret marker), AExtra a type declaration the overlay alone has. Each
   list is comma-separated, '' = no check: AExact / ACompat / AOther / ALeads
   must be listed with that match, AAbsent must not be listed at all. }
-procedure ExpCase(const ALine, AExact, ACompat, AOther, AAbsent: string;
-  const AExtra: string = ''; const ALeads: string = '');
+procedure ExpSrc(const ASource, AExact, ACompat, AOther, AAbsent: string;
+  const ALeads: string = ''; const ATitle: string = '');
 var
   LOk: Boolean;
   LWhy: string;
@@ -1176,8 +1177,7 @@ var
   end;
 
 begin
-  ProjCase(EXP_HEAD_A + AExtra + EXP_HEAD_B + '  ' + ALine + #10 +
-    PROJ_TAIL);
+  ProjCase(ASource);
   LOk := GHit and (GCtx in [ccExpression, ccMember]);
   LWhy := '';
   Want(AExact, cmExact);
@@ -1190,11 +1190,27 @@ begin
       LOk := False;
       LWhy := LWhy + ' has ' + LName;
     end;
-  GCounter.Ok(Format('expected type: %s', [ALine]), LOk,
+  GCounter.Ok(Format('expected type: %s', [ATitle]), LOk,
     procedure
     begin
       Writeln('    ctx=', Ord(GCtx), ' items=', Length(GItems), ':', LWhy);
     end);
+end;
+
+procedure ExpCase(const ALine, AExact, ACompat, AOther, AAbsent: string;
+  const AExtra: string = ''; const ALeads: string = '');
+begin
+  ExpSrc(EXP_HEAD_A + AExtra + EXP_HEAD_B + '  ' + ALine + #10 + PROJ_TAIL,
+    AExact, ACompat, AOther, AAbsent, ALeads, ALine);
+end;
+
+{ An expected-type case in routines of its own: ARoutines is the whole
+  implementation section's code, the caret marker inside it. }
+procedure ExpRoutines(const ATitle, ARoutines, AExact, ACompat, AOther,
+  AAbsent: string; const ALeads: string = '');
+begin
+  ExpSrc(EXP_HEAD_A + 'implementation'#10 + ARoutines + 'end.'#10, AExact,
+    ACompat, AOther, AAbsent, ALeads, ATitle);
 end;
 
 begin
@@ -1400,7 +1416,8 @@ begin
   DotCase('Arr[B.|] := nil;');
   DotCase('ImplVar := [B.|];');
   DotCase('with B.| do;');
-  DotCase('case B.| of 1: ; end;');
+  // A case selector takes an ordinal: the procedure Pub is none.
+  DotCase('case B.| of 1: ; end;', 'CF');
   DotCase('for ImplVar := B.| to 1 do;');
   DotCase('raise B.|;');
   DotCase('var V := B.|;');
@@ -2877,6 +2894,77 @@ begin
   ExpCase('ExtOwner.|;', '', '', 'Color,Pet', '');
   GCounter.Ok('expected type: members in a statement keep the procedures',
     Has('Reset'));
+  // `Exit(|` returns the enclosing routine's result: a function's type is
+  // expected and no procedure listed; a procedure (Run), a procedure
+  // nested in a function and an anonymous procedure expect nothing.
+  ExpRoutines('Exit in a function',
+    'function Fn: TColor2;'#10'var I: Integer;'#10'begin'#10 +
+    '  Exit(|);'#10'end;'#10, 'clRed,ExtColor,ExtColorOf,CRed', 'TColor2',
+    'shRound,I', 'ExtReset');
+  ExpRoutines('Exit with a prefix',
+    'function Fn: TColor2;'#10'begin'#10'  Exit(cl|);'#10'end;'#10,
+    'clRed,clGreen', '', '', 'ExtReset');
+  ExpCase('Exit(|);', '', '', 'I,C', '');
+  GCounter.Ok('expected type: Exit in a procedure keeps the procedures',
+    Has('ExtReset'));
+  ExpRoutines('Exit in a procedure nested in a function',
+    'function Fn: TColor2;'#10 +
+    '  procedure Inner;'#10'  begin'#10'    Exit(|);'#10'  end;'#10 +
+    'begin'#10'  Result := clRed;'#10'end;'#10, '', '', 'clRed', '');
+  GCounter.Ok('expected type: Exit in a nested procedure keeps the ' +
+    'procedures', Has('ExtReset'));
+  ExpRoutines('Exit in a function nested in a procedure',
+    'procedure Outer;'#10 +
+    '  function Inner: TShape2;'#10'  begin'#10'    Exit(|);'#10'  end;'#10 +
+    'begin'#10'end;'#10, 'shRound,shSquare', '', 'clRed', 'ExtReset');
+  ExpRoutines('Exit in a method',
+    'type TLoc = class function Get: TShape2; end;'#10 +
+    'function TLoc.Get: TShape2;'#10'begin'#10'  Exit(|);'#10'end;'#10,
+    'shRound', '', 'clRed', 'ExtReset');
+  // A `case` selector takes any ordinal - an integer, an enumeration, a
+  // Char, a Boolean; a float or a string is wrong, a class leads to one.
+  ExpCase('case | of end;', '', 'C,I,LE,B,True,ExtColorOf,clRed,Integer',
+    'F,string', 'ExtReset,LocalProc', '', 'A,ExtOwner');
+  ExpCase('case ExtOwner.| of end;', '', 'Color,Count,Total', '', 'Reset',
+    '', 'Pet,Next');
+  // A `case` label is a constant of the selector's type: no variable, no
+  // typed constant, no function or procedure (an intrinsic a constant
+  // expression may call stays). Over an enumeration of another unit, on
+  // the first label line, a later one, after `,` and `..`.
+  ExpCase('case C of | end;', 'clRed,clGreen,CRed', 'TColor2', 'shRound',
+    'C,ExtColor,ExtColorOf,CGreenT,ExtReset,I,ExtPick,LocalProc', '', 'Ord');
+  ExpCase('case C of cl| end;', 'clRed,clGreen', '', '', 'ExtColorOf');
+  ExpCase('case C of clRed: ; | end;', 'clGreen', '', 'shRound',
+    'C,ExtColorOf,ExtReset');
+  ExpCase('case C of clRed: begin I := 1; end; | end;', 'clGreen', '',
+    'shRound', 'C,ExtReset');
+  ExpCase('case C of clRed: if B then I := 1 else I := 2; | end;', 'clGreen',
+    '', '', 'C,ExtReset');
+  ExpCase('case C of clRed, | : ; end;', 'clGreen', '', 'shRound',
+    'C,ExtColorOf');
+  ExpCase('case C of clRed..| : ; end;', 'clGreen', '', 'shRound', 'C');
+  ExpCase('case I of 1, 2..| : ; end;', '', '', 'clRed', 'I,ExtCount');
+  ExpCase('case LE of | end;', 'leOne,leTwo', '', 'clRed', 'LE');
+  ExpCase('case ExtOwner.Color of | end;', 'clRed', '', 'shRound',
+    'ExtColor');
+  // A nested case: the innermost open one decides; past its `end` the
+  // outer one again.
+  ExpCase('case S of shRound: case C of clRed: ; | end; end;', 'clGreen', '',
+    'shRound', 'C');
+  ExpCase('case S of shRound: case C of clRed: ; end; | end;', 'shSquare',
+    '', 'clRed', 'S');
+  // Not a label: an argument inside an arm, a statement inside an arm's
+  // block, the case's `else` part.
+  ExpCase('case C of clRed: ExtTake(C, |); end;', 'I,ExtCount', '',
+    'shRound', 'ExtReset');
+  ProjCase(EXP_HEAD_A + EXP_HEAD_B +
+    '  case C of clRed: begin I := 1; | end; end;'#10 + PROJ_TAIL);
+  GCounter.Ok('expected type: a statement in an arm''s block lists ' +
+    'variables', (GCtx = ccStatement) and Has('I') and Has('ExtReset'));
+  ProjCase(EXP_HEAD_A + EXP_HEAD_B +
+    '  case C of clRed: ; else I := 1; | end;'#10 + PROJ_TAIL);
+  GCounter.Ok('expected type: the case''s else part lists variables',
+    (GCtx = ccStatement) and Has('I') and Has('ExtReset'));
   GComp.Free;
   GComp := nil;
   GProj.Free;
