@@ -1085,6 +1085,18 @@ const
     '    property Items[AColor: TColor2]: Integer read GetItem; default;'#10 +
     '    property Named[const S: string; N: TShape2]: Integer read GetNamed;'#10 +
     '  end;'#10 +
+    // Raised objects: an exception hierarchy (no SysUtils here; the name
+    // is what completion asks for). Events: a method pointer, a reference
+    // type, a class with handlers of and not of their signature.
+    '  Exception = class end;'#10 +
+    '  EFoo = class(Exception) end;'#10 +
+    '  TClick = procedure(Sender: TAnimal) of object;'#10 +
+    '  TRefClick = reference to procedure(Sender: TAnimal);'#10 +
+    '  TFrm = class'#10 +
+    '    OnClick: TClick;'#10 +
+    '    procedure Click(Sender: TAnimal);'#10 +
+    '    procedure Other(A, B: Integer);'#10 +
+    '  end;'#10 +
     'const'#10 +
     '  CRed = clRed;'#10 +
     '  CGreenT: TColor2 = clGreen;'#10 +
@@ -1112,6 +1124,11 @@ const
     '  ExtByColor: TColorIdx;'#10 +
     '  ExtGrid: TGrid;'#10 +
     '  ExtDict: TDict2;'#10 +
+    '  ExtErr: EFoo;'#10 +
+    '  ExtOnClick: TClick;'#10 +
+    '  ExtRef: TRefClick;'#10 +
+    'function ExtErrOf: EFoo;'#10 +
+    'procedure ExtClickProc(Sender: TAnimal);'#10 +
     'function ExtGuidOf(const S: string): TGuid2;'#10 +
     'function ExtColorOf: TColor2;'#10 +
     'procedure ExtReset;'#10 +
@@ -1138,6 +1155,10 @@ const
     'procedure ExtUntyped(const X; N: Integer);'#10'begin'#10'end;'#10 +
     'procedure ExtOpen(const A: array of Integer);'#10'begin'#10'end;'#10 +
     'procedure ExtOnEvent(N: TNotify);'#10'begin'#10'end;'#10 +
+    'function ExtErrOf: EFoo;'#10'begin'#10'  Result := nil;'#10'end;'#10 +
+    'procedure ExtClickProc(Sender: TAnimal);'#10'begin'#10'end;'#10 +
+    'procedure TFrm.Click(Sender: TAnimal);'#10'begin'#10'end;'#10 +
+    'procedure TFrm.Other(A, B: Integer);'#10'begin'#10'end;'#10 +
     'function ExtPick(S: TShape2): TColor2;'#10'begin'#10'  Result := clRed;'#10'end;'#10 +
     'procedure TOwner.Paint(AColor: TColor2);'#10'begin'#10'end;'#10 +
     'class function TUtil.Max<T>(A, B: T): T;'#10'begin'#10'  Result := A;'#10'end;'#10 +
@@ -1450,12 +1471,13 @@ begin
   // An index takes a value: the procedure Pub is none.
   DotCase('Arr[B.|] := nil;', 'CF');
   DotCase('ImplVar := [B.|];');
-  DotCase('with B.| do;');
+  // A `with` item and a raised object are values: the procedure Pub is none.
+  DotCase('with B.| do;', 'CF');
   // A case selector takes an ordinal: the procedure Pub is none.
   DotCase('case B.| of 1: ; end;', 'CF');
   // A for bound takes the counter's type: the procedure Pub is no bound.
   DotCase('for ImplVar := B.| to 1 do;', 'CF');
-  DotCase('raise B.|;');
+  DotCase('raise B.|;', 'CF');
   DotCase('var V := B.|;');
   DotCase('ImplVar := Ord(Assigned(B.|));', 'CF');
   DotCase('M.Over(TBase(B).|);', 'CF');
@@ -2915,9 +2937,10 @@ begin
   ExpCase('ExtTake(ExtPick(S), |);', 'I', '', 'shRound', 'ExtReset');
   ExpCase('ExtTake(ExtPick(|), 1);', 'shRound', '', 'clRed', 'ExtReset');
   // A procedural parameter takes a procedure.
-  ExpCase('ExtOnEvent(|);', '', 'nil', '', '');
+  ExpCase('ExtOnEvent(|);', 'ExtReset,LocalProc', 'nil',
+    'ExtClickProc,ExtTake', '');
   GCounter.Ok('expected type: a procedural argument lists the procedures',
-    Has('ExtReset') and Has('LocalProc'));
+    Has('ExtReset') and Has('LocalProc') and Has('ExtClickProc'));
   // A `var` / `out` argument: a variable of exactly that type; no constant,
   // no function, no procedure; a value that converts is wrong, a class may
   // reach one, a property is no variable.
@@ -3098,6 +3121,62 @@ begin
   ExpCase('ExtPtr := Pointer(|);', '', 'Arr,ExtStr,A,nil', 'F,C', 'ExtReset');
   ExpCase('F := Double(|);', '', '', '', 'ExtReset,LocalProc');
   ExpCase('A := TPen.Create(|);', 'C,clRed', '', 'I,shRound', 'ExtReset');
+  // A `with` item is a value with members: a class, a record, an
+  // interface, a class's name; a scalar is wrong, an array or a pointer
+  // leads; no procedure. After a `,` of the list too; a `,` of an
+  // argument list inside the body is the argument's.
+  ExpCase('with | do;', '', 'A,ExtOwner,ExtHas,TOwner,ExtErrOf', 'I,C,F,ExtStr,B,ExtSet',
+    'ExtReset,LocalProc', '', 'Arr,ExtPtr');
+  ExpCase('with A, | do;', '', 'ExtOwner,ExtHas', 'I,C', 'ExtReset');
+  ExpCase('with ExtOwner.| do;', '', 'Pet,Next,Car', 'Count,Color', 'Reset');
+  ExpCase('with A do ExtTake(C, |);', 'I,ExtCount', '', 'shRound', 'ExtReset');
+  // A raised object: an Exception's descendant fits - a variable, a
+  // function, the class's name (`EFoo.Create`); another class leads, a
+  // scalar is wrong; no procedure.
+  ExpCase('raise |;', '', 'ExtErr,ExtErrOf,EFoo,Exception', 'I,C,ExtStr,B',
+    'ExtReset,LocalProc', '', 'A,ExtOwner,TAnimal');
+  ExpCase('raise Ext|;', '', 'ExtErr,ExtErrOf', 'ExtCount', 'ExtReset', '',
+    'ExtOwner');
+  // A procedural left side: a routine of its signature first - a plain
+  // type a plain routine, `of object` a method, `reference to` either;
+  // one of another signature, or of the other kind, is wrong.
+  ExpCase('N := |;', 'ExtReset,LocalProc,N', 'nil', 'ExtClickProc,ExtTake,Str',
+    '');
+  ExpCase('ExtOnClick := |;', 'ExtOnClick', 'nil', 'ExtClickProc,ExtReset',
+    '');
+  ExpCase('ExtRef := |;', 'ExtClickProc,ExtRef', 'nil', 'ExtReset,ExtTake',
+    '');
+  // Go, which only the buffer declares (the last analysis has no TMyFrm),
+  // has no signature to compare yet: it leads.
+  ExpSrc(EXP_HEAD_A + '  TMyFrm = class(TFrm) procedure Go; end;'#10 +
+    'implementation'#10'procedure TMyFrm.Go;'#10'begin'#10 +
+    '  OnClick := |;'#10'end;'#10'end.'#10, 'Click,OnClick', 'nil',
+    'Other,ExtClickProc,ExtReset', '', 'Go', 'OnClick := | in a method');
+  ExpSrc(EXP_HEAD_A + '  TMyFrm = class(TFrm) procedure Go; end;'#10 +
+    'implementation'#10'procedure TMyFrm.Go;'#10'begin'#10 +
+    '  ExtRef := |;'#10'end;'#10'end.'#10, 'Click,ExtClickProc', '',
+    'Other,ExtReset', '', '', 'ExtRef := | in a method');
+  // A parameter's default, a typed constant, an initialized variable: a
+  // constant expression - no variable, no typed constant, no function, the
+  // intrinsics a constant expression may call kept. A procedural one takes
+  // a routine; an inline variable's `:=` is no constant.
+  ExpSrc(EXP_HEAD_A + 'procedure P(X: TColor2 = |);'#10'implementation'#10 +
+    'procedure P(X: TColor2);'#10'begin'#10'end;'#10'end.'#10,
+    'clRed,clGreen,CRed', '', 'shRound',
+    'ExtColor,ExtColorOf,CGreenT,ExtReset,ExtPick', '', '(X: TColor2 = |)');
+  GCounter.Ok('expected type: a default keeps Ord', Has('Ord'));
+  ExpSrc(EXP_HEAD_A + 'const CC: TColor2 = |;'#10'implementation'#10'end.'#10,
+    'clRed,CRed', '', 'shRound', 'ExtColor,ExtColorOf,CGreenT,ExtReset', '',
+    'const CC: TColor2 = |');
+  ExpSrc(EXP_HEAD_A + 'const CI: Integer = |;'#10'implementation'#10'end.'#10,
+    '', '', '', 'ExtCount,ExtIntOf,ExtReset,ExtOwner', '', 'const CI: Integer = |');
+  GCounter.Ok('expected type: a typed constant keeps High and SizeOf',
+    Has('High') and Has('SizeOf') and Has('Ord'));
+  ExpSrc(EXP_HEAD_A + 'var GV: Integer = |;'#10'implementation'#10'end.'#10,
+    '', '', '', 'ExtCount,ExtIntOf,ExtReset', '', 'var GV: Integer = |');
+  ExpSrc(EXP_HEAD_A + 'const CP: TNotify = |;'#10'implementation'#10'end.'#10,
+    'ExtReset', '', 'ExtClickProc', '', '', 'const CP: TNotify = |');
+  ExpCase('var V: Integer := |;', 'I,ExtCount', '', 'C', 'ExtReset');
   // `in` as the set operator is no for-in.
   ProjCase(EXP_HEAD_A + EXP_HEAD_B + '  if C in | then;'#10 + PROJ_TAIL);
   GCounter.Ok('expected type: the set operator `in` is no for-in',
