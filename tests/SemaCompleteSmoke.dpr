@@ -1080,6 +1080,14 @@ const
     '    property Current: TColor2 read GetCurrent;'#10 +
     '  end;'#10 +
     '  TBag = class function GetEnumerator: TBagEnum; end;'#10 +
+    // A helper of an ordinal type with GetEnumerator: dcc 37 still rejects
+    // `for X in S` (E2430).
+    '  TShapeH = record helper for TShape2'#10 +
+    '    function GetEnumerator: TBagEnum;'#10 +
+    '  end;'#10 +
+    // Value casts to a record: one of an Integer's size, one of a Double's.
+    '  TRec4 = record A: Integer; end;'#10 +
+    '  TRec8 = record A, B: Integer; end;'#10 +
     // Indexes: a static array over an enumeration, a two-dimensional one,
     // array properties - a default one and a named one of two parameters.
     '  TColorIdx = array[TColor2] of Integer;'#10 +
@@ -1134,6 +1142,9 @@ const
     '  ExtErr: EFoo;'#10 +
     '  ExtOnClick: TClick;'#10 +
     '  ExtRef: TRefClick;'#10 +
+    '  ExtR4: TRec4;'#10 +
+    '  ExtR8: TRec8;'#10 +
+    '  ExtSingle: Single;'#10 +
     'function ExtErrOf: EFoo;'#10 +
     'procedure ExtClickProc(Sender: TAnimal);'#10 +
     'function ExtGuidOf(const S: string): TGuid2;'#10 +
@@ -1150,6 +1161,9 @@ const
     'procedure ExtUntyped(const X; N: Integer);'#10 +
     'procedure ExtOpen(const A: array of Integer);'#10 +
     'procedure ExtOnEvent(N: TNotify);'#10 +
+    // Overloads told apart by an enumeration of this unit as the argument.
+    'procedure ExtPut(A: TColor2; B: Integer); overload;'#10 +
+    'procedure ExtPut(A: TShape2; B: TColor2); overload;'#10 +
     'function ExtPick(S: TShape2): TColor2;'#10 +
     // A constructor taking an argument: a call, never a cast.
     'type TPen = class constructor Create(AColor: TColor2); end;'#10 +
@@ -1229,6 +1243,10 @@ const
     'procedure ExtUntyped(const X; N: Integer);'#10'begin'#10'end;'#10 +
     'procedure ExtOpen(const A: array of Integer);'#10'begin'#10'end;'#10 +
     'procedure ExtOnEvent(N: TNotify);'#10'begin'#10'end;'#10 +
+    'procedure ExtPut(A: TColor2; B: Integer);'#10'begin'#10'end;'#10 +
+    'procedure ExtPut(A: TShape2; B: TColor2);'#10'begin'#10'end;'#10 +
+    'function TShapeH.GetEnumerator: TBagEnum;'#10'begin'#10 +
+    '  Result := nil;'#10'end;'#10 +
     'function ExtErrOf: EFoo;'#10'begin'#10'  Result := nil;'#10'end;'#10 +
     'procedure ExtClickProc(Sender: TAnimal);'#10'begin'#10'end;'#10 +
     'procedure TFrm.Click(Sender: TAnimal);'#10'begin'#10'end;'#10 +
@@ -3200,6 +3218,11 @@ begin
   ExpCase('ExtTake(C, |);', 'I,ExtCount', '', 'C,shRound', 'ExtReset');
   ExpCase('ExtTake(A, |);', 'shRound,S', '', 'clRed,I', 'ExtReset');
   ExpCase('ExtTake(D, |);', 'shSquare,S', '', 'clRed', 'ExtReset');
+  // An argument naming another unit's enumeration value picks the overload
+  // as a variable of its type does.
+  ExpCase('ExtPut(shRound, |);', 'clRed,C', '', 'I,shSquare', 'ExtReset');
+  ExpCase('ExtPut(clGreen, |);', 'I,ExtCount', '', 'C,shRound', 'ExtReset');
+  ExpCase('ExtPut(S, |);', 'clRed,C', '', 'I', 'ExtReset');
   // A later argument written after the caret counts as well (the caret on
   // a name: an empty first argument, `(, X)`, parses as no call).
   ExpCase('ExtTake(A|, S);', 'A', '', '', 'ExtReset');
@@ -3346,6 +3369,9 @@ begin
     'ExtReset', '', 'Arr,ExtOwner');
   ExpCase('for var X in | do;', '', 'Arr,ExtFlags,ExtColors,ExtSet,ExtBag,ExtStr',
     'I,F,C,ExtCount', 'ExtReset', '', 'ExtOwner');
+  // A helper of an ordinal type providing GetEnumerator does not make it a
+  // collection: dcc 37 rejects `for X in S` (E2430).
+  ExpCase('for C in | do;', '', '', 'S,I', 'ExtReset');
   ExpCase('for C in Ext| do;', 'ExtColors,ExtSet,ExtBag', '', 'ExtCount',
     'ExtReset', '', 'ExtFlags');
   ExpRoutines('for Ch in |',
@@ -3399,7 +3425,18 @@ begin
   ExpCase('ExtP := PChar(|);', '', 'ExtStr,ExtPtr,A,Arr', 'F,C',
     'ExtReset', '', 'I');
   ExpCase('ExtPtr := Pointer(|);', '', 'Arr,ExtStr,A,nil', 'F,C', 'ExtReset');
-  ExpCase('F := Double(|);', '', '', '', 'ExtReset,LocalProc');
+  // A float cast: any number, and a value of exactly its size (dcc 37,
+  // E2089 otherwise); a record of another size leads. A record cast: a
+  // value of exactly its size, never a true constant or an enumeration
+  // value (E2089).
+  ExpCase('F := Double(|);', '', 'I,F,ExtCount,ExtSingle,ExtR8',
+    'C,B,clRed,ExtCh', 'ExtReset,LocalProc', '', 'ExtR4,ExtGuid');
+  ExpCase('ExtSingle := Single(|);', '', 'I,F,ExtR4', 'C,B', 'ExtReset', '',
+    'ExtR8,ExtGuid');
+  ExpCase('ExtR4 := TRec4(|);', '', 'I,ExtCount,ExtSingle,ExtR4',
+    'F,C,B,ExtCh,CMax,clRed', 'ExtReset,LocalProc', '', 'ExtR8,ExtGuid');
+  ExpCase('ExtR8 := TRec8(|);', '', 'F,ExtR8', 'I,ExtSingle,C', 'ExtReset', '',
+    'ExtR4,ExtGuid');
   ExpCase('A := TPen.Create(|);', 'C,clRed', '', 'I,shRound', 'ExtReset');
   // A `with` item is a value with members: a class, a record, an
   // interface, a class's name; a scalar is wrong, an array or a pointer
@@ -3408,6 +3445,11 @@ begin
   ExpCase('with | do;', '', 'A,ExtOwner,ExtHas,TOwner,ExtErrOf', 'I,C,F,ExtStr,B,ExtSet',
     'ExtReset,LocalProc', '', 'Arr,ExtPtr');
   ExpCase('with A, | do;', '', 'ExtOwner,ExtHas', 'I,C', 'ExtReset');
+  // A type's name: a class's compiles, class members or none (`with TCar
+  // do`); a record's is E2029 bare, so it only leads through a member the
+  // type names (`with TGuid2.Make do`) and is wrong without one.
+  ExpCase('with T| do;', '', 'TOwner,TCar', 'THasColor,TRec4,TColor2',
+    'ExtReset', '', 'TGuid2');
   ExpCase('with ExtOwner.| do;', '', 'Pet,Next,Car', 'Count,Color', 'Reset');
   ExpCase('with A do ExtTake(C, |);', 'I,ExtCount', '', 'shRound', 'ExtReset');
   // A raised object: an Exception's descendant fits - a variable, a
@@ -3417,6 +3459,12 @@ begin
     'ExtReset,LocalProc', '', 'A,ExtOwner,TAnimal');
   ExpCase('raise Ext|;', '', 'ExtErr,ExtErrOf', 'ExtCount', 'ExtReset', '',
     'ExtOwner');
+  // `raise X at |`: an address - a pointer (dcc 37: E2017 for an integer or
+  // an object); a value with members leads.
+  ExpCase('raise ExtErr at |;', '', 'ExtPtr,ExtP,nil', 'I,ExtCount,C,ExtStr',
+    'ExtReset,LocalProc', '', 'ExtOwner,ExtGuid');
+  ExpCase('raise ExtErrOf at Ext|;', '', 'ExtPtr,ExtP', 'ExtCount', 'ExtReset',
+    '', 'ExtOwner');
   // A procedural left side: a routine of its signature first - a plain
   // type a plain routine, `of object` a method, `reference to` either;
   // one of another signature, or of the other kind, is wrong.
@@ -3730,6 +3778,12 @@ begin
   AccCase(ccPropRead, '    class property CP: Integer read |;',
     'FCount,GetCount', '', 'FBase,GetBase,GetClassVal,FOwn', '');
   // A type the edited unit declares.
+  // A redeclaration without a type (`property BaseProp read |`) keeps the
+  // inherited property's type: TAccBase.BaseProp's Integer.
+  AccCase(ccPropRead, '    property BaseProp read |;', 'FBase,FOwn,GetBase,GetOwn',
+    '', 'FBaseB,GetBaseB,FOwnS,FL,GetL', 'SetBase');
+  AccCase(ccPropWrite, '    property BaseProp write |;', 'FBase,SetBase,SetOwn',
+    '', 'FBaseB,SetVarB,FOwnS', 'GetBase');
   AccCase(ccPropRead, '    property PL: TLocalEnum read |;', 'FL,GetL', '',
     'FOwn,GetOwn', '');
   // `default |` and `index |`: constant expressions of the property's
@@ -3768,6 +3822,22 @@ begin
     '  inherited |'#10'end;'#10'end.'#10);
   GCounter.Ok('inherited | outside a method lists nothing',
     Length(GItems) = 0);
+  // In a class method an ancestor's instance method or property is wrong
+  // (dcc 37: E2076, E2233); a class method, a static one and a constructor
+  // stay.
+  CtxSrc(ccInherited, 'inherited | in a class method', EXP_HEAD_A +
+    '  TInh = class(TAccBase)'#10'    class function GetClassVal: Integer;'#10 +
+    '  end;'#10 +
+    'implementation'#10'class function TInh.GetClassVal: Integer;'#10 +
+    'begin'#10'  inherited |'#10'end;'#10'end.'#10, 'GetClassVal',
+    'GetCount,Create', 'Run,Plain,GetBase,SetBase,BaseProp', 'FBase,FCount');
+  // `inherited |`: the ancestor's own namesake leads in an instance method
+  // still (a class method of the ancestor stays fit 1 there).
+  CtxSrc(ccInherited, 'inherited | in an instance method keeps class methods',
+    EXP_HEAD_A +
+    '  TInh = class(TAccBase)'#10'    procedure Run; override;'#10'  end;'#10 +
+    'implementation'#10'procedure TInh.Run;'#10'begin'#10'  inherited |'#10 +
+    'end;'#10'end.'#10, 'Run', 'GetCount,GetClassVal,Plain', '', '');
   // `inherited SetBase(|` keeps the call-argument context.
   CtxSrc(ccExpression, 'inherited SetBase(| is a call argument', EXP_HEAD_A +
     '  TInh = class(TAccBase)'#10'    procedure Run; override;'#10'  end;'#10 +
