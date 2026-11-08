@@ -1164,6 +1164,34 @@ const
     '  TFree<T> = class end;'#10 +
     '  TPick = class class function Get<T: TAnimal>: T; static; end;'#10 +
     '  IPaint = interface end;'#10 +
+    // Property accessors and `inherited`: an ancestor in another unit with
+    // a member of each accessor shape, right and wrong.
+    '  TAccBase = class'#10 +
+    '  private'#10 +
+    '    FPriv: Integer;'#10 +
+    '  protected'#10 +
+    '    FBase: Integer;'#10 +
+    '    FBaseB: Byte;'#10 +
+    '    FFlag: Boolean;'#10 +
+    '    FRecB: THasColor;'#10 +
+    '    class var FCount: Integer;'#10 +
+    '    function GetBase: Integer;'#10 +
+    '    function GetBaseB: Byte;'#10 +
+    '    procedure SetBase(V: Integer);'#10 +
+    '    procedure SetVarB(var V: Integer);'#10 +
+    '    function GetAt(I: Integer): Integer;'#10 +
+    '    function GetAtC(const I: Integer): Integer;'#10 +
+    '    procedure SetAt(I: Integer; V: Integer);'#10 +
+    '    function IsStored: Boolean;'#10 +
+    '    function IsStoredAt(I: Integer): Boolean;'#10 +
+    '    class function GetCount: Integer; static;'#10 +
+    '    class function GetClassVal: Integer;'#10 +
+    '    property BaseProp: Integer read FBase;'#10 +
+    '  public'#10 +
+    '    constructor Create;'#10 +
+    '    procedure Run; virtual;'#10 +
+    '    procedure Plain;'#10 +
+    '  end;'#10 +
     'const'#10 +
     '  CMax = 9;'#10 +
     '  CName = ''abc'';'#10 +
@@ -1172,6 +1200,20 @@ const
     '  ExtShape: IShape;'#10 +
     'function ExtClassOf: TAnimalClass;'#10 +
     'implementation'#10 +
+    'function TAccBase.GetBase: Integer;'#10'begin'#10'  Result := 0;'#10'end;'#10 +
+    'function TAccBase.GetBaseB: Byte;'#10'begin'#10'  Result := 0;'#10'end;'#10 +
+    'procedure TAccBase.SetBase(V: Integer);'#10'begin'#10'end;'#10 +
+    'procedure TAccBase.SetVarB(var V: Integer);'#10'begin'#10'end;'#10 +
+    'function TAccBase.GetAt(I: Integer): Integer;'#10'begin'#10'  Result := 0;'#10'end;'#10 +
+    'function TAccBase.GetAtC(const I: Integer): Integer;'#10'begin'#10'  Result := 0;'#10'end;'#10 +
+    'procedure TAccBase.SetAt(I: Integer; V: Integer);'#10'begin'#10'end;'#10 +
+    'function TAccBase.IsStored: Boolean;'#10'begin'#10'  Result := False;'#10'end;'#10 +
+    'function TAccBase.IsStoredAt(I: Integer): Boolean;'#10'begin'#10'  Result := False;'#10'end;'#10 +
+    'class function TAccBase.GetCount: Integer;'#10'begin'#10'  Result := 0;'#10'end;'#10 +
+    'class function TAccBase.GetClassVal: Integer;'#10'begin'#10'  Result := 0;'#10'end;'#10 +
+    'constructor TAccBase.Create;'#10'begin'#10'end;'#10 +
+    'procedure TAccBase.Run;'#10'begin'#10'end;'#10 +
+    'procedure TAccBase.Plain;'#10'begin'#10'end;'#10 +
     'constructor TPen.Create(AColor: TColor2);'#10'begin'#10'end;'#10 +
     'procedure ExtOne(A: TColor2);'#10'begin'#10'end;'#10 +
     'procedure ExtTake(A: TColor2; B: Integer);'#10'begin'#10'end;'#10 +
@@ -1355,6 +1397,73 @@ procedure ExpRoutines(const ATitle, ARoutines, AExact, ACompat, AOther,
 begin
   ExpSrc(EXP_HEAD_A + 'implementation'#10 + ARoutines + 'end.'#10, AExact,
     ACompat, AOther, AAbsent, ALeads, ATitle);
+end;
+
+{ A ranked case whose context is ACtx (a property accessor, `inherited`):
+  like ExpSrc otherwise. }
+procedure CtxSrc(ACtx: TPasComplContext; const ATitle, ASource, AExact,
+  ACompat, AOther, AAbsent: string; const ALeads: string = '');
+var
+  LOk: Boolean;
+  LWhy: string;
+
+  procedure Want(const ANames: string; AMatch: TPasComplMatch);
+  begin
+    for var LName in ANames.Split([',']) do
+      if LName <> '' then
+        if not Has(LName) then
+        begin
+          LOk := False;
+          LWhy := LWhy + ' missing ' + LName;
+        end
+        else if ItemNamed(LName).Match <> AMatch then
+        begin
+          LOk := False;
+          LWhy := LWhy + Format(' %s=%d', [LName,
+            Ord(ItemNamed(LName).Match)]);
+        end;
+  end;
+
+begin
+  ProjCase(ASource);
+  LOk := GHit and (GCtx = ACtx);
+  LWhy := '';
+  Want(AExact, cmExact);
+  Want(ACompat, cmCompatible);
+  Want(AOther, cmOther);
+  Want(ALeads, cmLeads);
+  for var LName in AAbsent.Split([',']) do
+    if (LName <> '') and Has(LName) then
+    begin
+      LOk := False;
+      LWhy := LWhy + ' has ' + LName;
+    end;
+  GCounter.Ok(ATitle, LOk,
+    procedure
+    begin
+      Writeln('    ctx=', Ord(GCtx), ' items=', Length(GItems), ':', LWhy);
+    end);
+end;
+
+const
+  // A class over TAccBase (another unit's) with own members of each
+  // accessor shape; ACC_PROP marks where the property under test goes.
+  ACC_HEAD =
+    '  TAcc = class(TAccBase)'#10 +
+    '    FOwn: Integer;'#10 +
+    '    FOwnS: string;'#10 +
+    '    FL: TLocalEnum;'#10 +
+    '    function GetOwn: Integer;'#10 +
+    '    procedure SetOwn(const V: Integer);'#10 +
+    '    function GetL: TLocalEnum;'#10;
+  ACC_TAIL = '  end;'#10'implementation'#10'end.'#10;
+
+// A property accessor case: AProp is the property line, caret inside.
+procedure AccCase(ACtx: TPasComplContext; const AProp, AExact, ACompat,
+  AOther, AAbsent: string; const ALeads: string = '');
+begin
+  CtxSrc(ACtx, 'accessor: ' + Trim(AProp), EXP_HEAD_A + ACC_HEAD + AProp +
+    #10 + ACC_TAIL, AExact, ACompat, AOther, AAbsent, ALeads);
 end;
 
 begin
@@ -3469,6 +3578,95 @@ begin
   ProjCase(EXP_HEAD_A + EXP_HEAD_B + '  if C in | then;'#10 + PROJ_TAIL);
   GCounter.Ok('expected type: the set operator `in` is no for-in',
     Has('ExtReset'));
+  // ======== property accessors (pastree-lsp COMPLETION.md) ================
+  // `read |`: a field of the property's type and a getter returning it fit
+  // 0 (a non-static class function too); the same shapes of another type,
+  // a class var, a static class method fit 3 (E2010 / E2008 / E2356); a
+  // record field leads (`read FRecB.Tag`). No procedure, no property, no
+  // private member of another unit, nothing outside the class.
+  AccCase(ccPropRead, '    property P: Integer read |;',
+    'FBase,FOwn,GetBase,GetOwn,GetClassVal', '',
+    'FBaseB,FOwnS,FFlag,FL,GetBaseB,GetL,FCount,GetCount,GetAt,IsStored',
+    'SetBase,SetOwn,SetAt,FPriv,BaseProp,Create,Run,Plain,ExtCount,' +
+    'ExtReset,TColor2,nil', 'FRecB');
+  AccCase(ccPropRead, '    property P: Integer read GetB|;', 'GetBase', '',
+    'GetBaseB', 'SetBase');
+  // `write |`: a setter taking the value by value or const; `var` is E2282,
+  // a procedure of another shape fit 3.
+  AccCase(ccPropWrite, '    property P: Integer read FOwn write |;',
+    'FBase,FOwn,SetBase,SetOwn', '', 'FBaseB,SetVarB,SetAt,FCount,Run,Plain',
+    'GetBase,GetOwn,FPriv,BaseProp', 'FRecB');
+  // An array property: methods taking its indices, the same types and
+  // modes (`const I` for `I` is E2008); a field is wrong.
+  AccCase(ccPropRead, '    property Items[I: Integer]: Integer read |;',
+    'GetAt', '', 'GetAtC,GetBase,FBase,FOwn,IsStoredAt', 'SetAt,SetBase');
+  AccCase(ccPropRead, '    property Items[const I: Integer]: Integer read |;',
+    'GetAtC', '', 'GetAt', '');
+  AccCase(ccPropWrite,
+    '    property Items[I: Integer]: Integer read GetAt write |;', 'SetAt', '',
+    'SetBase,SetOwn,FBase', 'GetAt');
+  // `index N`: the methods take an Integer after the indices (value or
+  // const); a field still compiles.
+  AccCase(ccPropRead, '    property P: Integer index 3 read |;',
+    'GetAt,GetAtC,FBase', '', 'GetBase,GetOwn', 'SetAt');
+  AccCase(ccPropWrite, '    property P: Integer index 3 read GetAt write |;',
+    'SetAt', '', 'SetBase', '');
+  // `stored |`: a Boolean field or a parameterless Boolean function (with
+  // `index N` the Integer), `True` / `False`.
+  AccCase(ccPropStored, '    property P: Integer read FBase stored |;',
+    'True,False,FFlag,IsStored', '', 'FBase,GetBase,IsStoredAt',
+    'SetBase,ExtCount,FPriv,ExtReset', 'FRecB');
+  AccCase(ccPropStored,
+    '    property P: Integer index 2 read GetAt stored |;', 'IsStoredAt,FFlag',
+    '', 'IsStored', '');
+  // A class property: a class var or a static class method (E2355).
+  AccCase(ccPropRead, '    class property CP: Integer read |;',
+    'FCount,GetCount', '', 'FBase,GetBase,GetClassVal,FOwn', '');
+  // A type the edited unit declares.
+  AccCase(ccPropRead, '    property PL: TLocalEnum read |;', 'FL,GetL', '',
+    'FOwn,GetOwn', '');
+  // `default |` and `index |`: constant expressions of the property's
+  // type, of Integer.
+  CtxSrc(ccExpression, 'accessor: default |', EXP_HEAD_A + ACC_HEAD +
+    '    property PC: TColor2 read FC default |;'#10 + ACC_TAIL,
+    'clRed,CRed', '', 'shRound', 'ExtColor,ExtColorOf,CGreenT,ExtReset');
+  CtxSrc(ccExpression, 'accessor: index |', EXP_HEAD_A + ACC_HEAD +
+    '    property P: Integer index | read GetAt;'#10 + ACC_TAIL, 'CMax', '',
+    '', 'ExtCount,ExtReset,ExtIntOf');
+  // ======== `inherited` ====================================================
+  // The ancestors' methods and properties (dcc 37: `X := inherited Prop`
+  // compiles, `inherited FField` is E2096); the enclosing method's own
+  // name first - what a bare `inherited` calls.
+  CtxSrc(ccInherited, 'inherited | in an override', EXP_HEAD_A +
+    '  TInh = class(TAccBase)'#10'    constructor Create;'#10 +
+    '    procedure Run; override;'#10'    procedure Own;'#10'  end;'#10 +
+    'implementation'#10'procedure TInh.Run;'#10'begin'#10'  inherited |'#10 +
+    'end;'#10'end.'#10, 'Run', 'Plain,Create,GetBase,SetBase,BaseProp,GetCount',
+    '', 'FBase,FFlag,FCount,FPriv,Own,ExtCount,ExtReset,TColor2,TAccBase');
+  CtxSrc(ccInherited, 'inherited | in a constructor', EXP_HEAD_A +
+    '  TInh = class(TAccBase)'#10'    constructor Create;'#10'  end;'#10 +
+    'implementation'#10'constructor TInh.Create;'#10'begin'#10 +
+    '  inherited |'#10'end;'#10'end.'#10, 'Create', 'Run,Plain', '', 'FBase');
+  CtxSrc(ccInherited, 'inherited Cr| in a constructor', EXP_HEAD_A +
+    '  TInh = class(TAccBase)'#10'    constructor Create;'#10'  end;'#10 +
+    'implementation'#10'constructor TInh.Create;'#10'begin'#10 +
+    '  inherited Cr|'#10'end;'#10'end.'#10, 'Create', 'Run', '', 'FBase');
+  // A new method has no namesake: nothing is fit 0.
+  CtxSrc(ccInherited, 'inherited | in a new method', EXP_HEAD_A +
+    '  TInh = class(TAccBase)'#10'    procedure Own;'#10'  end;'#10 +
+    'implementation'#10'procedure TInh.Own;'#10'begin'#10'  inherited |'#10 +
+    'end;'#10'end.'#10, '', 'Run,Plain', '', 'Own,FBase');
+  // Outside a method nothing is an ancestor's.
+  ProjCase(EXP_HEAD_A + 'implementation'#10'procedure Free1;'#10'begin'#10 +
+    '  inherited |'#10'end;'#10'end.'#10);
+  GCounter.Ok('inherited | outside a method lists nothing',
+    Length(GItems) = 0);
+  // `inherited SetBase(|` keeps the call-argument context.
+  CtxSrc(ccExpression, 'inherited SetBase(| is a call argument', EXP_HEAD_A +
+    '  TInh = class(TAccBase)'#10'    procedure Run; override;'#10'  end;'#10 +
+    'implementation'#10'procedure TInh.Run;'#10'begin'#10 +
+    '  inherited SetBase(|'#10'end;'#10'end.'#10, 'FBase,ExtCount', '', '',
+    'ExtReset');
   GComp.Free;
   GComp := nil;
   GProj.Free;

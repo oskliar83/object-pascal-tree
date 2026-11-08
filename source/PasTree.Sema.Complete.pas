@@ -106,11 +106,15 @@ type
     // property declaration only a field or a method of this class (or an
     // ancestor) may stand - the collection is the struct chain alone, and
     // AddSym filters by SHAPE (fields always; functions for read,
-    // procedures for write). Type compatibility is deliberately not
-    // checked: a wrong-typed member is the compiler's E2258 to report,
-    // and hiding near-misses helps nobody.
+    // procedures for write). Type compatibility is not filtered: a member
+    // of the right shape and a wrong type stays listed, ranked last
+    // (AccessorFit) - hiding near-misses helps nobody, and pastree-lsp's
+    // class completion asks this list whether a name is already a member.
     ccPropRead,
-    ccPropWrite);
+    ccPropWrite,
+    // After `stored`: the same struct chain, fields and functions, and
+    // `True` / `False`.
+    ccPropStored);
 
   { Where a candidate came from - the ranking bucket (sortText prefix in the
     LSP mapping; display grouping in the demo). Declaration order IS priority
@@ -409,6 +413,23 @@ type
     FImplFirst: TArray<TSemaXType>;
     FHelperRecord: Boolean;
     FTypeAfterType: Boolean;
+    // A property accessor's position (ccPropRead / ccPropWrite /
+    // ccPropStored, PropAccessorOf): the property's type (FPropX, or FPropOv
+    // for a type only the buffer declares), its index parameters' types and
+    // modes, whether it has an `index N` specifier and whether it is a
+    // `class property`. FPropRank: AccessorFit ranks the list.
+    FPropRank: Boolean;
+    FPropX: TSemaXType;
+    FPropOv: Integer;
+    FPropIdxX: TArray<TSemaXType>;
+    FPropIdxOv: TArray<Integer>;
+    FPropIdxMode: TArray<Integer>;
+    FPropIndexed: Boolean;
+    FPropClass: Boolean;
+    // `inherited |`: the enclosing method's name, lowercase - what a bare
+    // `inherited` calls, ranked first (FInhRank).
+    FInhName: string;
+    FInhRank: Boolean;
     // ArgExpectAt's answer for an open-array parameter (`Foo([|])`): its
     // element, which the parameter's own type cannot carry.
     FArgOpenElem: TPasComplTypeRef;
@@ -605,6 +626,19 @@ type
     function IsArrayBoundOp(ARaw: Integer): Boolean;
     function IsSubrangeHighOp(ARaw: Integer): Boolean;
     function BoundLeftType(ADotDot: Integer): TPasComplTypeRef;
+    // property accessors and `inherited`
+    function PropSpecWordAt(ANode: Integer): string;
+    procedure PropAccessorOf(const AInfo: TPasCaretInfo);
+    procedure TypeNodeXOv(ANode: Integer; out AX: TSemaXType;
+      out AOv: Integer);
+    function ItemValueX(AMid, ASym, ACtx: Integer;
+      out AOv: Integer): TSemaXType;
+    function SameAccType(const AX: TSemaXType; AOv: Integer;
+      const BX: TSemaXType; BOv: Integer): Integer;
+    function IsStaticRoutine(AModel: TPasSemaModel; ASym: Integer): Boolean;
+    function AccessorSigFit(AMid, ASym, ACtx: Integer): Integer;
+    function AccessorFit(const AItem: TPasComplItem): TPasComplMatch;
+    function InheritedMethodName(AScope: Integer): string;
   public
     constructor Create(AModel: TPasSemaModel;
       AProject: TPasSemaProject = nil; AProjectMid: Integer = -1);
@@ -3644,13 +3678,13 @@ begin
     Exit;
   // Property accessor positions take members of the right SHAPE only:
   // fields always, routines split by head - a function can stand after
-  // `read`, a procedure after `write`, nothing else (13.1.1).
-  if FContext in [ccPropRead, ccPropWrite] then
+  // `read` and `stored`, a procedure after `write`, nothing else (13.1.1).
+  if FContext in [ccPropRead, ccPropWrite, ccPropStored] then
     case LM.Symbols[ASym].Kind of
       skField, skVar:
         ;
       skRoutine:
-        if ((FContext = ccPropRead) and
+        if ((FContext in [ccPropRead, ccPropStored]) and
             (SymHeadWord(LM, ASym) <> 'function')) or
            ((FContext = ccPropWrite) and
             (SymHeadWord(LM, ASym) <> 'procedure')) then
@@ -4886,11 +4920,12 @@ begin
   if (AInfo.DotBase <> NIL_NODE) or (AInfo.Kind = ckAfterDot) then
     Exit(ccMember);
   // A property ACCESSOR position: the caret sits inside an nkPropSpec whose
-  // specifier word is `read`/`write`. Checked before the generic token rules
-  // below - the word left of the caret is an identifier-LEXED directive word
-  // the token switch cannot tell from any other name. The other specifiers
-  // (index, stored, default, implements) keep the ordinary expression
-  // treatment: their right sides really are expressions.
+  // specifier word is `read`/`write`/`stored`. Checked before the generic
+  // token rules below - the word left of the caret is an identifier-LEXED
+  // directive word the token switch cannot tell from any other name. The
+  // other specifiers (index, default, implements) keep the ordinary
+  // expression treatment: their right sides really are expressions (`index`
+  // and `default` constant ones - CompleteAt sets FConstOnly there).
   LPrev := AInfo.Node;
   while (LPrev <> NIL_NODE) and
         not (FModel.Tree.Nodes[LPrev].Kind in [nkPropSpec, nkPropertyDecl,
@@ -4905,6 +4940,9 @@ begin
     if FModel.Tree.Source.VisibleTextEquals(
          FModel.Tree.Nodes[LPrev].FirstToken, 'write') then
       Exit(ccPropWrite);
+    if FModel.Tree.Source.VisibleTextEquals(
+         FModel.Tree.Nodes[LPrev].FirstToken, 'stored') then
+      Exit(ccPropStored);
   end;
   // A record aggregate's FIELD NAME (3.2.2, `(flDensity: 1.0; flDe|`): the
   // typed prefix that IS an nkAggregateField's name child, or a fresh spot
@@ -7078,6 +7116,19 @@ begin
   // A type position ranks its types by rules of its own.
   if FTypePos <> tpNone then
     Exit(TypePosFit(AItem));
+  // A property accessor ranks by the accessor's signature.
+  if FPropRank then
+    Exit(AccessorFit(AItem));
+  // `inherited |`: the enclosing method's own name is what a bare
+  // `inherited` calls - the commonest use, `inherited Create(...)` in a
+  // constructor included; any other method or property of an ancestor
+  // fits.
+  if FInhRank then
+  begin
+    if (FInhName <> '') and SameText(AItem.Name, FInhName) then
+      Exit(cmExact);
+    Exit(cmCompatible);
+  end;
   Result := cmOther;
   // `nil` - a keyword or a seeded constant, whichever list it came from -
   // fits every reference.
@@ -9227,7 +9278,8 @@ function TPasCompletion.CompleteAt(ALine, ACol: Integer;
 var
   LInfo: TPasCaretInfo;
   LRef: TPasComplTypeRef;
-  LNode, LOff: Integer;
+  LNode, LOff, LOv, LBridged: Integer;
+  LSpec: string;
 begin
   AContext := ccNone;
   AItems := nil;
@@ -9312,6 +9364,29 @@ begin
   FImplFirst := nil;
   FHelperRecord := False;
   FTypeAfterType := False;
+  FPropRank := False;
+  FPropX := XNil;
+  FPropOv := NIL_SYM;
+  FPropIdxX := nil;
+  FPropIdxOv := nil;
+  FPropIdxMode := nil;
+  FPropIndexed := False;
+  FPropClass := False;
+  FInhName := '';
+  FInhRank := False;
+  if FContext in [ccPropRead, ccPropWrite, ccPropStored] then
+    PropAccessorOf(LInfo);
+  if FContext = ccInherited then
+  begin
+    // Outside a method body there is no ancestor to call: the collection
+    // below lists nothing then.
+    LNode := MethodBodyScope(LInfo.Scope);
+    if LNode <> NIL_SCOPE then
+    begin
+      FInhName := InheritedMethodName(LNode);
+      FInhRank := True;
+    end;
+  end;
   if FContext in [ccExpression, ccType, ccStatement] then
   begin
     if not CaretOffset(ALine, ACol, LOff) then
@@ -9328,7 +9403,27 @@ begin
   end;
   if FContext in [ccExpression, ccMember] then
   begin
-    FExpect := RefValueX(ExpectedTypeAt(LInfo), FExpectOv);
+    // A property's `default |` and `index |` are constant expressions: of
+    // the property's type, of Integer (13.1.1).
+    LSpec := '';
+    if (FContext = ccExpression) and (FProj <> nil) then
+      LSpec := PropSpecWordAt(LInfo.Node);
+    if LSpec = 'default' then
+    begin
+      PropAccessorOf(LInfo);
+      FPropRank := False;
+      FExpect := FPropX;
+      FExpectOv := FPropOv;
+      FConstOnly := True;
+    end
+    else if LSpec = 'index' then
+    begin
+      if BridgeName('integer', LOv, LBridged) then
+        FExpect := FProj.CanonTypeX(XPlain(LOv, LBridged));
+      FConstOnly := True;
+    end
+    else
+      FExpect := RefValueX(ExpectedTypeAt(LInfo), FExpectOv);
     if XValid(FExpect) then
       FExpectCat := FProj.XCatOf(FExpect)
     else if FExpectOv <> NIL_SYM then
@@ -9392,9 +9487,10 @@ begin
       CollectUnitNames;
     ccInherited:
       begin
-        // The ancestor of the innermost enclosing struct, instance side.
+        // The ancestor of the innermost enclosing struct, instance side -
+        // in a method body only (FInhRank).
         EnsureAncestry(LInfo.Scope);
-        if Length(FCaretStructs) > 0 then
+        if FInhRank and (Length(FCaretStructs) > 0) then
         begin
           LRef := OverlayHeritageRef(FCaretStructs[0], 0);
           FBaseOwnUnit := True;
@@ -9406,14 +9502,22 @@ begin
       end;
     ccLabel:
       CollectLabels(LInfo);
-    ccPropRead, ccPropWrite:
+    ccPropRead, ccPropWrite, ccPropStored:
       begin
         // Only this class's (and its ancestors') members are legal after
-        // read/write - the struct chain alone, no scope pipeline. The shape
-        // filter (fields; functions vs procedures) lives in AddSym.
+        // read/write/stored - the struct chain alone, no scope pipeline.
+        // The shape filter (fields; functions vs procedures) lives in
+        // AddSym, the ranking in AccessorFit.
         EnsureAncestry(LInfo.Scope);
         for LNode := 0 to High(FCaretStructs) do
           CollectOverlayChain(FCaretStructs[LNode], True, cbStructMember);
+        if FContext = ccPropStored then
+        begin
+          AddItem('True', 'true', skKeyword, cbKeyword, -1, NIL_SYM,
+            NIL_INST);
+          AddItem('False', 'false', skKeyword, cbKeyword, -1, NIL_SYM,
+            NIL_INST);
+        end;
       end;
     ccRecField:
       begin
@@ -9443,7 +9547,7 @@ begin
   end;
   if XValid(FExpect) or (FExpectOv <> NIL_SYM) or FExpectOrdinal or
      FExpectEnum or (FCastRef <> tcUnknown) or FExpectWith or FExpectRaise or
-     FTypeRank then
+     FTypeRank or FPropRank or FInhRank then
     RankItems;
   SetLength(FItems, FCount);
   AItems := FItems;
@@ -9453,6 +9557,411 @@ begin
   FParamsOf := nil;
   FParamsKnown := nil;
   FCount := 0;
+end;
+
+{ The word of the property specifier (13.1.1) holding ANode, lowercase:
+  'read', 'write', 'stored', 'default', 'index', ...; '' outside one. }
+function TPasCompletion.PropSpecWordAt(ANode: Integer): string;
+begin
+  Result := '';
+  while (ANode <> NIL_NODE) and
+        not (FModel.Tree.Nodes[ANode].Kind in [nkPropSpec, nkPropertyDecl,
+          nkBlock, nkInterfaceSec, nkImplementationSec, nkUnit]) do
+    ANode := FModel.Tree.Nodes[ANode].Parent;
+  if (ANode <> NIL_NODE) and (FModel.Tree.Nodes[ANode].Kind = nkPropSpec) then
+    Result := LowerCase(FModel.Tree.Source.VisibleText(
+      FModel.Tree.Nodes[ANode].FirstToken));
+end;
+
+// The type an overlay type reference ANode names, canonical - or, for a
+// type only the buffer declares, its overlay symbol in AOv.
+procedure TPasCompletion.TypeNodeXOv(ANode: Integer; out AX: TSemaXType;
+  out AOv: Integer);
+var
+  LRef: TPasComplTypeRef;
+begin
+  AX := XNil;
+  AOv := NIL_SYM;
+  if (FProj = nil) or (ANode = NIL_NODE) then
+    Exit;
+  LRef := ResolveTypeRefNode(ANode, 0);
+  AX := LRef.X;
+  if not XValid(AX) and (LRef.OvSym <> NIL_SYM) then
+  begin
+    AX := OwnModelTypeX(LRef.OvSym);
+    if not XValid(AX) then
+      AOv := LRef.OvSym;
+  end;
+  if XValid(AX) then
+    AX := FProj.CanonTypeX(AX);
+end;
+
+{ The property whose accessor the caret is at (13.1.1): its type, its index
+  parameters (type and mode per name), `index N`, `class property` - into
+  FPropX / FPropOv, FPropIdxX / FPropIdxOv / FPropIdxMode, FPropIndexed,
+  FPropClass; FPropRank when a project can type them. A property that
+  redeclares an inherited one without a type (`property Foo read |`) leaves
+  FPropX unknown. }
+procedure TPasCompletion.PropAccessorOf(const AInfo: TPasCaretInfo);
+var
+  LProp, LKid, LParam, LPart, LNames, LMode, LTypeNode: Integer;
+  LX: TSemaXType;
+  LOv: Integer;
+  LTypeSeen: Boolean;
+begin
+  if FProj = nil then
+    Exit;
+  LProp := UpChainNode(AInfo.Node, nkPropertyDecl);
+  if LProp = NIL_NODE then
+    Exit;
+  FPropClass := FModel.Tree.Nodes[LProp].Aux = 1;
+  LTypeSeen := False;
+  // The name first, then the index parameters, the type and the specifiers
+  // (TPasParser.ParseProperty).
+  LKid := FModel.Tree.Nodes[LProp].FirstChild;
+  if LKid <> NIL_NODE then
+    LKid := FModel.Tree.Nodes[LKid].NextSibling;
+  while LKid <> NIL_NODE do
+  begin
+    case FModel.Tree.Nodes[LKid].Kind of
+      nkParams:
+        begin
+          LParam := FModel.Tree.Nodes[LKid].FirstChild;
+          while LParam <> NIL_NODE do
+          begin
+            if nfVar in FModel.Tree.Nodes[LParam].Flags then
+              LMode := 2
+            else if nfOut in FModel.Tree.Nodes[LParam].Flags then
+              LMode := 3
+            else if nfConst in FModel.Tree.Nodes[LParam].Flags then
+              LMode := 1
+            else
+              LMode := 0;
+            LNames := 0;
+            LTypeNode := NIL_NODE;
+            LPart := FModel.Tree.Nodes[LParam].FirstChild;
+            while LPart <> NIL_NODE do
+            begin
+              if nfName in FModel.Tree.Nodes[LPart].Flags then
+                Inc(LNames)
+              else if (FModel.Tree.Nodes[LPart].Kind <> nkAttrGroup) and
+                 (LTypeNode = NIL_NODE) then
+                LTypeNode := LPart;
+              LPart := FModel.Tree.Nodes[LPart].NextSibling;
+            end;
+            TypeNodeXOv(LTypeNode, LX, LOv);
+            for var LI := 1 to LNames do
+            begin
+              FPropIdxX := FPropIdxX + [LX];
+              FPropIdxOv := FPropIdxOv + [LOv];
+              FPropIdxMode := FPropIdxMode + [LMode];
+            end;
+            LParam := FModel.Tree.Nodes[LParam].NextSibling;
+          end;
+        end;
+      nkPropSpec:
+        if FModel.Tree.Source.VisibleTextEquals(
+             FModel.Tree.Nodes[LKid].FirstToken, 'index') then
+          FPropIndexed := True;
+    else
+      if not LTypeSeen then
+      begin
+        LTypeSeen := True;
+        TypeNodeXOv(LKid, FPropX, FPropOv);
+      end;
+    end;
+    LKid := FModel.Tree.Nodes[LKid].NextSibling;
+  end;
+  FPropRank := True;
+end;
+
+// The declared type of a value, a parameter or a routine's result (Mid -1:
+// the overlay's), canonical; AOv for a type only the buffer declares.
+function TPasCompletion.ItemValueX(AMid, ASym, ACtx: Integer;
+  out AOv: Integer): TSemaXType;
+begin
+  AOv := NIL_SYM;
+  if AMid < 0 then
+    Result := RefValueX(TypeOfOverlaySym(ASym, 0), AOv)
+  else
+  begin
+    Result := RefValueX(TypeOfProjectSym(AMid, ASym, ACtx, 0), AOv);
+    if not XValid(Result) and (AOv = NIL_SYM) then
+    begin
+      Result := FProj.DeclTypeX(AMid, ASym);
+      if XValid(Result) then
+        Result := FProj.CanonTypeX(Result);
+    end;
+  end;
+end;
+
+{ Are two types (each a project type, or a type only the buffer declares)
+  the same type - what a property accessor's field, parameter or result
+  must be (13.1.1; dcc 37: Byte for Integer is E2010, a getter's E2008)? 1
+  yes, -1 no, 0 when either is unknown. }
+function TPasCompletion.SameAccType(const AX: TSemaXType; AOv: Integer;
+  const BX: TSemaXType; BOv: Integer): Integer;
+begin
+  if XValid(AX) and XValid(BX) then
+  begin
+    if FProj.XConvX(BX, AX) = scIdentical then
+      Exit(1);
+    Exit(-1);
+  end;
+  if (AOv <> NIL_SYM) and (BOv <> NIL_SYM) then
+  begin
+    if AOv = BOv then
+      Exit(1);
+    Exit(-1);
+  end;
+  // A project type is never one only the buffer declares.
+  if (XValid(AX) and (BOv <> NIL_SYM)) or (XValid(BX) and (AOv <> NIL_SYM))
+  then
+    Exit(-1);
+  Result := 0;
+end;
+
+// Does a routine's declaration say `static`? A text-demoted model has no
+// directive text left: no.
+function TPasCompletion.IsStaticRoutine(AModel: TPasSemaModel;
+  ASym: Integer): Boolean;
+var
+  LRoutine, LChild: Integer;
+begin
+  Result := False;
+  if AModel.Demoted then
+    Exit;
+  LRoutine := RoutineNodeOf(AModel, ASym);
+  if LRoutine = NIL_NODE then
+    Exit;
+  LChild := AModel.Tree.Nodes[LRoutine].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    if (AModel.Tree.Nodes[LChild].Kind = nkDirective) and
+       AModel.Tree.NodeTextEquals(LChild, 'static') then
+      Exit(True);
+    LChild := AModel.Tree.Nodes[LChild].NextSibling;
+  end;
+end;
+
+{ One routine (no overload chain) against the accessor the caret is at
+  (13.1.1, each rule dcc 37-probed): a getter takes the index parameters -
+  the same types, the same modes - then the `index` specifier's Integer
+  (value or const), and returns the property's type; a setter takes the
+  same and then the value, of the property's type, by value or const (a
+  `var` / `out` one is E2282); a `stored` function takes the `index`
+  Integer alone and returns a Boolean. 1 fits, -1 does not, 0 unknown. }
+function TPasCompletion.AccessorSigFit(AMid, ASym, ACtx: Integer): Integer;
+var
+  LM: TPasSemaModel;
+  LParams: TArray<Integer>;
+  LCount, LIdx, LMode, LOv, LIntMid, LIntSym, LSame: Integer;
+  LX, LInt: TSemaXType;
+  LUnknown: Boolean;
+
+  procedure Judge(ASame: Integer);
+  begin
+    if ASame = 0 then
+      LUnknown := True;
+  end;
+
+begin
+  Result := -1;
+  if not SymModelOf(AMid, 'AccessorSigFit', LM, False) then
+    Exit(0);
+  if AMid < 0 then
+    LParams := OverlayParams(ASym)
+  else
+    LParams := FProj.XParamSyms(AMid, ASym);
+  LCount := Ord(FPropIndexed);
+  if FContext <> ccPropStored then
+    Inc(LCount, Length(FPropIdxX));
+  if FContext = ccPropWrite then
+    Inc(LCount);
+  if Length(LParams) <> LCount then
+    Exit;
+  LUnknown := False;
+  LIdx := 0;
+  if FContext <> ccPropStored then
+    for var LI := 0 to High(FPropIdxX) do
+    begin
+      LMode := ParamModeOf(LM, LParams[LIdx]);
+      if LMode < 0 then
+        LUnknown := True
+      else if LMode <> FPropIdxMode[LI] then
+        Exit;
+      LX := ItemValueX(AMid, LParams[LIdx], ACtx, LOv);
+      LSame := SameAccType(LX, LOv, FPropIdxX[LI], FPropIdxOv[LI]);
+      if LSame < 0 then
+        Exit;
+      Judge(LSame);
+      Inc(LIdx);
+    end;
+  if FPropIndexed then
+  begin
+    LMode := ParamModeOf(LM, LParams[LIdx]);
+    if LMode > 1 then
+      Exit;
+    LInt := XNil;
+    if BridgeName('integer', LIntMid, LIntSym) then
+      LInt := FProj.CanonTypeX(XPlain(LIntMid, LIntSym));
+    LX := ItemValueX(AMid, LParams[LIdx], ACtx, LOv);
+    LSame := SameAccType(LX, LOv, LInt, NIL_SYM);
+    if LSame < 0 then
+      Exit;
+    Judge(LSame);
+    Inc(LIdx);
+  end;
+  case FContext of
+    ccPropWrite:
+      begin
+        LMode := ParamModeOf(LM, LParams[LIdx]);
+        if LMode > 1 then
+          Exit;
+        LX := ItemValueX(AMid, LParams[LIdx], ACtx, LOv);
+        LSame := SameAccType(LX, LOv, FPropX, FPropOv);
+        if LSame < 0 then
+          Exit;
+        Judge(LSame);
+      end;
+    ccPropRead:
+      begin
+        LX := ItemValueX(AMid, ASym, ACtx, LOv);
+        LSame := SameAccType(LX, LOv, FPropX, FPropOv);
+        if LSame < 0 then
+          Exit;
+        Judge(LSame);
+      end;
+    ccPropStored:
+      begin
+        LX := ItemValueX(AMid, ASym, ACtx, LOv);
+        if XValid(LX) then
+        begin
+          if FProj.XCatOf(LX) <> tcBoolean then
+            Exit;
+        end
+        else if (LOv = NIL_SYM) or
+           (FModel.Symbols[LOv].TypeCat <> tcBoolean) then
+          LUnknown := True;
+      end;
+  end;
+  if LUnknown then
+    Result := 0
+  else
+    Result := 1;
+end;
+
+{ One member against the property accessor the caret is at: the accessor's
+  exact signature is fit 0 (a field of the property's type, a getter, a
+  setter, a Boolean for `stored`, `True` / `False` there); a record field
+  leads (`read FRec.X` - dcc takes a path through records); a member of
+  the right shape and another type, or one on the wrong side - a class var
+  or a static class method for an instance property (E2356), anything but
+  a class var or a static class method for a class property (E2355) - is
+  fit 3. A member whose types cannot be read leads. }
+function TPasCompletion.AccessorFit(const AItem: TPasComplItem):
+  TPasComplMatch;
+var
+  LM: TPasSemaModel;
+  LX: TSemaXType;
+  LOv, LSym, LBest, LFit: Integer;
+  LClass: Boolean;
+  LCat: TSemaTypeCat;
+begin
+  if AItem.Bucket = cbKeyword then
+  begin
+    if (FContext = ccPropStored) and (SameText(AItem.Name, 'True') or
+       SameText(AItem.Name, 'False')) then
+      Exit(cmExact);
+    Exit(cmOther);
+  end;
+  if (AItem.Sym = NIL_SYM) or
+     not SymModelOf(AItem.Mid, 'AccessorFit', LM, False) then
+    Exit(cmLeads);
+  LClass := ClassSideMember(LM, AItem.Sym);
+  case LM.Symbols[AItem.Sym].Kind of
+    skField, skVar:
+      begin
+        if LClass <> FPropClass then
+          Exit(cmOther);
+        // An array property reads and writes through methods alone (E2008;
+        // `index N` with a field compiles).
+        if (Length(FPropIdxX) > 0) and (FContext <> ccPropStored) then
+          Exit(cmOther);
+        LX := ItemValueX(AItem.Mid, AItem.Sym, AItem.Ctx, LOv);
+        if XValid(LX) then
+          LCat := FProj.XCatOf(LX)
+        else if LOv <> NIL_SYM then
+          LCat := FModel.Symbols[LOv].TypeCat
+        else
+          Exit(cmLeads);
+        if FContext = ccPropStored then
+        begin
+          if LCat = tcBoolean then
+            Exit(cmExact);
+          if LCat = tcRecord then
+            Exit(cmLeads);
+          Exit(cmOther);
+        end;
+        case SameAccType(LX, LOv, FPropX, FPropOv) of
+          1:
+            Exit(cmExact);
+          0:
+            Exit(cmLeads);
+        end;
+        if LCat = tcRecord then
+          Exit(cmLeads);
+        Exit(cmOther);
+      end;
+    skRoutine:
+      begin
+        // An instance property takes a non-static class method too (dcc 37
+        // accepts `read CF` for a `class function CF`).
+        if FPropClass <> (LClass and IsStaticRoutine(LM, AItem.Sym)) then
+          Exit(cmOther);
+        LBest := -1;
+        LSym := AItem.Sym;
+        for var LHop := 1 to 64 do
+        begin
+          if (LSym = NIL_SYM) or (LM.Symbols[LSym].Kind <> skRoutine) then
+            Break;
+          LFit := AccessorSigFit(AItem.Mid, LSym, AItem.Ctx);
+          if LFit > 0 then
+            Exit(cmExact);
+          if LFit = 0 then
+            LBest := 0;
+          LSym := LM.Symbols[LSym].NextOverload;
+        end;
+        if LBest = 0 then
+          Exit(cmLeads);
+        Exit(cmOther);
+      end;
+  end;
+  Result := cmOther;
+end;
+
+{ The name of the method whose body AScope (MethodBodyScope's answer) is,
+  lowercase: `Create` of `constructor TFoo.Create`. }
+function TPasCompletion.InheritedMethodName(AScope: Integer): string;
+var
+  LNode, LName: Integer;
+begin
+  Result := '';
+  LNode := FModel.Scopes[AScope].OwnerNode;
+  if (LNode = NIL_NODE) or (FModel.Tree.Nodes[LNode].Kind <> nkRoutine) then
+    Exit;
+  // Each segment of `TFoo.Bar` is a name child (TPasParser.ParseRoutine):
+  // the last one is the method's.
+  LNode := FModel.Tree.Nodes[LNode].FirstChild;
+  LName := NIL_NODE;
+  while LNode <> NIL_NODE do
+  begin
+    if nfName in FModel.Tree.Nodes[LNode].Flags then
+      LName := LNode;
+    LNode := FModel.Tree.Nodes[LNode].NextSibling;
+  end;
+  if (LName <> NIL_NODE) and (FModel.Tree.Nodes[LName].Kind = nkIdent) then
+    Result := FModel.Tree.NodeNameLower(LName);
 end;
 
 function TPasCompletion.EnclosingStructSym(AScope: Integer): Integer;
