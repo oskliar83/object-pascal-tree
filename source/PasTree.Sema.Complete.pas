@@ -336,6 +336,11 @@ type
     // The operand of `:=` / a comparison whose left side is known and of no
     // procedural type: a procedure cannot stand there, and is not listed.
     FNoProcedures: Boolean;
+    // ValueReaches' answers per record type for one ranking (RankItems):
+    // 0 being walked, 1 reaches nothing, 2 may reach. FReachCycle: a walk
+    // met a record still being walked, so what it found is not final.
+    FReach: TDictionary<TSemaXType, Byte>;
+    FReachCycle: Boolean;
 
     function RawTokenAt(AOffset: Integer): Integer;
     function CaretOffset(ALine, ACol: Integer; out AOffset: Integer): Boolean;
@@ -468,6 +473,10 @@ type
     function RefValueX(const ARef: TPasComplTypeRef;
       out AOvSym: Integer): TSemaXType;
     function MatchOf(const AItem: TPasComplItem): TPasComplMatch;
+    function ValueReaches(const AX: TSemaXType; ADepth: Integer): Boolean;
+    function ElementValueX(ARef: TPasComplTypeRef): TSemaXType;
+    function MemberValueX(AMid, ASym, ACtx: Integer;
+      out AX: TSemaXType): Boolean;
     procedure RankItems;
   public
     constructor Create(AModel: TPasSemaModel;
@@ -596,6 +605,7 @@ destructor TPasCompletion.Destroy;
 begin
   FUnitMids.Free;
   FSeen.Free;
+  FReach.Free;
   inherited;
 end;
 
@@ -5092,19 +5102,175 @@ end;
   completion alone needs: what may still LEAD to a fitting value through
   `.` `[` `(` `^` is cmLeads, and only a value proven not to convert that
   has nothing to reach through (a number, a string, a Char, an
-  enumeration, a set) is cmOther. A comparison makes a Boolean of any
+  enumeration, a set; a record, an array or a typed pointer whose members
+  or elements are each such - ValueReaches) is cmOther. A comparison makes a Boolean of any
   value (`B := I > 0`), so nothing is cmOther where a Boolean is expected.
   A scalar's record helper (`I.ToString`) is the one way out this ignores. }
-function TPasCompletion.MatchOf(const AItem: TPasComplItem): TPasComplMatch;
 const
   NOTHING_TO_REACH = [tcInteger, tcFloat, tcBoolean, tcChar, tcString,
     tcEnum, tcSet, tcNil, tcFile];
+
+{ A type answer as the one value type ValueReaches walks: an anonymous
+  array as its element (each dimension consumed), an inline `^T` as T, a
+  type reference as a value of the type. XNil where no type names it. }
+function TPasCompletion.ElementValueX(ARef: TPasComplTypeRef): TSemaXType;
+var
+  LOv, LHop: Integer;
+begin
+  ARef.IsTypeRef := False;
+  for LHop := 1 to 8 do
+    if ARef.ArrNode <> NIL_NODE then
+      ARef := ElementTypeOf(ARef, 1, 0)
+    else
+      Break;
+  ARef.ViaPointer := False;
+  Result := RefValueX(ARef, LOv);
+end;
+
+{ The value type of a member met by ValueReaches' walk: a field, a property
+  (an array property's element), a constant, a function's result, a nested
+  type as the value a cast or a constructor of it makes. An inline array
+  slot (`D4: array[0..7] of Byte`) gives its element, an inline `^T` its
+  T. False for what no walk should follow - a procedure, a destructor, an
+  operator, a class constructor - and AX is XNil (with True) for a member
+  whose type the engine cannot name, which the walk takes as leading
+  somewhere. }
+function TPasCompletion.MemberValueX(AMid, ASym, ACtx: Integer;
+  out AX: TSemaXType): Boolean;
+var
+  LM: TPasSemaModel;
+begin
+  AX := XNil;
+  LM := ProjModel(AMid, 'MemberValueX');
+  case LM.Symbols[ASym].Kind of
+    skRoutine:
+      if (LM.RoutineHead(ASym) in [rhProcedure, rhDestructor, rhOperator]) or
+         LM.IsClassCtorDtor(ASym) then
+        Exit(False);
+    skField, skVar, skConst, skProperty, skType:
+      ;
+  else
+    Exit(False);
+  end;
+  Result := True;
+  AX := ElementValueX(TypeOfProjectSym(AMid, ASym, ACtx, 0));
+  if not XValid(AX) and (LM.Symbols[ASym].Kind = skConst) and
+     (LM.Symbols[ASym].TypeNode = NIL_NODE) then
+  begin
+    AX := FProj.DeclTypeX(AMid, ASym);
+    if XValid(AX) then
+      AX := FProj.CanonTypeX(AX);
+  end;
+end;
+
+{ Whether a value of type AX may lead to a value of the expected type
+  through `.` `[` `^` - what makes a value of no fit cmLeads rather than
+  cmOther. Proven not only for a scalar (NOTHING_TO_REACH) but for a RECORD
+  whose members, its helper's included, are each proven not to (`TGUID`
+  for an enumeration: integers, an array of Byte, a string, Boolean, TGUID
+  again), and for an array or a typed pointer by its element. A class, an
+  interface, a class reference, a procedural value, a Variant may lead
+  anywhere and are not walked: their member graphs are the whole library,
+  walked again for every expected type. Records are walked four levels
+  deep, each record once per ranking (FReach). }
+function TPasCompletion.ValueReaches(const AX: TSemaXType;
+  ADepth: Integer): Boolean;
+var
+  LX, LEl: TSemaXType;
+  LRef: TPasComplTypeRef;
+  LState: Byte;
+  LFound, LSaveCycle: Boolean;
+begin
+  if not XValid(AX) or (FProj = nil) then
+    Exit(True);
+  LX := FProj.CanonTypeX(AX);
+  if not XValid(LX) then
+    Exit(True);
+  if FProj.XConvX(FExpect, LX) <> scNone then
+    Exit(True);
+  case FProj.XCatOf(LX) of
+    tcInteger, tcFloat, tcBoolean, tcChar, tcString, tcEnum, tcSet, tcNil,
+    tcFile:
+      Exit(False);
+    tcArray:
+      begin
+        if ADepth >= 4 then
+          Exit(True);
+        LRef := ComplNilRef;
+        LRef.X := LX;
+        LEl := ElementValueX(ElementTypeOf(LRef, 1, 0));
+        Exit(not XValid(LEl) or ValueReaches(LEl, ADepth + 1));
+      end;
+    tcPointer:
+      begin
+        if ADepth >= 4 then
+          Exit(True);
+        LEl := FProj.PointeeX(LX);
+        Exit(not XValid(LEl) or ValueReaches(LEl, ADepth + 1));
+      end;
+    tcRecord:
+      ;
+  else
+    Exit(True);
+  end;
+  if ADepth >= 4 then
+    Exit(True);
+  if FReach = nil then
+    FReach := TDictionary<TSemaXType, Byte>.Create;
+  if FReach.TryGetValue(LX, LState) then
+  begin
+    // A record met again while it is being walked adds nothing the walk
+    // in progress will not find; what this walk concludes is not final.
+    if LState = 0 then
+    begin
+      FReachCycle := True;
+      Exit(False);
+    end;
+    Exit(LState = 2);
+  end;
+  FReach.Add(LX, 0);
+  LSaveCycle := FReachCycle;
+  FReachCycle := False;
+  LFound := False;
+  FProj.EnumMembersX(FProjMid, LX,
+    procedure(AMid, ASym, ACtx: Integer)
+    var
+      LMX: TSemaXType;
+    begin
+      if LFound or not MemberValueX(AMid, ASym, ACtx, LMX) then
+        Exit;
+      if not XValid(LMX) or ValueReaches(LMX, ADepth + 1) then
+        LFound := True;
+    end);
+  Result := LFound;
+  if Result or not FReachCycle then
+    FReach[LX] := 1 + Ord(Result)
+  else
+    FReach.Remove(LX);
+  FReachCycle := LSaveCycle or (FReachCycle and not Result);
+end;
+
+function TPasCompletion.MatchOf(const AItem: TPasComplItem): TPasComplMatch;
 var
   LRef: TPasComplTypeRef;
   LX: TSemaXType;
-  LOv: Integer;
+  LOv, LBridged: Integer;
   LCat: TSemaTypeCat;
   LM: TPasSemaModel;
+
+  // An implicit conversion of a value of type AX: cmCompatible, except an
+  // untyped Pointer where a class, an interface, a class reference, a
+  // procedural value or a dynamic array is expected - dcc takes `O := P`,
+  // but nobody writes it, and since the conversion rules admit it every
+  // System Pointer (`__ImageBase`, `_ClassCreate`) ranked above the class
+  // name of `L := TFoo.Create`. It may still be cast there: cmLeads.
+  function ImplicitFit(const AX: TSemaXType): TPasComplMatch;
+  begin
+    Result := cmCompatible;
+    if (FExpectCat in [tcClass, tcInterface, tcClassOf, tcProc, tcArray]) and
+       (FProj.XCatOf(FProj.CanonTypeX(AX)) = tcPointer) then
+      Result := cmLeads;
+  end;
 
   // A value of type AX against the expected type: AIdentical when it is
   // that type, cmCompatible when it converts, cmOther when it provably does
@@ -5116,10 +5282,9 @@ var
       scIdentical:
         Result := AIdentical;
       scImplicit:
-        Result := cmCompatible;
+        Result := ImplicitFit(AX);
       scNone:
-        if (FExpectCat <> tcBoolean) and
-           (FProj.XCatOf(FProj.CanonTypeX(AX)) in NOTHING_TO_REACH) then
+        if (FExpectCat <> tcBoolean) and not ValueReaches(AX, 0) then
           Result := cmOther
         else
           Result := cmLeads;
@@ -5167,9 +5332,19 @@ begin
   if AItem.Kind in [skType, skBuiltinType] then
   begin
     Result := cmLeads;
-    if (AItem.Mid < 0) or (AItem.Sym = NIL_SYM) or not XValid(FExpect) then
+    if (AItem.Sym = NIL_SYM) or not XValid(FExpect) then
       Exit;
-    LX := FProj.CanonTypeX(XPlain(AItem.Mid, AItem.Sym));
+    // A builtin type the overlay seeds (`string`, `Integer`) is judged as
+    // its System twin; a type the overlay itself declares has none.
+    if AItem.Mid < 0 then
+    begin
+      if (AItem.Kind <> skBuiltinType) or
+         not BridgeName(FModel.Symbols[AItem.Sym].NameLower, LOv, LBridged) then
+        Exit;
+      LX := FProj.CanonTypeX(XPlain(LOv, LBridged));
+    end
+    else
+      LX := FProj.CanonTypeX(XPlain(AItem.Mid, AItem.Sym));
     if XValid(LX) then
       Result := FitOf(LX, cmCompatible);
     Exit;
@@ -5226,7 +5401,7 @@ begin
     scIdentical:
       Exit(cmExact);
     scImplicit:
-      Exit(cmCompatible);
+      Exit(ImplicitFit(LX));
   end;
   LCat := FProj.XCatOf(FProj.CanonTypeX(LX));
   // A dynamic array whose element fits is the start of `A[I]` - the most
@@ -5261,6 +5436,10 @@ procedure TPasCompletion.RankItems;
 var
   LIdx: Integer;
 begin
+  // ValueReaches' answers hold for one expected type.
+  if FReach <> nil then
+    FReach.Clear;
+  FReachCycle := False;
   for LIdx := 0 to FCount - 1 do
     FItems[LIdx].Match := MatchOf(FItems[LIdx]);
 end;
