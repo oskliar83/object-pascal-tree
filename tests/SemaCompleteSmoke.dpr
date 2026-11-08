@@ -1364,9 +1364,10 @@ begin
   DotCase('ImplVar := Ord(B.|);');
   DotCase('ImplVar := B.| + 1;', 'CF');
   DotCase('ImplVar := 1 + B.|;');
-  DotCase('if B.| then;');
-  DotCase('if not B.| then;');
-  DotCase('while B.| do;');
+  // A condition expects a Boolean: the procedure Pub is no operand there.
+  DotCase('if B.| then;', 'CF');
+  DotCase('if not B.| then;', 'CF');
+  DotCase('while B.| do;', 'CF');
   DotCase('if (B.|) then;');
   DotCase('if (ImplVar = 1) and (B.|) then;');
   DotCase('Arr[B.|] := nil;');
@@ -2773,6 +2774,16 @@ begin
   ExpCase('A := |;', 'A', 'D', '', 'ExtReset', '', 'ExtPtr');
   ExpCase('Arr := |;', '', '', '', 'ExtReset', '', 'ExtPtr');
   ExpCase('ExtP := |;', '', 'ExtPtr', '', 'ExtReset');
+  // A condition expects a Boolean: no procedure is listed, an intrinsic is
+  // typed by the table's result (Assigned, Odd), and nothing is wrong - a
+  // comparison makes a Boolean of any value.
+  ExpCase('if | then;', 'B,Assigned,Odd,True', '', '', 'ExtReset,LocalProc',
+    '', 'I,C,ExtOwner');
+  ExpCase('if Ass| then;', 'Assigned', '', '', 'Assert');
+  ExpCase('while not | do;', 'B,Assigned', '', '', 'ExtReset');
+  ExpCase('repeat until |;', 'B', '', '', 'ExtReset');
+  ExpCase('if ExtOwner.| then;', '', '', '', 'Reset', '', 'Color,Count');
+  ExpCase('I := |;', 'SizeOf', '', '', 'ExtReset');
   ExpCase('if C = ExtOwner.Co| then;', 'Color', '', 'Count', 'Reset');
   // A member access as an argument is no value of the left side's type.
   ExpCase('I := Ord(ExtOwner.|);', '', '', 'Color,Pet', '');
