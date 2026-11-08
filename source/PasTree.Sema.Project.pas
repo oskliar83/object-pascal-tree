@@ -2150,6 +2150,10 @@ type
       the copies in the typer, the argument scorer and the completion
       ranking - first version, see TSemaConv. }
     function XConvX(const ADst, ASrc: TSemaXType): TSemaConv;
+    { How far an implicit conversion of a value of ASrc lands from ADst's
+      own type, 0 nearest .. CConvDistVariant - the grade inside "converts"
+      that completion orders by; TSemaConvView.ConvDistance has the rules. }
+    function XConvDistX(const ADst, ASrc: TSemaXType): Integer;
     { A user conversion of ASrc to ADst (both canonical, one a record)
       through a `class operator Implicit` of either (9.3.1, 6.3.1): an
       operator `Implicit(A: Q): R` of ADst or of ASrc converts when ASrc
@@ -14165,6 +14169,11 @@ end;
 function TPasSemaProject.XConvX(const ADst, ASrc: TSemaXType): TSemaConv;
 begin
   Result := FConv.Conv(ADst, ASrc);
+end;
+
+function TPasSemaProject.XConvDistX(const ADst, ASrc: TSemaXType): Integer;
+begin
+  Result := FConv.ConvDistance(ADst, ASrc);
 end;
 
 function TPasSemaProject.ConvNoteX(const ADst, ASrc: TSemaXType): string;

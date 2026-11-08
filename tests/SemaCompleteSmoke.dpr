@@ -1038,6 +1038,7 @@ const
     '  TShape2 = (shRound, shSquare);'#10 +
     '  TAnimal = class end;'#10 +
     '  TDog = class(TAnimal) end;'#10 +
+    '  TPuppy = class(TDog) end;'#10 +
     '  TCar = class end;'#10 +
     '  TNotify = procedure;'#10 +
     '  TIntArr = array of Integer;'#10 +
@@ -1495,6 +1496,82 @@ procedure AccCase(ACtx: TPasComplContext; const AProp, AExact, ACompat,
 begin
   CtxSrc(ACtx, 'accessor: ' + Trim(AProp), EXP_HEAD_A + ACC_HEAD + AProp +
     #10 + ACC_TAIL, AExact, ACompat, AOther, AAbsent, ALeads);
+end;
+
+{ The conversion grade inside "fits" (TPasComplItem.Conv, XConvDistX): ALine
+  typed in Run's body with CONV_VARS added to its variables; AOrder lists
+  names that must each be cmCompatible with a strictly growing Conv, AExact
+  one that must be cmExact with Conv 0. }
+const
+  CONV_VARS =
+    '  Sg: Single;'#10'  By: Byte;'#10'  Wd: Word;'#10'  I6: Int64;'#10 +
+    '  Pup: TPuppy;'#10'  V: Variant;'#10;
+
+procedure ConvOrder(const ALine, AExact, AOrder: string);
+var
+  LOk: Boolean;
+  LWhy: string;
+  LPrev: Integer;
+begin
+  ProjCase(EXP_HEAD_A + Copy(EXP_HEAD_B, 1, Length(EXP_HEAD_B) - 6) +
+    CONV_VARS + 'begin'#10 + '  ' + ALine + #10 + PROJ_TAIL);
+  LOk := GHit;
+  LWhy := '';
+  if AExact <> '' then
+    if not Has(AExact) or (ItemNamed(AExact).Match <> cmExact) or
+       (ItemNamed(AExact).Conv <> 0) then
+    begin
+      LOk := False;
+      LWhy := LWhy + ' exact ' + AExact;
+    end;
+  LPrev := -1;
+  for var LName in AOrder.Split([',']) do
+  begin
+    if not Has(LName) then
+    begin
+      LOk := False;
+      LWhy := LWhy + ' missing ' + LName;
+      Continue;
+    end;
+    LWhy := LWhy + Format(' %s=%d/%d', [LName, Ord(ItemNamed(LName).Match),
+      ItemNamed(LName).Conv]);
+    if (ItemNamed(LName).Match <> cmCompatible) or
+       (ItemNamed(LName).Conv <= LPrev) then
+      LOk := False;
+    LPrev := ItemNamed(LName).Conv;
+  end;
+  GCounter.Ok(Format('conversion grade: %s - %s', [ALine, AOrder]), LOk,
+    procedure
+    begin
+      Writeln('    ctx=', Ord(GCtx), ' items=', Length(GItems), ':', LWhy);
+    end);
+end;
+
+// One item's fit and grade (AConv -1: any) for ASource's caret.
+procedure FitCase(const ATitle, ASource, AName: string; AMatch: TPasComplMatch;
+  AConv: Integer = -1);
+var
+  LOk: Boolean;
+begin
+  ProjCase(ASource);
+  LOk := GHit and Has(AName) and (ItemNamed(AName).Match = AMatch) and
+    ((AConv < 0) or (ItemNamed(AName).Conv = AConv));
+  GCounter.Ok(Format('fit: %s - %s', [ATitle, AName]), LOk,
+    procedure
+    begin
+      Write('    ctx=', Ord(GCtx), ' items=', Length(GItems));
+      if Has(AName) then
+        Write(' ', AName, '=', Ord(ItemNamed(AName).Match), '/',
+          ItemNamed(AName).Conv);
+      Writeln;
+    end);
+end;
+
+// Run's body holding ALine, with CONV_VARS and AVars among its variables.
+function ConvSrc(const ALine: string; const AVars: string = ''): string;
+begin
+  Result := EXP_HEAD_A + Copy(EXP_HEAD_B, 1, Length(EXP_HEAD_B) - 6) +
+    CONV_VARS + AVars + 'begin'#10 + '  ' + ALine + #10 + PROJ_TAIL;
 end;
 
 begin
@@ -3418,7 +3495,8 @@ begin
     'function TLoc.Get: TShape2;'#10'begin'#10'  Exit(|);'#10'end;'#10,
     'shRound', '', 'clRed', 'ExtReset');
   // A `case` selector takes any ordinal - an integer, an enumeration, a
-  // Char, a Boolean; a float or a string is wrong, a class leads to one.
+  // Char, a Boolean; a float or a string type is wrong, a class leads to
+  // one, and since 0.174.0 so does a string value (`case S[I] of`).
   ExpCase('case | of end;', '', 'C,I,LE,B,True,ExtColorOf,clRed,Integer',
     'F,string', 'ExtReset,LocalProc', '', 'A,ExtOwner');
   ExpCase('case ExtOwner.| of end;', '', 'Color,Count,Total', '', 'Reset',
@@ -3814,17 +3892,18 @@ begin
   TypDecl('  TMyH = class helper(TObject) for |'#10'  end;', '', 'TAnimal', '',
     'TColor2,IShape,clRed');
   // A static array's bounds: a constant expression of an ordinal type -
-  // an ordinal type or an ordinal constant fits, a type or a constant of
-  // another scalar kind is wrong; the intrinsics a constant expression may
+  // an ordinal type fits exactly where a whole range may stand (0.174.0:
+  // fit 0 - the commonest bound), an ordinal constant fits, a type or a
+  // constant of another scalar kind is wrong; the intrinsics a constant expression may
   // call stay; no variable, typed constant, function or procedure.
   ExpSrc(EXP_HEAD_A + 'var V1: array[|] of Integer;'#10'implementation'#10 +
-    'end.'#10, '', 'TColor2,TSub,Integer,Boolean,TLocalEnum,clRed,CRed,CMax',
+    'end.'#10, 'TColor2,TSub,Integer,Boolean,TLocalEnum', 'clRed,CRed,CMax',
     'Double,CName', 'ExtCount,ExtColor,CGreenT,ExtReset,ExtColorOf,ExtIntOf',
     '', 'var V1: array[|] of Integer');
   GCounter.Ok('declaration: an array bound offers High', Has('High') and
     Has('SizeOf'));
   ExpSrc(EXP_HEAD_A + 'var V1: array[TColor2, |] of Integer;'#10 +
-    'implementation'#10'end.'#10, '', 'TShape2,CMax', 'CName',
+    'implementation'#10'end.'#10, 'TShape2', 'CMax', 'CName',
     'ExtCount,CGreenT,ExtReset', '', 'array[TColor2, |]');
   ExpSrc(EXP_HEAD_A + 'var V1: array[0..|] of Integer;'#10'implementation'#10 +
     'end.'#10, 'CMax', '', 'clRed,CName', 'ExtCount,CGreenT,ExtReset,ExtIntOf',
@@ -3833,13 +3912,13 @@ begin
     'implementation'#10'end.'#10, 'clGreen,CRed', '', 'leOne',
     'ExtColor,CGreenT,ExtReset', '', 'array[clRed..|]');
   ExpSrc(EXP_HEAD_A + '  TArrT = packed array[|] of Integer;'#10 +
-    'implementation'#10'end.'#10, '', 'TColor2,CMax', 'CName',
+    'implementation'#10'end.'#10, 'TColor2', 'CMax', 'CName',
     'ExtCount,ExtReset', '', 'packed array[|]');
   ExpSrc(EXP_HEAD_A + '  TMyA = class'#10'    F: array[TColor2, |] of Byte;'#10 +
-    '  end;'#10'implementation'#10'end.'#10, '', 'TShape2,CMax', '',
+    '  end;'#10'implementation'#10'end.'#10, 'TShape2', 'CMax', '',
     'ExtCount,CGreenT,ExtReset', '', 'a field''s array[TColor2, |]');
   ExpSrc(EXP_HEAD_A + EXP_HEAD_B + '  var L: array[|] of Integer;'#10 +
-    PROJ_TAIL, '', 'TColor2,CMax', '', 'I,C,ExtCount,ExtReset,LocalProc', '',
+    PROJ_TAIL, 'TColor2', 'CMax', '', 'I,C,ExtCount,ExtReset,LocalProc', '',
     'an inline var''s array[|]');
   // A value's index and a set constructor keep their contexts.
   ExpCase('I := ExtByColor[|];', 'clRed,C,ExtColor', '', 'shSquare,I',
@@ -3961,6 +4040,60 @@ begin
     'implementation'#10'procedure TInh.Run;'#10'begin'#10 +
     '  inherited SetBase(|'#10'end;'#10'end.'#10, 'FBase,ExtCount', '', '',
     'ExtReset');
+  // The conversion grade inside fit 1 (0.174.0), halved: for a Double
+  // target a Single (0) before an Integer (2) before a Byte (4), a Variant
+  // last of all; for an Int64 an Integer (0) before a Word before a Byte; an
+  // operand of `+` alike.
+  ConvOrder('F := |;', 'F', 'Sg,I,By,V');
+  FitCase('F := | (a Single)', ConvSrc('F := |;'), 'Sg', cmCompatible, 0);
+  FitCase('I6 := | (an Integer)', ConvSrc('I6 := |;'), 'I', cmCompatible, 0);
+  ConvOrder('I6 := |;', 'I6', 'I,Wd,By');
+  // A class is not graded by its hops (measured: `Sender = actSave`).
+  FitCase('A := | (a descendant)', ConvSrc('A := |;'), 'D', cmCompatible, 0);
+  FitCase('A := | (a deeper one)', ConvSrc('A := |;'), 'Pup', cmCompatible, 0);
+  ConvOrder('F := F + |;', 'F', 'Sg,I,By');
+  // `is` / `as` grades no descendant: the class tested for is mostly a deep
+  // one (`Sender is TStringGrid` from a TObject), so nearer-first would bury
+  // it - measured on a large project.
+  FitCase('if A is | then', ConvSrc('if A is | then'), 'TDog', cmCompatible, 0);
+  FitCase('if A is | then', ConvSrc('if A is | then'), 'TPuppy', cmCompatible,
+    0);
+  // `case S[I] of`: a string leads to the Char its `[` reads (it was fit 3).
+  FitCase('case | of (a string)', ConvSrc('case | of', '  Str: string;'#10),
+    'Str', cmLeads, 1);
+  FitCase('case | of (an array leads first)', ConvSrc('case | of'), 'Arr',
+    cmLeads, 0);
+  // A true constant takes the type it meets in its own category: no grade
+  // for an integer target; for a float it is still an integer (2).
+  FitCase('I6 := | (a true constant)', ConvSrc('I6 := |;'), 'CMax',
+    cmCompatible, 0);
+  FitCase('F := | (a true integer constant)', ConvSrc('F := |;'), 'CMax',
+    cmCompatible, 2);
+  // High / Low / Pred / Succ return their argument's ordinal: fit 1 where an
+  // integer is read, not "leads" below every typed integer.
+  FitCase('for I := 0 to |', ConvSrc('for I := 0 to | do'), 'High',
+    cmCompatible);
+  FitCase('I := |', ConvSrc('I := |;'), 'Low', cmCompatible);
+  // `array[|]`: an ordinal type is fit 0, an ordinal constant fit 1.
+  FitCase('array[| (a type)', ConvSrc('var Q: array[|] of Integer;'),
+    'TLocalEnum', cmExact);
+  FitCase('array[| (a constant)', ConvSrc('var Q: array[|] of Integer;'),
+    'leTwo', cmCompatible);
+  // A Boolean's literals lead its fit outside a condition; inside one they
+  // do not.
+  FitCase('B := | (True)', ConvSrc('B := |;'), 'True', cmExact, 0);
+  FitCase('B := | (a variable)', ConvSrc('B := |;'), 'B', cmExact, 1);
+  FitCase('if | (a variable)', ConvSrc('if | then'), 'B', cmExact, 0);
+  // A comparison's constant leads its fit: `C = clRed` before `C = C`.
+  FitCase('if C = | (a value)', ConvSrc('if C = | then'), 'clRed', cmExact, 0);
+  FitCase('if C = | (a unit''s variable)', ConvSrc('if C = | then'),
+    'ExtColor', cmExact, 1);
+  FitCase('if C = | (a local)', ConvSrc('if C = | then'), 'C', cmExact, 0);
+  // `inherited |` in a constructor: an ancestor's constructor is fit 0.
+  FitCase('inherited | in a constructor', EXP_HEAD_A +
+    '  TInh = class(TAccBase)'#10'    constructor CreateNew;'#10'  end;'#10 +
+    'implementation'#10'constructor TInh.CreateNew;'#10'begin'#10 +
+    '  inherited |'#10'end;'#10'end.'#10, 'Create', cmExact);
   GComp.Free;
   GComp := nil;
   GProj.Free;

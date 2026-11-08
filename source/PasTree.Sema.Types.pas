@@ -173,6 +173,9 @@ const
   CUntypedCtorFit = CConvScale;
   CCtorDynConst = 980;
   CCtorOpenWiden = 900;
+  // ConvDistance's farthest: a Variant converting to a scalar. Every other
+  // distance is below it.
+  CConvDistVariant = 9;
   CCtorSetWiden = 860;
   CCtorDynWiden = 840;
   CCtorOpenVariant = 820;
@@ -525,6 +528,9 @@ type
       (no user conversion, no assignment-only conversion). }
     function ConvCore(const ADst, ASrc: TSemaXType; AUser: Boolean): TSemaConv;
     function Conv(const ADst, ASrc: TSemaXType): TSemaConv;
+    // XConvDistX: how far an implicit conversion of a value of ASrc lands
+    // from ADst's own type, 0 nearest - see ConvDistance's header.
+    function ConvDistance(const ADst, ASrc: TSemaXType): Integer;
     // XRefConvX: a reference conversion's rank - see TSemaRefConv.
     function RefConv(const ADst, ASrc: TSemaXType; D, S: TSemaTypeCat;
       out ARank, AUserRank: Integer; ATypedAddr: Boolean = False): Integer;
@@ -4367,6 +4373,66 @@ function ConvRank(const AArg: TSemaArgConv; AParKind: TSemaConvKind;
 begin
   Result := ConvTier(AArg, AParKind, ConvRawRank(AArg, AParKind, AWideExt),
     AWideExt);
+end;
+
+{ How far an implicit conversion of a value of ASrc lands from ADst's own
+  type: 0 nearest, CConvDistVariant the farthest - completion's order inside
+  "fits" (TPasComplItem.Conv). Read off the tables overload resolution
+  ranks by, so the order is dcc's own preference:
+  - two kinds of CConvRanks (the integers, the reals, the strings, the
+    characters, PChar): the row of ASrc ranks its own type highest and every
+    target below it by how well it keeps the value, so the distance is that
+    row's highest entry less its entry at ADst, halved - for a TDateTime
+    (Double) target a Double and a Single 0, an Integer 2, a Byte 4; for an
+    Int64 an Integer 0, a Word 1, a Byte 2;
+  - a value of no such kind where the target has one (an enumeration value
+    where an index takes any ordinal): CConvDistVariant - 1;
+  - a Variant to anything but a Variant: CConvDistVariant - it converts to
+    every scalar, and that is no evidence;
+  - anything else (a class or an interface to an ancestor, an enumeration's
+    subrange, a pointer, nil, a set, a record's Implicit): 0. A class's
+    hops were measured and dropped: the object compared or assigned is as
+    often a deep one (`Sender = actSave`, a TAction for a TObject) as a
+    near one - only an exception handler and `raise` grade them
+    (TPasCompletion). }
+function TSemaConvView.ConvDistance(const ADst, ASrc: TSemaXType): Integer;
+var
+  LDst, LSrc: TSemaXType;
+  DC, SC: TSemaTypeCat;
+  D, S, K: TSemaConvKind;
+  LAt, LOwn: Integer;
+begin
+  Result := 0;
+  if not XValid(ADst) or not XValid(ASrc) then
+    Exit;
+  LDst := Canon(ADst);
+  LSrc := Canon(ASrc);
+  DC := Cat(LDst);
+  SC := Cat(LSrc);
+  if (SC = tcVariant) and (DC <> tcVariant) then
+    Exit(CConvDistVariant);
+  D := ParConvKind(LDst);
+  S := ParConvKind(LSrc);
+  if D in [cnkNone, cnkStrLit, cnkCharLit] then
+    Exit;
+  // A value with no conversion kind where the target has one - an
+  // enumeration value where any ordinal fits an integer index - after
+  // every value of the target's own kinds.
+  if S in [cnkNone, cnkStrLit, cnkCharLit] then
+    Exit(CConvDistVariant - 1);
+  LAt := CConvRanks[FWideExt, S, D];
+  if LAt <= 0 then
+    Exit;
+  LOwn := 0;
+  for K := Low(TSemaConvKind) to High(TSemaConvKind) do
+    if CConvRanks[FWideExt, S, K] > LOwn then
+      LOwn := CConvRanks[FWideExt, S, K];
+  // Halved: a step of one (an Integer for an Int64, a Single for a
+  // Double) is no reason to put a value below a nearer-declared one -
+  // proximity comes next.
+  Result := (LOwn - LAt) div 2;
+  if Result >= CConvDistVariant then
+    Result := CConvDistVariant - 1;
 end;
 
 function UserConvLevel(const AArg: TSemaArgConv; AQKind: TSemaConvKind;

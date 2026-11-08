@@ -166,6 +166,12 @@ type
     Ctx: Integer;              // instantiation frame (project members)
     Overloads: Integer;        // same-name routines collapsed into this item
     Match: TPasComplMatch;     // fit to the expected type; cmOther if none
+    // Inside cmCompatible: how far the item's value converts to the
+    // expected type, 0 nearest (TPasSemaProject.XConvDistX - a Double before
+    // a Single before an Integer for a TDateTime; in an exception handler
+    // and after `raise` Exception's nearer descendant) - and the context's
+    // sub-rules (RankItems). A host orders by it after Match.
+    Conv: Byte;
   end;
 
   { A type answer that may live in either space: the last-good PROJECT
@@ -366,6 +372,21 @@ type
     // procedure (CaseLabelOf); FExpect is the selector's type, if known.
     FExpectOrdinal: Boolean;
     FConstOnly: Boolean;
+    // A static array's bound where a whole range may stand (`array[|]`,
+    // `array[TKind, |]`, not after `..`): an ordinal TYPE is what is
+    // written there, so it is fit 0 and an ordinal constant fit 1.
+    FBoundType: Boolean;
+    // A `case` selector (`case | of`): a string leads there - `case S[I]`
+    // selects by a Char - where a cast or a type's bound finds it wrong.
+    FCaseSel: Boolean;
+    // A condition or an operand of `and` / `or` / `xor` / `not`: any value
+    // may make the Boolean there, and `True` / `False` are seldom written -
+    // elsewhere a Boolean's literals lead its fit (RankItems).
+    FCondLike: Boolean;
+    // The right side of a comparison (`=` `<>` `<` `>` `<=` `>=`): what is
+    // compared with is mostly a constant (`X = nil`, `K = kOne`), so a
+    // constant leads its fit there (RankItems).
+    FCompare: Boolean;
     // A for-in collection (`for X in |`): what can be enumerated fits - a
     // category again, FExpect stays XNil and MatchOf asks EnumFit.
     // FEnumElem is the loop variable's type when it has a declared one
@@ -459,6 +480,9 @@ type
     // `inherited |` in a class method (FInhClass): an ancestor's instance
     // method or property is wrong there (dcc 37: E2076, E2233).
     FInhClass: Boolean;
+    // `inherited |` in a constructor: an ancestor's constructor is what is
+    // called there (`inherited Create(AOwner)` from `CreateNew`), fit 0.
+    FInhCtor: Boolean;
     // ArgExpectAt's answer for an open-array parameter (`Foo([|])`): its
     // element, which the parameter's own type cannot carry.
     FArgOpenElem: TPasComplTypeRef;
@@ -467,6 +491,16 @@ type
     // met a record still being walked, so what it found is not final.
     FReach: TDictionary<TSemaXType, Byte>;
     FReachCycle: Boolean;
+    // MatchOf's second answer: the item's Conv (TPasComplItem.Conv), set
+    // where a value is judged cmCompatible against FExpect.
+    FConvOut: Byte;
+    // The same inside cmLeads: a `case` selector's string (`case S[I]`)
+    // after the values that lead through a member or an element.
+    FLeadConvOut: Byte;
+    // The value graded by FConvOut is of the expected type's category (an
+    // integer for an integer): a true constant adapts there and is not
+    // graded.
+    FConvSameCat: Boolean;
 
     function RawTokenAt(AOffset: Integer): Integer;
     function CaretOffset(ALine, ACol: Integer; out AOffset: Integer): Boolean;
@@ -643,6 +677,8 @@ type
     function MemberValueX(AMid, ASym, ACtx: Integer;
       out AX: TSemaXType): Boolean;
     procedure RankItems;
+    function IsConstantItem(const AItem: TPasComplItem): Boolean;
+    function IsTrueConstItem(const AItem: TPasComplItem): Boolean;
     // type positions
     function TypePosAt(const AInfo: TPasCaretInfo;
       ACaretOff: Integer): TPasComplTypePos;
@@ -3567,6 +3603,7 @@ begin
   FItems[FCount].Ctx := ACtx;
   FItems[FCount].Overloads := 0;
   FItems[FCount].Match := cmOther;
+  FItems[FCount].Conv := 0;
   Inc(FCount);
 end;
 
@@ -5448,13 +5485,17 @@ begin
   // stands where its own position puts it, and its operand is what makes
   // that - a Boolean, or an integer for a bitwise not (NotOperandExpect).
   if LTS.Tokens[LOp].Kind = tkNot then
+  begin
+    FCondLike := True;
     Exit(NotOperandExpect(
       OperandExpect(PrevVisibleRaw(LOp - 1), AScope, ADepth + 1)));
+  end;
   // A condition - right after `if`, `while`, `until` - is a Boolean: the
   // operand starting there is the whole condition or its first operand,
   // which a relational operator would still make Boolean of any value.
   if LTS.Tokens[LOp].Kind in [tkIf, tkWhile, tkUntil] then
   begin
+    FCondLike := True;
     if BridgeName('boolean', LLeft, LEnd) then
       Result.X := XPlain(LLeft, LEnd);
     Exit;
@@ -5462,7 +5503,10 @@ begin
   // The right operand of `and` / `or` / `xor`: the left one's type, a
   // Boolean or an integer (LogicalOperandExpect).
   if LTS.Tokens[LOp].Kind in [tkAnd, tkOr, tkXor] then
+  begin
+    FCondLike := True;
     Exit(LogicalOperandExpect(LOp));
+  end;
   // A sign (`X := -|`, `Foo(-|`) stands for what its own position expects
   // (SignOperandExpect); the right operand of an arithmetic operator
   // (`X := A + |`, `A div |`) is ranked by the left operand's family
@@ -5481,6 +5525,7 @@ begin
   if LTS.Tokens[LOp].Kind = tkCase then
   begin
     FExpectOrdinal := True;
+    FCaseSel := True;
     Exit;
   end;
   // A `with` item - right after `with`, or a `,` of its list - is a value
@@ -5522,6 +5567,7 @@ begin
     if IsArrayBoundOp(LOp) then
     begin
       FConstOnly := True;
+      FBoundType := LTS.Tokens[LOp].Kind <> tkDotDot;
       if LTS.Tokens[LOp].Kind = tkDotDot then
         Result := BoundLeftType(LOp);
       if not ComplValid(Result) then
@@ -5597,6 +5643,8 @@ begin
   // list - expects its parameter's type (ArgExpectAt).
   if LTS.Tokens[LOp].Kind in [tkLParen, tkComma] then
     Exit(ArgExpectAt(LOp, AScope));
+  FCompare := LTS.Tokens[LOp].Kind in [tkEqual, tkNotEqual, tkLess, tkGreater,
+    tkLessEqual, tkGreaterEqual];
   Result := OperatorLeftType(LOp, False);
 end;
 
@@ -7504,7 +7552,13 @@ var
     Result := cmCompatible;
     if (FExpectCat in [tcClass, tcInterface, tcClassOf, tcProc, tcArray]) and
        (FProj.XCatOf(FProj.CanonTypeX(AX)) = tcPointer) then
-      Result := cmLeads;
+      Result := cmLeads
+    else
+    begin
+      FConvOut := FProj.XConvDistX(FExpect, AX);
+      FConvSameCat := FProj.XCatOf(FProj.CanonTypeX(AX)) =
+        FProj.XCatOf(FProj.CanonTypeX(FExpect));
+    end;
   end;
 
   // A value of type AX against the expected type: AIdentical when it is
@@ -7531,7 +7585,8 @@ var
   // A `case` selector's fit (FExpectOrdinal): an ordinal is one, a scalar
   // of any other kind (a string, a float, a set) is wrong, a value with
   // members or elements may lead to one; an untyped value leads.
-  function OrdinalFit(const AX: TSemaXType): TPasComplMatch;
+  function OrdinalFit(const AX: TSemaXType;
+    AValue: Boolean = True): TPasComplMatch;
   var
     LOrd: TSemaTypeCat;
   begin
@@ -7540,6 +7595,13 @@ var
     LOrd := FProj.XCatOf(FProj.CanonTypeX(AX));
     if LOrd in [tcInteger, tcChar, tcBoolean, tcEnum] then
       Result := cmCompatible
+    // A string variable leads through `[`: `case S[I] of` selects by a
+    // Char (FCaseSel).
+    else if (LOrd = tcString) and FCaseSel and AValue then
+    begin
+      Result := cmLeads;
+      FLeadConvOut := 1;
+    end
     else if LOrd in NOTHING_TO_REACH then
       Result := cmOther
     else
@@ -7631,10 +7693,17 @@ var
     if ACat = tcClass then
     begin
       Result := cmCompatible;
-      if XValid(FRaiseBase) and XValid(AX) and
-         (FProj.XDescentDistX(FProj.CanonTypeX(AX), FRaiseBase, LDist) =
-          xdNo) then
-        Result := cmLeads;
+      if XValid(FRaiseBase) and XValid(AX) then
+        case FProj.XDescentDistX(FProj.CanonTypeX(AX), FRaiseBase, LDist) of
+          xdNo:
+            Result := cmLeads;
+          // The nearer descendant of Exception first, Exception itself 0.
+          xdYes:
+            if LDist < CConvDistVariant then
+              FConvOut := LDist
+            else
+              FConvOut := CConvDistVariant - 1;
+        end;
     end
     else if ACat in NOTHING_TO_REACH then
       Result := cmOther
@@ -7720,10 +7789,19 @@ var
       Result := cmCompatible;
       if XValid(AX) and XValid(FExpect) and
          FProj.XSameType(FProj.CanonTypeX(AX), FProj.CanonTypeX(FExpect)) then
-        Result := cmExact;
+        Result := cmExact
+      else if XValid(AX) and XValid(FExpect) then
+      begin
+        FConvOut := FProj.XConvDistX(FExpect, AX);
+        FConvSameCat := FProj.XCatOf(FProj.CanonTypeX(AX)) =
+          FProj.XCatOf(FProj.CanonTypeX(FExpect));
+      end;
     end
     else if ACat = tcVariant then
-      Result := cmCompatible
+    begin
+      Result := cmCompatible;
+      FConvOut := CConvDistVariant;
+    end
     else if ACat in NOTHING_TO_REACH then
       Result := cmOther
     else if (ACat <> tcUnknown) and XValid(AX) and not ValueReaches(AX, 0) then
@@ -7753,6 +7831,11 @@ begin
        not ClassSideMember(LM, AItem.Sym) then
       Exit(cmOther);
     if (FInhName <> '') and SameText(AItem.Name, FInhName) then
+      Exit(cmExact);
+    // In a constructor any ancestor's constructor is what is called.
+    if FInhCtor and (AItem.Sym <> NIL_SYM) and
+       SymModelOf(AItem.Mid, 'MatchOf', LM, False) and
+       (LM.RoutineHead(AItem.Sym) = rhConstructor) then
       Exit(cmExact);
     Exit(cmCompatible);
   end;
@@ -7806,13 +7889,17 @@ begin
     if FExpectOrdinal and (AItem.Sym <> NIL_SYM) then
     begin
       if AItem.Mid >= 0 then
-        Result := OrdinalFit(FProj.CanonTypeX(XPlain(AItem.Mid, AItem.Sym)))
+        Result := OrdinalFit(FProj.CanonTypeX(XPlain(AItem.Mid, AItem.Sym)),
+          False)
       else if (AItem.Kind = skBuiltinType) and
          BridgeName(FModel.Symbols[AItem.Sym].NameLower, LOv, LBridged) then
-        Result := OrdinalFit(FProj.CanonTypeX(XPlain(LOv, LBridged)))
+        Result := OrdinalFit(FProj.CanonTypeX(XPlain(LOv, LBridged)), False)
       else if FModel.Symbols[AItem.Sym].TypeCat in [tcInteger, tcChar,
          tcBoolean, tcEnum] then
         Result := cmCompatible;
+      // `array[|]`: the ordinal type is the commonest bound (FBoundType).
+      if FBoundType and (Result = cmCompatible) then
+        Result := cmExact;
       Exit;
     end;
     // A type is no collection (`for X in TColors` does not compile); a
@@ -7987,6 +8074,23 @@ begin
       if (LText <> '') and BridgeName(LText, LOv, LBridged) then
         LX := FProj.CanonTypeX(XPlain(LOv, LBridged));
       LOv := NIL_SYM;
+      // `High` / `Low` / `Pred` / `Succ` return their argument's ordinal
+      // type - which the argument decides, so the table has none; where an
+      // ordinal or a number is read they are what is written (`for I := 0
+      // to High(A)`: an Integer), fit 1 rather than "leads" below every
+      // typed integer. Not for a `var` / `out` argument, which no function
+      // result is.
+      if not XValid(LX) and not FArgByRef and
+         ((LM.Symbols[AItem.Sym].NameLower = 'high') or
+          (LM.Symbols[AItem.Sym].NameLower = 'low') or
+          (LM.Symbols[AItem.Sym].NameLower = 'pred') or
+          (LM.Symbols[AItem.Sym].NameLower = 'succ')) and
+         (FExpectOrdinal or FExpectNumber or
+          ((FCastValue = tcUnknown) and (FCastRef = tcUnknown) and
+           not FExpectAddr and not FExpectWith and not FExpectRaise and
+           not FExpectEnum and
+           (FExpectCat in [tcInteger, tcChar, tcEnum, tcFloat]))) then
+        Exit(cmCompatible);
     end;
   end;
   // A property is no variable a `var` / `out` argument takes (E2197); it
@@ -8066,6 +8170,11 @@ begin
       if FModel.Symbols[LOv].TypeCat in [tcInteger, tcChar, tcBoolean,
          tcEnum] then
         Exit(cmCompatible);
+      if (FModel.Symbols[LOv].TypeCat = tcString) and FCaseSel then
+      begin
+        FLeadConvOut := 1;
+        Exit(cmLeads);
+      end;
       if FModel.Symbols[LOv].TypeCat in NOTHING_TO_REACH then
         Exit(cmOther);
     end;
@@ -8184,14 +8293,68 @@ end;
 // Every collected item against the expected type (see MatchOf).
 procedure TPasCompletion.RankItems;
 var
-  LIdx: Integer;
+  LIdx, LConv: Integer;
+  LBoolLits: Boolean;
 begin
   // ValueReaches' answers hold for one expected type.
   if FReach <> nil then
     FReach.Clear;
   FReachCycle := False;
+  LBoolLits := (FExpectCat = tcBoolean) and not FCondLike and not FCompare;
   for LIdx := 0 to FCount - 1 do
+  begin
+    FConvOut := 0;
+    FLeadConvOut := 0;
+    FConvSameCat := False;
     FItems[LIdx].Match := MatchOf(FItems[LIdx]);
+    LConv := 0;
+    // A true constant (`C = 37.0` for a Double, `N = 5` for an Int64) takes
+    // the type it meets in its own category: no conversion to grade there.
+    // An integer one for a float is still an integer (`NOERROR` after
+    // `Norm` for a TDateTime).
+    if (FItems[LIdx].Match = cmCompatible) and
+       not (FConvSameCat and IsTrueConstItem(FItems[LIdx])) then
+      LConv := FConvOut
+    else if FItems[LIdx].Match = cmLeads then
+      LConv := FLeadConvOut;
+    if FItems[LIdx].Match in [cmExact, cmCompatible] then
+    begin
+      // A Boolean's literals before every other Boolean, outside a
+      // condition (`Exit(True)`, `B := False`, `= False` as a default).
+      if LBoolLits and not (SameText(FItems[LIdx].Name, 'True') or
+         SameText(FItems[LIdx].Name, 'False')) then
+        Inc(LConv);
+      // A comparison's constant before a variable or a function.
+      // Not over the routine's own locals and parameters, which are as
+      // often what is compared with (`Status <> AStatus`).
+      if FCompare and not IsConstantItem(FItems[LIdx]) and
+         (FItems[LIdx].Bucket <> cbLocal) then
+        Inc(LConv);
+    end;
+    if LConv >= CConvDistVariant then
+      LConv := CConvDistVariant;
+    FItems[LIdx].Conv := LConv;
+  end;
+end;
+
+{ A true constant: a `const` with no declared type, whose value takes the
+  type it is used as. }
+function TPasCompletion.IsTrueConstItem(const AItem: TPasComplItem): Boolean;
+var
+  LM: TPasSemaModel;
+begin
+  Result := (AItem.Kind = skConst) and (AItem.Sym <> NIL_SYM) and
+    SymModelOf(AItem.Mid, 'IsTrueConstItem', LM, False) and
+    (LM.Symbols[AItem.Sym].TypeNode = NIL_NODE);
+end;
+
+{ A constant as a comparison's right side means one (FCompare): a true or
+  typed constant, an enumeration value, `nil`, `True`, `False`. }
+function TPasCompletion.IsConstantItem(const AItem: TPasComplItem): Boolean;
+begin
+  Result := (AItem.Kind in [skConst, skEnumValue]) or
+    SameText(AItem.Name, 'nil') or SameText(AItem.Name, 'True') or
+    SameText(AItem.Name, 'False');
 end;
 
 function TPasCompletion.CompleteAt(ALine, ACol: Integer;
@@ -9576,7 +9739,17 @@ var
   begin
     case FProj.XDescentDistX(ADesc, ABase, LDist) of
       xdYes:
-        Result := cmCompatible;
+        begin
+          Result := cmCompatible;
+          // In a handler the nearer descendant first: Exception itself. Not
+          // in an attribute or a generic argument, where the class meant is
+          // a project's own, however deep.
+          if FTypePos = tpHandler then
+            if LDist < CConvDistVariant then
+              FConvOut := LDist
+            else
+              FConvOut := CConvDistVariant - 1;
+        end;
       xdNo:
         Result := cmOther;
     else
@@ -10045,6 +10218,10 @@ begin
   FArgByRef := False;
   FExpectOrdinal := False;
   FConstOnly := False;
+  FBoundType := False;
+  FCaseSel := False;
+  FCondLike := False;
+  FCompare := False;
   FExpectEnum := False;
   FEnumElem := XNil;
   FCastRef := tcUnknown;
@@ -10086,6 +10263,7 @@ begin
   FInhName := '';
   FInhRank := False;
   FInhClass := False;
+  FInhCtor := False;
   if FContext in [ccPropRead, ccPropWrite, ccPropStored] then
     PropAccessorOf(LInfo);
   if FContext = ccInherited then
@@ -10101,6 +10279,13 @@ begin
       FInhClass := (LOv <> NIL_NODE) and
         (FModel.Tree.Nodes[LOv].Kind = nkRoutine) and
         (FModel.Tree.Nodes[LOv].Aux = 1);
+      FInhCtor := (LOv <> NIL_NODE) and
+        (FModel.Tree.Nodes[LOv].Kind = nkRoutine) and
+        (FModel.Tree.Nodes[LOv].FirstToken >= 0) and
+        (FModel.Tree.Nodes[LOv].FirstToken <=
+         High(FModel.Tree.Source.Visible)) and
+        (FModel.Tree.Source.VisibleKind(FModel.Tree.Nodes[LOv].FirstToken) =
+         tkConstructor);
     end;
   end;
   if FContext in [ccExpression, ccType, ccStatement] then
