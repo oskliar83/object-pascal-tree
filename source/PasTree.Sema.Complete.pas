@@ -691,7 +691,12 @@ type
       editor typed with the opening one - had no dot at all and listed the
       scope instead of Decl's members (pastree-lsp, 2026-10-22). Nobody
       invokes completion inside a `.)` written as a bracket; positions left of
-      the caret, the caret's own included, are unchanged. }
+      the caret, the caret's own included, are unchanged.
+      A caret PAST the line's end (an editor's virtual space) gets the blanks
+      the editor shows there: RAD Studio keeps no trailing blank by default,
+      so after `inherited ` the buffer holds `inherited` with the caret one
+      column right of it, and that read as the prefix `inherited` - the whole
+      statement list, not the ancestors' methods (an IDE test, 2026-11-08). }
     class function CaretSource(const AText: string;
       ALine, ACol: Integer): string; static;
     { Classifies the caret at 1-based (line, col) of the model's main file.
@@ -823,7 +828,7 @@ end;
 class function TPasCompletion.CaretSource(const AText: string;
   ALine, ACol: Integer): string;
 var
-  LPos, LLine, LEnd: Integer;
+  LPos, LLine, LEnd, LStart: Integer;
 begin
   Result := AText;
   if (ALine < 1) or (ACol < 2) then
@@ -837,11 +842,18 @@ begin
     Inc(LPos);
   end;
   // LPos: the line's first character; the caret stands before LPos + ACol - 1.
-  // A caret past the line's end (virtual space) has no `)` after it.
+  // LEnd: the line's end, before its break (a CR included).
+  LStart := LPos;
   LEnd := Pos(#10, AText, LPos);
   if LEnd = 0 then
     LEnd := Length(AText) + 1;
+  if (LEnd > LStart) and (AText[LEnd - 1] = #13) then
+    Dec(LEnd);
   LPos := LPos + ACol - 1;
+  // Virtual space: the blanks the editor shows and does not keep.
+  if LPos > LEnd then
+    Exit(Copy(AText, 1, LEnd - 1) + StringOfChar(' ', LPos - LEnd) +
+      Copy(AText, LEnd, MaxInt));
   if (LPos < LEnd) and (AText[LPos] = ')') and
      (AText[LPos - 1] = '.') then
     Result := Copy(AText, 1, LPos - 1) + ' ' + Copy(AText, LPos, MaxInt);
