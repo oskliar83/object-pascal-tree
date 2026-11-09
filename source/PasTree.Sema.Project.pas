@@ -2157,6 +2157,11 @@ type
     { An ordinal type's value range (TSemaConvView.OrdRange) - False when
       AX is no ordinal or its bounds are not known. }
     function XOrdRangeX(const AX: TSemaXType; out ALo, AHi: Int64): Boolean;
+    { AX's category through its aliases, a distinct one (`T = type Base`,
+      which CanonTypeX stops at) included: `HDC = type UINT_PTR` is an
+      integer, `TOFNotifyEx = type TOFNotifyExW` a record. For a question
+      about the kind of type alone - never for type identity. }
+    function XCatThroughX(const AX: TSemaXType): TSemaTypeCat;
     { A user conversion of ASrc to ADst (both canonical, one a record)
       through a `class operator Implicit` of either (9.3.1, 6.3.1): an
       operator `Implicit(A: Q): R` of ADst or of ASrc converts when ASrc
@@ -14183,6 +14188,32 @@ function TPasSemaProject.XOrdRangeX(const AX: TSemaXType; out ALo,
   AHi: Int64): Boolean;
 begin
   Result := FConv.OrdRange(AX, ALo, AHi);
+end;
+
+function TPasSemaProject.XCatThroughX(const AX: TSemaXType): TSemaTypeCat;
+var
+  LX, LNext: TSemaXType;
+  LDef, LDepth: Integer;
+begin
+  Result := tcUnknown;
+  LX := CanonTypeX(AX);
+  for LDepth := 1 to 8 do
+  begin
+    if not XValid(LX) then
+      Exit;
+    Result := XCatOf(LX);
+    if Result <> tcUnknown then
+      Exit;
+    LDef := TypeDefNodeOf(LX.UnitId, LX.Sym);
+    if (LDef = NIL_NODE) or not (FModels[LX.UnitId].Tree.Nodes[LDef].Kind in
+       [nkIdent, nkMember, nkTypeArgs]) then
+      Exit;
+    LNext := AliasStepX(LX, LDef);
+    if not XValid(LNext) or
+       ((LNext.UnitId = LX.UnitId) and (LNext.Sym = LX.Sym)) then
+      Exit;
+    LX := CanonTypeX(LNext);
+  end;
 end;
 
 function TPasSemaProject.ConvNoteX(const ADst, ASrc: TSemaXType): string;
