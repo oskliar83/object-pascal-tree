@@ -10,7 +10,7 @@ support) into an abstract syntax tree, resolves and type-checks it into a
 project-wide symbol model, and exposes both through a small VCL demo that
 behaves like a slice of the real RAD Studio IDE. It targets the language as
 implemented by **Delphi 13.x Florence** and specified by
-[object-pascal-spec](https://github.com/SkliarOleksandr/object-pascal-spec) -
+[object-pascal-spec](https://github.com/oskliar83/object-pascal-spec) -
 the companion specification this parser is built from.
 
 > **Status: in progress.** Lexer, preprocessor, parser, and the semantic
@@ -25,7 +25,7 @@ the companion specification this parser is built from.
 
 `PasTreeVersion` lives in `source/PasTree.Version.pas`. Two rules, and the same
 two hold in the repository that builds on this one
-([`pastree-lsp`](https://github.com/SkliarOleksandr/pastree-lsp) - the LSP
+([`pastree-lsp`](https://github.com/oskliar83/pastree-lsp) - the LSP
 server and its clients, which share one version between them), counting its
 own commits:
 
@@ -235,7 +235,7 @@ project) is parked on the branch `perf/mm-retention`.
 
 ## Start from the spec
 
-[object-pascal-spec](https://github.com/SkliarOleksandr/object-pascal-spec) is
+[object-pascal-spec](https://github.com/oskliar83/object-pascal-spec) is
 the reference this parser is written against, not documentation written after the
 fact. **Before fixing or adding anything, read the section that governs it and
 work from there.** In order:
