@@ -3660,10 +3660,23 @@ begin
   ExpCase('I := I and |;', 'I', '', '', 'ExtReset,LocalProc');
   ExpCase('if I = I and | then;', 'I', '', '', 'ExtReset');
   ExpCase('if B and not | then;', 'B', '', '', 'ExtReset');
-  // A grouping paren stands where the `(` does: a condition's is a Boolean.
-  ExpCase('if (| then;', 'B,Assigned', '', '', 'ExtReset,LocalProc');
-  ExpCase('if ((| then;', 'B', '', '', 'ExtReset');
-  ExpCase('if (B) and (| then;', 'B', '', '', 'ExtReset');
+  // A grouping paren stands where the `(` does - except where that is a
+  // Boolean: right after the `(` a comparison's left side is typed, a value
+  // of any type, so nothing is ranked there (decided by Alex, 2026-11-09);
+  // inside the paren, after a Boolean operator, the Boolean is back.
+  for var LFresh in ['if (| then;', 'if ((| then;', 'if (B) and (| then;',
+    'while (| do;', 'if not (| then;', 'B := (|;'] do
+  begin
+    ProjCase(EXP_HEAD_A + EXP_HEAD_B + '  ' + LFresh + #10 + PROJ_TAIL);
+    var LRanked := False;
+    for var LIt in GItems do
+      if LIt.Match in [cmExact, cmCompatible] then
+        LRanked := True;
+    GCounter.Ok('a fresh paren in a Boolean position ranks nothing: ' + LFresh,
+      GHit and Has('B') and Has('I') and not LRanked and not Has('ExtReset'));
+  end;
+  ExpCase('if (B and | then;', 'B', '', '', 'ExtReset');
+  ExpCase('if (I > 0) and (B or | then;', 'B', '', '', 'ExtReset');
   ExpCase('I := (|;', 'I', '', '', 'ExtReset');
   // `not` elsewhere: a Boolean where a Boolean is expected, the integer
   // where an integer is (a bitwise not).
@@ -4676,7 +4689,7 @@ begin
   // A parenthesized comparison or membership test before `and` / `or` is a
   // Boolean, whatever its operands - `nil` included (item 9).
   ExpCase('if (I <> 0) and | then;', 'B', '', '', 'ExtReset');
-  ExpCase('if (A = nil) or (| then;', 'B', '', '', 'ExtReset');
+  ExpCase('if (A = nil) or | then;', 'B', '', '', 'ExtReset');
   ExpCase('if (C in ExtSet) and | then;', 'B', '', '', 'ExtReset');
   // After `is` / `as` a class-reference value leads below the types of its
   // fit (item 10).
