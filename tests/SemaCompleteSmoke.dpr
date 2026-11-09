@@ -1821,7 +1821,8 @@ begin
   // A for bound takes the counter's type: the procedure Pub is no bound.
   DotCase('for ImplVar := B.| to 1 do;', 'CF');
   DotCase('raise B.|;', 'CF');
-  DotCase('var V := B.|;');
+  // An untyped inline variable takes a value: the procedure Pub is none.
+  DotCase('var V := B.|;', 'CF');
   DotCase('ImplVar := Ord(Assigned(B.|));', 'CF');
   DotCase('M.Over(TBase(B).|);', 'CF');
   DotCase('Writeln(B.|);');
@@ -2979,6 +2980,10 @@ begin
     begin
       Writeln('    match=', Ord(ItemNamed('Self').Match));
     end);
+  // A constant expression takes no Self (E2026), no variable.
+  ProjCase(StringReplace(LSelfMain, '//INST', 'case GI of |: ; end;', []));
+  GCounter.Ok('Self: a `case` label lists no Self and no variable',
+    GHit and not Has('Self') and not Has('GI'));
   ProjCase(StringReplace(LSelfMain, '//REC', 'GI := |;', []));
   GCounter.Ok('Self: a record''s Self with nothing that reaches an ' +
     'Integer is fit 3', GHit and Has('Self') and
@@ -3665,15 +3670,33 @@ begin
   ExpRoutines('Exit with a prefix',
     'function Fn: TColor2;'#10'begin'#10'  Exit(cl|);'#10'end;'#10,
     'clRed,clGreen', '', '', 'ExtReset');
-  ExpCase('Exit(|);', '', '', 'I,C', '');
-  GCounter.Ok('expected type: Exit in a procedure keeps the procedures',
-    Has('ExtReset'));
-  ExpRoutines('Exit in a procedure nested in a function',
+  // In a procedure `Exit(X)` is E2025 (dcc 37): nothing is listed.
+  ProjCase(EXP_HEAD_A + EXP_HEAD_B + '  Exit(|);'#10 + PROJ_TAIL);
+  GCounter.Ok('expected type: Exit in a procedure lists nothing',
+    GHit and (Length(GItems) = 0),
+    procedure
+    begin
+      Writeln('    items=', Length(GItems));
+    end);
+  ProjCase(EXP_HEAD_A + 'implementation'#10 +
     'function Fn: TColor2;'#10 +
     '  procedure Inner;'#10'  begin'#10'    Exit(|);'#10'  end;'#10 +
-    'begin'#10'  Result := clRed;'#10'end;'#10, '', '', 'clRed', '');
-  GCounter.Ok('expected type: Exit in a nested procedure keeps the ' +
-    'procedures', Has('ExtReset'));
+    'begin'#10'  Result := clRed;'#10'end;'#10'end.'#10);
+  GCounter.Ok('expected type: Exit in a procedure nested in a function ' +
+    'lists nothing', GHit and (Length(GItems) = 0),
+    procedure
+    begin
+      Writeln('    items=', Length(GItems));
+    end);
+  ProjCase(EXP_HEAD_A + 'implementation'#10 +
+    'type TLoc = class constructor Create; end;'#10 +
+    'constructor TLoc.Create;'#10'begin'#10'  Exit(|);'#10'end;'#10'end.'#10);
+  GCounter.Ok('expected type: Exit in a constructor lists nothing',
+    GHit and (Length(GItems) = 0));
+  // `Exit;` with no parenthesis in a procedure is a statement as before.
+  ProjCase(EXP_HEAD_A + EXP_HEAD_B + '  Exit; |'#10 + PROJ_TAIL);
+  GCounter.Ok('expected type: a statement after Exit lists the scope',
+    GHit and Has('ExtReset'));
   ExpRoutines('Exit in a function nested in a procedure',
     'procedure Outer;'#10 +
     '  function Inner: TShape2;'#10'  begin'#10'    Exit(|);'#10'  end;'#10 +
@@ -3981,6 +4004,102 @@ begin
   KwCheck('after an operand', 'and,or,div,in,is,not', 'nil,begin,interface');
   ProjCase(EXP_HEAD_A + EXP_HEAD_B + '  ' + '|' + #10 + PROJ_TAIL);
   KwCheck('a statement', 'begin,if,var,const,while,try', 'then,do,to,downto,of,interface,and');
+  // A constant expression starts with `nil` or `not` alone: `inherited`,
+  // an anonymous method and an if-expression are E2026 there (dcc 37) - a
+  // `case` label, a default, a typed and an untyped constant, an array
+  // bound, after an operator inside one too.
+  ProjCase(EXP_HEAD_A + EXP_HEAD_B + '  case LE of |: ; end;' + #10 + PROJ_TAIL);
+  KwCheck('a case label', 'nil,not', 'inherited,function,procedure,if,and');
+  ProjCase(EXP_HEAD_A + '  TMyC = class procedure P(A: Integer = |); end;' + #10'implementation'#10'end.'#10);
+  KwCheck('a default', 'nil,not', 'inherited,function,procedure,if,and');
+  ProjCase(EXP_HEAD_A + 'const CX: Integer = |;' + #10'implementation'#10'end.'#10);
+  KwCheck('a typed constant', 'nil,not', 'inherited,function,procedure,if,and');
+  ProjCase(EXP_HEAD_A + 'const CX = |;' + #10'implementation'#10'end.'#10);
+  KwCheck('an untyped constant', 'nil,not', 'inherited,function,procedure,if,and');
+  ProjCase(EXP_HEAD_A + 'const CX = 1 + |;' + #10'implementation'#10'end.'#10);
+  KwCheck('after an operator in a constant', 'nil,not', 'inherited,function,procedure,if,and');
+  ProjCase(EXP_HEAD_A + '  TMyB = array[0..|] of Integer;' + #10'implementation'#10'end.'#10);
+  KwCheck('an array bound', 'nil,not', 'inherited,function,procedure,if,and');
+  // An inline constant is initialized at run time: an operand as anywhere.
+  ProjCase(EXP_HEAD_A + EXP_HEAD_B + '  const LC = |;' + #10 + PROJ_TAIL);
+  KwCheck('an inline constant', 'nil,not,inherited,if', 'and');
+  // A `var` argument is a variable: no keyword starts one.
+  ProjCase(EXP_HEAD_A + EXP_HEAD_B + '  Inc(|);' + #10 + PROJ_TAIL);
+  KwCheck('a var argument', '', 'nil,not,inherited,function,procedure,if,and');
+  // A directive word is no operand: the operand starts after it, so no
+  // binary operator - `raise X at |`, a property's `default |` / `index |`.
+  ProjCase(EXP_HEAD_A + EXP_HEAD_B + '  raise EFoo.Create at |' + #10 + PROJ_TAIL);
+  KwCheck('raise at', 'nil', 'and,or,xor,div,mod,shl,shr,is,as,in');
+  ProjCase(EXP_HEAD_A + '  TMyC = class FN: Integer; property P: Integer read FN default |; end;' + #10'implementation'#10'end.'#10);
+  KwCheck('property default', 'nil,not', 'and,or,xor,div,mod,shl,shr,is,as,in,inherited,if');
+  ProjCase(EXP_HEAD_A + '  TMyC = class function G(I: Integer): Integer; property P: Integer index | read G; end;' + #10'implementation'#10'end.'#10);
+  KwCheck('property index', 'nil,not', 'and,or,xor,div,mod,shl,shr,is,as,in,inherited,if');
+  ExpSrc(EXP_HEAD_A + '  TMyC = class FN: Integer; property P: Integer read FN default 1 + |; end;'#10 +
+    'implementation'#10'end.'#10, '', '', '',
+    'ExtColor,ExtCount,ExtReset,ExtColorOf,CGreenT', '',
+    'after an operator in a property default');
+  // An accessor names a member, whatever the type declaration around it.
+  ProjCase(EXP_HEAD_A + '  TMyC = class FOrig: Integer; property P: Integer read FOri|; end;' + #10'implementation'#10'end.'#10);
+  GCounter.Ok('keywords: an accessor keeps its field', GHit and Has('FOrig'));
+  ProjCase(EXP_HEAD_A + '  TMyC = class'#10'    FOrig: Integer;'#10'    property P: Integer read FOri|'#10'    procedure M;'#10'  end;' + #10'implementation'#10'end.'#10);
+  GCounter.Ok('keywords: an accessor keeps its field, the line half typed', GHit and Has('FOrig'));
+  // ... but an identifier of that spelling is an operand.
+  ProjCase(EXP_HEAD_A + EXP_HEAD_B + '  I := at |;' + #10 + PROJ_TAIL);
+  KwCheck('after an identifier `at`', 'and,or', 'nil,inherited');
+
+  // A constant's value - untyped too, after an operator too - lists
+  // constants alone: no variable, function, procedure or typed constant
+  // (E2026), only the intrinsics a constant expression may call.
+  ExpSrc(EXP_HEAD_A + 'const CX = |;'#10'implementation'#10'end.'#10, '', '',
+    '', 'ExtColor,ExtCount,ExtReset,ExtColorOf,CGreenT', '',
+    'an untyped constant');
+  GCounter.Ok('expected type: an untyped constant lists the constants',
+    Has('CRed') and Has('clRed') and Has('Ord'));
+  ExpSrc(EXP_HEAD_A + 'const CX = Ord(CRed) + |;'#10'implementation'#10'end.'#10,
+    '', '', '', 'ExtColor,ExtCount,ExtReset,ExtColorOf,CGreenT', '',
+    'after an operator in an untyped constant');
+  ExpSrc(EXP_HEAD_A + 'const CX: Integer = 1 + |;'#10'implementation'#10'end.'#10,
+    '', '', '', 'ExtColor,ExtCount,ExtReset,ExtColorOf,CGreenT', '',
+    'after an operator in a typed constant');
+  ExpSrc(EXP_HEAD_A + 'var GX: Integer = 2 * |;'#10'implementation'#10'end.'#10,
+    '', '', '', 'ExtColor,ExtCount,ExtReset,ExtColorOf,CGreenT', '',
+    'after an operator in an initialized global');
+  ExpSrc(EXP_HEAD_A + '  TMyC = class procedure P(A: Integer = 1 + |); end;'#10 +
+    'implementation'#10'end.'#10, '', '', '',
+    'ExtColor,ExtCount,ExtReset,ExtColorOf,CGreenT', '',
+    'after an operator in a default');
+  // A procedural constant's value is a routine; an inline constant's and
+  // an `absolute` target are run-time values.
+  ExpSrc(EXP_HEAD_A + 'const CP: TNotify = |;'#10'implementation'#10'end.'#10,
+    '', '', '', '', '', 'a procedural constant');
+  GCounter.Ok('expected type: a procedural constant lists the procedures',
+    Has('ExtReset'));
+  ExpCase('const LC = ExtCount + |;', '', '', '', 'ExtReset,LocalProc');
+  GCounter.Ok('expected type: an inline constant lists the variables',
+    Has('ExtCount') and Has('ExtColorOf'));
+  // An untyped inline variable (`var X := |`) takes a value: no procedure
+  // (dcc 37 compiles `var X := Proc` into an uncallable 'Procedure').
+  ExpCase('var LV := |;', '', '', '', 'ExtReset,LocalProc');
+  GCounter.Ok('expected type: an untyped inline variable lists the ' +
+    'functions and variables', Has('ExtCount') and Has('ExtColorOf'));
+  ExpCase('for var LI := |', '', '', '', 'ExtReset,LocalProc');
+  // A type declaration's right side: the type constructors lead the types
+  // of their fit.
+  ProjCase(EXP_HEAD_A + '  TMyT = |;' + #10'implementation'#10'end.'#10);
+  GCounter.Ok('type position: `T = |` ranks the type keywords first',
+    GHit and Has('class') and Has('TAnimal') and
+    ((Ord(ItemNamed('class').Match) < Ord(ItemNamed('TAnimal').Match)) or
+     (ItemNamed('class').Match = ItemNamed('TAnimal').Match) and
+     (ItemNamed('class').Conv < ItemNamed('TAnimal').Conv)),
+    procedure
+    begin
+      Writeln('    class=', Ord(ItemNamed('class').Match), '.',
+        ItemNamed('class').Conv, ' TAnimal=',
+        Ord(ItemNamed('TAnimal').Match), '.', ItemNamed('TAnimal').Conv);
+    end);
+  ProjCase(EXP_HEAD_A + '  TMyT = type |;' + #10'implementation'#10'end.'#10);
+  GCounter.Ok('type position: `T = type |` grades no type by a keyword',
+    GHit and Has('TAnimal') and (ItemNamed('TAnimal').Conv = 0));
 
   // A type constructor's tail lists types alone - no constant, variable or
   // routine - as a declaration's `Name: |` does (an IDE test: `arr: array
@@ -4078,8 +4197,9 @@ begin
     'TableAttribute', 'TAnimal', 'clRed');
   ProjCase(EXP_HEAD_A + '  [TableAttribute(|)]'#10'  TMyA = class end;'#10 +
     'implementation'#10'end.'#10);
-  GCounter.Ok('type position: an attribute''s argument is an expression',
-    (GCtx = ccExpression) and Has('ExtCount'));
+  // ... a constant expression (dcc 37: a variable there is E2026).
+  GCounter.Ok('type position: an attribute''s argument is a constant expression',
+    (GCtx = ccExpression) and Has('CRed') and not Has('ExtCount'));
   // ======== declaration contexts (pastree-lsp COMPLETION.md) ==============
   // `implements |`: interfaces alone; those the class's own heritage list
   // names and the property's own type first (fit 0), any other interface
