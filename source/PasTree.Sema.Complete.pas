@@ -5371,9 +5371,12 @@ end;
 
 procedure TPasCompletion.AddContextKeywords(const AInfo: TPasCaretInfo);
 const
-  STMT_WORDS: array[0..21] of string = ('begin', 'end', 'if', 'then', 'else',
-    'case', 'while', 'do', 'repeat', 'until', 'for', 'to', 'downto', 'with',
-    'try', 'finally', 'except', 'raise', 'goto', 'asm', 'inherited', 'var');
+  // A statement's first word. Not `then`, `do`, `to`, `downto`, `of`:
+  // they follow a part of a statement, never start one. `const` and `var`
+  // open an inline declaration (dcc 37).
+  STMT_WORDS: array[0..18] of string = ('begin', 'end', 'if', 'else',
+    'case', 'while', 'repeat', 'until', 'for', 'with', 'try', 'finally',
+    'except', 'raise', 'goto', 'asm', 'inherited', 'var', 'const');
   UNIT_WORDS: array[0..14] of string = ('type', 'var', 'const', 'uses',
     'procedure', 'function', 'implementation', 'initialization',
     'finalization', 'end', 'begin', 'resourcestring', 'threadvar', 'label',
@@ -5381,44 +5384,98 @@ const
   STRUCT_WORDS: array[0..15] of string = ('private', 'protected', 'public',
     'published', 'strict', 'procedure', 'function', 'constructor',
     'destructor', 'property', 'class', 'var', 'const', 'type', 'end', 'case');
-  EXPR_WORDS: array[0..13] of string = ('nil', 'not', 'and', 'or', 'xor',
-    'div', 'mod', 'shl', 'shr', 'is', 'as', 'in', 'inherited', 'function');
-  TYPE_WORDS: array[0..11] of string = ('array', 'set', 'file', 'record',
-    'class', 'interface', 'procedure', 'function', 'packed', 'string',
-    'reference', 'of');
+  // An operand's first word: `nil`, `not`, `inherited`, an anonymous
+  // method, an if-expression (dcc 37).
+  OPERAND_WORDS: array[0..5] of string = ('nil', 'not', 'inherited',
+    'function', 'procedure', 'if');
+  // After an operand: a binary operator (`not` of `is not` / `not in`).
+  OPERATOR_WORDS: array[0..10] of string = ('and', 'or', 'xor', 'div', 'mod',
+    'shl', 'shr', 'is', 'as', 'in', 'not');
+  // A type declaration's right side (`T = |`): every type constructor, the
+  // class-like ones only here (dcc 37: E2058 elsewhere), and `type`.
+  TYPE_DECL_WORDS: array[0..13] of string = ('array', 'set', 'file',
+    'record', 'class', 'interface', 'dispinterface', 'object', 'procedure',
+    'function', 'packed', 'string', 'reference', 'type');
+  // A variable's, a field's, a typed constant's type, an array's element:
+  // no class-like type (E2058), no `reference to` (E2003 outside `T = `).
+  VAR_TYPE_WORDS: array[0..7] of string = ('array', 'set', 'file', 'record',
+    'packed', 'string', 'procedure', 'function');
   // A routine's declaration part, before its `begin` (6.1).
   ROUTINE_WORDS: array[0..7] of string = ('var', 'const', 'type', 'label',
     'procedure', 'function', 'begin', 'asm');
-  // A parameter's, a result's, a property's type (TypeNameOnlyAt).
+  // A parameter's type (TypeNameOnlyAt): `array of`, `string`, an untyped
+  // `file`; a result's and a property's `string` alone (dcc 37: `array`
+  // there is E2029, `file` E2024).
   PARAM_TYPE_WORDS: array[0..2] of string = ('array', 'string', 'file');
+var
+  LPrev: Integer;
+  LPrevKind: TPasTokenKind;
+  LTS: TPasTokenStream;
 begin
+  LTS := FModel.Tree.Source.Files[0];
+  if AInfo.Kind = ckIdent then
+    LPrev := PrevVisibleRaw(AInfo.RawToken - 1)
+  else
+    LPrev := AInfo.RawToken;
+  if LPrev >= 0 then
+    LPrevKind := LTS.Tokens[LPrev].Kind
+  else
+    LPrevKind := tkUnknown;
   case FContext of
     ccExpression:
-      AddKeywords(EXPR_WORDS);
+      // Right after an operand an operator continues the expression; an
+      // operand's start takes none of them (an IDE test: keywords got
+      // through where a value or a type was clearly expected).
+      if LPrevKind in [tkIdentifier, tkIntLiteral, tkRealLiteral,
+         tkStringLiteral, tkControlChar, tkCaretChar, tkRParen, tkRBracket,
+         tkCaret, tkNil] then
+        AddKeywords(OPERATOR_WORDS)
+      else
+        AddKeywords(OPERAND_WORDS);
     ccType:
       // A ranked type position: `not` right after `is` (Delphi 13's
-      // `is not`), the constraint keywords in a constraint, nothing else -
-      // a type name stands there, never a type constructor.
+      // `is not`), the constraint keywords in a constraint, `string` in a
+      // generic argument, nothing else - a type name stands there.
       if FTypePos <> tpNone then
       begin
         if (FTypePos = tpIsAs) and FTypeAfterIs then
           AddKeywords(['not'])
         else if FTypePos = tpConstraint then
           AddKeywords(['class', 'record', 'constructor'])
+        else if FTypePos = tpGenArg then
+          AddKeywords(['string'])
         // A type declaration's `T = |` takes a type constructor and the
         // `type` of a distinct type; `T = type |` a type identifier alone.
         else if (FTypePos = tpTypeDecl) and not FTypeAfterType then
-        begin
-          AddKeywords(TYPE_WORDS);
-          AddKeywords(['type']);
-        end;
+          AddKeywords(TYPE_DECL_WORDS);
       end
       // A heritage list names declared types only - no type constructor.
       else if FHeritage <> nkError then
+      // A pointer type's base: a type identifier or `string` (`^string`).
+      else if LPrevKind = tkCaret then
+        AddKeywords(['string'])
+      else if LPrevKind = tkOf then
+        case UpChainKind(AInfo.Node, [nkArrayType, nkFileType, nkParam]) of
+          // An open array parameter's element: a type identifier, `const`.
+          nkParam:
+            AddKeywords(['const', 'string']);
+          nkArrayType:
+            if UpChainKind(AInfo.Node, [nkParam, nkVarDecl, nkTypeDecl,
+               nkRoutine]) = nkParam then
+              AddKeywords(['const', 'string'])
+            else
+              AddKeywords(VAR_TYPE_WORDS);
+        end
       else if FTypeNameOnly then
-        AddKeywords(PARAM_TYPE_WORDS)
+      begin
+        if UpChainKind(AInfo.Node, [nkParam, nkPropertyDecl, nkRoutine,
+           nkProcType]) = nkParam then
+          AddKeywords(PARAM_TYPE_WORDS)
+        else
+          AddKeywords(['string']);
+      end
       else
-        AddKeywords(TYPE_WORDS);
+        AddKeywords(VAR_TYPE_WORDS);
     ccStatement:
       begin
         // Decided by the NODE (audit A1-32): a statement list - a block, a
