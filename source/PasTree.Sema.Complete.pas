@@ -379,7 +379,16 @@ type
     // line): a constant expression stands there - no variable, function or
     // procedure (CaseLabelOf); FExpect is the selector's type, if known.
     FExpectOrdinal: Boolean;
+    // FConstOnly holds in every constant expression - besides a `case` label,
+    // a bound, a typed constant's value (set by the operator before the
+    // caret) also anywhere inside a constant's, an initialized global's, a
+    // parameter default's or a type declaration's expression
+    // (ConstExprSiteAt), after an operator too: `C = A + |`.
     FConstOnly: Boolean;
+    // `Exit(|` in a routine with no result - a procedure, a constructor, a
+    // destructor, an anonymous procedure: `Exit(X)` is E2025 there, so
+    // nothing is listed (ExitExpect).
+    FExitNoValue: Boolean;
     // A static array's bound where a whole range may stand (`array[|]`,
     // `array[TKind, |]`, not after `..`): an ordinal TYPE is what is
     // written there, so it is fit 0 and an ordinal constant fit 1.
@@ -660,6 +669,10 @@ type
     procedure CastExpect(AMid, ASym: Integer);
     function CastSizeOf(const AX: TSemaXType): Int64;
     function RaiseAtStart(AAt: Integer): Boolean;
+    function DirectiveWordBefore(const AInfo: TPasCaretInfo;
+      APrev: Integer): string;
+    function ConstExprSiteAt(const AInfo: TPasCaretInfo): Boolean;
+    function DeclTypeIsProc(ADecl, ACaretVis: Integer): Boolean;
     function ExitExpect(AScope: Integer): TPasComplTypeRef;
     function CaseLabelOf(ARaw: Integer): Integer;
     function CaseOfStart(AOf: Integer): Integer;
@@ -4673,8 +4686,10 @@ begin
   // row was untyped, fit 3, and `if self|` listed it after every `SELF...`
   // constant (an IDE test, 2026-11-08).
   LScope := MethodBodyScope(AInfo.Scope);
+  // Not in a constant expression (E2026). A `var` argument keeps it: dcc 37
+  // passes Self to a `var` parameter of its type, in a class and a record.
   if (FContext in [ccStatement, ccExpression]) and (LScope <> NIL_SCOPE) and
-     MethodHasSelf(LScope) then
+     not FConstOnly and MethodHasSelf(LScope) then
   begin
     FSelfOv := FModel.Scopes[LScope].StructSym;
     LTarget := FModel.Scopes[LScope].OwnerNode;
@@ -5425,11 +5440,22 @@ begin
     ccExpression:
       // Right after an operand an operator continues the expression; an
       // operand's start takes none of them (an IDE test: keywords got
-      // through where a value or a type was clearly expected).
-      if LPrevKind in [tkIdentifier, tkIntLiteral, tkRealLiteral,
+      // through where a value or a type was clearly expected). A directive
+      // word in its directive position - `raise X at |`, a property's
+      // `default |` / `index |`, `message |`, `dispid |` - is no operand:
+      // the operand starts after it.
+      if (LPrevKind in [tkIdentifier, tkIntLiteral, tkRealLiteral,
          tkStringLiteral, tkControlChar, tkCaretChar, tkRParen, tkRBracket,
-         tkCaret, tkNil] then
+         tkCaret, tkNil]) and
+         ((LPrevKind <> tkIdentifier) or
+          (DirectiveWordBefore(AInfo, LPrev) = '')) then
         AddKeywords(OPERATOR_WORDS)
+      // A `var` / `out` argument is a variable: no keyword starts one.
+      else if FArgByRef then
+      // A constant expression: `nil` and `not` alone - `inherited`, an
+      // anonymous method and an if-expression are E2026 there (dcc 37).
+      else if FConstOnly then
+        AddKeywords(['nil', 'not'])
       else
         AddKeywords(OPERAND_WORDS);
     ccType:
@@ -5727,22 +5753,25 @@ begin
     if LOp < 0 then
       Exit;
   end;
-  // An inline counter with no declared type (`for var I := |`) is typed by
-  // its bounds: nothing to expect, but a value stands there - no procedure.
-  if LTS.Tokens[LOp].Kind = tkAssign then
+  // An inline variable or counter with no declared type (`var X := |`,
+  // `for var I := |`) is typed by its initializer: nothing to expect, but a
+  // value stands there - no procedure. (dcc 37 compiles `var X := Proc`,
+  // into a variable of type 'Procedure' that cannot be called: never what
+  // is meant.) An inline constant's `const C = |` likewise.
+  if LTS.Tokens[LOp].Kind in [tkAssign, tkEqual] then
   begin
     LBefore := PrevVisibleRaw(LOp - 1);
     if (LBefore >= 1) and (LTS.Tokens[LBefore].Kind = tkIdentifier) then
     begin
       LBefore := PrevVisibleRaw(LBefore - 1);
-      if (LBefore >= 1) and (LTS.Tokens[LBefore].Kind = tkVar) then
+      if (LBefore >= 0) and
+         ((LTS.Tokens[LOp].Kind = tkAssign) and
+          (LTS.Tokens[LBefore].Kind = tkVar) or
+          (LTS.Tokens[LOp].Kind = tkEqual) and
+          (LTS.Tokens[LBefore].Kind = tkConst)) then
       begin
-        LBefore := PrevVisibleRaw(LBefore - 1);
-        if (LBefore >= 0) and (LTS.Tokens[LBefore].Kind = tkFor) then
-        begin
-          FArgNoProcs := True;
-          Exit;
-        end;
+        FArgNoProcs := True;
+        Exit;
       end;
     end;
   end;
@@ -7188,15 +7217,190 @@ begin
   end;
 end;
 
+{ The directive word, lowercase, that raw token APrev (the token before the
+  operand at the caret) is in its directive position - 'at' of `raise X at
+  |` (RaiseAtStart), a property specifier's 'default' or 'index' (the
+  specifier holding the caret starts with it), 'message' or 'dispid' in a
+  type declaration - or '' when APrev is an operand (an identifier of that
+  spelling anywhere else). }
+function TPasCompletion.DirectiveWordBefore(const AInfo: TPasCaretInfo;
+  APrev: Integer): string;
+var
+  LTS: TPasTokenStream;
+begin
+  Result := '';
+  LTS := FModel.Tree.Source.Files[0];
+  if (APrev < 1) or (LTS.Tokens[APrev].Kind <> tkIdentifier) then
+    Exit;
+  Result := LowerCase(Copy(LTS.Source, LTS.Tokens[APrev].Start + 1,
+    LTS.Tokens[APrev].Len));
+  if Result = 'at' then
+  begin
+    if not RaiseAtStart(APrev) then
+      Result := '';
+  end
+  else if (Result = 'default') or (Result = 'index') then
+  begin
+    if PropSpecWordAt(AInfo.Node) <> Result then
+      Result := '';
+  end
+  else if (Result = 'message') or (Result = 'dispid') then
+  begin
+    if UpChainKind(AInfo.Node, [nkTypeDecl, nkBlock]) <> nkTypeDecl then
+      Result := '';
+  end
+  else
+    Result := '';
+end;
+
+{ Whether the declaration ADecl (an nkConstDecl or nkVarDecl) declares a
+  type of the procedural category, its `:` before visible token ACaretVis:
+  `const P: TProc = Foo` takes a routine, whatever constant rules hold for
+  any other typed constant. }
+function TPasCompletion.DeclTypeIsProc(ADecl, ACaretVis: Integer): Boolean;
+var
+  LVis, LDepth, LColon, LKid, LOv: Integer;
+  LX: TSemaXType;
+begin
+  Result := False;
+  LColon := -1;
+  LDepth := 0;
+  LVis := FModel.Tree.Nodes[ADecl].FirstToken;
+  if LVis < 0 then
+    Exit;
+  while (LVis <= ACaretVis) and (LVis <= High(FModel.Tree.Source.Visible)) do
+  begin
+    case FModel.Tree.Source.VisibleKind(LVis) of
+      tkLParen, tkLBracket:
+        Inc(LDepth);
+      tkRParen, tkRBracket:
+        Dec(LDepth);
+      tkColon:
+        if LDepth = 0 then
+        begin
+          LColon := LVis;
+          Break;
+        end;
+      tkEqual:
+        if LDepth = 0 then
+          Break;
+    end;
+    Inc(LVis);
+  end;
+  if LColon < 0 then
+    Exit;
+  LKid := FModel.Tree.Nodes[ADecl].FirstChild;
+  while (LKid <> NIL_NODE) and
+        (FModel.Tree.Nodes[LKid].FirstToken <= LColon) do
+    LKid := FModel.Tree.Nodes[LKid].NextSibling;
+  if LKid = NIL_NODE then
+    Exit;
+  if FModel.Tree.Nodes[LKid].Kind = nkProcType then
+    Exit(True);
+  if FProj = nil then
+    Exit;
+  TypeNodeXOv(LKid, LX, LOv);
+  if XValid(LX) then
+    Result := FProj.XCatOf(LX) = tcProc
+  else if LOv <> NIL_SYM then
+    Result := FModel.Symbols[LOv].TypeCat = tcProc;
+end;
+
+{ Whether the operand at the caret stands in a constant expression by the
+  declaration holding it, whatever operator precedes it: a constant's value
+  (`const C = |`, `C = A + |`, a typed one's too), a parameter's default, a
+  type declaration's expressions (an enumeration's values, a subrange, an
+  array's bounds), an initialized global's value and its type's bounds -
+  never an inline `const` / `var` (dcc 37 initializes those at run time),
+  nor a procedural constant or global, whose value is a routine. }
+function TPasCompletion.ConstExprSiteAt(const AInfo: TPasCaretInfo): Boolean;
+var
+  LNode, LRaw, LCaretVis, LVis, LDepth: Integer;
+  LEq: Boolean;
+  LSpec: string;
+begin
+  Result := False;
+  if AInfo.Kind = ckIdent then
+    LRaw := PrevVisibleRaw(AInfo.RawToken - 1)
+  else
+    LRaw := AInfo.RawToken;
+  if (LRaw < 0) or (LRaw > High(FVisOfRaw)) then
+    Exit;
+  LCaretVis := FVisOfRaw[LRaw];
+  if LCaretVis < 0 then
+    Exit;
+  // A property accessor's word before the operand: a member stands there,
+  // even where a half-typed line left the property out of the tree (`read
+  // FOr|` with nothing after it was read as an expression, and a field
+  // vanished from a large project's list).
+  if FModel.Tree.Source.Files[0].Tokens[LRaw].Kind = tkIdentifier then
+  begin
+    LSpec := LowerCase(Copy(FModel.Tree.Source.Files[0].Source,
+      FModel.Tree.Source.Files[0].Tokens[LRaw].Start + 1,
+      FModel.Tree.Source.Files[0].Tokens[LRaw].Len));
+    if (LSpec = 'read') or (LSpec = 'write') or (LSpec = 'stored') or
+       (LSpec = 'add') or (LSpec = 'remove') or (LSpec = 'implements') then
+      Exit;
+  end;
+  LNode := AInfo.Node;
+  while LNode <> NIL_NODE do
+  begin
+    case FModel.Tree.Nodes[LNode].Kind of
+      nkParam, nkTypeDecl:
+        Exit(True);
+      // A property's `default` and `index` take a constant; its accessors
+      // name members (a `read FOri|` taken for an expression listed no
+      // field once a type declaration made every expression constant).
+      nkPropSpec:
+        begin
+          LSpec := PropSpecWordAt(LNode);
+          Exit((LSpec = 'default') or (LSpec = 'index'));
+        end;
+      nkPropertyDecl:
+        Exit;
+      nkConstDecl:
+        Exit(not DeclTypeIsProc(LNode, LCaretVis));
+      nkVarDecl:
+        begin
+          // A global's initializer (`G: T = |`) or a bound of its type
+          // (`[`), not an `absolute` target (a variable).
+          LEq := False;
+          LDepth := 0;
+          LVis := FModel.Tree.Nodes[LNode].FirstToken;
+          while (LVis >= 0) and (LVis <= LCaretVis) and
+                (LVis <= High(FModel.Tree.Source.Visible)) do
+          begin
+            case FModel.Tree.Source.VisibleKind(LVis) of
+              tkLBracket:
+                Inc(LDepth);
+              tkRBracket:
+                Dec(LDepth);
+              tkEqual:
+                if LDepth = 0 then
+                  LEq := True;
+            end;
+            Inc(LVis);
+          end;
+          Exit((LEq or (LDepth > 0)) and not DeclTypeIsProc(LNode, LCaretVis));
+        end;
+      nkInlineVar, nkInlineConst, nkBlock, nkRoutine, nkInterfaceSec,
+      nkImplementationSec, nkUnit, nkProgram, nkLibrary, nkPackage:
+        Exit;
+    end;
+    LNode := FModel.Tree.Nodes[LNode].Parent;
+  end;
+end;
+
 { What `Exit(|` returns: the result type of the innermost routine holding
   AScope - its implicit Result, a symbol of the routine's own scope with
   no declaration (DeclareImplicitResult), whose type node is the heading's
   result. A nested procedure inside a function has none of its own, and
-  neither has an anonymous procedure: no context there, as in a procedure
-  (where Exit takes no argument at all). }
+  neither has an anonymous procedure: no context there. In a routine whose
+  heading is a procedure's, a constructor's or a destructor's, `Exit(X)` is
+  E2025 (dcc 37): FExitNoValue, and nothing is listed. }
 function TPasCompletion.ExitExpect(AScope: Integer): TPasComplTypeRef;
 var
-  LRes: Integer;
+  LRes, LHead: Integer;
 begin
   Result := ComplNilRef;
   while (AScope <> NIL_SCOPE) and
@@ -7209,6 +7413,19 @@ begin
   end;
   if AScope = NIL_SCOPE then
     Exit;
+  LHead := FModel.Scopes[AScope].OwnerNode;
+  if LHead <> NIL_NODE then
+    LHead := FModel.Tree.Nodes[LHead].FirstToken;
+  if (LHead >= 0) and (LHead < High(FModel.Tree.Source.Visible)) and
+     (FModel.Tree.Source.VisibleKind(LHead) = tkClass) then
+    Inc(LHead);
+  if (LHead >= 0) and (LHead <= High(FModel.Tree.Source.Visible)) and
+     (FModel.Tree.Source.VisibleKind(LHead) in [tkProcedure, tkConstructor,
+      tkDestructor]) then
+  begin
+    FExitNoValue := True;
+    Exit;
+  end;
   LRes := FModel.FindLocal(AScope, 'result');
   if (LRes = NIL_SYM) or (FModel.Symbols[LRes].Kind <> skVar) or
      (FModel.Symbols[LRes].DeclNode <> NIL_NODE) or
@@ -8515,6 +8732,13 @@ begin
          (FItems[LIdx].Bucket <> cbLocal) then
         Inc(LConv);
     end;
+    // A type declaration's right side (`T = |`, not `= type |`): a type
+    // constructor (`class`, `record`, `array`, ...) is what is written
+    // there most, and over a thousand type names share its fit - the
+    // keywords before them.
+    if (FTypePos = tpTypeDecl) and not FTypeAfterType and
+       (FItems[LIdx].Bucket <> cbKeyword) then
+      Inc(LConv);
     if LConv >= CConvDistVariant then
       LConv := CConvDistVariant;
     FItems[LIdx].Conv := LConv;
@@ -10451,6 +10675,7 @@ begin
   FArgAssigned := False;
   FExpectOrdinal := False;
   FConstOnly := False;
+  FExitNoValue := False;
   FBoundType := False;
   FCaseSel := False;
   FCondLike := False;
@@ -10558,6 +10783,18 @@ begin
     end
     else
       FExpect := RefValueX(ExpectedTypeAt(LInfo), FExpectOv);
+    // The declaration decides a constant expression, not only the operator
+    // before the caret: `const C = |`, `C = A + |` (ConstExprSiteAt). A
+    // `message` / `dispid` index is an integer constant too.
+    if not FConstOnly then
+    begin
+      if LInfo.Kind = ckIdent then
+        LSpec := DirectiveWordBefore(LInfo, PrevVisibleRaw(LInfo.RawToken - 1))
+      else
+        LSpec := DirectiveWordBefore(LInfo, LInfo.RawToken);
+      FConstOnly := (LSpec = 'message') or (LSpec = 'dispid') or
+        ConstExprSiteAt(LInfo);
+    end;
     if XValid(FExpect) then
       FExpectCat := FProj.XCatOf(FExpect)
     else if FExpectOv <> NIL_SYM then
@@ -10671,12 +10908,16 @@ begin
   else
     begin
       // A member's start in a type declaration takes keywords alone.
-      if not IsStructMemberStart(LInfo) then
+      // `Exit(|` in a procedure takes nothing at all (E2025).
+      if not FExitNoValue then
       begin
-        EnsureAncestry(LInfo.Scope);
-        CollectScope(LInfo);
+        if not IsStructMemberStart(LInfo) then
+        begin
+          EnsureAncestry(LInfo.Scope);
+          CollectScope(LInfo);
+        end;
+        AddContextKeywords(LInfo);
       end;
-      AddContextKeywords(LInfo);
     end;
   end;
   if XValid(FExpect) or (FExpectOv <> NIL_SYM) or FExpectOrdinal or
