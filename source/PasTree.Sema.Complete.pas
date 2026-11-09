@@ -3733,6 +3733,28 @@ begin
         begin
           if not TypePosAdmits(LM.Symbols[ASym].TypeCat) then
             Exit;
+          // A position that takes one category or a few: a helper is none
+          // of them (dcc 37: `O is THelper` is E2015 for a class and a
+          // record helper alike), and an alias the symbol does not
+          // categorize (`TCanvasDC = HDC`, `HDC = type UINT_PTR`) is judged
+          // by the type it names, through a distinct alias too
+          // (an IDE test: `if Self is t|` listed both).
+          if FTypePos in [tpIsAs, tpHandler, tpAttribute, tpConstraint,
+             tpImplements, tpClassOf, tpSetOf] then
+          begin
+            if (LM.Symbols[ASym].Kind = skType) and
+               (TPasSemaProject.TypeDefNodeIn(LM, ASym) <> NIL_NODE) and
+               (LM.Tree.Nodes[TPasSemaProject.TypeDefNodeIn(LM, ASym)].Kind =
+                nkHelperType) then
+              Exit;
+            if (LM.Symbols[ASym].TypeCat = tcUnknown) and (FProj <> nil) and
+               (AMid >= 0) then
+            begin
+              var LCatT := FProj.XCatThroughX(XPlain(AMid, ASym));
+              if (LCatT <> tcUnknown) and not TypePosAdmits(LCatT) then
+                Exit;
+            end;
+          end;
           // A record helper extends a dynamic array, never a static one
           // (E2474).
           if (FTypePos = tpHelper) and FHelperRecord and

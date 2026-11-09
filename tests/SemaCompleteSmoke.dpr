@@ -3002,6 +3002,127 @@ begin
   GProjMid := -1;
   TDirectory.Delete(GDir, True);
 
+  // ======== `if Self is |`: Self typed, no helper or non-class ============
+  // An IDE test: `if Self is t| then` in a form's method listed record
+  // helpers, an integer alias and a record among the classes, all of one
+  // fit, by name. Self is the method's class: its descendants fit, the
+  // class and its ancestors lead (the test is true), an unrelated class is
+  // wrong; a helper is no class (dcc 37: E2015 for a class and a record
+  // helper alike), nor a record, an alias of a non-class type or an
+  // enumeration.
+  GDir := TPath.Combine(TPath.GetTempPath, 'pastree_complete_selfis');
+  if TDirectory.Exists(GDir) then
+    TDirectory.Delete(GDir, True);
+  // The same with the types in a library unit read interface-only (light
+  // mode, as the server reads the RTL and VCL): a distinct type of an
+  // integer (`HDC = type UINT_PTR`), an alias of it in another unit
+  // (`TCanvasDC = HDC`), a distinct alias of a record (`TOFNotifyEx =
+  // type ...`) and a helper were listed after `if Self is t|` in the IDE,
+  // leading: CanonTypeX stops at a distinct type, which has no category.
+  GDir := TPath.Combine(TPath.GetTempPath, 'pastree_complete_selfis_light');
+  if TDirectory.Exists(GDir) then
+    TDirectory.Delete(GDir, True);
+  TDirectory.CreateDirectory(TPath.Combine(GDir, 'lib'));
+  TFile.WriteAllText(TPath.Combine(TPath.Combine(GDir, 'lib'), 'libz.pas'),
+    'unit libz;'#10'interface'#10'type'#10 +
+    '  THandleL = type NativeUInt;'#10'  TRecW = record end;'#10 +
+    '  TRecL = TRecW;'#10'  TBaseL = class end;'#10 +
+    '  TIntHelperL = record helper for Integer end;'#10 +
+    'implementation'#10'end.'#10);
+  TDirectory.CreateDirectory(TPath.Combine(GDir, 'lib2'));
+  TFile.WriteAllText(TPath.Combine(TPath.Combine(GDir, 'lib2'), 'liby.pas'),
+    'unit liby;'#10'interface'#10'uses libz;'#10'type'#10 +
+    '  TDcL = THandleL;'#10'  TRecL2 = type TRecL;'#10 +
+    'implementation'#10'end.'#10);
+  var LLightMain :=
+    'unit mainu;'#10'interface'#10'uses libz, liby;'#10'type'#10 +
+    '  TMyFrm = class(TBaseL)'#10'    procedure Click;'#10'  end;'#10 +
+    'implementation'#10 +
+    'procedure TMyFrm.Click;'#10'begin'#10'  //IS'#10'end;'#10 +
+    'end.'#10;
+  TFile.WriteAllText(TPath.Combine(GDir, 'mainu.pas'), LLightMain);
+  GProj := TPasSemaProject.Create(pfWin32, [GDir, TPath.Combine(GDir, 'lib'),
+    TPath.Combine(GDir, 'lib2')], []);
+  GProj.LightPaths := [TPath.Combine(GDir, 'lib'),
+    TPath.Combine(GDir, 'lib2')];
+  GProjMid := GProj.AnalyzeProject(TPath.Combine(GDir, 'mainu.pas'));
+  ProjCase(StringReplace(LLightMain, '//IS', 'if Self is | then Exit;', []));
+  GCounter.Ok('`if Self is |` over light units: no distinct integer type, ' +
+    'no alias of one or of a record, no helper',
+    GHit and Has('TBaseL') and not Has('THandleL') and not Has('TDcL') and
+    not Has('TRecL') and not Has('TRecL2') and not Has('TIntHelperL'),
+    procedure
+    begin
+      Writeln('    hit=', GHit, ' base=', Has('TBaseL'), ' h=',
+        Has('THandleL'), ' dc=', Has('TDcL'), ' rec=', Has('TRecL'),
+        Has('TRecL2'), ' helper=', Has('TIntHelperL'));
+    end);
+  GComp.Free;
+  GComp := nil;
+  GProj.Free;
+  GProj := nil;
+  GProjMid := -1;
+  TDirectory.Delete(GDir, True);
+
+  TDirectory.CreateDirectory(GDir);
+  var LIsMain :=
+    'unit mainu;'#10'interface'#10'type'#10 +
+    '  TAnimal = class end;'#10'  TDog = class(TAnimal) end;'#10 +
+    '  TCar = class end;'#10 +
+    '  TMyFrm = class(TDog)'#10'    procedure Click;'#10'  end;'#10 +
+    '  TMyKid = class(TMyFrm) end;'#10 +
+    '  TDogHelper = class helper for TDog end;'#10 +
+    '  TIntHelper = record helper for Integer end;'#10 +
+    '  TMyInt = Integer;'#10'  TMyRec = record end;'#10 +
+    '  TDogAlias = TDog;'#10'  TColorZ = (czA, czB);'#10 +
+    '  THandleZ = type NativeUInt;'#10'  TDcZ = THandleZ;'#10 +
+    '  TRecZ = record end;'#10'  TRecAliasZ = type TRecZ;'#10 +
+    'implementation'#10 +
+    'procedure TMyFrm.Click;'#10'begin'#10'  //IS'#10'end;'#10 +
+    'end.'#10;
+  TFile.WriteAllText(TPath.Combine(GDir, 'mainu.pas'), LIsMain);
+  GProj := TPasSemaProject.Create(pfWin32, [GDir], []);
+  GProjMid := GProj.AnalyzeProject(TPath.Combine(GDir, 'mainu.pas'));
+  for var LPre in ['', 'T'] do
+  begin
+    ProjCase(StringReplace(LIsMain, '//IS', 'if Self is ' + LPre +
+      '| then Exit;', []));
+    GCounter.Ok('`if Self is ' + LPre + '|`: descendants fit, the class ' +
+      'and its ancestors lead, an unrelated class is wrong',
+      GHit and (GCtx = ccType) and Has('TMyKid') and
+      (ItemNamed('TMyKid').Match = cmCompatible) and
+      (ItemNamed('TMyFrm').Match = cmLeads) and
+      (ItemNamed('TDog').Match = cmLeads) and
+      (ItemNamed('TAnimal').Match = cmLeads) and
+      (ItemNamed('TDogAlias').Match = cmLeads) and
+      (ItemNamed('TCar').Match = cmOther),
+      procedure
+      begin
+        Writeln('    hit=', GHit, ' ctx=', Ord(GCtx), ' kid=',
+          Ord(ItemNamed('TMyKid').Match), ' frm=',
+          Ord(ItemNamed('TMyFrm').Match), ' car=',
+          Ord(ItemNamed('TCar').Match));
+      end);
+    GCounter.Ok('`if Self is ' + LPre + '|`: no helper, record, alias ' +
+      'of a non-class type, enumeration or routine',
+      not Has('TDogHelper') and not Has('TIntHelper') and
+      not Has('TMyInt') and not Has('TMyRec') and not Has('TColorZ') and
+      not Has('THandleZ') and not Has('TDcZ') and not Has('TRecAliasZ') and
+      not Has('Click'),
+      procedure
+      begin
+        Writeln('    helper=', Has('TDogHelper'), Has('TIntHelper'),
+          ' int=', Has('TMyInt'), ' rec=', Has('TMyRec'), ' h=',
+          Has('THandleZ'), Has('TDcZ'), Has('TRecAliasZ'));
+      end);
+  end;
+  GComp.Free;
+  GComp := nil;
+  GProj.Free;
+  GProj := nil;
+  GProjMid := -1;
+  TDirectory.Delete(GDir, True);
+
   // ======== 16.4.1: a lone `constructor` unlocks T.Create only ==============
   // (local/probe-ctor C1-C7: V.Free, V.ClassName, T.Create.Free are E2003.)
   GDir := TPath.Combine(TPath.GetTempPath, 'pastree_complete_ctor');
