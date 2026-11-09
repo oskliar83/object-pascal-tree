@@ -1422,6 +1422,43 @@ begin
     ACompat, AOther, AAbsent, ALeads, Trim(ADecl));
 end;
 
+{ The keywords the last ProjCase listed: every one of AHas present (as a
+  keyword or a builtin of that name), no keyword of AHasNot (comma lists). }
+procedure KwCheck(const ATitle, AHas, AHasNot: string);
+var
+  LOk: Boolean;
+  LWhy: string;
+  function KwIn(const AWord: string): Boolean;
+  begin
+    Result := False;
+    for var LIt in GItems do
+      if (LIt.Bucket = cbKeyword) and SameText(LIt.Name, AWord) then
+        Exit(True);
+  end;
+begin
+  LOk := GHit;
+  LWhy := '';
+  // `string` and `nil` are listed as the builtin type and constant of
+  // that name, which the keyword deduplicates against.
+  for var LW in AHas.Split([',']) do
+    if (LW <> '') and not KwIn(LW) and not Has(LW) then
+    begin
+      LOk := False;
+      LWhy := LWhy + ' missing ' + LW;
+    end;
+  for var LW in AHasNot.Split([',']) do
+    if (LW <> '') and KwIn(LW) then
+    begin
+      LOk := False;
+      LWhy := LWhy + ' has ' + LW;
+    end;
+  GCounter.Ok(Format('keywords: %s', [ATitle]), LOk,
+    procedure
+    begin
+      Writeln('    ctx=', Ord(GCtx), ':', LWhy);
+    end);
+end;
+
 { An expected-type case in routines of its own: ARoutines is the whole
   implementation section's code, the caret marker inside it. }
 procedure ExpRoutines(const ATitle, ARoutines, AExact, ACompat, AOther,
@@ -3913,6 +3950,38 @@ begin
     '  try'#10'  except'#10'    on E: EFoo do ;'#10'    on X: E| do ;'#10 +
     '  end;'#10'end;'#10'end.'#10, '', 'EFoo', '', 'ExtErr,ExtErrOf', '',
     'on X: E| after another handler');
+  // Keywords by position, each checked against dcc 37 (an IDE test: `arr:
+  // array of int|` listed `interface` among the types). KwCheck: the words
+  // a position must list and those it must not.
+  ProjCase(EXP_HEAD_A + 'var V1: array of int|;' + #10'implementation'#10'end.'#10);
+  KwCheck('array of int|', '', 'interface,class,reference,of,object,nil,begin');
+  ProjCase(EXP_HEAD_A + 'var V1: array of |;' + #10'implementation'#10'end.'#10);
+  KwCheck('array of |', 'array,record,string,procedure,set', 'interface,class,reference,of,object');
+  ProjCase(EXP_HEAD_A + 'var V1: |;' + #10'implementation'#10'end.'#10);
+  KwCheck('var V1: |', 'array,record,string,procedure,file,packed', 'interface,class,reference,of,object,dispinterface');
+  ProjCase(EXP_HEAD_A + '  TMyT = |;' + #10'implementation'#10'end.'#10);
+  KwCheck('T = |', 'interface,class,reference,type,record,object', 'of,nil');
+  ProjCase(EXP_HEAD_A + '  TMyC = class function F: |; end;' + #10'implementation'#10'end.'#10);
+  KwCheck('a result type', 'string', 'array,file,record,interface');
+  ProjCase(EXP_HEAD_A + '  TMyC = class procedure P(A: |); end;' + #10'implementation'#10'end.'#10);
+  KwCheck('a parameter type', 'array,string,file', 'record,interface,class');
+  ProjCase(EXP_HEAD_A + '  TMyC = class procedure P(A: array of |); end;' + #10'implementation'#10'end.'#10);
+  KwCheck('an open array element', 'const,string', 'record,array,interface');
+  ProjCase(EXP_HEAD_A + 'var V1: ^|'#10'  ;' + #10'implementation'#10'end.'#10);
+  KwCheck('a pointer type', 'string', 'record,array,interface');
+  ProjCase(EXP_HEAD_A + 'var V1: TBoxA<|>;' + #10'implementation'#10'end.'#10);
+  KwCheck('a generic argument', 'string', 'array,record,interface');
+  ProjCase(EXP_HEAD_A + 'var V1: set of |;' + #10'implementation'#10'end.'#10);
+  KwCheck('set of', '', 'array,record,interface,string');
+  ProjCase(EXP_HEAD_A + '  TMyCR = class of |;' + #10'implementation'#10'end.'#10);
+  KwCheck('class of', '', 'array,record,interface,class');
+  ProjCase(EXP_HEAD_A + EXP_HEAD_B + '  ' + 'I := |;' + #10 + PROJ_TAIL);
+  KwCheck('an operand', 'nil,not,if,inherited,function,procedure', 'and,div,in,then,interface,begin');
+  ProjCase(EXP_HEAD_A + EXP_HEAD_B + '  ' + 'if I | then;' + #10 + PROJ_TAIL);
+  KwCheck('after an operand', 'and,or,div,in,is,not', 'nil,begin,interface');
+  ProjCase(EXP_HEAD_A + EXP_HEAD_B + '  ' + '|' + #10 + PROJ_TAIL);
+  KwCheck('a statement', 'begin,if,var,const,while,try', 'then,do,to,downto,of,interface,and');
+
   // A type constructor's tail lists types alone - no constant, variable or
   // routine - as a declaration's `Name: |` does (an IDE test: `arr: array
   // of acc|` listed the ACCESS_ constants among the types).
