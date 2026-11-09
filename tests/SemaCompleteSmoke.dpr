@@ -3586,9 +3586,21 @@ begin
     'ExtReset,clRed');
   ExpCase('ExtSwap(C, ExtOwner.|);', 'Count', '', 'Color,Total', 'Car,Reset',
     '', 'Next');
-  // An intrinsic's `var` parameter: no constant, function or procedure, and
-  // no type to rank by (Inc takes any ordinal variable).
-  ExpCase('Inc(|);', '', '', 'I,C', 'clRed,CRed,ExtColorOf,ExtReset,True');
+  // An intrinsic's `var` parameter: no constant, function or procedure.
+  // Its shape ranks (the replay of every context: 5% of `Inc(` / `Dec(` /
+  // `SetLength(` ranked): Inc takes an ordinal or a typed pointer - an
+  // integer, an enumeration, a Boolean fit, a float is wrong, an object
+  // leads; SetLength a string or a dynamic array.
+  ExpCase('Inc(|);', '', 'I,C,B,LE', 'F', 'clRed,CRed,ExtColorOf,ExtReset,' +
+    'True', '', 'A');
+  ExpCase('Dec(|, 2);', '', 'I,C', 'F', 'clRed,ExtReset', '', 'A');
+  ExpCase('SetLength(|, 2);', '', 'Arr', 'I,F,C', 'clRed,ExtReset', '', 'A');
+  // `Assigned(|` a reference: a class, a procedural value, a dynamic array
+  // fit; a scalar is wrong (dcc 37: a string is E2008); no procedure.
+  ExpCase('if Assigned(|) then;', '', 'A,D,N,Arr', 'I,F,C', 'ExtReset,' +
+    'LocalProc');
+  // Their later arguments are values, unranked as before.
+  ExpCase('Inc(I, |);', '', '', '', 'ExtReset');
   // An intrinsic's typed value parameter is ranked by the table.
   ExpCase('Assert(|);', 'B,True', '', '', 'ExtReset');
   ExpCase('Odd(|);', 'I', '', 'C', 'ExtReset');
