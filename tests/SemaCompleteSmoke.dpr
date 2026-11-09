@@ -4108,13 +4108,27 @@ begin
   TypCase('if A is not | then;', '', 'TDog', 'TCar,IShape', 'I,ExtReset,not',
     'TAnimal');
   TypCase('if A is T| then;', '', 'TDog,TBall', 'TCar', 'TColor2,TLocalEnum');
-  TypCase('D := A as |;', '', 'TDog,IShape,IRound', 'TCar', 'I,ExtReset,not',
-    'TAnimal');
+  // `as` takes its target's type (pastree-lsp R2, dcc 37): in `D := A as |`
+  // the cast must be assignable to D's TDog - TDog fit 0, its descendants
+  // fit 1, an ancestor, an unrelated class and an interface wrong (E2010).
+  TypCase('D := A as |;', 'TDog', 'TPuppy', 'TCar,TAnimal,TBall,IShape,IRound',
+    'I,ExtReset,not');
   TypCase('(A as |).Free;', '', 'TDog', 'TCar', 'I,ExtReset');
   TypCase('if D is | then;', '', '', 'TBall,TCar', '', 'TDog,TAnimal');
   // After an interface any class fits; another interface only after `as`.
   TypCase('if ExtShape is | then;', '', 'TCar,TDog', 'IRound', 'I,ExtReset');
-  TypCase('A := ExtShape as |;', '', 'TCar,IRound', '', 'I,ExtReset');
+  TypCase('A := ExtShape as |;', 'TAnimal', 'TDog,TBall', 'TCar,IRound',
+    'I,ExtReset');
+  // An interface target: the interface fit 0, a descendant and a class
+  // implementing it fit 1, another class wrong (E2010).
+  TypCase('ExtShape := A as |;', 'IShape', 'IRound,TBall', 'TDog,TCar',
+    'I,ExtReset');
+  // A value parameter's type is the target too.
+  TypCase('ExtClickProc(ExtShape as |);', 'TAnimal', 'TDog,TBall', 'TCar',
+    'I,ExtReset');
+  // In a grouping paren the cast is mostly read through (`(X as T).Y`): no
+  // target narrows it.
+  TypCase('A := (ExtShape as |', '', 'TCar,TDog,IRound', '', 'I,ExtReset');
   // A left side that is no class or interface ranks nothing, but the
   // position is still a type position.
   TypCase('if I is | then;', '', '', '', 'I,ExtReset,TColor2');
@@ -4658,6 +4672,41 @@ begin
     '  TInh = class(TAccBase)'#10'    constructor CreateNew;'#10'  end;'#10 +
     'implementation'#10'constructor TInh.CreateNew;'#10'begin'#10 +
     '  inherited |'#10'end;'#10'end.'#10, 'Create', cmExact);
+  // ======== audit series C (pastree-lsp AUDIT-2026-11-09) =================
+  // A parenthesized comparison or membership test before `and` / `or` is a
+  // Boolean, whatever its operands - `nil` included (item 9).
+  ExpCase('if (I <> 0) and | then;', 'B', '', '', 'ExtReset');
+  ExpCase('if (A = nil) or (| then;', 'B', '', '', 'ExtReset');
+  ExpCase('if (C in ExtSet) and | then;', 'B', '', '', 'ExtReset');
+  // After `is` / `as` a class-reference value leads below the types of its
+  // fit (item 10).
+  TypCase('if A is | then;', '', 'TDog', '', '', 'TAnimal,ExtClass');
+  GCounter.Ok('type position: a class reference below the types of its fit',
+    Has('ExtClass') and Has('TAnimal') and
+    (ItemNamed('ExtClass').Conv > ItemNamed('TAnimal').Conv));
+  // A true set constant left of `+` (item 15).
+  ExpCase('LS := CLocSet + [|];', 'leOne,leTwo', '', '', 'ExtReset',
+    '  TLocSet = set of TLocalEnum;'#10'const'#10'  CLocSet = [leOne];'#10 +
+    'var'#10'  LS: TLocSet;'#10);
+  // A set casts to an ordinal of its size, not of another (item 16).
+  FitCase('Byte(| (a set of its size)', ConvSrc('By := Byte(|);'),
+    'ExtSet', cmCompatible);
+  FitCase('Word(| (a set of another size)', ConvSrc('Wd := Word(|);'),
+    'ExtSet', cmOther);
+  // A string leads where a Char is read: `S[I]` (item 16).
+  FitCase('Ch := | (a string)', ConvSrc('Ch := |;',
+    '  Ch: Char;'#10'  St: string;'#10), 'St', cmLeads);
+  // Overloads the written arguments cannot tell apart: an item takes its
+  // best fit over their types at the caret (item 16).
+  ExpCase('ExtPut(|', 'C,S,clRed,shRound', '', 'I', 'ExtReset');
+  // `read FOr|` lexes as `read for`: still the accessor (item 19).
+  AccCase(ccPropRead, '    property PK: Integer read FOr|;', 'FOwn', '', '',
+    'SetOwn');
+  // A narrower target than TObject / IInterface keeps exact before a
+  // descendant (pastree-lsp R1; the roots themselves need System, which this
+  // mini-project has not - LspClientSmoke checks them).
+  FitCase('A := | (a narrower target)', ConvSrc('A := |;'), 'A', cmExact);
+  FitCase('A := | (a descendant)', ConvSrc('A := |;'), 'D', cmCompatible);
   GComp.Free;
   GComp := nil;
   GProj.Free;
