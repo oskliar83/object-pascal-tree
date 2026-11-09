@@ -6868,10 +6868,15 @@ begin
   end
   else
   begin
+    // The buffer's own routine (CalleeSyms gives Mid -1 for a routine of
+    // the unit being edited): its parameter's type node resolves to a TYPE
+    // reference - a value of that type is what the argument is, as for a
+    // variable of it (ValueOfTypeRef). Left a type reference, the slot
+    // expected a type name, and nothing was ranked.
     Result := ResolveTypeRefNode(LTypeNode, 0);
     if ComplValid(Result) and ((Result.OvSym = NIL_SYM) or
        (FModel.Symbols[Result.OvSym].Kind <> skGenericParam)) then
-      Exit;
+      Exit(ValueOfTypeRef(Result, 0));
     Result := ComplNilRef;
   end;
   // A generic parameter's type (`Max<T>(|`) is none to rank by; anything

@@ -3405,6 +3405,24 @@ begin
   // A call argument expects its parameter's type; no procedure is listed.
   ExpCase('ExtOne(|);', 'clRed,C,ExtColor,ExtColorOf,CRed', 'TColor2',
     'shRound,I', 'ExtReset,LocalProc', '', 'A,ExtOwner');
+  // A routine of the unit being edited, called from another routine of it
+  // (an IDE test: `Test(|)` ranked nothing).
+  ExpRoutines('a routine of this unit as the callee',
+    'procedure Take(AC: TColor2);'#10'begin'#10'end;'#10 +
+    'procedure Run;'#10'var'#10'  C: TColor2;'#10'  I: Integer;'#10 +
+    'begin'#10'  Take(|)'#10'end;'#10,
+    'clRed,C', '', 'shRound,I', 'ExtReset,Run');
+  // The IDE's shape: a plain routine of the unit called from a method of
+  // its class, the statement unterminated, the parameter a class (the
+  // mini-project has no TObject: TAnimal stands for it).
+  ExpSrc(EXP_HEAD_A + '  TFrm = class'#10 +
+    '    procedure Click(Sender: TAnimal);'#10'  end;'#10 +
+    'implementation'#10 +
+    'procedure Take(AObj: TAnimal);'#10'begin'#10'end;'#10 +
+    'procedure TFrm.Click(Sender: TAnimal);'#10'var'#10 +
+    '  Act: Integer;'#10'  D: TDog;'#10'begin'#10'  Take(|)'#10'end;'#10 +
+    'end.'#10, 'Sender', 'D', 'Act', 'Take,Click,ExtReset', '',
+    'a class parameter of this unit''s routine, from a method');
   ExpCase('ExtOne(cl|);', 'clRed,clGreen', '', '', 'ExtReset');
   // Overloads: the best fit for the arguments already written, among
   // those taking this many; with none written, the first declared.
