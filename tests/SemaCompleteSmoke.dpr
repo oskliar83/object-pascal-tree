@@ -3780,6 +3780,45 @@ begin
     '  try'#10'  except'#10'    on E: EFoo do ;'#10'    on X: E| do ;'#10 +
     '  end;'#10'end;'#10'end.'#10, '', 'EFoo', '', 'ExtErr,ExtErrOf', '',
     'on X: E| after another handler');
+  // A type constructor's tail lists types alone - no constant, variable or
+  // routine - as a declaration's `Name: |` does (an IDE test: `arr: array
+  // of acc|` listed the ACCESS_ constants among the types).
+  TypDecl('var V1: array of |;', '', '', '',
+    'clRed,ExtReset,ExtCount,CRed');
+  TypDecl('var V1: array of TC|;', '', '', '',
+    'clRed,ExtReset,ExtCount,CRed');
+  TypDecl('var V1: array[0..1] of |;', '', '', '',
+    'clRed,ExtReset,ExtCount,CRed');
+  TypDecl('var V1: file of |;', '', '', '',
+    'clRed,ExtReset,ExtCount,CRed');
+  TypDecl('  TMyArr = array of |;', '', '', '',
+    'clRed,ExtReset,ExtCount,CRed');
+  TypDecl('  TMyR = record F: array of |; end;', '', '', '',
+    'clRed,ExtReset,ExtCount,CRed');
+  TypDecl('  TMyC = class procedure P(const A: array of |); end;', '', '', '',
+    'clRed,ExtReset,ExtCount,CRed');
+  TypDecl('  TMyC = class function F: TBoxA<|>; end;', '', '', '',
+    'clRed,ExtReset,ExtCount,CRed');
+  TypDecl('  TMyC = class F: TBoxA<|>; end;', '', '', '',
+    'clRed,ExtReset,ExtCount,CRed');
+  // A pointer type's `^`, the caret at the line's end or after a blank (`^;`
+  // is one character token, `^` + `;`, and lists nothing).
+  TypDecl('var V1: ^TC|;', '', '', '',
+    'clRed,ExtReset,ExtCount,CRed');
+  TypDecl('var V1: ^ |;', '', '', '',
+    'clRed,ExtReset,ExtCount,CRed');
+  TypDecl('var V1: ^|'#10'  ;', '', '', '',
+    'clRed,ExtReset,ExtCount,CRed');
+  TypDecl('  TMyP = ^|'#10'  ;', '', '', '',
+    'clRed,ExtReset,ExtCount,CRed');
+  // `class of |` takes a class (E2021): classes fit, nothing else listed.
+  TypDecl('  TMyCR = class of |;', '', 'TAnimal,TDog,TCar', '',
+    'TColor2,IShape,Integer,'+'clRed,ExtReset,ExtCount,CRed');
+  // `set of |` an ordinal: of at most 256 values in 0..255 fits, a wider
+  // one is wrong (E2028); no class, no record.
+  TypDecl('var V1: set of |;', '', 'TColor2,TShape2,TLocalEnum', 'Integer',
+    'TAnimal,IShape,TGuid2,'+'clRed,ExtReset,ExtCount,CRed');
+  TypDecl('  TMyS = set of |;', '', 'TColor2', 'Integer', 'TAnimal,clRed');
   // A generic argument: what the parameter's constraint admits fits, what
   // it rejects is wrong; no value. An empty `<>` is one token.
   TypDecl('var V1: TBoxC<|>;', '', 'TAnimal,TDog,TCar,TPen', 'TColor2,IShape,TGuid2,Integer',
