@@ -366,6 +366,13 @@ type
     // which takes a variable alone, of exactly its type.
     FArgNoProcs: Boolean;
     FArgByRef: Boolean;
+    // An intrinsic's first `var` parameter with a shape but no type:
+    // `Inc(|` / `Dec(|` an ordinal or a typed pointer, `SetLength(|` a
+    // string or a dynamic array (ArgVarShapeFit). `Assigned(|` a reference
+    // of any kind (its parameter is untyped in the table).
+    FArgIncDec: Boolean;
+    FArgSetLen: Boolean;
+    FArgAssigned: Boolean;
     // A `case` selector (`case | of`): any ordinal fits - a category, not
     // one type, so FExpect stays XNil and MatchOf asks OrdinalFit. A `case`
     // label (`case K of |:`, after `,` / `..` in its list, on a later label
@@ -648,6 +655,8 @@ type
     function ProcValueFit(const AItem: TPasComplItem): Integer;
     function RefCatOf(const ARef: TPasComplTypeRef): TSemaTypeCat;
     function ArgExpectAt(ARaw, AScope: Integer): TPasComplTypeRef;
+    function ArgVarShapeFit(const AX: TSemaXType;
+      AOv: Integer): TPasComplMatch;
     procedure CastExpect(AMid, ASym: Integer);
     function CastSizeOf(const AX: TSemaXType): Int64;
     function RaiseAtStart(AAt: Integer): Boolean;
@@ -6732,6 +6741,68 @@ begin
   end;
 end;
 
+{ A variable for an intrinsic's first `var` parameter that has a shape and
+  no type (ArgExpectAt: FArgIncDec, FArgSetLen), by its type AX (or the
+  overlay's AOv): `Inc(|` / `Dec(|` take an ordinal - an integer, a Char,
+  a Boolean, an enumeration - or a typed pointer (dcc 37: an untyped Pointer
+  is E2001); `SetLength(|` a string (any kind) or a dynamic array;
+  `Assigned(|` (FArgAssigned) a reference - a class, an interface, a
+  pointer, a dynamic array, a procedural value, a class reference (dcc 37:
+  a string is E2008). Those fit; a value with members leads; any other is
+  wrong. }
+function TPasCompletion.ArgVarShapeFit(const AX: TSemaXType;
+  AOv: Integer): TPasComplMatch;
+var
+  LCat: TSemaTypeCat;
+  LX: TSemaXType;
+  LMid, LSym: Integer;
+begin
+  LX := XNil;
+  if XValid(AX) then
+  begin
+    LX := FProj.CanonTypeX(AX);
+    LCat := FProj.XCatThroughX(LX);
+  end
+  else if AOv <> NIL_SYM then
+    LCat := FModel.Symbols[AOv].TypeCat
+  else
+    LCat := tcUnknown;
+  if LCat = tcUnknown then
+    Exit(cmLeads);
+  if FArgAssigned then
+  begin
+    if LCat in [tcClass, tcInterface, tcPointer, tcProc, tcClassOf] then
+      Exit(cmCompatible);
+    if (LCat = tcArray) and XValid(LX) and FProj.IsDynArrayTypeX(LX) then
+      Exit(cmCompatible);
+  end
+  else if FArgIncDec then
+  begin
+    if LCat in [tcInteger, tcChar, tcBoolean, tcEnum] then
+      Exit(cmCompatible);
+    if LCat = tcPointer then
+    begin
+      if XValid(LX) and BridgeName('pointer', LMid, LSym) and
+         FProj.XSameType(LX, FProj.CanonTypeX(XPlain(LMid, LSym))) then
+        Exit(cmOther);
+      Exit(cmCompatible);
+    end;
+  end
+  else
+  begin
+    if LCat = tcString then
+      Exit(cmCompatible);
+    if (LCat = tcArray) and XValid(LX) and FProj.IsDynArrayTypeX(LX) then
+      Exit(cmCompatible);
+  end;
+  // NOTHING_TO_REACH, declared further down.
+  if LCat in [tcInteger, tcFloat, tcBoolean, tcChar, tcString, tcEnum, tcSet,
+     tcNil, tcFile] then
+    Result := cmOther
+  else
+    Result := cmLeads;
+end;
+
 { The type a call's argument expects: ARaw is the `(` or `,` the operand at
   the caret follows. The walk goes back over the argument list - nested
   `()` / `[]` skipped, commas at its level counted - to the `(` that opens
@@ -6867,6 +6938,14 @@ begin
       Exit;
     FArgNoProcs := True;
     FArgByRef := LByRef;
+    if LByRef and (LArgs = 0) then
+    begin
+      FArgIncDec := (LM.Symbols[LSym].NameLower = 'inc') or
+        (LM.Symbols[LSym].NameLower = 'dec');
+      FArgSetLen := LM.Symbols[LSym].NameLower = 'setlength';
+    end;
+    FArgAssigned := (LArgs = 0) and
+      (LM.Symbols[LSym].NameLower = 'assigned');
     if not LByRef and (LType <> '') and
        BridgeName(LowerCase(LType), LMid, LSym) then
       Result.X := XPlain(LMid, LSym);
@@ -8148,6 +8227,8 @@ begin
       Exit(cmOther);
     Exit(cmLeads);
   end;
+  if FArgIncDec or FArgSetLen or FArgAssigned then
+    Exit(ArgVarShapeFit(LX, LOv));
   if (FCastValue <> tcUnknown) or FExpectAddr then
   begin
     // A type the overlay alone declares has no project type: its category.
@@ -10308,6 +10389,9 @@ begin
   FNoProcedures := False;
   FArgNoProcs := False;
   FArgByRef := False;
+  FArgIncDec := False;
+  FArgSetLen := False;
+  FArgAssigned := False;
   FExpectOrdinal := False;
   FConstOnly := False;
   FBoundType := False;
@@ -10541,7 +10625,8 @@ begin
   if XValid(FExpect) or (FExpectOv <> NIL_SYM) or FExpectOrdinal or
      FExpectEnum or (FCastRef <> tcUnknown) or (FCastValue <> tcUnknown) or
      FExpectAddr or FExpectWith or FExpectRaise or
-     FTypeRank or FPropRank or FInhRank then
+     FTypeRank or FPropRank or FInhRank or FArgIncDec or FArgSetLen or
+     FArgAssigned then
     RankItems;
   SetLength(FItems, FCount);
   AItems := FItems;
