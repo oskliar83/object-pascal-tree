@@ -5794,8 +5794,22 @@ begin
   // A grouping paren (`if (|`, `if (A) and (|`, `X := (|`): the
   // parenthesized expression - whose first operand starts at the caret -
   // stands where the `(` does. A call's or a cast's `(` is ArgExpectAt's.
+  // Not where that is a Boolean (`if (|`, `A and (|`, `not (|`): there the
+  // paren holds a comparison, whose left side - what is typed right after
+  // the `(` - is a value of any type; ranking the Boolean values first
+  // buried it (decided by Alex, 2026-11-09). Nothing is expected, and no
+  // procedure is a value.
   if (LTS.Tokens[LOp].Kind = tkLParen) and IsGroupingParen(LOp) then
-    Exit(OperandExpect(PrevVisibleRaw(LOp - 1), AScope, ADepth + 1));
+  begin
+    Result := OperandExpect(PrevVisibleRaw(LOp - 1), AScope, ADepth + 1);
+    if RefCatOf(Result) = tcBoolean then
+    begin
+      // FCondLike stays: `(not |` makes its own Boolean again, a condition's.
+      Result := ComplNilRef;
+      FArgNoProcs := True;
+    end;
+    Exit;
+  end;
   // A `case` selector takes any ordinal: a category, FExpectOrdinal.
   if LTS.Tokens[LOp].Kind = tkCase then
   begin
