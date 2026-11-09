@@ -2162,6 +2162,11 @@ type
       integer, `TOFNotifyEx = type TOFNotifyExW` a record. For a question
       about the kind of type alone - never for type identity. }
     function XCatThroughX(const AX: TSemaXType): TSemaTypeCat;
+    { The types the generic parameter AParam is constrained to - TObject for
+      `class` - as ConstraintsOfParamX reads them (completion: does `nil`
+      fit a value of that parameter's type?). }
+    function ParamConstraintTypesX(
+      const AParam: TSemaXType): TArray<TSemaXType>;
     { A user conversion of ASrc to ADst (both canonical, one a record)
       through a `class operator Implicit` of either (9.3.1, 6.3.1): an
       operator `Implicit(A: Q): R` of ADst or of ASrc converts when ASrc
@@ -14188,6 +14193,12 @@ function TPasSemaProject.XOrdRangeX(const AX: TSemaXType; out ALo,
   AHi: Int64): Boolean;
 begin
   Result := FConv.OrdRange(AX, ALo, AHi);
+end;
+
+function TPasSemaProject.ParamConstraintTypesX(
+  const AParam: TSemaXType): TArray<TSemaXType>;
+begin
+  Result := ConstraintsOfParamX(AParam);
 end;
 
 function TPasSemaProject.XCatThroughX(const AX: TSemaXType): TSemaTypeCat;

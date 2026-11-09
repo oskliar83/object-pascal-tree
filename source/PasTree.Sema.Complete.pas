@@ -523,6 +523,34 @@ type
     // ArgExpectAt's answer for an open-array parameter (`Foo([|])`): its
     // element, which the parameter's own type cannot carry.
     FArgOpenElem: TPasComplTypeRef;
+    // The operand of `:=` or of a call's value parameter (OperandExpect sets
+    // FFlatRootPos). FFlatRoot when the type expected there is exactly
+    // TObject or IInterface: every class, or every interface, that converts
+    // is fit 1 alike - the exact root gains nothing over a descendant, and
+    // proximity decides (`Test(Ac|` for `Test(AObj: TObject)`: a local
+    // `Acc: TAccount` above System's `AcquireExceptionObject: TObject`).
+    FFlatRootPos: Boolean;
+    FFlatRoot: Boolean;
+    // `X := AObj as |`, `Foo(AObj as |)`: the type the whole `as` expression
+    // must be assignable to (FAsTarget, a class or an interface - never
+    // TObject or IInterface, which narrow nothing), its category. The cast's
+    // type is ranked against it (TypePosFit) rather than the left operand.
+    FAsTarget: TSemaXType;
+    FAsTargetCat: TSemaTypeCat;
+    // A call argument whose overloads tie on the arguments written and take
+    // different types at the caret (`SetValue('Name', |` over Char, Byte,
+    // Boolean, string ...): each of those types (ArgExpectAt). An item
+    // takes its best fit over them (RankItems). FArgTied holds the tied
+    // overloads, ArgTypedOverload's answer for a call being written.
+    FArgTied: TArray<Integer>;
+    FExpectAlts: TArray<TSemaXType>;
+    // A value typecast to an ordinal type (`Longword(|`): its SizeOf - a
+    // set of exactly that size casts to it (dcc 37; E2089 for another).
+    FCastOrdSize: Int64;
+    // The expected type is a generic parameter constrained to a class
+    // (`class` or a class type) or an interface: `nil` fits it (dcc 37;
+    // E2010 for an unconstrained or a `record` one). GenericNilFits.
+    FExpectGenNil: Boolean;
     // ValueReaches' answers per record type for one ranking (RankItems):
     // 0 being walked, 1 reaches nothing, 2 may reach. FReachCycle: a walk
     // met a record still being walked, so what it found is not final.
@@ -667,6 +695,13 @@ type
     procedure CollectUnitNames;
     procedure AddContextKeywords(const AInfo: TPasCaretInfo);
     // expected-type ranking
+    procedure ResetOperandState;
+    function IsRootTypeX(const AX: TSemaXType): Boolean;
+    procedure AsTargetOf(AOp, AScope: Integer);
+    function GroupIsRelation(AOpen, AClose: Integer): Boolean;
+    function SetConstElemRef(AOp: Integer): TPasComplTypeRef;
+    function GenericNilFits(const AX: TSemaXType;
+      out AIsParam: Boolean): Boolean;
     function ExpectedTypeAt(const AInfo: TPasCaretInfo): TPasComplTypeRef;
     function OperandExpect(AOp, AScope, ADepth: Integer): TPasComplTypeRef;
     function NotOperandExpect(const AOuter: TPasComplTypeRef): TPasComplTypeRef;
@@ -684,6 +719,9 @@ type
     function ProcValueFit(const AItem: TPasComplItem): Integer;
     function RefCatOf(const ARef: TPasComplTypeRef): TSemaTypeCat;
     function ArgExpectAt(ARaw, AScope: Integer): TPasComplTypeRef;
+    procedure ArgTiedAlts(AModel: TPasSemaModel; AMid, ACtx, AArg: Integer;
+      const AFirst: TSemaXType);
+    procedure RankPass;
     function ArgVarShapeFit(const AX: TSemaXType;
       AOv: Integer): TPasComplMatch;
     procedure CastExpect(AMid, ASym: Integer);
@@ -1154,6 +1192,32 @@ begin
 
   // Semantic anchors: innermost node, scope in effect, enclosing routine.
   AInfo.Node := InnermostNodeAt(AInfo.VisToken);
+  // A prefix that lexes as a reserved word right after an accessor word -
+  // `read FOr|` is `read for`, since words are case-insensitive - breaks
+  // the property's parse there: the accessor is the `read` / `write` /
+  // `stored` specifier before it, whatever the prefix spells (the audit's
+  // `read FOriginalValue` with three letters typed was an expression).
+  if (AInfo.Kind = ckIdent) and (LTS.Tokens[AInfo.RawToken].Kind >= tkAnd) then
+  begin
+    LPrevRaw := PrevVisibleRaw(AInfo.RawToken - 1);
+    if (LPrevRaw >= 0) and (LTS.Tokens[LPrevRaw].Kind = tkIdentifier) and
+       (FVisOfRaw[LPrevRaw] >= 0) then
+    begin
+      LNode := InnermostNodeAt(FVisOfRaw[LPrevRaw]);
+      while (LNode <> NIL_NODE) and
+            not (FModel.Tree.Nodes[LNode].Kind in [nkPropSpec, nkPropertyDecl,
+              nkBlock, nkInterfaceSec, nkImplementationSec, nkUnit]) do
+        LNode := FModel.Tree.Nodes[LNode].Parent;
+      if (LNode <> NIL_NODE) and
+         (FModel.Tree.Nodes[LNode].Kind = nkPropSpec) and
+         (FModel.Tree.Nodes[LNode].FirstToken = FVisOfRaw[LPrevRaw]) and
+         (FModel.Tree.Source.VisibleTextEquals(FVisOfRaw[LPrevRaw], 'read') or
+          FModel.Tree.Source.VisibleTextEquals(FVisOfRaw[LPrevRaw], 'write') or
+          FModel.Tree.Source.VisibleTextEquals(FVisOfRaw[LPrevRaw],
+            'stored')) then
+        AInfo.Node := LNode;
+    end;
+  end;
   LNode := AInfo.Node;
   while LNode <> NIL_NODE do
   begin
@@ -1640,6 +1704,16 @@ begin
   else
     begin
       Result.X := FProj.SymDeclTypeX(AMid, ASym);
+      // A true constant (`SECTION_WORDS = [tkA, tkB]`) has no declared
+      // type: the analysis recorded its initializer's - `S + [|` ranks the
+      // set's elements by it.
+      if not XValid(Result.X) and (LM.Symbols[ASym].Kind = skConst) and
+         (LM.Symbols[ASym].TypeNode = NIL_NODE) then
+      begin
+        Result.X := FProj.DeclTypeX(AMid, ASym);
+        if XValid(Result.X) then
+          Exit;
+      end;
       // An inline `array ... of T` or `^T` slot names no type: the
       // declaration's own node is the type (audit A1-22, A1-24).
       LNode := LM.Symbols[ASym].TypeNode;
@@ -2345,6 +2419,7 @@ var
   LRef: TPasComplTypeRef;
   LParX: TSemaXType;
   LNode, LTypeNode, LVarRecMid, LVarRecSym: Integer;
+  LTied: TArray<Integer>;
   LConvs: TArray<TSemaArgConv>;
   LHeads: TArray<TSemaSymbolKind>;
   LTyper: TPasSemaTyper;
@@ -2390,6 +2465,24 @@ begin
     LArgs := 0;
   if LArgs < 0 then
     Exit;
+  // A call being written whose `(` is not closed: the parse runs on into
+  // the next statement, which comes back as trailing nkError arguments -
+  // `Foo([|` counted two and ruled out `Foo(const A: array of T)`.
+  if (ACaretArg >= 0) and (ACall <> NIL_NODE) then
+  begin
+    var LReal := 0;
+    var LAt := 0;
+    LNode := CallFirstArg(FModel.Tree, ACall);
+    while LNode <> NIL_NODE do
+    begin
+      Inc(LAt);
+      if FModel.Tree.Nodes[LNode].Kind <> nkError then
+        LReal := LAt;
+      LNode := FModel.Tree.Nodes[LNode].NextSibling;
+    end;
+    if LReal < LArgs then
+      LArgs := LReal;
+  end;
   if LArgs < ACaretArg + 1 then
     LArgs := ACaretArg + 1;
   // The designator called, read by both walks below.
@@ -2505,6 +2598,7 @@ begin
   for LPass := 0 to 1 do
   begin
     LBestScore := -1;
+    LTied := nil;
     for LCur in LCands do
     begin
       if (LPass = 0) and (LTypeArgs >= 0) and
@@ -2595,10 +2689,19 @@ begin
       begin
         LBestScore := LScore;
         Result := LCur;
-      end;
+        LTied := [LCur];
+      end
+      else if (LScore >= 0) and (LScore = LBestScore) then
+        LTied := LTied + [LCur];
     end;
     if (LBestScore >= 0) or (LTypeArgs < 0) then
+    begin
+      // A call being written: the overloads the written arguments cannot
+      // tell apart (ArgExpectAt ranks by each one's parameter).
+      if (ACaretArg >= 0) and (LBestScore >= 0) then
+        FArgTied := LTied;
       Exit;
+    end;
   end;
 end;
 
@@ -5816,10 +5919,17 @@ begin
   end;
   // A call's argument - the operand right after its `(` or a `,` of its
   // list - expects its parameter's type (ArgExpectAt).
+  // A value parameter and `:=` take every descendant of a root type alike
+  // (FFlatRoot).
   if LTS.Tokens[LOp].Kind in [tkLParen, tkComma] then
-    Exit(ArgExpectAt(LOp, AScope));
+  begin
+    Result := ArgExpectAt(LOp, AScope);
+    FFlatRootPos := not FArgByRef;
+    Exit;
+  end;
   FCompare := LTS.Tokens[LOp].Kind in [tkEqual, tkNotEqual, tkLess, tkGreater,
     tkLessEqual, tkGreaterEqual];
+  FFlatRootPos := LTS.Tokens[LOp].Kind = tkAssign;
   Result := OperatorLeftType(LOp, False);
 end;
 
@@ -6218,8 +6328,17 @@ begin
     begin
       Result := ExprTypeEndingAt(PrevVisibleRaw(AEndRaw - 1), 0, ADepth + 1,
         LInner);
-      if LInner <> LOpen then
-        Exit(ComplNilRef);
+      if (LInner <> LOpen) or not ComplValid(Result) then
+      begin
+        // A comparison or a membership test is a Boolean whatever its
+        // operands are - `(X = nil)`, `(A <> B.C[I])`, operands the walk
+        // cannot type (`nil`, a call's result) included.
+        Result := ComplNilRef;
+        if not GroupIsRelation(LOpen, AEndRaw) or
+           not BridgeName('boolean', LMid, LSym) then
+          Exit;
+        Result.X := XPlain(LMid, LSym);
+      end;
       LBefore := PrevVisibleRaw(LOpen - 1);
     end
     else
@@ -6239,6 +6358,35 @@ begin
     else
       Break;
   ABeforeRaw := LBefore;
+end;
+
+{ Does the grouping paren from raw token AOpen to AClose hold a relation at
+  its own level - `=` `<>` `<` `>` `<=` `>=` `in` `is` outside any nested
+  bracket? Relational operators bind loosest (5.2.1), so one there makes the
+  whole content a Boolean. A `<` / `>` of type arguments (`TList<T>.Create`)
+  would count too: only asked when the content could not be typed. }
+function TPasCompletion.GroupIsRelation(AOpen, AClose: Integer): Boolean;
+var
+  LTS: TPasTokenStream;
+  LRaw, LDepth: Integer;
+begin
+  Result := False;
+  LTS := FModel.Tree.Source.Files[0];
+  LDepth := 0;
+  LRaw := PrevVisibleRaw(AClose - 1);
+  while (LRaw > AOpen) and (LRaw >= 0) do
+  begin
+    case LTS.Tokens[LRaw].Kind of
+      tkRParen, tkRBracket:
+        Inc(LDepth);
+      tkLParen, tkLBracket:
+        Dec(LDepth);
+    else
+      if (LDepth = 0) and (BinaryOpPrec(LTS.Tokens[LRaw].Kind) = 0) then
+        Exit(True);
+    end;
+    LRaw := PrevVisibleRaw(LRaw - 1);
+  end;
 end;
 
 { Is the `(` at raw token AParen a grouping paren rather than a call's or a
@@ -6503,6 +6651,12 @@ begin
       begin
         Result := SetElementRef(OperatorLeftType(LPrev, False), LIsSet);
         FArgNoProcs := LIsSet;
+        if not ComplValid(Result) then
+        begin
+          Result := SetConstElemRef(LPrev);
+          if ComplValid(Result) then
+            FArgNoProcs := True;
+        end;
       end;
     // An operand of a set operator (`S + [|`, `S - [A, |`, `S * [|`) or of
     // an array concatenation (`Arr + [|`): the left operand's element.
@@ -6511,6 +6665,12 @@ begin
       begin
         Result := SetElementRef(LeftOperandType(LPrev), LIsSet);
         FArgNoProcs := LIsSet;
+        if not ComplValid(Result) then
+        begin
+          Result := SetConstElemRef(LPrev);
+          if ComplValid(Result) then
+            FArgNoProcs := True;
+        end;
       end;
     tkLParen, tkComma:
       begin
@@ -6531,6 +6691,104 @@ begin
             FArgNoProcs := True;
         end;
       end;
+  end;
+end;
+
+{ The element of a true set constant left of the set operator at raw token
+  AOp - `SECTION_WORDS + [|` with `SECTION_WORDS = [tkA, tkB]`: such a
+  constant has no declared type, and the analysis records none for a set
+  constructor, so its first element names the element type - an
+  enumeration value's enumeration. Also a field or variable typed `set of T`
+  inline (`F.Flags := [|`, `F.Flags + [|`): T. ComplNilRef for anything
+  else. }
+function TPasCompletion.SetConstElemRef(AOp: Integer): TPasComplTypeRef;
+var
+  LNode, LBefore, LMid, LSym, LDecl, LInit, LCh, LBound: Integer;
+  LM: TPasSemaModel;
+  LExt: TPasExtRef;
+begin
+  Result := ComplNilRef;
+  LNode := DesignatorEndingAt(PrevVisibleRaw(AOp - 1), LBefore);
+  if (LNode = NIL_NODE) or not DesignatorSymOf(LNode, 0, LMid, LSym) or
+     not SymModelOf(LMid, 'SetConstElemRef', LM) then
+    Exit;
+  // A field or variable typed `set of T` inline (`Flags: set of TKind`)
+  // names no set type to take the element from: T is the element.
+  LInit := LM.Symbols[LSym].TypeNode;
+  if (LInit <> NIL_NODE) and (LM.Tree.Nodes[LInit].Kind = nkSetType) and
+     (LM.Symbols[LSym].Kind in [skVar, skField, skParam, skProperty]) then
+  begin
+    LCh := LM.Tree.Nodes[LInit].FirstChild;
+    if (LCh = NIL_NODE) or
+       not (LM.Tree.Nodes[LCh].Kind in [nkIdent, nkMember]) then
+      Exit;
+    if LMid >= 0 then
+    begin
+      Result.X := FProj.ResolveTypeExpr(LMid, LCh);
+      if XValid(Result.X) then
+        Result.X := FProj.CanonTypeX(Result.X);
+    end
+    else
+    begin
+      Result := ResolveTypeRefNode(LCh, 0);
+      Result.IsTypeRef := False;
+    end;
+    Exit;
+  end;
+  if (LM.Symbols[LSym].Kind <> skConst) or
+     (LM.Symbols[LSym].TypeNode <> NIL_NODE) then
+    Exit;
+  LDecl := LM.Symbols[LSym].DeclNode;
+  if (LDecl = NIL_NODE) or (LM.Tree.Nodes[LDecl].Parent = NIL_NODE) or
+     (LM.Tree.Nodes[LM.Tree.Nodes[LDecl].Parent].Kind <> nkConstDecl) then
+    Exit;
+  // The initializer: the declaration's last child short of its hints.
+  LInit := NIL_NODE;
+  LCh := LM.Tree.Nodes[LM.Tree.Nodes[LDecl].Parent].FirstChild;
+  while LCh <> NIL_NODE do
+  begin
+    if LM.Tree.Nodes[LCh].Kind <> nkDirective then
+      LInit := LCh;
+    LCh := LM.Tree.Nodes[LCh].NextSibling;
+  end;
+  if (LInit = NIL_NODE) or (LInit = LDecl) or
+     (LM.Tree.Nodes[LInit].Kind <> nkSetCtor) then
+    Exit;
+  LCh := LM.Tree.Nodes[LInit].FirstChild;
+  if (LCh <> NIL_NODE) and (LM.Tree.Nodes[LCh].Kind = nkRange) then
+    LCh := LM.Tree.Nodes[LCh].FirstChild;
+  if (LCh = NIL_NODE) or (LM.Tree.Nodes[LCh].Kind <> nkIdent) then
+    Exit;
+  // The buffer's own constant: its element typed as any operand of the
+  // buffer is - another unit's enumeration value included.
+  if LMid < 0 then
+  begin
+    Result := DesignatorType(LCh, 0);
+    if Result.IsTypeRef or (RefCatOf(Result) <> tcEnum) and
+       (Result.OvSym = NIL_SYM) then
+      Result := ComplNilRef;
+    Exit;
+  end;
+  LBound := NIL_SYM;
+  if LCh < Length(LM.RefMap) then
+    LBound := LM.RefMap[LCh];
+  if LBound <> NIL_SYM then
+  begin
+    if (LM.Symbols[LBound].Kind <> skEnumValue) or
+       (LM.Symbols[LBound].TypeSym = NIL_SYM) then
+      Exit;
+    if LMid >= 0 then
+      Result.X := FProj.CanonTypeX(XPlain(LMid, LM.Symbols[LBound].TypeSym))
+    else
+      Result.OvSym := LM.Symbols[LBound].TypeSym;
+  end
+  else if LM.ExtRefMap.TryGetValue(LCh, LExt) and (LExt.UnitId >= 0) then
+  begin
+    LM := ProjModel(LExt.UnitId, 'SetConstElemRef');
+    if (LM.Symbols[LExt.Sym].Kind = skEnumValue) and
+       (LM.Symbols[LExt.Sym].TypeSym <> NIL_SYM) then
+      Result.X := FProj.CanonTypeX(XPlain(LExt.UnitId,
+        LM.Symbols[LExt.Sym].TypeSym));
   end;
 end;
 
@@ -7076,6 +7334,7 @@ begin
       Result.X := XPlain(LMid, LSym);
     Exit;
   end;
+  FArgTied := nil;
   LSel := ArgTypedOverload(LMid, LSym, LCtx, LCallNode, 0, LArgs);
   if LMid >= 0 then
     LParams := FProj.XParamSyms(LMid, LSel)
@@ -7108,6 +7367,7 @@ begin
         skGenericParam) then
     begin
       Result.X := LX;
+      ArgTiedAlts(LM, LMid, LCtx, LArgs, LX);
       Exit;
     end;
   end
@@ -7136,6 +7396,68 @@ begin
     if (LBound <> NIL_SYM) and (LM.Symbols[LBound].Kind = skGenericParam) then
       FArgNoProcs := True;
   end;
+end;
+
+{ The overloads ArgTypedOverload left tied (FArgTied) for argument AArg of a
+  project routine family of AModel (AMid; ACtx its instantiation): when they
+  take different types there - `SetValue('Name', |` over Char, Byte,
+  Boolean, string, Double ... - each type into FExpectAlts, AFirst (the
+  chosen overload's) first, and RankItems gives an item its best fit over
+  them; the first one alone made every Byte and Boolean wrong. Only where
+  each takes the argument alike - by value or each by reference, a typed
+  parameter, no open array, no generic parameter's type; at most 16. }
+procedure TPasCompletion.ArgTiedAlts(AModel: TPasSemaModel;
+  AMid, ACtx, AArg: Integer; const AFirst: TSemaXType);
+const
+  MAX_ALTS = 16;
+var
+  LAlts: TArray<TSemaXType>;
+  LParams: TArray<Integer>;
+  LPar, LTypeNode: Integer;
+  LX: TSemaXType;
+  LOpenArr, LOfConst, LSeen: Boolean;
+begin
+  FExpectAlts := nil;
+  if Length(FArgTied) < 2 then
+    Exit;
+  LAlts := [FProj.CanonTypeX(AFirst)];
+  for var LCand in FArgTied do
+  begin
+    LParams := FProj.XParamSyms(AMid, LCand);
+    if AArg > High(LParams) then
+      Exit;
+    LPar := LParams[AArg];
+    if (ParamIsByRef(AModel, LPar) <> FArgByRef) or
+       ParamIsUntyped(AModel, LPar) then
+      Exit;
+    LTypeNode := AModel.Symbols[LPar].TypeNode;
+    if (LTypeNode = NIL_NODE) or
+       (AModel.Tree.Nodes[LTypeNode].Kind = nkArrayType) then
+      Exit;
+    LX := FProj.ParamFitTypeX(AMid, LPar, ACtx, LOpenArr, LOfConst);
+    if not XValid(LX) or LOpenArr or
+       (ProjModel(LX.UnitId, 'ArgTiedAlts').Symbols[LX.Sym].Kind =
+        skGenericParam) then
+      Exit;
+    LX := FProj.CanonTypeX(LX);
+    if not XValid(LX) then
+      Exit;
+    LSeen := False;
+    for var LHad in LAlts do
+      if FProj.XSameType(LHad, LX) then
+      begin
+        LSeen := True;
+        Break;
+      end;
+    if not LSeen then
+    begin
+      if Length(LAlts) >= MAX_ALTS then
+        Exit;
+      LAlts := LAlts + [LX];
+    end;
+  end;
+  if Length(LAlts) > 1 then
+    FExpectAlts := LAlts;
 end;
 
 { The operand of a value typecast to the type (AMid, ASym) - `Int64(|`,
@@ -7173,8 +7495,15 @@ begin
   if XValid(LX) then
     LCat := FProj.XCatOf(LX);
   case LCat of
+    // A set of exactly the ordinal's size casts to it (`Longword(S)` for a
+    // set of 0..31, `Byte(S)` for one of an enumeration of up to 8 values;
+    // dcc 37 - E2089 for another size).
     tcInteger, tcChar, tcBoolean, tcEnum:
-      FExpectOrdinal := True;
+      begin
+        FExpectOrdinal := True;
+        if XValid(LX) then
+          FCastOrdSize := CastSizeOf(LX);
+      end;
     tcClass, tcInterface, tcPointer, tcClassOf, tcProc:
       FCastRef := LCat;
     tcFloat, tcRecord:
@@ -7900,8 +8229,10 @@ begin
   if FProj.XConvX(FExpect, LX) <> scNone then
     Exit(True);
   case FProj.XCatOf(LX) of
-    tcInteger, tcFloat, tcBoolean, tcChar, tcString, tcEnum, tcSet, tcNil,
-    tcFile:
+    // A string reaches a Char through `[`: `CharInSet(S[I], ...)`.
+    tcString:
+      Exit(FExpectCat = tcChar);
+    tcInteger, tcFloat, tcBoolean, tcChar, tcEnum, tcSet, tcNil, tcFile:
       Exit(False);
     tcArray:
       begin
@@ -8292,7 +8623,7 @@ begin
       Exit;
     if (FExpectCat in [tcClass, tcInterface, tcPointer, tcProc, tcClassOf])
        or ((FExpectCat = tcArray) and XValid(FExpect) and
-           FProj.IsDynArrayTypeX(FExpect)) then
+           FProj.IsDynArrayTypeX(FExpect)) or FExpectGenNil then
       Result := cmCompatible;
     Exit;
   end;
@@ -8620,6 +8951,11 @@ begin
       if FModel.Symbols[LOv].TypeCat in NOTHING_TO_REACH then
         Exit(cmOther);
     end;
+    // A set of the ordinal cast's size (CastExpect's FCastOrdSize).
+    if (FCastOrdSize > 0) and XValid(LX) and
+       (FProj.XCatOf(FProj.CanonTypeX(LX)) = tcSet) and
+       (CastSizeOf(LX) = FCastOrdSize) then
+      Exit(cmCompatible);
     Exit(OrdinalFit(LX));
   end;
   if FCastRef <> tcUnknown then
@@ -8648,8 +8984,12 @@ begin
   if not XValid(LX) or not XValid(FExpect) then
     Exit;
   case FProj.XConvX(FExpect, LX) of
+    // TObject / IInterface itself gains nothing over a descendant there.
     scIdentical:
-      Exit(cmExact);
+      if FFlatRoot then
+        Exit(cmCompatible)
+      else
+        Exit(cmExact);
     scImplicit:
       Exit(ImplicitFit(LX));
   end;
@@ -8732,8 +9072,55 @@ begin
   end;
 end;
 
-// Every collected item against the expected type (see MatchOf).
+{ Every collected item against the expected type (see MatchOf) - against
+  each of FExpectAlts when a call's tied overloads take different types
+  there (ArgTiedAlts), an item keeping its best fit and, within it, its
+  nearest Conv. }
 procedure TPasCompletion.RankItems;
+var
+  LBest: TArray<TPasComplMatch>;
+  LBestConv: TArray<Integer>;
+  LSaveX: TSemaXType;
+  LSaveCat: TSemaTypeCat;
+  LIdx, LAlt: Integer;
+begin
+  if Length(FExpectAlts) < 2 then
+  begin
+    RankPass;
+    Exit;
+  end;
+  LSaveX := FExpect;
+  LSaveCat := FExpectCat;
+  SetLength(LBest, FCount);
+  SetLength(LBestConv, FCount);
+  try
+    for LAlt := 0 to High(FExpectAlts) do
+    begin
+      FExpect := FExpectAlts[LAlt];
+      FExpectCat := FProj.XCatOf(FExpect);
+      RankPass;
+      for LIdx := 0 to FCount - 1 do
+        if (LAlt = 0) or (Ord(FItems[LIdx].Match) < Ord(LBest[LIdx])) or
+           ((FItems[LIdx].Match = LBest[LIdx]) and
+            (FItems[LIdx].Conv < LBestConv[LIdx])) then
+        begin
+          LBest[LIdx] := FItems[LIdx].Match;
+          LBestConv[LIdx] := FItems[LIdx].Conv;
+        end;
+    end;
+    for LIdx := 0 to FCount - 1 do
+    begin
+      FItems[LIdx].Match := LBest[LIdx];
+      FItems[LIdx].Conv := LBestConv[LIdx];
+    end;
+  finally
+    FExpect := LSaveX;
+    FExpectCat := LSaveCat;
+  end;
+end;
+
+// One ranking of every item against FExpect (RankItems).
+procedure TPasCompletion.RankPass;
 var
   LIdx, LConv: Integer;
   LBoolLits: Boolean;
@@ -8778,6 +9165,14 @@ begin
     // there most, and over a thousand type names share its fit - the
     // keywords before them.
     if (FTypePos = tpTypeDecl) and not FTypeAfterType and
+       (FItems[LIdx].Bucket <> cbKeyword) then
+      Inc(LConv);
+    // After `is` / `as` a class-reference value (`ClassType`, a
+    // `Default*Class` function) leads, below the types of its fit: the
+    // types are what is written there.
+    if (FTypePos = tpIsAs) and
+       not (FItems[LIdx].Kind in [skType, skBuiltinType, skUnitRef,
+         skGenericParam]) and (FItems[LIdx].Bucket <> cbUnitName) and
        (FItems[LIdx].Bucket <> cbKeyword) then
       Inc(LConv);
     if LConv >= CConvDistVariant then
@@ -9641,6 +10036,8 @@ begin
     FTypeAs := LTS.Tokens[LOp].Kind = tkAs;
     FTypeAfterIs := LKind = tkIs;
     IsAsLeftOf(LOp);
+    if FTypeAs then
+      AsTargetOf(LOp, AInfo.Scope);
     Exit(tpIsAs);
   end;
   // A property's `implements |`, `implements IA, |`: an interface.
@@ -9771,6 +10168,93 @@ begin
   else if LOv <> NIL_SYM then
     FTypeLeftCat := FModel.Symbols[LOv].TypeCat;
   FTypeRank := FTypeLeftCat in [tcClass, tcInterface];
+end;
+
+{ The type an `as` expression at raw operator AOp must be assignable to -
+  `Acc := AObj as |` Acc's, `Foo(AObj as |)` the parameter's - into
+  FAsTarget / FAsTargetCat, when it is a class or an interface other than
+  TObject and IInterface (which every class, every interface, is): dcc 37
+  rejects a cast whose type does not convert to it (E2010 for an ancestor
+  and an unrelated class alike), so TypePosFit ranks the types against it.
+  Only for `:=` and a value parameter, the positions FFlatRootPos marks; the
+  probe's other answers are about that outer operand and are dropped
+  (ResetOperandState). }
+procedure TPasCompletion.AsTargetOf(AOp, AScope: Integer);
+var
+  LNode, LBefore, LOv: Integer;
+  LRef: TPasComplTypeRef;
+  LX: TSemaXType;
+  LAt: Boolean;
+begin
+  if FProj = nil then
+    Exit;
+  LNode := DesignatorEndingAt(PrevVisibleRaw(AOp - 1), LBefore);
+  if (LNode = NIL_NODE) or (LBefore < 1) then
+    Exit;
+  // `X := (Y as |).Member`: a cast in a grouping paren is mostly read
+  // through - its own type is not what is assigned (the frozen audit's
+  // `(AForm as TFooForm).Items`, the `)` not yet typed).
+  if (FModel.Tree.Source.Files[0].Tokens[LBefore].Kind = tkLParen) and
+     IsGroupingParen(LBefore) then
+    Exit;
+  LRef := OperandExpect(LBefore, AScope, 0);
+  LAt := FFlatRootPos and not FArgByRef;
+  LX := RefValueX(LRef, LOv);
+  ResetOperandState;
+  if not LAt or not XValid(LX) then
+    Exit;
+  LX := FProj.CanonTypeX(LX);
+  if not XValid(LX) or IsRootTypeX(LX) or
+     not (FProj.XCatOf(LX) in [tcClass, tcInterface]) then
+    Exit;
+  FAsTarget := LX;
+  FAsTargetCat := FProj.XCatOf(LX);
+  FTypeRank := True;
+end;
+
+{ Is AX a generic parameter (AIsParam), and one `nil` is assignable to - its
+  constraints name a class or an interface, or `class` (which
+  ConstraintsOfParamX answers as TObject)? dcc 37: `Result := nil` compiles
+  for `<I: IInterface>` and `<C: class>`, is E2010 for `<T>` and
+  `<T: record>`. }
+function TPasCompletion.GenericNilFits(const AX: TSemaXType;
+  out AIsParam: Boolean): Boolean;
+var
+  LM: TPasSemaModel;
+begin
+  Result := False;
+  AIsParam := False;
+  if (FProj = nil) or not XValid(AX) or (AX.UnitId < 0) then
+    Exit;
+  LM := FProj.Model(AX.UnitId);
+  if (LM = nil) or (AX.Sym = NIL_SYM) or
+     (LM.Symbols[AX.Sym].Kind <> skGenericParam) then
+    Exit;
+  AIsParam := True;
+  for var LC in FProj.ParamConstraintTypesX(AX) do
+    if XValid(LC) and
+       (FProj.XCatOf(FProj.CanonTypeX(LC)) in [tcClass, tcInterface]) then
+      Exit(True);
+end;
+
+{ Is AX (canonical or not) System's TObject or IInterface - the roots every
+  class, every interface converts to? }
+function TPasCompletion.IsRootTypeX(const AX: TSemaXType): Boolean;
+var
+  LX: TSemaXType;
+  LM: TPasSemaModel;
+begin
+  Result := False;
+  if (FProj = nil) or not XValid(AX) then
+    Exit;
+  LX := FProj.CanonTypeX(AX);
+  if not XValid(LX) or (LX.Inst <> NIL_INST) then
+    Exit;
+  LM := FProj.Model(LX.UnitId);
+  if (LM = nil) or (LM.UnitNameLower <> 'system') then
+    Exit;
+  Result := (LM.Symbols[LX.Sym].NameLower = 'tobject') or
+    (LM.Symbols[LX.Sym].NameLower = 'iinterface');
 end;
 
 { A generic constraint: the caret after a type parameter's `:` (`<T: |>`),
@@ -10508,8 +10992,63 @@ begin
         Result := cmLeads
       else
         Result := DescentFit(LX, FTypeBase);
+    // `as` with a target (AsTargetOf): the cast's type must convert to it -
+    // the target itself fit 0, a descendant (an interface's: an interface
+    // descending from it, a class implementing it) fit 1, anything else
+    // wrong (E2010; a class to an interface target or the other way E2010 /
+    // E2015). What the left operand rules out stays wrong.
     tpIsAs:
-      if LCat = tcInterface then
+      if XValid(FAsTarget) then
+      begin
+        if not XValid(LX) then
+          Exit(cmLeads);
+        if FAsTargetCat = tcClass then
+        begin
+          if LCat <> tcClass then
+            Exit(cmOther);
+          case FProj.XDescentDistX(LX, FAsTarget, LDist) of
+            xdYes:
+              if LDist = 0 then
+                Result := cmExact
+              else
+                Result := cmCompatible;
+            xdNo:
+              Exit(cmOther);
+          else
+            Exit(cmLeads);
+          end;
+        end
+        else if LCat = tcInterface then
+          case FProj.XDescentDistX(LX, FAsTarget, LDist) of
+            xdYes:
+              if LDist = 0 then
+                Result := cmExact
+              else
+                Result := cmCompatible;
+            xdNo:
+              Exit(cmOther);
+          else
+            Exit(cmLeads);
+          end
+        else if LCat = tcClass then
+          case FProj.XImplementsX(LX, FAsTarget) of
+            xdYes:
+              Result := cmCompatible;
+            xdNo:
+              Exit(cmOther);
+          else
+            Exit(cmLeads);
+          end
+        else
+          Exit(cmOther);
+        // An unrelated class on the left: `O as T` itself is E2010.
+        if (LCat = tcClass) and (FTypeLeftCat = tcClass) and
+           XValid(FTypeLeft) and
+           (FProj.XDescentDistX(LX, FTypeLeft, LDist) = xdNo) and
+           (FProj.XDescentDistX(FTypeLeft, LX, LDist) = xdNo) then
+          Result := cmOther;
+      end
+      else if LCat = tcInterface then
       begin
         if FTypeAs then
           Result := cmCompatible;
@@ -10806,6 +11345,47 @@ begin
   end;
 end;
 
+{ Everything OperandExpect and its helpers decide about the operand at the
+  caret, back to "nothing expected": before a completion, and after the
+  `as` target's probe (AsTargetOf), whose answer is about another operand. }
+procedure TPasCompletion.ResetOperandState;
+begin
+  FExpect := XNil;
+  FExpectCat := tcUnknown;
+  FExpectOv := NIL_SYM;
+  FNoProcedures := False;
+  FArgNoProcs := False;
+  FArgByRef := False;
+  FArgIncDec := False;
+  FArgSetLen := False;
+  FArgAssigned := False;
+  FExpectOrdinal := False;
+  FConstOnly := False;
+  FExitNoValue := False;
+  FBoundType := False;
+  FCaseSel := False;
+  FCondLike := False;
+  FCompare := False;
+  FExpectEnum := False;
+  FEnumElem := XNil;
+  FCastRef := tcUnknown;
+  FCastValue := tcUnknown;
+  FCastX := XNil;
+  FCastSize := -1;
+  FCastOrdSize := -1;
+  FExpectAddr := False;
+  FExpectWith := False;
+  FExpectRaise := False;
+  FRaiseBase := XNil;
+  FExpectNumber := False;
+  FArgOpenElem := ComplNilRef;
+  FFlatRootPos := False;
+  FFlatRoot := False;
+  FExpectGenNil := False;
+  FArgTied := nil;
+  FExpectAlts := nil;
+end;
+
 function TPasCompletion.CompleteAt(ALine, ACol: Integer;
   out ACaret: TPasCaretInfo; out AContext: TPasComplContext;
   out AItems: TArray<TPasComplItem>): Boolean;
@@ -10869,34 +11449,9 @@ begin
   // first (RankItems), and a procedure is no operand unless the left side
   // is of a procedural type - or of a type whose category is not known.
   // After a dot (`X := Obj.|`) the members are ranked the same way.
-  FExpect := XNil;
-  FExpectCat := tcUnknown;
-  FExpectOv := NIL_SYM;
-  FNoProcedures := False;
-  FArgNoProcs := False;
-  FArgByRef := False;
-  FArgIncDec := False;
-  FArgSetLen := False;
-  FArgAssigned := False;
-  FExpectOrdinal := False;
-  FConstOnly := False;
-  FExitNoValue := False;
-  FBoundType := False;
-  FCaseSel := False;
-  FCondLike := False;
-  FCompare := False;
-  FExpectEnum := False;
-  FEnumElem := XNil;
-  FCastRef := tcUnknown;
-  FCastValue := tcUnknown;
-  FCastX := XNil;
-  FCastSize := -1;
-  FExpectAddr := False;
-  FExpectWith := False;
-  FExpectRaise := False;
-  FRaiseBase := XNil;
-  FExpectNumber := False;
-  FArgOpenElem := ComplNilRef;
+  ResetOperandState;
+  FAsTarget := XNil;
+  FAsTargetCat := tcUnknown;
   // A ranked type position (`is` / `as`, a handler, a generic argument or
   // constraint, an attribute) is a type position whatever the token rules
   // made of it: `O is |` and `[|]` read as expressions, `on |` too.
@@ -11013,6 +11568,23 @@ begin
       FExpectCat := FProj.XCatOf(FExpect)
     else if FExpectOv <> NIL_SYM then
       FExpectCat := FModel.Symbols[FExpectOv].TypeCat;
+    FFlatRoot := FFlatRootPos and not FArgByRef and IsRootTypeX(FExpect);
+    // A value of a generic parameter's type is never a procedure.
+    // One only the buffer types is judged through its last-good twin.
+    if FExpectCat = tcUnknown then
+    begin
+      var LGenParam: Boolean;
+      var LGenX := FExpect;
+      if not XValid(LGenX) and (FExpectOv <> NIL_SYM) and
+         (FModel.Symbols[FExpectOv].Kind = skGenericParam) then
+      begin
+        LGenX := OwnModelParamX(FExpectOv);
+        FArgNoProcs := True;
+      end;
+      FExpectGenNil := GenericNilFits(LGenX, LGenParam);
+      if LGenParam then
+        FArgNoProcs := True;
+    end;
     FNoProcedures := not (FExpectCat in [tcUnknown, tcProc]) or FArgNoProcs or
       FExpectOrdinal or FConstOnly or FExpectEnum or (FCastRef <> tcUnknown) or
       (FCastValue <> tcUnknown) or FExpectAddr or FExpectWith or FExpectRaise;
