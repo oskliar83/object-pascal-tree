@@ -2154,6 +2154,9 @@ type
       own type, 0 nearest .. CConvDistVariant - the grade inside "converts"
       that completion orders by; TSemaConvView.ConvDistance has the rules. }
     function XConvDistX(const ADst, ASrc: TSemaXType): Integer;
+    { An ordinal type's value range (TSemaConvView.OrdRange) - False when
+      AX is no ordinal or its bounds are not known. }
+    function XOrdRangeX(const AX: TSemaXType; out ALo, AHi: Int64): Boolean;
     { A user conversion of ASrc to ADst (both canonical, one a record)
       through a `class operator Implicit` of either (9.3.1, 6.3.1): an
       operator `Implicit(A: Q): R` of ADst or of ASrc converts when ASrc
@@ -14174,6 +14177,12 @@ end;
 function TPasSemaProject.XConvDistX(const ADst, ASrc: TSemaXType): Integer;
 begin
   Result := FConv.ConvDistance(ADst, ASrc);
+end;
+
+function TPasSemaProject.XOrdRangeX(const AX: TSemaXType; out ALo,
+  AHi: Int64): Boolean;
+begin
+  Result := FConv.OrdRange(AX, ALo, AHi);
 end;
 
 function TPasSemaProject.ConvNoteX(const ADst, ASrc: TSemaXType): string;

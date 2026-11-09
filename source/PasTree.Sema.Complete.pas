@@ -244,9 +244,10 @@ type
     declaration contexts too: a property's `implements |`, a helper's
     `class helper for |` / `record helper for |`, a type declaration's
     right side (`T = |`, `T = type |`; a subrange's low bound stays
-    listed there). }
+    listed there), `class of |` (a class) and `set of |` (an ordinal of at
+    most 256 values, 0..255). }
   TPasComplTypePos = (tpNone, tpIsAs, tpHandler, tpGenArg, tpConstraint,
-    tpAttribute, tpImplements, tpHelper, tpTypeDecl);
+    tpAttribute, tpImplements, tpHelper, tpTypeDecl, tpClassOf, tpSetOf);
 
   TPasCallInfo = record
     OpenLine: Integer;    // 1-based position of the call's '('
@@ -5116,6 +5117,18 @@ begin
       else
         Result := ccType;
       end;
+    tkCaret:
+      // A pointer type's `^` (`P: ^|`, `T = ^|`, `array of ^|`) names a
+      // type. In an expression `^` follows a designator (`P^.`), and `^A`
+      // written as a character is one tkCaretChar.
+      begin
+        LPrev := PrevVisibleRaw(LPrev - 1);
+        if (LPrev >= 0) and (LTS.Tokens[LPrev].Kind in [tkColon, tkEqual,
+           tkOf]) then
+          Result := ccType
+        else
+          Result := ccExpression;
+      end;
     tkEqual:
       // `TFoo = |` in a type decl is a type; `= |` anywhere else - a const
       // initializer, a parameter DEFAULT, an aggregate value, a comparison -
@@ -5227,7 +5240,12 @@ end;
 
 { A ccType position right after a colon - every declaration's `Name: |`
   (ClassifyAt has already told those from a case label's and an aggregate
-  field's colon). }
+  field's colon) - and a type constructor's tail after `of` (`array of |`,
+  `array[..] of |`, `set of |`, `class of |`, `file of |`; ClassifyAt made
+  a `case`'s `of` an expression): the list there is for picking a type too
+  (pastree-lsp, 2026-11-09: `arr: array of acc|` listed every ACCESS_
+  constant), and `set of 0..9` is written by hand - and a pointer type's
+  `^|` (ClassifyAt made it ccType after a `:`, `=` or `of`). }
 function TPasCompletion.ColonTypeAt(const AInfo: TPasCaretInfo): Boolean;
 var
   LPrev: Integer;
@@ -5237,7 +5255,8 @@ begin
   else
     LPrev := AInfo.RawToken;
   Result := (LPrev >= 0) and
-    (FModel.Tree.Source.Files[0].Tokens[LPrev].Kind = tkColon);
+    (FModel.Tree.Source.Files[0].Tokens[LPrev].Kind in [tkColon, tkOf,
+     tkCaret]);
 end;
 
 { The heritage list a ccType caret stands in: `= class(|`, `class(TA, |`
@@ -9236,6 +9255,23 @@ begin
       end;
     end;
   end;
+  // `class of |` names a class (E2021 otherwise), `set of |` an ordinal
+  // of at most 256 values in 0..255 (E2028, E2001) - ClassifyAt made both
+  // ccType.
+  if (LKind = tkOf) and (FContext = ccType) then
+    case UpChainKind(AInfo.Node, [nkClassOf, nkSetType, nkArrayType,
+      nkFileType]) of
+      nkClassOf:
+        begin
+          FTypeRank := True;
+          Exit(tpClassOf);
+        end;
+      nkSetType:
+        begin
+          FTypeRank := True;
+          Exit(tpSetOf);
+        end;
+    end;
   // An attribute's name: right after the group's `[` or a `,` of it - the
   // parser made the brackets an nkAttrGroup (before a declaration), not a
   // set constructor or an index; a name being typed is the nkAttribute's
@@ -9622,8 +9658,11 @@ begin
   case FTypePos of
     tpIsAs, tpConstraint:
       Result := ACat in [tcUnknown, tcClass, tcInterface];
-    tpHandler, tpAttribute:
+    tpHandler, tpAttribute, tpClassOf:
       Result := ACat in [tcUnknown, tcClass];
+    // A set's base: an ordinal type (TypePosFit ranks its size).
+    tpSetOf:
+      Result := ACat in [tcUnknown, tcInteger, tcBoolean, tcChar, tcEnum];
     // `implements` names an interface (E2205 for a class).
     tpImplements:
       Result := ACat in [tcUnknown, tcInterface];
@@ -9845,8 +9884,34 @@ begin
             if FProj.XSameType(LX, LFirst) then
               Exit(cmExact);
       end;
-    tpHelper, tpTypeDecl:
+    tpHelper, tpTypeDecl, tpClassOf:
       Result := cmCompatible;
+    // A set's base: one whose values lie in 0..255 fits; a wider one
+    // (Integer, Word, a 16-bit Char - W1050 reduces that one to a byte)
+    // is wrong; a range the analysis cannot tell leads. A builtin with no
+    // System twin to read the range from goes by its name: Byte, Boolean
+    // and AnsiChar are the ones of 0..255 (TPasSemaTyper.CheckSetCardinality).
+    tpSetOf:
+      begin
+        var LLo, LHi: Int64;
+        if XValid(LX) and FProj.XOrdRangeX(LX, LLo, LHi) then
+        begin
+          if (LLo >= 0) and (LHi <= 255) then
+            Result := cmCompatible
+          else
+            Result := cmOther;
+        end
+        else if AItem.Kind = skBuiltinType then
+        begin
+          if SameText(AItem.Name, 'Byte') or SameText(AItem.Name, 'Boolean')
+             or SameText(AItem.Name, 'AnsiChar') then
+            Result := cmCompatible
+          else
+            Result := cmOther;
+        end
+        else
+          Result := cmLeads;
+      end;
     tpConstraint:
       Result := cmCompatible;
     tpHandler, tpAttribute:
