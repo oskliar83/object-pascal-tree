@@ -347,9 +347,29 @@ type
     // after `interface(`, nkError anywhere else. A class's list takes a class
     // and interfaces, an interface's interfaces alone.
     FHeritage: TPasNodeKind;
+    // The heritage list's first entry (`class(|`), where a class stands -
+    // an interface there is E2021; after a comma the interfaces (a class is
+    // E2205).
+    FHeritageFirst: Boolean;
     // The nkTypeDecl that heritage list belongs to - the type being declared,
-    // which cannot be its own ancestor; NIL_NODE outside one.
+    // which cannot be its own ancestor; NIL_NODE outside one. Also the type
+    // declared at `T = |` and `TH = class helper for |`: dcc 37 rejects
+    // `T = T` (E2086) and a helper for itself (E2021 / E2474) - a type names
+    // itself only through `^` or `class of`, which leave this NIL_NODE.
     FHeritageDecl: Integer;
+    // A type position that takes a helper: a generic argument, a pointer's
+    // base, a type declaration's right side (`T = THelper`, `T = type
+    // THelper`). Everywhere else a type is named a helper is E2527 (a
+    // declaration), E2021 / E2474 (a heritage list, a helper's type), E2015
+    // (`is`, `as`) - dcc 37, pastree-lsp audit 2026-11-09.
+    FHelperOk: Boolean;
+    // A type position where the compiler's own simple types (Integer,
+    // Boolean, string, Double, ...) are named most: a declaration's type,
+    // an array's element, a pointer's base, a generic argument. They take
+    // Conv 0 (the ones written most; the other builtins 1, System's aliases
+    // of them 2), every other item Conv 3
+    // (BuiltinTypesFirst).
+    FBuiltinFirst: Boolean;
     // The type the caret's operand must fit (ExpectedTypeAt), canonical, in
     // project space; XNil when the position expects nothing knowable. Its
     // category, read once. A type only the overlay knows (declared since the
@@ -717,6 +737,12 @@ type
     function TypeItemX(const AItem: TPasComplItem;
       out ACat: TSemaTypeCat): TSemaXType;
     function TypePosFit(const AItem: TPasComplItem): TPasComplMatch;
+    function PrevTokenKindAt(const AInfo: TPasCaretInfo): TPasTokenKind;
+    function HeritageFit(const AItem: TPasComplItem): TPasComplMatch;
+    function IsHelperSym(AModel: TPasSemaModel; ASym: Integer): Boolean;
+    function AliasCatOf(AMid, ASym: Integer): TSemaTypeCat;
+    function BuiltinTypeRank(const AItem: TPasComplItem): Integer;
+    procedure BuiltinTypesFirst;
     // declaration contexts
     function ImplementsAt(const AInfo: TPasCaretInfo; APrev: Integer): Boolean;
     procedure ImplementsFirstOf(const AInfo: TPasCaretInfo);
@@ -751,6 +777,10 @@ type
       scope instead of Decl's members (pastree-lsp, 2026-10-22). Nobody
       invokes completion inside a `.)` written as a bracket; positions left of
       the caret, the caret's own included, are unchanged.
+      A caret between a `^` and a `;`, `)` or `,` gets a space there too: `^;`
+      lexes as one caret character literal (`P: ^|;`, `T = ^|;`, `(A: ^|)`),
+      and a caret inside a literal lists nothing (pastree-lsp audit,
+      2026-11-09). A caret character written as `^;` is never completed.
       A caret PAST the line's end (an editor's virtual space) gets the blanks
       the editor shows there: RAD Studio keeps no trailing blank by default,
       so after `inherited ` the buffer holds `inherited` with the caret one
@@ -913,8 +943,10 @@ begin
   if LPos > LEnd then
     Exit(Copy(AText, 1, LEnd - 1) + StringOfChar(' ', LPos - LEnd) +
       Copy(AText, LEnd, MaxInt));
-  if (LPos < LEnd) and (AText[LPos] = ')') and
-     (AText[LPos - 1] = '.') then
+  if (LPos < LEnd) and
+     (((AText[LPos] = ')') and (AText[LPos - 1] = '.')) or
+      (CharInSet(AText[LPos], [';', ')', ',']) and
+       (AText[LPos - 1] = '^'))) then
     Result := Copy(AText, 1, LPos - 1) + ' ' + Copy(AText, LPos, MaxInt);
 end;
 
@@ -3755,28 +3787,21 @@ begin
         begin
           if not TypePosAdmits(LM.Symbols[ASym].TypeCat) then
             Exit;
-          // A position that takes one category or a few: a helper is none
-          // of them (dcc 37: `O is THelper` is E2015 for a class and a
-          // record helper alike), and an alias the symbol does not
-          // categorize (`TCanvasDC = HDC`, `HDC = type UINT_PTR`) is judged
-          // by the type it names, through a distinct alias too
-          // (an IDE test: `if Self is t|` listed both).
+          // A position that takes one category or a few: an alias the
+          // symbol does not categorize (`TCanvasDC = HDC`, `HDC = type
+          // UINT_PTR`, `EListError = System.SysUtils.EListError`,
+          // `TFoos = TArray<TFoo>`) is judged by the type it names, through
+          // a distinct alias too (an IDE test: `if Self is t|` listed
+          // both), the buffer's own included (a constraint listed a
+          // `TArray<>` alias of its unit). A helper is dropped below.
           if FTypePos in [tpIsAs, tpHandler, tpAttribute, tpConstraint,
-             tpImplements, tpClassOf, tpSetOf] then
-          begin
-            if (LM.Symbols[ASym].Kind = skType) and
-               (TPasSemaProject.TypeDefNodeIn(LM, ASym) <> NIL_NODE) and
-               (LM.Tree.Nodes[TPasSemaProject.TypeDefNodeIn(LM, ASym)].Kind =
-                nkHelperType) then
-              Exit;
-            if (LM.Symbols[ASym].TypeCat = tcUnknown) and (FProj <> nil) and
-               (AMid >= 0) then
+             tpImplements, tpClassOf, tpSetOf, tpHelper] then
+            if LM.Symbols[ASym].TypeCat = tcUnknown then
             begin
-              var LCatT := FProj.XCatThroughX(XPlain(AMid, ASym));
+              var LCatT := AliasCatOf(AMid, ASym);
               if (LCatT <> tcUnknown) and not TypePosAdmits(LCatT) then
                 Exit;
             end;
-          end;
           // A record helper extends a dynamic array, never a static one
           // (E2474).
           if (FTypePos = tpHelper) and FHelperRecord and
@@ -3792,6 +3817,12 @@ begin
           end;
         end;
     end;
+  // A helper is named as a type only in a generic argument, a pointer's
+  // base and a type declaration's right side (FHelperOk); everywhere else
+  // dcc 37 rejects it - E2527 in a declaration, E2021 / E2474 in a
+  // heritage list and as a helper's type, E2015 after `is` / `as`.
+  if (FContext = ccType) and not FHelperOk and IsHelperSym(LM, ASym) then
+    Exit;
   // ... except where the type must be NAMED: `procedure P(A: 1..2)` and
   // `function F: 1..2` are E2029, `(A: K)` E2005 (local/probe-cc P5a-P5e).
   if FTypeNameOnly and (LM.Symbols[ASym].Kind in [skConst, skEnumValue]) then
@@ -3811,14 +3842,22 @@ begin
       skUnitRef:
         ;
       skType, skBuiltinType:
-        if not (LM.Symbols[ASym].TypeCat in [tcUnknown, tcInterface]) and
-           ((FHeritage = nkInterfaceType) or
-            (LM.Symbols[ASym].TypeCat <> tcClass)) then
-          Exit;
+        begin
+          var LCatH := LM.Symbols[ASym].TypeCat;
+          // An alias by the type it names (TBytes, PByte, `TLocaleID =
+          // LCID`, a record through an alias: the audit found one in 79% of
+          // heritage lists).
+          if (LCatH = tcUnknown) and (LM.Symbols[ASym].Kind = skType) then
+            LCatH := AliasCatOf(AMid, ASym);
+          if not (LCatH in [tcUnknown, tcInterface]) and
+             ((FHeritage = nkInterfaceType) or (LCatH <> tcClass)) then
+            Exit;
+        end;
     else
       Exit;
     end;
-  // ... and never the type whose list it is.
+  // ... and never the type whose list it is - nor the type `T = |` and
+  // `TH = class helper for |` declare (FHeritageDecl).
   if (FHeritageDecl <> NIL_NODE) and (AMid < 0) and
      (LM.Symbols[ASym].DeclNode <> NIL_NODE) and
      ((LM.Symbols[ASym].DeclNode = FHeritageDecl) or
@@ -8213,6 +8252,8 @@ begin
   // A type position ranks its types by rules of its own.
   if FTypePos <> tpNone then
     Exit(TypePosFit(AItem));
+  if FHeritage <> nkError then
+    Exit(HeritageFit(AItem));
   // A property accessor ranks by the accessor's signature.
   if FPropRank then
     Exit(AccessorFit(AItem));
@@ -10033,6 +10074,168 @@ begin
     Result := XNil;
 end;
 
+{ The kind of the token before the caret's identifier (before the caret
+  where no identifier is under it); tkUnknown at the file's start. }
+function TPasCompletion.PrevTokenKindAt(
+  const AInfo: TPasCaretInfo): TPasTokenKind;
+var
+  LPrev: Integer;
+begin
+  if AInfo.Kind = ckIdent then
+    LPrev := PrevVisibleRaw(AInfo.RawToken - 1)
+  else
+    LPrev := AInfo.RawToken;
+  if LPrev < 0 then
+    Result := tkUnknown
+  else
+    Result := FModel.Tree.Source.Files[0].Tokens[LPrev].Kind;
+end;
+
+{ A helper type (`class helper for`, `record helper for`). }
+function TPasCompletion.IsHelperSym(AModel: TPasSemaModel;
+  ASym: Integer): Boolean;
+var
+  LDef: Integer;
+begin
+  Result := False;
+  if AModel.Symbols[ASym].Kind <> skType then
+    Exit;
+  LDef := TPasSemaProject.TypeDefNodeIn(AModel, ASym);
+  Result := (LDef <> NIL_NODE) and
+    (AModel.Tree.Nodes[LDef].Kind = nkHelperType);
+end;
+
+{ The category of the type a type symbol names, followed through aliases -
+  a qualified one (`EListError = System.SysUtils.EListError`), a distinct
+  one (`HDC = type UINT_PTR`), a generic instance (`TFoos = TArray<TFoo>`) -
+  for a project's symbol and for one of the buffer's own; tcUnknown when no
+  project can tell. }
+function TPasCompletion.AliasCatOf(AMid, ASym: Integer): TSemaTypeCat;
+var
+  LX: TSemaXType;
+begin
+  Result := tcUnknown;
+  if FProj = nil then
+    Exit;
+  if AMid >= 0 then
+    LX := XPlain(AMid, ASym)
+  else
+    LX := OwnModelTypeX(ASym);
+  if XValid(LX) then
+    Result := FProj.XCatThroughX(LX);
+end;
+
+{ How near an item is to the compiler's own simple types, as completion
+  lists it: 0 for the ones written most (Integer, Boolean, string, Char,
+  Byte, Word, Cardinal, Double, Single, Extended, Currency, Pointer,
+  Variant), the keyword `string` included; 1 for every other seeded builtin
+  of a scalar, string, pointer or variant category (Int64, SmallInt,
+  ShortInt, UInt64, NativeInt, AnsiChar, WideString, ... - not TObject,
+  TClass, TArray, a file); 2 for System's fixed-size aliases of them (Int8
+  .. UInt32, FixedInt, FixedUInt, IntPtr, UIntPtr) and its TDateTime,
+  TDate, TTime; 3 for anything else. Graded because the name decides
+  within a grade: `Int|` meant Integer far more often than Int64 or Int16
+  (Integer is 59 of the 100 built-in types written in the audit's corpora,
+  Boolean 23). }
+function TPasCompletion.BuiltinTypeRank(const AItem: TPasComplItem): Integer;
+const
+  MOST_WRITTEN: array[0..12] of string = ('integer', 'boolean', 'string',
+    'char', 'byte', 'word', 'cardinal', 'double', 'single', 'extended',
+    'currency', 'pointer', 'variant');
+  SYSTEM_SIMPLE: array[0..12] of string = ('int8', 'int16', 'int32',
+    'uint8', 'uint16', 'uint32', 'fixedint', 'fixeduint', 'intptr',
+    'uintptr', 'tdatetime', 'tdate', 'ttime');
+var
+  LM: TPasSemaModel;
+  LKey: string;
+begin
+  Result := 3;
+  if AItem.Bucket = cbKeyword then
+  begin
+    if SameText(AItem.Name, 'string') then
+      Result := 0;
+    Exit;
+  end;
+  if AItem.Sym = NIL_SYM then
+    Exit;
+  if AItem.Kind = skBuiltinType then
+  begin
+    if SymModelOf(AItem.Mid, 'BuiltinTypeRank', LM, False) and
+       (LM.Symbols[AItem.Sym].TypeCat in [tcInteger, tcFloat, tcBoolean,
+        tcChar, tcString, tcPointer, tcVariant]) then
+    begin
+      Result := 1;
+      LKey := LowerCase(AItem.Name);
+      for var LName in MOST_WRITTEN do
+        if LName = LKey then
+          Exit(0);
+    end;
+    Exit;
+  end;
+  if (AItem.Kind <> skType) or (AItem.Mid < 0) or (FProj = nil) then
+    Exit;
+  LM := FProj.Model(AItem.Mid);
+  if (LM = nil) or (LM.UnitNameLower <> 'system') then
+    Exit;
+  LKey := LowerCase(AItem.Name);
+  for var LName in SYSTEM_SIMPLE do
+    if LName = LKey then
+      Exit(2);
+end;
+
+{ A declaration's type, an array's element, a pointer's base, a generic
+  argument (FBuiltinFirst): the compiler's own simple types first. Over a
+  thousand types share the list there, ranked by nothing (or by a generic
+  parameter's constraint), and sorted by the bucket and the name every
+  used unit's `Int*` type (Int64Rec, INIT_ONCE) came before `Integer` -
+  the pastree-lsp audit (2026-11-09) found a built-in type the author
+  wrote at row 1 in 26% of the requests with 2-3 letters typed. Each item
+  takes its BuiltinTypeRank in steps of Conv: within a fit, the simple
+  types written most lead, the other builtins and System's aliases of
+  them next. }
+procedure TPasCompletion.BuiltinTypesFirst;
+var
+  LIdx: Integer;
+begin
+  for LIdx := 0 to FCount - 1 do
+  begin
+    Inc(FItems[LIdx].Conv, BuiltinTypeRank(FItems[LIdx]));
+    if FItems[LIdx].Conv > CConvDistVariant then
+      FItems[LIdx].Conv := CConvDistVariant;
+  end;
+end;
+
+{ A heritage list's entry (FHeritage): `class(|` takes a class (an
+  interface there is E2021), `class(TBase, |` and `interface(|` an
+  interface (a class after the comma is E2205) - dcc 37. A unit name and a
+  type whose category is not known lead. }
+function TPasCompletion.HeritageFit(
+  const AItem: TPasComplItem): TPasComplMatch;
+var
+  LCat: TSemaTypeCat;
+begin
+  if (AItem.Bucket = cbUnitName) or (AItem.Kind = skUnitRef) then
+    Exit(cmLeads);
+  if not (AItem.Kind in [skType, skBuiltinType]) then
+    Exit(cmOther);
+  TypeItemX(AItem, LCat);
+  if (LCat = tcUnknown) and (AItem.Kind = skType) then
+    LCat := AliasCatOf(AItem.Mid, AItem.Sym);
+  if LCat = tcUnknown then
+    Exit(cmLeads);
+  if (FHeritage = nkClassType) and FHeritageFirst then
+  begin
+    if LCat = tcClass then
+      Result := cmCompatible
+    else
+      Result := cmOther;
+  end
+  else if LCat = tcInterface then
+    Result := cmCompatible
+  else
+    Result := cmOther;
+end;
+
 { Whether a type of category ACat can stand in the type position at all: a
   class or an interface on the right of `is` / `as` and in a constraint, a
   class in a handler and an attribute; anything in a generic argument. A
@@ -10660,6 +10863,8 @@ begin
     FHeritageDecl := UpChainNode(LInfo.Node, nkTypeDecl)
   else
     FHeritageDecl := NIL_NODE;
+  FHeritageFirst := (FHeritage <> nkError) and
+    (PrevTokenKindAt(LInfo) = tkLParen);
   // The right side of `:=` or a comparison: what the left side wants ranks
   // first (RankItems), and a procedure is no operand unless the left side
   // is of a procedural type - or of a type whose category is not known.
@@ -10758,8 +10963,17 @@ begin
       FTypeNameOnly := False;
       FHeritage := nkError;
       FHeritageDecl := NIL_NODE;
+      FHeritageFirst := False;
+      // `T = |`, `TH = class helper for |` never name the type declared.
+      if FTypePos in [tpTypeDecl, tpHelper] then
+        FHeritageDecl := UpChainNode(LInfo.Node, nkTypeDecl);
     end;
   end;
+  FHelperOk := (FContext = ccType) and
+    ((FTypePos in [tpGenArg, tpTypeDecl]) or
+     ((FTypePos = tpNone) and (PrevTokenKindAt(LInfo) = tkCaret)));
+  FBuiltinFirst := (FContext = ccType) and (FHeritage = nkError) and
+    (FTypePos in [tpNone, tpGenArg]);
   if FContext in [ccExpression, ccMember] then
   begin
     // A property's `default |` and `index |` are constant expressions: of
@@ -10924,8 +11138,10 @@ begin
      FExpectEnum or (FCastRef <> tcUnknown) or (FCastValue <> tcUnknown) or
      FExpectAddr or FExpectWith or FExpectRaise or
      FTypeRank or FPropRank or FInhRank or FArgIncDec or FArgSetLen or
-     FArgAssigned then
+     FArgAssigned or (FHeritage <> nkError) then
     RankItems;
+  if FBuiltinFirst then
+    BuiltinTypesFirst;
   SetLength(FItems, FCount);
   AItems := FItems;
   FItems := nil;

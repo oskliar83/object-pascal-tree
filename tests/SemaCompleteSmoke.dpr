@@ -3165,6 +3165,189 @@ begin
   GProjMid := -1;
   TDirectory.Delete(GDir, True);
 
+  // ======== type positions: helpers, aliases, heritage, builtins first ======
+  // (pastree-lsp audit 2026-11-09, every rule checked against dcc 37.)
+  GDir := TPath.Combine(TPath.GetTempPath, 'pastree_complete_typepos');
+  if TDirectory.Exists(GDir) then
+    TDirectory.Delete(GDir, True);
+  TDirectory.CreateDirectory(GDir);
+  TFile.WriteAllText(TPath.Combine(GDir, 'extz.pas'),
+    'unit extz;'#10'interface'#10'type'#10 +
+    '  TBaseZ = class end;'#10'  IExtZ = interface end;'#10 +
+    '  TBaseZH = class helper for TBaseZ end;'#10 +
+    '  TExtRecH = record helper for Integer end;'#10 +
+    '  TBaseQ = extz.TBaseZ;'#10'  TExtInt = Integer;'#10 +
+    '  TExtArr = array of TBaseZ;'#10'  TExtArrA = TExtArr;'#10 +
+    '  TExtRec = record end;'#10'  TExtRecA = TExtRec;'#10 +
+    'implementation'#10'end.'#10);
+  var LTpMain :=
+    'unit mainu;'#10'interface'#10'uses extz;'#10'type'#10 +
+    '  TAnimalZ = class end;'#10'  TDogZ = class(TAnimalZ) end;'#10 +
+    '  IShapeZ = interface end;'#10 +
+    '  TDogZH = class helper for TDogZ end;'#10 +
+    '  TIntZH = record helper for Integer end;'#10 +
+    '  TDogQ = mainu.TDogZ;'#10'  TIntZ = Integer;'#10 +
+    '  TDogArr = array of TDogZ;'#10'  TDogArrA = TDogArr;'#10 +
+    '  TBoxZ<T> = class end;'#10 +
+    '//SLOT'#10 +
+    'implementation'#10'end.'#10;
+  TFile.WriteAllText(TPath.Combine(GDir, 'mainu.pas'), LTpMain);
+  GProj := TPasSemaProject.Create(pfWin32, [GDir], []);
+  GProjMid := GProj.AnalyzeProject(TPath.Combine(GDir, 'mainu.pas'));
+  // A helper is named only in a generic argument, a pointer's base and a
+  // type declaration's right side; a declaration is E2527.
+  for var LSlot in ['var V1: |;', 'var V1: array of |;',
+    '  TArrZ = array of |;', 'procedure P(A: |);', 'function F: |;',
+    'const C1: | = nil;', '  TRecZ = record F: |; end;'] do
+  begin
+    ProjCase(StringReplace(LTpMain, '//SLOT', LSlot, []));
+    GCounter.Ok('type position `' + LSlot + '`: no helper (E2527)',
+      GHit and (GCtx = ccType) and Has('TDogZ') and Has('Integer') and
+      not Has('TDogZH') and not Has('TIntZH') and not Has('TBaseZH') and
+      not Has('TExtRecH'),
+      procedure
+      begin
+        Writeln('    hit=', GHit, ' ctx=', Ord(GCtx), ' helpers=',
+          Has('TDogZH'), Has('TIntZH'), Has('TBaseZH'), Has('TExtRecH'));
+      end);
+  end;
+  for var LSlot in ['var V1: TBoxZ<|>;', 'var V1: ^|;', 'var V1: ^ |;',
+    '  TPtrZ = ^|;', '  TNewZ = |;', '  TNewZ = type |;'] do
+  begin
+    ProjCase(StringReplace(LTpMain, '//SLOT', LSlot, []));
+    GCounter.Ok('type position `' + LSlot + '`: helpers listed (dcc 37 ' +
+      'takes them)', GHit and (GCtx = ccType) and Has('TDogZH') and
+      Has('TIntZH') and Has('TBaseZH') and Has('TExtRecH'),
+      procedure
+      begin
+        Writeln('    hit=', GHit, ' ctx=', Ord(GCtx), ' items=',
+          Length(GItems));
+      end);
+  end;
+  // A type declared at `T = |` is not its own right side (E2086).
+  ProjCase(StringReplace(LTpMain, '//SLOT', '  TNewZ = |;', []));
+  GCounter.Ok('`TNewZ = |` does not list TNewZ', GHit and Has('TDogZ') and
+    not Has('TNewZ'));
+  ProjCase(StringReplace(LTpMain, '//SLOT', '  TNewP = ^|;', []));
+  GCounter.Ok('`TNewP = ^|` lists TNewP (a pointer names its own type)',
+    GHit and Has('TNewP'));
+  // A declaration's type, an array's element, a pointer's base, a generic
+  // argument: the compiler's simple types first (Conv 0, others 1).
+  for var LSlot in ['var V1: |;', 'var V1: array of |;', 'var V1: ^|;',
+    'var V1: TBoxZ<|>;', 'procedure P(A: |);'] do
+  begin
+    ProjCase(StringReplace(LTpMain, '//SLOT', LSlot, []));
+    GCounter.Ok('type position `' + LSlot + '`: builtin types first',
+      GHit and Has('Integer') and Has('Boolean') and Has('Double') and
+      (ItemNamed('Integer').Conv = 0) and (ItemNamed('Boolean').Conv = 0) and
+      (ItemNamed('Double').Conv = 0) and (ItemNamed('Int64').Conv = 1) and
+      (ItemNamed('TDogZ').Conv = 3) and
+      (ItemNamed('TIntZ').Conv = 3),
+      procedure
+      begin
+        Writeln('    Integer=', ItemNamed('Integer').Conv, ' Boolean=',
+          ItemNamed('Boolean').Conv, ' TDogZ=', ItemNamed('TDogZ').Conv,
+          ' TIntZ=', ItemNamed('TIntZ').Conv);
+      end);
+  end;
+  // ... not at `T = |`, where the type constructors lead.
+  ProjCase(StringReplace(LTpMain, '//SLOT', '  TNewZ = |;', []));
+  GCounter.Ok('`TNewZ = |`: Integer ties with TDogZ',
+    GHit and (ItemNamed('Integer').Conv = ItemNamed('TDogZ').Conv));
+  // A heritage list: the first entry a class (an interface is E2021),
+  // after a comma the interfaces (a class is E2205); an alias by the type
+  // it names (a qualified one too), no helper, no other category.
+  const HERITAGE_NOT = 'TDogZH,TIntZH,TBaseZH,TExtRecH,TIntZ,TExtInt,' +
+    'TDogArr,TDogArrA,TExtArr,TExtArrA,TExtRec,TExtRecA,Integer';
+  ProjCase(StringReplace(LTpMain, '//SLOT', '  TNewC = class(|) end;', []));
+  var LHerOk := GHit and (GCtx = ccType) and
+    (ItemNamed('TDogZ').Match = cmCompatible) and
+    (ItemNamed('TBaseZ').Match = cmCompatible) and
+    (ItemNamed('TBaseQ').Match = cmCompatible) and
+    (ItemNamed('TDogQ').Match = cmCompatible) and
+    (ItemNamed('IShapeZ').Match = cmOther) and
+    (ItemNamed('IExtZ').Match = cmOther);
+  for var LName in HERITAGE_NOT.Split([',']) do
+    LHerOk := LHerOk and not Has(LName);
+  GCounter.Ok('`class(|`: classes fit, interfaces wrong, no helper or ' +
+    'alias of another category', LHerOk,
+    procedure
+    begin
+      Writeln('    dog=', Ord(ItemNamed('TDogZ').Match), ' q=',
+        Ord(ItemNamed('TBaseQ').Match), Ord(ItemNamed('TDogQ').Match),
+        ' i=', Ord(ItemNamed('IShapeZ').Match), ' intz=', Has('TIntZ'),
+        ' extint=', Has('TExtInt'), ' arr=', Has('TDogArrA'),
+        Has('TExtArrA'), ' rec=', Has('TExtRecA'), ' h=', Has('TDogZH'));
+    end);
+  ProjCase(StringReplace(LTpMain, '//SLOT',
+    '  TNewC = class(TDogZ, |) end;', []));
+  GCounter.Ok('`class(TDogZ, |`: interfaces fit, a class is wrong',
+    GHit and (ItemNamed('IShapeZ').Match = cmCompatible) and
+    (ItemNamed('IExtZ').Match = cmCompatible) and
+    (ItemNamed('TBaseZ').Match = cmOther) and not Has('TDogZH'));
+  ProjCase(StringReplace(LTpMain, '//SLOT',
+    '  INewI = interface(|) end;', []));
+  GCounter.Ok('`interface(|`: interfaces alone',
+    GHit and (ItemNamed('IShapeZ').Match = cmCompatible) and
+    not Has('TDogZ') and not Has('TBaseQ') and not Has('TDogQ'));
+  // A helper's type: no helper (E2021 / E2474), a class helper classes
+  // alone, a record helper no class - through a qualified alias too - and
+  // never the helper itself.
+  ProjCase(StringReplace(LTpMain, '//SLOT',
+    '  TNewH = class helper for |'#10'  end;', []));
+  GCounter.Ok('`class helper for |`: classes, no helper or integer alias',
+    GHit and Has('TDogZ') and Has('TBaseQ') and Has('TDogQ') and
+    not Has('TDogZH') and not Has('TBaseZH') and not Has('TIntZ') and
+    not Has('TExtInt') and not Has('TNewH') and not Has('TExtRecA'),
+    procedure
+    begin
+      Writeln('    q=', Has('TBaseQ'), Has('TDogQ'), ' h=', Has('TDogZH'),
+        Has('TBaseZH'), ' int=', Has('TIntZ'), Has('TExtInt'), ' self=',
+        Has('TNewH'), ' rec=', Has('TExtRecA'));
+    end);
+  ProjCase(StringReplace(LTpMain, '//SLOT',
+    '  TNewH = record helper for |'#10'  end;', []));
+  GCounter.Ok('`record helper for |`: value types, no helper, no class ' +
+    'through an alias', GHit and Has('TIntZ') and Has('TExtInt') and
+    Has('Integer') and Has('TExtRecA') and not Has('TIntZH') and
+    not Has('TExtRecH') and not Has('TBaseQ') and not Has('TDogQ') and
+    not Has('TNewH'),
+    procedure
+    begin
+      Writeln('    int=', Has('TIntZ'), Has('TExtInt'), ' h=', Has('TIntZH'),
+        Has('TExtRecH'), ' q=', Has('TBaseQ'), Has('TDogQ'), ' self=',
+        Has('TNewH'));
+    end);
+  // A constraint: an alias of an array is no class or interface.
+  ProjCase(StringReplace(LTpMain, '//SLOT', '  TNewG<T: |> = class end;', []));
+  GCounter.Ok('`<T: |>`: no alias of an array, no helper',
+    GHit and Has('TDogZ') and Has('TDogQ') and not Has('TDogArr') and
+    not Has('TDogArrA') and not Has('TExtArr') and not Has('TExtArrA') and
+    not Has('TDogZH'),
+    procedure
+    begin
+      Writeln('    arr=', Has('TDogArr'), Has('TDogArrA'), Has('TExtArr'),
+        Has('TExtArrA'), ' q=', Has('TDogQ'));
+    end);
+  // `^|;` is no caret character: CaretSource splits it.
+  GCounter.Ok('CaretSource splits `^;`, `^)`, `^,`',
+    (TPasCompletion.CaretSource('  P: ^;', 1, 7) = '  P: ^ ;') and
+    (TPasCompletion.CaretSource('(A: ^)', 1, 6) = '(A: ^ )') and
+    (TPasCompletion.CaretSource('(A: ^,', 1, 6) = '(A: ^ ,') and
+    (TPasCompletion.CaretSource('  P: ^;', 1, 8) = '  P: ^;'));
+  for var LSlot in ['var V1: ^|;', '  TPtrZ = ^|;'] do
+  begin
+    ProjCase(StringReplace(LTpMain, '//SLOT', LSlot, []));
+    GCounter.Ok('`' + LSlot + '` lists the types', GHit and
+      (GCtx = ccType) and Has('TDogZ') and Has('Integer'));
+  end;
+  GComp.Free;
+  GComp := nil;
+  GProj.Free;
+  GProj := nil;
+  GProjMid := -1;
+  TDirectory.Delete(GDir, True);
+
   // ======== 16.4.1: a lone `constructor` unlocks T.Create only ==============
   // (local/probe-ctor C1-C7: V.Free, V.ClassName, T.Create.Free are E2003.)
   GDir := TPath.Combine(TPath.GetTempPath, 'pastree_complete_ctor');
@@ -4122,11 +4305,13 @@ begin
     'clRed,ExtReset,ExtCount,CRed');
   TypDecl('  TMyC = class F: TBoxA<|>; end;', '', '', '',
     'clRed,ExtReset,ExtCount,CRed');
-  // A pointer type's `^`, the caret at the line's end or after a blank (`^;`
-  // is one character token, `^` + `;`, and lists nothing).
+  // A pointer type's `^`, the caret before a `;` (CaretSource splits the caret
+  // character literal `^;`), at the line's end or after a blank.
   TypDecl('var V1: ^TC|;', '', '', '',
     'clRed,ExtReset,ExtCount,CRed');
   TypDecl('var V1: ^ |;', '', '', '',
+    'clRed,ExtReset,ExtCount,CRed');
+  TypDecl('var V1: ^|;', '', '', '',
     'clRed,ExtReset,ExtCount,CRed');
   TypDecl('var V1: ^|'#10'  ;', '', '', '',
     'clRed,ExtReset,ExtCount,CRed');
