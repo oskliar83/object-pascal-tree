@@ -38,6 +38,9 @@ uses
   PasTree.Platforms in '..\source\PasTree.Platforms.pas',
   PasTree.Ast in '..\source\PasTree.Ast.pas',
   PasTree.Parser in '..\source\PasTree.Parser.pas',
+  PasTree.Ast.Check in '..\source\PasTree.Ast.Check.pas',
+  PasTree.Printer in '..\source\PasTree.Printer.pas',
+  PasTree.Format in '..\source\PasTree.Format.pas',
   PasTree.Project in '..\source\PasTree.Project.pas',
   PasTree.Sema.Diagnostics in '..\source\PasTree.Sema.Diagnostics.pas',
   PasTree.Sema.Model in '..\source\PasTree.Sema.Model.pas',
@@ -502,6 +505,40 @@ begin
           Exit(True);
 end;
 
+// Formatter stage F7: a manager's DcuTextFilter reaches the generated text
+// every reader gets, a host opening the unit gets the same text through
+// LoadFileTolerant's filter, and no filter is the text as generated.
+procedure CheckDcuTextFilter(const ADcuPath: string);
+var
+  LSM: TPasSourceManager;
+  LPlain, LFiltered, LMsg: string;
+  LOpt: TPasFormatOptions;
+begin
+  LOpt := TPasFormatOptions.Default;
+  LOpt.IndentStep := 4;
+  LSM := TPasSourceManager.Create([ExtractFileDir(ADcuPath)]);
+  try
+    LPlain := LSM.LoadText(ADcuPath);
+    LSM.DcuTextFilter :=
+      function(const APath, AText: string): string
+      begin
+        Result := PasFormatText(AText, APath, LOpt);
+      end;
+    LFiltered := LSM.LoadText(ADcuPath);
+    Ok('F7 the filter reaches the generated text',
+      (LFiltered <> LPlain) and PasSameTokens(LPlain, LFiltered, LMsg));
+    Ok('F7 the filtered text parses clean',
+      ParseDiagCount(LFiltered, 'DcuFix.dcu') = 0);
+    Ok('F7 a host opening the unit reads the analysis''s text',
+      TPasSourceManager.LoadFileTolerant(ADcuPath, LSM.DcuTextFilter) =
+      LFiltered);
+    LSM.DcuTextFilter := nil;
+    Ok('F7 no filter: the text as generated', LSM.LoadText(ADcuPath) = LPlain);
+  finally
+    LSM.Free;
+  end;
+end;
+
 procedure CheckReaderAndPrinter(const ADcuPath: string; APlatform: TPasDcuPlatform;
   const ATag: string);
 var
@@ -915,6 +952,8 @@ begin
       CheckReaderAndPrinter(TPath.Combine(GLib32, 'DcuFix.dcu'), dcuWin32, 'win32');
     if TFile.Exists(TPath.Combine(GLib64, 'DcuFix.dcu')) then
       CheckReaderAndPrinter(TPath.Combine(GLib64, 'DcuFix.dcu'), dcuWin64, 'win64');
+    if TFile.Exists(TPath.Combine(GLib64, 'DcuFix.dcu')) then
+      CheckDcuTextFilter(TPath.Combine(GLib64, 'DcuFix.dcu'));
     // B53 (A1-41): a `}` in the .dcu's path must not close the header
     // comment of the generated text.
     if TFile.Exists(TPath.Combine(GLib32, 'DcuFix.dcu')) then

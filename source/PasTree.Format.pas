@@ -147,6 +147,14 @@ function PasFormatEdits(const ATree: TPasTree; AFileId: Integer;
   const AOptions: TPasFormatOptions;
   const AIdentCase: TPasIdentCaseFunc): TPasTextEdits; overload;
 
+{ AText formatted as a file of its own, parsed with no conditional symbol
+  defined and no search path: for text a tool generated - the interface
+  source PasTree.Dcu.Source prints for a compiled unit (a
+  TPasSourceManager.DcuTextFilter), code a refactoring writes. AFileName
+  names it for the parse only. }
+function PasFormatText(const AText, AFileName: string;
+  const AOptions: TPasFormatOptions): string;
+
 { ASource with AEdits applied (ascending, not overlapping - as
   PasFormatEdits returns them). }
 function PasApplyEdits(const ASource: string;
@@ -164,6 +172,8 @@ implementation
 uses
   System.SysUtils,
   PasTree.Lexer,
+  PasTree.SourceManager,
+  PasTree.Parser,
   PasTree.Printer;
 
 class function TPasFormatOptions.Default: TPasFormatOptions;
@@ -1354,6 +1364,36 @@ begin
   LFmt.Init(ATree, AFileId, AOptions);
   LFmt.IdentCase := AIdentCase;
   Result := LFmt.Run;
+end;
+
+function PasFormatText(const AText, AFileName: string;
+  const AOptions: TPasFormatOptions): string;
+var
+  LSM: TPasSourceManager;
+  LDefines: TPasDefines;
+  LPP: TPasPreprocessor;
+  LPre: TPasPreprocessed;
+  LTree: TPasTree;
+  LDiags: TArray<TPasParseDiag>;
+begin
+  LSM := TPasSourceManager.Create([]);
+  LDefines := TPasDefines.Create;
+  try
+    LPP := TPasPreprocessor.Create(LSM, LDefines);
+    try
+      LPre := LPP.ProcessText(AFileName, AText);
+      if Length(LPre.Files) = 0 then
+        Exit(AText);
+      LTree := TPasParser.ParseFile(LPre, LDiags);
+      Result := PasApplyEdits(LPre.Files[0].Source,
+        PasFormatEdits(LTree, 0, AOptions));
+    finally
+      LPP.Free;
+    end;
+  finally
+    LDefines.Free;
+    LSM.Free;
+  end;
 end;
 
 function PasApplyEdits(const ASource: string;

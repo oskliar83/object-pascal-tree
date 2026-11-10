@@ -22,6 +22,10 @@ uses
   PasTree.Types;
 
 type
+  { A text a manager hands out, passed through the host's rewrite - see
+    TPasSourceManager.DcuTextFilter. }
+  TPasTextFilter = reference to function(const APath, AText: string): string;
+
   TPasSourceManager = class
   private type
     // An overlay buffer (SetBuffer): the text analysis sees for a path, plus
@@ -117,6 +121,8 @@ type
     // .pas anywhere on the paths beats a .dcu anywhere, so a library that
     // ships both is still analyzed from its source.
     FDcuIndex: TDictionary<string, string>;
+    // DcuTextFilter: applied to a generated text before FDcuTexts keeps it.
+    FDcuTextFilter: TPasTextFilter;
     // The generated interface text per .dcu path (lower), so a unit's text
     // is generated once whatever the number of readers (the parse workers, a
     // later rehydration). Kept for the manager's life - a demoted unit
@@ -291,6 +297,7 @@ type
       out AResolved: string): Boolean;
     function FindDcuFile(const AUnitName: string; out AResolved: string): Boolean;
     function DcuText(const APath: string): string;
+    procedure SetDcuTextFilter(const AFilter: TPasTextFilter);
     function DcuForeign(const APath: string): TObject;
     procedure FreeDcuUnits;
     function ReadFileText(const APath: string): string;
@@ -509,7 +516,20 @@ type
     class function IsValidUtf8(const ABytes: TBytes; AStart: Integer): Boolean;
     class function DecodeBytes(const ABytes: TBytes;
       out AHow: string): string; static;
-    class function LoadFileTolerant(const APath: string): string; static;
+    class function LoadFileTolerant(const APath: string): string; overload;
+      static;
+    { The same, a .dcu's generated text passed through ADcuFilter (nil: as
+      generated) - the filter the host gave its managers' DcuTextFilter, so
+      the text it shows is the text its analysis ran on. }
+    class function LoadFileTolerant(const APath: string;
+      const ADcuFilter: TPasTextFilter): string; overload; static;
+    { What a compiled unit's generated interface text goes through before
+      anything reads it - the formatter with the host's style
+      (PasTree.Format.PasFormatText), or nil for the text as PasTree.Dcu.Source
+      prints it. The positions a navigation lands on are positions in the
+      filtered text. Setting it forgets every text generated so far. }
+    property DcuTextFilter: TPasTextFilter read FDcuTextFilter
+      write SetDcuTextFilter;
   end;
 
 { The file name dcc looks for when an include directive names AArg: trimmed,
@@ -1595,6 +1615,13 @@ begin
     finally
       LUnit.Free;
     end;
+    // A filter that fails leaves the text as generated: the unit is still
+    // read, only not in the host's style.
+    if Assigned(FDcuTextFilter) then
+      try
+        Result := FDcuTextFilter(APath, Result);
+      except
+      end;
   except
     on E: Exception do
     begin
@@ -2149,7 +2176,28 @@ begin
   end;
 end;
 
+procedure TPasSourceManager.SetDcuTextFilter(const AFilter: TPasTextFilter);
+begin
+  TMonitor.Enter(FDcuLock);
+  try
+    FDcuTextFilter := AFilter;
+    // A text kept from before was filtered otherwise (or not at all).
+    if FDcuTexts <> nil then
+      FDcuTexts.Clear;
+    if FDcuStamps <> nil then
+      FDcuStamps.Clear;
+  finally
+    TMonitor.Exit(FDcuLock);
+  end;
+end;
+
 class function TPasSourceManager.LoadFileTolerant(const APath: string): string;
+begin
+  Result := LoadFileTolerant(APath, nil);
+end;
+
+class function TPasSourceManager.LoadFileTolerant(const APath: string;
+  const ADcuFilter: TPasTextFilter): string;
 var
   LHow: string;
   LUnit: TPasDcuUnit;
@@ -2161,7 +2209,10 @@ begin
   begin
     LUnit := LoadDcu(APath);
     try
-      Exit(DcuInterfaceSource(LUnit));
+      Result := DcuInterfaceSource(LUnit);
+      if Assigned(ADcuFilter) then
+        Result := ADcuFilter(APath, Result);
+      Exit;
     finally
       LUnit.Free;
     end;
