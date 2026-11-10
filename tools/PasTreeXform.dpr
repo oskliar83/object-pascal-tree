@@ -133,9 +133,14 @@ program PasTreeXform;
         or System's, variable or routine of that name (see
         TQWrongQualifier) - and nothing else. A unit with such a site must
         compile to another .dcu or not at all.
+    tf  the FORMATTER judged (docs/formatter.md): the unit laid out by
+        PasTree.Format with the default style - whitespace and case only,
+        so the code must stay; compiled without line and reference
+        records, which follow the lines (spec B.2). The include files are
+        copied as they are.
 
   Usage:
-    PasTreeXform <unit.pas> -mode:t0|ts|t0f|t1|t2|t3|t3x|tq|tqs|tm|tqm|tms -out:<dir> [-p:<platform>]
+    PasTreeXform <unit.pas> -mode:t0|ts|t0f|t1|t2|t3|t3x|tq|tqs|tm|tqm|tms|tf -out:<dir> [-p:<platform>]
                  [-D:X;Y]... [-Undef:X;Y]... [-I:<dir>[;<dir>]]...
                  [-sites:<ids>]
   -sites (ts, t1, t2, t3, t3x): only the sites with these ids take their edit - a
@@ -221,6 +226,7 @@ uses
   PasTree.Parser in '..\source\PasTree.Parser.pas',
   PasTree.Ast.Check in '..\source\PasTree.Ast.Check.pas',
   PasTree.Printer in '..\source\PasTree.Printer.pas',
+  PasTree.Format in '..\source\PasTree.Format.pas',
   PasTree.Sema.Diagnostics in '..\source\PasTree.Sema.Diagnostics.pas',
   PasTree.Sema.Model in '..\source\PasTree.Sema.Model.pas',
   PasTree.Sema.Builtins in '..\source\PasTree.Sema.Builtins.pas',
@@ -230,11 +236,11 @@ uses
 
 type
   TXformMode = (xmT0, xmTS, xmT0F, xmT1, xmT2, xmT3, xmT3X, xmTQ, xmTQS, xmTM,
-    xmTQM, xmTMS);
+    xmTQM, xmTMS, xmTF);
 
 const
   cModeNames: array[TXformMode] of string = ('t0', 'ts', 't0f', 't1', 't2',
-    't3', 't3x', 'tq', 'tqs', 'tm', 'tqm', 'tms');
+    't3', 't3x', 'tq', 'tqs', 'tm', 'tqm', 'tms', 'tf');
   // The modes that judge the resolver over the project analysis (S13-S15).
   cQModes = [xmTQ, xmTQS, xmTM, xmTQM, xmTMS];
 type
@@ -4556,6 +4562,7 @@ var
   GIdx, GJdx, GNonInfo, GOffset, GApplied: Integer;
   GSite: TSite;
   GEdit: TEdit;
+  GFmtEdit: TPasTextEdit;
   GName: string;
   GWritten: TDictionary<string, Boolean>;
   GSitesText, GFileLines: TStringList;
@@ -4633,6 +4640,7 @@ begin
         else if GArg = 'tm' then GMode := xmTM
         else if GArg = 'tqm' then GMode := xmTQM
         else if GArg = 'tms' then GMode := xmTMS
+        else if GArg = 'tf' then GMode := xmTF
         else raise Exception.Create('unknown mode: ' + GArg);
       end
       else if GArg.StartsWith('-Undef:', True) then
@@ -4667,7 +4675,7 @@ begin
     end;
     if (GFile = '') or (GOut = '') then
     begin
-      Writeln(ErrOutput, 'Usage: PasTreeXform <unit.pas> -mode:t0|ts|t0f|t1|t2|t3|t3x|tq|tqs|tm|tqm|tms ' +
+      Writeln(ErrOutput, 'Usage: PasTreeXform <unit.pas> -mode:t0|ts|t0f|t1|t2|t3|t3x|tq|tqs|tm|tqm|tms|tf ' +
         '-out:<dir> [-p:<platform>] [-D:X;Y]... [-Undef:X;Y]... ' +
         '[-I:<dir>[;<dir>]]... [-oracle [-S:<dir>[;<dir>]]...] ' +
         '[-sites:<ids>]');
@@ -4873,6 +4881,28 @@ begin
             end;
             Inc(GApplied);
           end;
+      end
+      else if GMode = xmTF then
+      begin
+        // tf: the unit formatted with the default style (PasTree.Format) -
+        // only whitespace and case change, so the code must not. The
+        // include files are copied as they are.
+        GTree := TPasParser.ParseFile(GPre, GDiags);
+        if Length(GDiags) > 0 then
+          raise Exception.CreateFmt('the unit parses with %d diagnostics: ' +
+            'not formatted', [Length(GDiags)]);
+        GUnitName := HeaderName;
+        for GFmtEdit in PasFormatEdits(GTree, 0, TPasFormatOptions.Default) do
+        begin
+          GEdit := Default(TEdit);
+          GEdit.FileId := 0;
+          GEdit.Offset := GFmtEdit.Start;
+          GEdit.Len := GFmtEdit.Len;
+          GEdit.Order := GApplied;
+          GEdit.Text := GFmtEdit.Text;
+          GEdits.Add(GEdit);
+          Inc(GApplied);
+        end;
       end
       else if GMode = xmT0F then
       begin
