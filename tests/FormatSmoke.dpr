@@ -131,6 +131,37 @@ begin
   Result := UNIT_HEAD + Lines(ABody) + UNIT_TAIL;
 end;
 
+// The identifier-case callback: a leaf's identifier takes the spelling the
+// caller gives, and a spelling that is not the same word is refused.
+procedure IdentCaseCase;
+var
+  LText, LOut: string;
+  LTree: TPasTree;
+  LDiags: Integer;
+begin
+  LText := U(['procedure P;', 'var', '  I: integer;', 'begin', '  i := 0;',
+    'end;']);
+  LTree := Parse(LText, LDiags);
+  LOut := PasApplyEdits(LText, PasFormatEdits(LTree, 0,
+    TPasFormatOptions.Default,
+    function(AVis: Integer; const AText: string): string
+    begin
+      if SameText(AText, 'integer') then
+        Result := 'Integer'
+      else if SameText(AText, 'i') then
+        Result := 'I'
+      else if SameText(AText, 'p') then
+        Result := 'Q'                 // not a spelling of P: refused
+      else
+        Result := AText;
+    end));
+  if LOut <> U(['procedure P;', 'var', '  I: Integer;', 'begin', '  I := 0;',
+    'end;']) then
+    Fail('identifier case', Visible(LOut))
+  else
+    Inc(GPassed);
+end;
+
 procedure Cases;
 var
   LOpt: TPasFormatOptions;
@@ -479,6 +510,73 @@ begin
     'asm',
     '      mov eax, 1',
     '   end;']));
+
+  Check('F2 spaces', U([
+    'procedure P(A:Integer;B : string);',
+    'var',
+    '  X,Y:Integer;',
+    '  C: array[0 .. 9] of Integer;',
+    'begin',
+    '  X:=A+B*2;',
+    '  Foo ( X , Y );',
+    '  L [ 1 ] := - X;',
+    '  S := ''a''#13''b''^M;',
+    '  if (X>0)and(Y<>1) then',
+    '    Z := P ^ .F;',
+    '  Write(X:10:2);',
+    'end;']), U([
+    'procedure P(A: Integer; B: string);',
+    'var',
+    '  X, Y: Integer;',
+    '  C: array[0..9] of Integer;',
+    'begin',
+    '  X := A + B * 2;',
+    '  Foo(X, Y);',
+    '  L[1] := -X;',
+    '  S := ''a''#13''b''^M;',
+    '  if (X > 0) and (Y <> 1) then',
+    '    Z := P^.F;',
+    '  Write(X:10:2);',
+    'end;']));
+
+  Check('F2 alignment kept, no fusion', U([
+    'const',
+    '  toEOF     = Char(0);',
+    '  toSymbol  = Char(1);',
+    'procedure P;',
+    'begin',
+    '  X := ( * Y);',
+    '  Z := A - -B;',
+    'end;']), U([
+    'const',
+    '  toEOF     = Char(0);',
+    '  toSymbol  = Char(1);',
+    'procedure P;',
+    'begin',
+    '  X := ( * Y);',
+    '  Z := A - -B;',
+    'end;']));
+
+  Check('F2 case', U([
+    'Procedure P; Override;',
+    '{$ifndef Debug}',
+    'Var',
+    '  S: String;',
+    '{$EndIf}',
+    'Begin',
+    '  If S = '''' Then Exit',
+    'End;']), U([
+    'procedure P; override;',
+    '{$IFNDEF Debug}',
+    'var',
+    '  S: string;',
+    '{$ENDIF}',
+    'begin',
+    '  if S = '''' then',
+    '    Exit',
+    'end;']));
+
+  IdentCaseCase;
 
   LOpt := TPasFormatOptions.Default;
   LOpt.StatementAfterThenDo := fbKeep;

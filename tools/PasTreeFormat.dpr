@@ -55,6 +55,7 @@ type
   TTotals = record
     Files, Clean, Exceptions, Lines: Int64;
     Changed, Edits, IndentOnly, BreakAdded, BlankDropped: Int64;
+    SpaceEdits, CaseEdits: Int64;
     TokFail, IdemFail, TreeFail: Int64;
   end;
 
@@ -64,6 +65,8 @@ var
   GMax: Integer = 200;
   GPrinted: Integer;
   GOutDir, GRoot: string;
+  GWordsMode: Boolean;
+  GWords: TDictionary<string, Int64>;
 
 procedure Report(const AFile, AGate, AMsg: string);
 begin
@@ -95,6 +98,33 @@ begin
   Result := TreeFingerprint(LTree);
 end;
 
+// -words: every identifier token a node owns that is no leaf - the words
+// the grammar reads as keywords in their place - counted by owner kind and
+// spelling, for the case rule of the formatter.
+procedure CountWords(const ATree: TPasTree);
+var
+  LOwn: TPasOwnership;
+  LVis, LOwner: Integer;
+  LKey: string;
+  LCount: Int64;
+begin
+  LOwn.Build(ATree);
+  for LVis := 0 to High(LOwn.Owner) do
+  begin
+    LOwner := LOwn.Owner[LVis];
+    if (LOwner < 0) or (ATree.Source.VisibleKind(LVis) <> tkIdentifier) then
+      Continue;
+    if ATree.Nodes[LOwner].Kind in [nkIdent, nkIntLit, nkRealLit, nkStrLit,
+      nkNilLit, nkCaretChar, nkError, nkMissing] then
+      Continue;
+    LKey := ATree.KindName(ATree.Nodes[LOwner].Kind) + ' ' +
+      LowerCase(ATree.Source.VisibleText(LVis));
+    if not GWords.TryGetValue(LKey, LCount) then
+      LCount := 0;
+    GWords.AddOrSetValue(LKey, LCount + 1);
+  end;
+end;
+
 procedure JudgeFile(const AFile: string);
 var
   LPre: TPasPreprocessed;
@@ -115,6 +145,11 @@ begin
     if (Length(LDiags) > 0) or (Length(LPre.Diagnostics) > 0) then
       Exit;
     Inc(GTotals.Clean);
+    if GWordsMode then
+    begin
+      CountWords(LTree);
+      Exit;
+    end;
     LSource := LPre.Files[0].Source;
     Inc(GTotals.Lines, Breaks(LSource) + 1);
     LEdits := PasFormatEdits(LTree, 0, TPasFormatOptions.Default);
@@ -125,7 +160,11 @@ begin
     for LIdx := 0 to High(LEdits) do
     begin
       LOld := Copy(LSource, LEdits[LIdx].Start + 1, LEdits[LIdx].Len);
-      if Breaks(LOld) = Breaks(LEdits[LIdx].Text) then
+      if Trim(LOld) <> '' then
+        Inc(GTotals.CaseEdits)       // a token's text: its case
+      else if (Breaks(LOld) = 0) and (Breaks(LEdits[LIdx].Text) = 0) then
+        Inc(GTotals.SpaceEdits)
+      else if Breaks(LOld) = Breaks(LEdits[LIdx].Text) then
         Inc(GTotals.IndentOnly)
       else if Breaks(LOld) < Breaks(LEdits[LIdx].Text) then
         Inc(GTotals.BreakAdded)
@@ -293,6 +332,8 @@ begin
         GOutDir := TPath.GetFullPath(Copy(ParamStr(GIdx), 6, MaxInt))
       else if SameText(ParamStr(GIdx), '-print') then
         GPrintMode := True
+      else if SameText(ParamStr(GIdx), '-words') then
+        GWordsMode := True
       else
         GArg := ParamStr(GIdx);
     if GArg = '' then
@@ -306,6 +347,7 @@ begin
       PrintOne(GArg, GPlatform);
       Halt(0);
     end;
+    GWords := TDictionary<string, Int64>.Create;
     GWatch := TStopwatch.StartNew;
     GFiles := CorpusFiles(GArg, GRoot);
     WithPreprocessor(GRoot, GPlatform,
@@ -316,14 +358,19 @@ begin
         for LFile in GFiles do
           JudgeFile(LFile);
       end);
+    if GWordsMode then
+      for GArg in GWords.Keys do
+        Writeln(GWords[GArg]:10, '  ', GArg);
     Writeln;
     Writeln(Format('Files: %d, parsed clean: %d, exceptions: %d',
       [GTotals.Files, GTotals.Clean, GTotals.Exceptions]));
     Writeln(Format('Changed: %d files, %d edits over %d lines (%.2f%%): ' +
-      '%d indentation only, %d line breaks added, %d with blank lines dropped',
+      '%d indentation only, %d line breaks added, %d with blank lines ' +
+      'dropped, %d spacing inside a line, %d case',
       [GTotals.Changed, GTotals.Edits, GTotals.Lines,
        Pct(GTotals.Edits, GTotals.Lines), GTotals.IndentOnly,
-       GTotals.BreakAdded, GTotals.BlankDropped]));
+       GTotals.BreakAdded, GTotals.BlankDropped, GTotals.SpaceEdits,
+       GTotals.CaseEdits]));
     Writeln(Format('Gates: G-tok %d, G-idem %d, G-tree %d failures',
       [GTotals.TokFail, GTotals.IdemFail, GTotals.TreeFail]));
     Writeln(Format('Elapsed: %.1f s', [GWatch.ElapsedMilliseconds / 1000]));

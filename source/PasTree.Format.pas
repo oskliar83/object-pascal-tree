@@ -24,8 +24,8 @@ unit PasTree.Format;
     the FORCED ones the options ask for (one statement per line, `begin` on
     its own line, `end` / `else` / `until` on their own lines, one
     declaration per line, the section word alone). F1 never removes a line
-    break the author wrote (but blank lines over the cap) and never touches
-    the spacing inside a line - a gap without a line break is kept as it is;
+    break the author wrote (but blank lines over the cap); a gap without a
+    line break is F2's;
   - for a gap that ends a line: the indentation of the next line. A line that
     starts a unit takes the unit's column (UnitCol, from the tree); a line
     that starts with a closer (`end`, `until`, `else`) takes its construct's;
@@ -34,6 +34,14 @@ unit PasTree.Format;
     its `(` stays aligned; a comment or directive line takes the column of
     the code line it introduces (a directive written in column 1 stays
     there).
+
+  F2 DECIDES the gaps INSIDE a line, between two code tokens (SpaceRule):
+  one space where the rules ask for one and the author wrote none (several
+  are the author's alignment and stay), none where the rules ask for none
+  and the two tokens lex back unchanged (MayTouch); and the case of a word
+  (ItemText): reserved words, the directive words a node owns, a compiler
+  directive's name, and the identifiers a leaf holds through the caller's
+  TPasIdentCaseFunc. docs/formatter.md is the full account.
 
   KEPT AS WRITTEN - the gap is copied: next to a skipped region or an opaque
   token, inside asm (tfAsm), around a token the tree owns no node for, after
@@ -65,6 +73,9 @@ type
   { Whether a statement after `then`, `do` or `else` goes onto its own line. }
   TPasFormatBreak = (fbAlways, fbKeep);
 
+  { How a class of words is spelled: lower case, upper case, as written. }
+  TPasFormatCase = (fcLower, fcUpper, fcKeep);
+
   TPasFormatOptions = record
     IndentStep: Integer;              // 2
     // Tab stops of the ORIGINAL text, for reading a column written with tabs.
@@ -87,8 +98,36 @@ type
     KeepDirectivesAtColumn1: Boolean; // True
     // A comment written in column 1 above declarations stays there.
     KeepCommentsAtColumn1: Boolean;   // True
+    // Spacing inside a line (F2). Off: every gap without a line break is
+    // kept as written. On: the spaces the rules below ask for are added
+    // where none is, and removed where the rules say none - a run of
+    // several spaces where one is asked for is the author's alignment and
+    // is kept.
+    NormalizeSpaces: Boolean;         // True
+    // One space around `:=`, a binary operator and a declaration's `=`.
+    SpaceAroundOperators: Boolean;    // True
+    // One space after `,`, after `;` inside a line and after `:`.
+    SpaceAfterSeparators: Boolean;    // True
+    // No space inside `( )` and `[ ]`, before `,` `;` `:` `)` `]`, around `.`
+    // and `..`, before the `(` of a call or a parameter list and the `[` of
+    // an index, inside `< >` of type arguments, after a unary `-` `+` `@`,
+    // around `^`.
+    RemoveSpaces: Boolean;            // True
+    // Reserved words (B.4.1): `begin`, `string`, `and`.
+    ReservedWordCase: TPasFormatCase; // fcLower
+    // Directive words in their directive position (B.4.2): `override`,
+    // `read`, `out`, `on`, `abstract` - the identifier tokens a node owns.
+    DirectiveWordCase: TPasFormatCase; // fcLower
+    // A compiler directive's name: `{$IFDEF`, `{$R`.
+    CompilerDirectiveCase: TPasFormatCase; // fcUpper
     class function Default: TPasFormatOptions; static;
   end;
+
+  { An identifier's spelling as the caller wants it - its declaration's, for
+    a caller that resolves names - or AText unchanged. AVis is the token's
+    visible index in the tree PasFormatEdits formats. }
+  TPasIdentCaseFunc = reference to function(AVis: Integer;
+    const AText: string): string;
 
   TPasTextEdit = record
     Start: Integer;    // 0-based offset into the file's source
@@ -101,7 +140,12 @@ type
   ascending order, none overlapping. ATree must come from a parse of that
   file's current text. }
 function PasFormatEdits(const ATree: TPasTree; AFileId: Integer;
-  const AOptions: TPasFormatOptions): TPasTextEdits;
+  const AOptions: TPasFormatOptions): TPasTextEdits; overload;
+{ The same, every identifier a leaf holds spelled as AIdentCase says (nil:
+  as written). }
+function PasFormatEdits(const ATree: TPasTree; AFileId: Integer;
+  const AOptions: TPasFormatOptions;
+  const AIdentCase: TPasIdentCaseFunc): TPasTextEdits; overload;
 
 { ASource with AEdits applied (ascending, not overlapping - as
   PasFormatEdits returns them). }
@@ -109,8 +153,11 @@ function PasApplyEdits(const ASource: string;
   const AEdits: TPasTextEdits): string;
 
 { G-tok: do the two texts hold the same tokens but whitespace, each with the
-  same text? AMsg names the first difference. }
-function PasSameTokens(const AOld, ANew: string; out AMsg: string): Boolean;
+  same text - a word and a compiler directive with the same text but for
+  case, when AWordCase (what the case options may change)? AMsg names the
+  first difference. }
+function PasSameTokens(const AOld, ANew: string; out AMsg: string;
+  AWordCase: Boolean = True): Boolean;
 
 implementation
 
@@ -132,6 +179,13 @@ begin
   Result.IndentNestedRoutines := True;
   Result.KeepDirectivesAtColumn1 := True;
   Result.KeepCommentsAtColumn1 := True;
+  Result.NormalizeSpaces := True;
+  Result.SpaceAroundOperators := True;
+  Result.SpaceAfterSeparators := True;
+  Result.RemoveSpaces := True;
+  Result.ReservedWordCase := fcLower;
+  Result.DirectiveWordCase := fcLower;
+  Result.CompilerDirectiveCase := fcUpper;
 end;
 
 const
@@ -192,6 +246,7 @@ type
     ItemCol: TArray<Integer>;       // per item: its output column
     CommentCont: TArray<Boolean>;   // per item: continues a trailing comment
     LineBreak: string;
+    IdentCase: TPasIdentCaseFunc;
     procedure Init(const ATree: TPasTree; AFileId: Integer;
       const AOptions: TPasFormatOptions);
     procedure BuildItems;
@@ -222,6 +277,9 @@ type
     function CodeCol(AVis: Integer): Integer;
     function CommentCol(AItem: Integer): Integer;
     function CountBreaks(AStart, AEnd: Integer; out AFirst: string): Integer;
+    function SpaceRule(AA, AB: Integer): Integer;
+    function MayTouch(AA, AB: Integer): Boolean;
+    function ItemText(AItem: Integer): string;
     function Run: TPasTextEdits;
   end;
 
@@ -959,13 +1017,198 @@ begin
   end;
 end;
 
+// The spaces a gap inside a line takes between code tokens AA and AB (visible
+// indices): 0, 1 (at least one - more is the author's alignment), or -1 to
+// keep it as written.
+function TFormatter.SpaceRule(AA, AB: Integer): Integer;
+var
+  LKa, LKb: TPasTokenKind;
+  LOa, LOb: Integer;
+  LNa, LNb: TPasNodeKind;
+
+  function IsOperatorOf(AVis, AOwner: Integer): Boolean;
+  begin
+    Result := (AOwner >= 0) and (Kind(AOwner) in [nkBinaryOp]) and
+      not (VisKind(AVis) in [tkIdentifier]);
+  end;
+
+  function IsDeclEqual(AVis, AOwner: Integer): Boolean;
+  begin
+    Result := (VisKind(AVis) = tkEqual) and (AOwner >= 0) and
+      (Kind(AOwner) in [nkTypeDecl, nkConstDecl, nkEnumValue, nkParam,
+      nkVarDecl, nkMethodResolution, nkInlineConst]);
+  end;
+
+begin
+  Result := -1;
+  LKa := VisKind(AA);
+  LKb := VisKind(AB);
+  LOa := Own.Owner[AA];
+  LOb := Own.Owner[AB];
+  if (LOa < 0) or (LOb < 0) then
+    Exit;
+  LNa := Kind(LOa);
+  LNb := Kind(LOb);
+  // One literal's elements (B.6.1), and the character after a caret
+  // (B.6.2): the gap is part of the value.
+  if (LOa = LOb) and (LNa in [nkStrLit, nkCaretChar]) then
+    Exit;
+  if (LKa = tkCaret) and (LNa = nkCaretChar) then
+    Exit;
+  if (LNa = nkFormattedArg) or (LNb = nkFormattedArg) then
+    Exit;                             // `Write(X:10:2)`
+  if O.RemoveSpaces then
+  begin
+    if (LKb in [tkComma, tkSemicolon, tkRParen, tkRBracket, tkColon]) or
+      (LKa in [tkLParen, tkLBracket]) then
+      Exit(0);
+    if (LKa in [tkDot, tkDotDot]) or (LKb in [tkDot, tkDotDot]) then
+      Exit(0);
+    if (LKb = tkLParen) and (LNb in [nkCall, nkParams, nkProgramParams]) then
+      Exit(0);
+    if (LKb = tkLBracket) and (LNb in [nkIndex, nkParams]) then
+      Exit(0);
+    if (LNb in [nkTypeArgs, nkGenericParams]) and (LKb in [tkLess, tkGreater]) then
+      Exit(0);
+    if (LNa in [nkTypeArgs, nkGenericParams]) and (LKa = tkLess) then
+      Exit(0);
+    if (LNa = nkUnaryOp) and (LKa in [tkMinus, tkPlus, tkAt]) then
+      Exit(0);
+    if (LKb = tkCaret) and (LNb = nkDeref) then
+      Exit(0);
+    if (LKa = tkCaret) and (LNa = nkPointerType) then
+      Exit(0);
+  end;
+  if O.SpaceAfterSeparators and (LKa in [tkComma, tkSemicolon, tkColon]) then
+    Exit(1);
+  if O.SpaceAroundOperators then
+  begin
+    if (LKa = tkAssign) or (LKb = tkAssign) then
+      Exit(1);
+    if IsOperatorOf(AA, LOa) or IsOperatorOf(AB, LOb) then
+      Exit(1);
+    if IsDeclEqual(AA, LOa) or IsDeclEqual(AB, LOb) then
+      Exit(1);
+  end;
+end;
+
+// May the gap between items AA and AB shrink to nothing? Only when the two
+// tokens lex back as the same two (spec B.2: `(` `*`, `/` `/`, `:` `=`,
+// `<` `>`, `.` `.`, two words would fuse).
+function TFormatter.MayTouch(AA, AB: Integer): Boolean;
+var
+  LA, LB: string;
+  LStream: TPasTokenStream;
+  LIdx, LCount: Integer;
+begin
+  LA := Copy(Src, Items[AA].Start + 1, Items[AA].EndPos - Items[AA].Start);
+  LB := Copy(Src, Items[AB].Start + 1, Items[AB].EndPos - Items[AB].Start);
+  // After an operand, as both tokens stand here: the lexer reads a caret
+  // by the token before it (B.6.2), and a caret that starts an operand is
+  // never asked about (SpaceRule keeps its gap).
+  LStream := TPasLexer.Tokenize('x ' + LA + LB);
+  LCount := -1;
+  for LIdx := 0 to High(LStream.Tokens) do
+    if not (LStream.Tokens[LIdx].Kind in [tkWhitespace, tkEndOfFile]) then
+    begin
+      Inc(LCount);
+      if (LCount = 1) and ((LStream.Tokens[LIdx].Len <> Length(LA)) or
+        (LStream.Tokens[LIdx].Kind <> Stream^.Tokens[T^.Source.Visible[
+        Items[AA].Vis].TokenIndex].Kind)) then
+        Exit(False);
+    end;
+  Result := LCount = 2;
+end;
+
+
+function ApplyCase(const AText: string; ACase: TPasFormatCase): string;
+begin
+  case ACase of
+    fcLower:
+      Result := LowerCase(AText);
+    fcUpper:
+      Result := UpperCase(AText);
+  else
+    Result := AText;
+  end;
+end;
+
+// The text an item takes: a word in its class's case, a compiler
+// directive's name in its.
+function TFormatter.ItemText(AItem: Integer): string;
+var
+  LText: string;
+  LVis, LOwner, LIdx, LEnd: Integer;
+begin
+  LText := Copy(Src, Items[AItem].Start + 1,
+    Items[AItem].EndPos - Items[AItem].Start);
+  Result := LText;
+  case Items[AItem].Kind of
+    fiDirective:
+      if O.CompilerDirectiveCase <> fcKeep then
+      begin
+        // `{$name` or `(*$name`: only the name, never the argument.
+        LIdx := Pos('$', LText);
+        if LIdx = 0 then
+          Exit;
+        LEnd := LIdx + 1;
+        while (LEnd <= Length(LText)) and CharInSet(LText[LEnd],
+          ['A'..'Z', 'a'..'z', '_']) do
+          Inc(LEnd);
+        Result := Copy(LText, 1, LIdx) +
+          ApplyCase(Copy(LText, LIdx + 1, LEnd - LIdx - 1),
+          O.CompilerDirectiveCase) + Copy(LText, LEnd, MaxInt);
+      end;
+    fiCode:
+      begin
+        LVis := Items[AItem].Vis;
+        if VisFlagged(LVis) then
+          Exit;
+        LOwner := Own.Owner[LVis];
+        if VisKind(LVis) in [tkAnd..tkXor] then
+          Result := ApplyCase(LText, O.ReservedWordCase)
+        else if VisKind(LVis) = tkIdentifier then
+        begin
+          // The kinds that own a directive word in valid code - every one
+          // the self-host and the Studio source show (tools\PasTreeFormat
+          // -words). Error recovery hands stray words to other kinds.
+          if (LOwner >= 0) and (Kind(LOwner) in [nkDirective, nkPropSpec,
+            nkVisibility, nkTypeDecl, nkPackage, nkUsesClause, nkClassType,
+            nkObjectType, nkRecordType, nkHelperType, nkInterfaceType,
+            nkProcType, nkRoutine, nkRaiseStmt, nkParam, nkExceptOn,
+            nkVarDecl, nkExportsItem, nkConstraint]) then
+            Result := ApplyCase(LText, O.DirectiveWordCase)
+          else if Assigned(IdentCase) and (LOwner >= 0) and
+            (Kind(LOwner) = nkIdent) then
+          begin
+            Result := IdentCase(LVis, LText);
+            // Only the case may change: anything else is no spelling of it.
+            if not SameText(Result, LText) or (Length(Result) <> Length(LText)) then
+              Result := LText;
+          end;
+        end;
+      end;
+  end;
+end;
+
 function TFormatter.Run: TPasTextEdits;
 var
-  LCount, LIdx, LBreaks, LCol, LLineIndent, LLineFirstOrig, LEditCount: Integer;
+  LCount, LIdx, LBreaks, LCol, LLineIndent, LLineFirstOrig, LEditCount,
+    LShift, LSpaces, LOrigSpaces: Integer;
   LKeep, LStarts: Boolean;
   LPrev, LCur: TFmtItem;
   LFirstBreak, LGap, LNew: string;
   LKept: TArray<Boolean>;
+
+  procedure AddEdit(AStart, ALen: Integer; const AText: string);
+  begin
+    if LEditCount = Length(Result) then
+      SetLength(Result, LEditCount * 2);
+    Result[LEditCount].Start := AStart;
+    Result[LEditCount].Len := ALen;
+    Result[LEditCount].Text := AText;
+    Inc(LEditCount);
+  end;
 
   function Opaque(const AItem: TFmtItem): Boolean;
   begin
@@ -1007,6 +1250,7 @@ begin
   // and the edits.
   SetLength(Result, 64);
   LEditCount := 0;
+  LShift := 0;
   LLineIndent := OrigCol(Items[0].Start);
   LLineFirstOrig := LLineIndent;
   for LIdx := 0 to LCount - 1 do
@@ -1043,22 +1287,40 @@ begin
         LGap := Copy(Src, Items[LIdx - 1].EndPos + 1,
           LCur.Start - Items[LIdx - 1].EndPos);
         if LGap <> LNew then
-        begin
-          if LEditCount = Length(Result) then
-            SetLength(Result, LEditCount * 2);
-          Result[LEditCount].Start := Items[LIdx - 1].EndPos;
-          Result[LEditCount].Len := LCur.Start - Items[LIdx - 1].EndPos;
-          Result[LEditCount].Text := LNew;
-          Inc(LEditCount);
-        end;
+          AddEdit(Items[LIdx - 1].EndPos, LCur.Start - Items[LIdx - 1].EndPos,
+            LNew);
+      end;
+      LShift := 0;
+    end
+    else if O.NormalizeSpaces and not LKept[LIdx] and
+      (LCur.Kind = fiCode) and (Items[LIdx - 1].Kind = fiCode) then
+    begin
+      // A gap inside a line, between two code tokens (F2).
+      LSpaces := SpaceRule(Items[LIdx - 1].Vis, LCur.Vis);
+      LOrigSpaces := OrigCol(LCur.Start) - OrigCol(Items[LIdx - 1].EndPos);
+      if (LSpaces = 1) and (LOrigSpaces = 0) then
+      begin
+        AddEdit(LCur.Start, 0, ' ');
+        Inc(LShift);
+      end
+      else if (LSpaces = 0) and (LOrigSpaces > 0) and MayTouch(LIdx - 1, LIdx) then
+      begin
+        AddEdit(Items[LIdx - 1].EndPos, LCur.Start - Items[LIdx - 1].EndPos, '');
+        Dec(LShift, LOrigSpaces);
       end;
     end;
-    ItemCol[LIdx] := LLineIndent + OrigCol(LCur.Start) - LLineFirstOrig;
+    if LCur.Kind in [fiCode, fiDirective] then
+    begin
+      LNew := ItemText(LIdx);
+      if LNew <> Copy(Src, LCur.Start + 1, LCur.EndPos - LCur.Start) then
+        AddEdit(LCur.Start, LCur.EndPos - LCur.Start, LNew);
+    end;
+    ItemCol[LIdx] := LLineIndent + OrigCol(LCur.Start) - LLineFirstOrig + LShift;
     if LCur.Kind = fiCode then
     begin
       StartsLineAt[LCur.Vis] := LStarts;
       LineIndentAt[LCur.Vis] := LLineIndent;
-      TokCol[LCur.Vis] := LLineIndent + OrigCol(LCur.Start) - LLineFirstOrig;
+      TokCol[LCur.Vis] := ItemCol[LIdx];
     end;
     // An item that spans lines (a block comment, a multiline string, a
     // skipped region): what follows it on its last line stays where it is.
@@ -1066,6 +1328,7 @@ begin
     begin
       LLineIndent := 0;
       LLineFirstOrig := 0;
+      LShift := 0;
     end;
   end;
   SetLength(Result, LEditCount);
@@ -1073,6 +1336,13 @@ end;
 
 function PasFormatEdits(const ATree: TPasTree; AFileId: Integer;
   const AOptions: TPasFormatOptions): TPasTextEdits;
+begin
+  Result := PasFormatEdits(ATree, AFileId, AOptions, nil);
+end;
+
+function PasFormatEdits(const ATree: TPasTree; AFileId: Integer;
+  const AOptions: TPasFormatOptions;
+  const AIdentCase: TPasIdentCaseFunc): TPasTextEdits;
 var
   LFmt: TFormatter;
 begin
@@ -1082,6 +1352,7 @@ begin
     Exit;
   LFmt := Default(TFormatter);
   LFmt.Init(ATree, AFileId, AOptions);
+  LFmt.IdentCase := AIdentCase;
   Result := LFmt.Run;
 end;
 
@@ -1107,7 +1378,8 @@ begin
   end;
 end;
 
-function PasSameTokens(const AOld, ANew: string; out AMsg: string): Boolean;
+function PasSameTokens(const AOld, ANew: string; out AMsg: string;
+  AWordCase: Boolean): Boolean;
 var
   LOld, LNew: TPasTokenStream;
   LI, LJ, LLine, LCol: Integer;
@@ -1126,7 +1398,9 @@ begin
     if (LI > High(LOld.Tokens)) or (LJ > High(LNew.Tokens)) then
       Break;
     if (LOld.Tokens[LI].Kind <> LNew.Tokens[LJ].Kind) or
-      (LOld.TokenText(LI) <> LNew.TokenText(LJ)) then
+      ((LOld.TokenText(LI) <> LNew.TokenText(LJ)) and not (AWordCase and
+      (LOld.Tokens[LI].Kind in [tkIdentifier, tkDirective, tkAnd..tkXor]) and
+      SameText(LOld.TokenText(LI), LNew.TokenText(LJ)))) then
     begin
       LOld.OffsetToLineCol(LOld.Tokens[LI].Start, LLine, LCol);
       AMsg := Format('(%d,%d): %s became %s',
