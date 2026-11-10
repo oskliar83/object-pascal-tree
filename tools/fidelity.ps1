@@ -57,6 +57,11 @@
   t3x adds t1's parentheses and t2's blocks over the print, under t2's
   switches: the plan's final gate. The localizer as for t1 over their sites.
 
+  Mode tf judges the FORMATTER (docs/formatter.md): the unit laid out by
+  PasTree.Format with the default style - whitespace and case only - under
+  t2's switches, since the line and reference records follow the lines
+  (spec B.2). Any DIFF is a formatter defect; there are no sites.
+
   Mode tq judges the RESOLVER's bindings (plan S12-S13): every name PasTree
   bound written so that dcc can only read it as the declaration PasTree
   chose - a unit-level one as <Unit>.Name, a member of the method's own type
@@ -112,7 +117,7 @@
 #>
 param(
   [Parameter(Mandatory = $true)] [string] $List,
-  [Parameter(Mandatory = $true)] [ValidateSet('t0', 'ts', 't0f', 't1', 't2', 't3', 't3x', 'tq', 'tqs', 'tm', 'tqm', 'tms')] [string] $Mode,
+  [Parameter(Mandatory = $true)] [ValidateSet('t0', 'ts', 't0f', 't1', 't2', 't3', 't3x', 'tq', 'tqs', 'tm', 'tqm', 'tms', 'tf')] [string] $Mode,
   [Parameter(Mandatory = $true)] [string] $Out,
   [string] $Platform = 'Win64',
   [string] $Bds = 'C:\Program Files (x86)\Embarcadero\Studio\37.0',
@@ -184,10 +189,17 @@ if ($Mode -eq 't0f' -and -not $PSBoundParameters.ContainsKey('Switches') -and $W
 # tq qualifies names (Self.X, a hard cast to a member's type): under dcc's
 # defaults the `$93` symbol-reference record differs, and -$Y- alone leaves
 # the casts' lines (plan S12, probes Q04, Q05, Q12) - t2's set.
-if ($Mode -in (@('t1', 't2', 't3x') + $qModes) -and -not $PSBoundParameters.ContainsKey('Switches') -and $Worker -eq '') {
+if ($Mode -in (@('t1', 't2', 't3x', 'tf') + $qModes) -and -not $PSBoundParameters.ContainsKey('Switches') -and $Worker -eq '') {
   $Switches = @('-$O-', '-$D-', '-$L-')
-  if ($Mode -in (@('t2', 't3x') + $qModes)) { $Switches += '-$Y-' }
+  if ($Mode -in (@('t2', 't3x', 'tf') + $qModes)) { $Switches += '-$Y-' }
+  # An assertion passes its line to the RTL as a constant: the CODE follows
+  # the lines (probed on the Studio RTL: System.Math.EnsureRange's
+  # ssert(AMin <= AMax) was the routine a moved line changed).
+  if ($Mode -eq 'tf') { $Switches += '-$C-' }
 }
+# tf - the formatter (docs/formatter.md) - moves lines: the line and the
+# symbol-reference records follow them, so t2's set, and assertions off
+# (spec B.2).
 # t3 - the print in place, every token on its line, nothing added - takes
 # dcc's own defaults like t0f: line tables and symbol info on, the strictest
 # judge of a print that must change nothing but spellings (dcc keeps lines,
@@ -818,6 +830,23 @@ function Invoke-Unit([string] $u, [string] $work) {
       $r.Line = "OK  $leaf  SELFTEST-MISS: $($sites.Count) site(s), .dcu identical"
     }
     return [pscustomobject]$r
+  }
+
+  # tf moves lines, and a .dcu records a routine's line even without line
+  # tables and reference info (probed, dcc64 37.0: a routine two lines
+  # lower changes one byte, -$O- -$D- -$L- -$Y-): the raw bytes cannot be
+  # its verdict. The dump is - every routine's code and data bytes, its
+  # fixups and the declarations, no line: equal dumps are OK (lines).
+  if ($Mode -eq 'tf') {
+    foreach ($side in @(@($a, 'orig.dump'), @($b, 'xf.dump'))) {
+      $d = Invoke-Tool $dcuTool @($side[0], '-dump') $work
+      [IO.File]::WriteAllText((Join-Path $work $side[1]), $d.Out)
+    }
+    $cmp = Compare-Dumps (Join-Path $work 'orig.dump') (Join-Path $work 'xf.dump')
+    if ($cmp.Routines.Count -eq 0 -and $cmp.Other.Count -eq 0) {
+      $r.Outcome = 'OK'; $r.Line = "OK  $leaf  lines$note"
+      return [pscustomobject]$r
+    }
   }
 
   # dcc is not always deterministic: under -$O- one Studio unit (Vcl.Skia)

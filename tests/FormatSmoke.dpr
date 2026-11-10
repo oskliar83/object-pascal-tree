@@ -14,6 +14,7 @@ program FormatSmoke;
 uses
   System.SysUtils,
   System.Classes,
+  System.IOUtils,
   PasTree.Types in '..\source\PasTree.Types.pas',
   PasTree.Lexer in '..\source\PasTree.Lexer.pas',
   PasTree.SourceManager in '..\source\PasTree.SourceManager.pas',
@@ -158,6 +159,61 @@ begin
   if LOut <> U(['procedure P;', 'var', '  I: Integer;', 'begin', '  I := 0;',
     'end;']) then
     Fail('identifier case', Visible(LOut))
+  else
+    Inc(GPassed);
+end;
+
+// Range mode: only the edits of the selected text, each as the whole-file
+// format makes it.
+procedure RangeCase;
+var
+  LText, LOut: string;
+  LTree: TPasTree;
+  LDiags, LStart: Integer;
+begin
+  LText := U(['procedure P;', 'begin', '      A;', 'B;', '    C;', 'end;']);
+  LTree := Parse(LText, LDiags);
+  LStart := Pos('B;', LText) - 1;
+  LOut := PasApplyEdits(LText, PasFormatRangeEdits(LTree, 0,
+    TPasFormatOptions.Default, LStart, LStart + 2));
+  if LOut <> U(['procedure P;', 'begin', '      A;', '  B;', '    C;', 'end;']) then
+    Fail('range', Visible(LOut))
+  else
+    Inc(GPassed);
+end;
+
+// An include file formats as itself: its own tokens, laid out by the
+// includer's tree; the includer is not touched by it.
+procedure IncludeCase;
+var
+  LDir, LMain, LInc, LOut: string;
+  LTree: TPasTree;
+  LDiags: TArray<TPasParseDiag>;
+  LPre: TPasPreprocessed;
+  LFile: Integer;
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'PasTreeFormatSmoke');
+  ForceDirectories(LDir);
+  LMain := TPath.Combine(LDir, 'IncMain.pas');
+  LInc := TPath.Combine(LDir, 'IncBody.inc');
+  TFile.WriteAllText(LMain, U(['procedure P;', 'begin',
+    '  {$I IncBody.inc}', 'end;']));
+  TFile.WriteAllText(LInc, Lines(['A;', '      B;']));
+  LPre := GPP.Process(LMain);
+  LTree := TPasParser.ParseFile(LPre, LDiags);
+  LFile := -1;
+  for var LIdx := 0 to High(LPre.FileNames) do
+    if SameText(TPath.GetFileName(LPre.FileNames[LIdx]), 'IncBody.inc') then
+      LFile := LIdx;
+  if (LFile < 0) or (Length(LDiags) > 0) then
+  begin
+    Fail('include', 'the include was not read');
+    Exit;
+  end;
+  LOut := PasApplyEdits(LPre.Files[LFile].Source,
+    PasFormatEdits(LTree, LFile, TPasFormatOptions.Default));
+  if LOut <> Lines(['A;', '  B;']) then
+    Fail('include', Visible(LOut))
   else
     Inc(GPassed);
 end;
@@ -577,6 +633,8 @@ begin
     'end;']));
 
   IdentCaseCase;
+  RangeCase;
+  IncludeCase;
 
   LOpt := TPasFormatOptions.Default;
   LOpt.StatementAfterThenDo := fbKeep;

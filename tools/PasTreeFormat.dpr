@@ -65,7 +65,7 @@ var
   GMax: Integer = 200;
   GPrinted: Integer;
   GOutDir, GRoot: string;
-  GWordsMode: Boolean;
+  GWordsMode, GHistMode: Boolean;
   GWords: TDictionary<string, Int64>;
 
 procedure Report(const AFile, AGate, AMsg: string);
@@ -125,6 +125,61 @@ begin
   end;
 end;
 
+// -hist: every edit counted by its kind and the words around it - the word
+// before the gap and the one after, lower case - for tuning the default
+// style against a corpus (stage F3).
+function NeighborWord(const ASource: string; APos: Integer;
+  ABackward: Boolean): string;
+var
+  LEnd: Integer;
+begin
+  if ABackward then
+  begin
+    LEnd := APos;                     // 1-based end of the word
+    while (LEnd > 0) and CharInSet(ASource[LEnd], [' ', #9, #13, #10]) do
+      Dec(LEnd);
+    APos := LEnd;
+    while (APos > 0) and not CharInSet(ASource[APos], [' ', #9, #13, #10]) and
+      (LEnd - APos < 12) do
+      Dec(APos);
+    Result := Copy(ASource, APos + 1, LEnd - APos);
+  end
+  else
+  begin
+    APos := APos + 1;                 // 1-based start
+    LEnd := APos;
+    while (LEnd <= Length(ASource)) and
+      not CharInSet(ASource[LEnd], [' ', #9, #13, #10]) and (LEnd - APos < 12) do
+      Inc(LEnd);
+    Result := Copy(ASource, APos, LEnd - APos);
+  end;
+  Result := LowerCase(Result);
+end;
+
+procedure CountEdit(const ASource: string; const AEdit: TPasTextEdit;
+  const AOld: string);
+var
+  LKey: string;
+  LCount: Int64;
+begin
+  if Trim(AOld) <> '' then
+    LKey := 'case   ' + LowerCase(AOld) + ' -> ' + AEdit.Text
+  else if (Breaks(AOld) = 0) and (Breaks(AEdit.Text) = 0) then
+    LKey := Format('space  %s|%s  %d->%d', [NeighborWord(ASource, AEdit.Start,
+      True), NeighborWord(ASource, AEdit.Start + AEdit.Len, False),
+      Length(AOld), Length(AEdit.Text)])
+  else if Breaks(AOld) < Breaks(AEdit.Text) then
+    LKey := 'break  ' + NeighborWord(ASource, AEdit.Start, True) + ' | ' +
+      NeighborWord(ASource, AEdit.Start + AEdit.Len, False)
+  else if Breaks(AOld) > Breaks(AEdit.Text) then
+    LKey := 'blank'
+  else
+    LKey := 'indent ' + NeighborWord(ASource, AEdit.Start + AEdit.Len, False);
+  if not GWords.TryGetValue(LKey, LCount) then
+    LCount := 0;
+  GWords.AddOrSetValue(LKey, LCount + 1);
+end;
+
 procedure JudgeFile(const AFile: string);
 var
   LPre: TPasPreprocessed;
@@ -170,6 +225,8 @@ begin
         Inc(GTotals.BreakAdded)
       else
         Inc(GTotals.BlankDropped);
+      if GHistMode then
+        CountEdit(LSource, LEdits[LIdx], LOld);
     end;
     if GOutDir <> '' then
     begin
@@ -334,6 +391,8 @@ begin
         GPrintMode := True
       else if SameText(ParamStr(GIdx), '-words') then
         GWordsMode := True
+      else if SameText(ParamStr(GIdx), '-hist') then
+        GHistMode := True
       else
         GArg := ParamStr(GIdx);
     if GArg = '' then
@@ -358,7 +417,7 @@ begin
         for LFile in GFiles do
           JudgeFile(LFile);
       end);
-    if GWordsMode then
+    if GWordsMode or GHistMode then
       for GArg in GWords.Keys do
         Writeln(GWords[GArg]:10, '  ', GArg);
     Writeln;

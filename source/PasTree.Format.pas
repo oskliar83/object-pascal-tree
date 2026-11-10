@@ -147,6 +147,16 @@ function PasFormatEdits(const ATree: TPasTree; AFileId: Integer;
   const AOptions: TPasFormatOptions;
   const AIdentCase: TPasIdentCaseFunc): TPasTextEdits; overload;
 
+{ Range mode: the edits of PasFormatEdits that touch the text from AStart to
+  AEnd (0-based offsets into the file's source, AEnd exclusive) - a gap's
+  edit by the token after it, so formatting a selection re-indents its
+  first line and leaves the line after it alone. Every column is still
+  computed over the whole file: a range formats as it would in a format of
+  the whole file, and the two agree edit for edit. }
+function PasFormatRangeEdits(const ATree: TPasTree; AFileId: Integer;
+  const AOptions: TPasFormatOptions; AStart, AEnd: Integer;
+  const AIdentCase: TPasIdentCaseFunc = nil): TPasTextEdits;
+
 { AText formatted as a file of its own, parsed with no conditional symbol
   defined and no search path: for text a tool generated - the interface
   source PasTree.Dcu.Source prints for a compiled unit (a
@@ -758,12 +768,21 @@ end;
 
 function TFormatter.AnonCol(AAnon: Integer): Integer;
 var
-  LFirst: Integer;
+  LFirst, LBody: Integer;
 begin
   LFirst := Leftmost[AAnon];
   if (LFirst < 0) or not InFile(LFirst) or (TokCol[LFirst] < 0) then
     Exit(BaseCol(Parent(AAnon)) + O.IndentStep);
   if StartsLineAt[LFirst] then
+    Exit(TokCol[LFirst]);
+  // `Run(procedure` with the body's `begin` written under its `procedure`:
+  // the body stays under it. Otherwise one step in from the line.
+  LBody := T^.LastChild(AAnon);
+  if (LBody <> NIL_NODE) and (Kind(LBody) = nkRoutineBody) then
+    LBody := T^.LastChild(LBody);
+  if (LBody <> NIL_NODE) and IsUnit(LBody) and InFile(Lead[LBody]) and
+    (OrigCol(VisStart(Lead[LBody])) = OrigCol(VisStart(LFirst))) and
+    (LineOf(VisStart(Lead[LBody])) > LineOf(VisStart(LFirst))) then
     Result := TokCol[LFirst]
   else
     Result := LineIndentAt[LFirst] + O.IndentStep;
@@ -966,7 +985,9 @@ begin
   // conditional's indentation is the author's.
   if Items[AItem].Kind = fiDirective then
   begin
-    Result := Result + LOrig - OrigCol(VisStart(LVis));
+    // Less than a step off is a slip of the hand, not a nesting.
+    if Abs(LOrig - OrigCol(VisStart(LVis))) >= O.IndentStep then
+      Result := Result + LOrig - OrigCol(VisStart(LVis));
     if Result < 0 then
       Result := 0;
     Exit;
@@ -1220,6 +1241,21 @@ var
     Inc(LEditCount);
   end;
 
+  // Only comments stand before item AIdx on its line, and the line starts
+  // with one of them: the line is already AIdx's (`{class} function F;`, a
+  // generated unit's member marker) - a break before AIdx would cut the
+  // comment from what it marks.
+  function LineOfComments(AIdx: Integer): Boolean;
+  var
+    LK: Integer;
+  begin
+    LK := AIdx - 1;
+    while (LK > 0) and (Items[LK].Kind = fiComment) and (NL[LK] = 0) do
+      Dec(LK);
+    Result := (LK >= 0) and (Items[LK].Kind = fiComment) and
+      ((LK = 0) or (NL[LK] > 0));
+  end;
+
   function Opaque(const AItem: TFmtItem): Boolean;
   begin
     Result := (AItem.Kind = fiOpaque) or AItem.InAsm or AItem.AfterEnd or
@@ -1250,7 +1286,7 @@ begin
       if (O.MaxBlankLines >= 0) and (LBreaks > O.MaxBlankLines + 1) then
         LBreaks := O.MaxBlankLines + 1;
       if (LBreaks = 0) and (LCur.Kind = fiCode) and ForcedAt[LCur.Vis] and
-        (LPrev.Kind <> fiDirective) then
+        (LPrev.Kind <> fiDirective) and not LineOfComments(LIdx) then
         LBreaks := 1;
     end;
     NL[LIdx] := LBreaks;
@@ -1313,7 +1349,11 @@ begin
         AddEdit(LCur.Start, 0, ' ');
         Inc(LShift);
       end
-      else if (LSpaces = 0) and (LOrigSpaces > 0) and MayTouch(LIdx - 1, LIdx) then
+      else if (LSpaces = 0) and (LOrigSpaces > 0) and
+        // `Name    : Type` - colons aligned down a declaration list are the
+        // author's alignment, as several spaces are where one is asked.
+        not ((LOrigSpaces > 1) and (VisKind(LCur.Vis) = tkColon)) and
+        MayTouch(LIdx - 1, LIdx) then
       begin
         AddEdit(Items[LIdx - 1].EndPos, LCur.Start - Items[LIdx - 1].EndPos, '');
         Dec(LShift, LOrigSpaces);
@@ -1364,6 +1404,34 @@ begin
   LFmt.Init(ATree, AFileId, AOptions);
   LFmt.IdentCase := AIdentCase;
   Result := LFmt.Run;
+end;
+
+function PasFormatRangeEdits(const ATree: TPasTree; AFileId: Integer;
+  const AOptions: TPasFormatOptions; AStart, AEnd: Integer;
+  const AIdentCase: TPasIdentCaseFunc): TPasTextEdits;
+var
+  LAll: TPasTextEdits;
+  LIdx, LCount, LAnchor: Integer;
+begin
+  LAll := PasFormatEdits(ATree, AFileId, AOptions, AIdentCase);
+  SetLength(Result, Length(LAll));
+  LCount := 0;
+  for LIdx := 0 to High(LAll) do
+  begin
+    // A gap's edit belongs to the token after it (where it ends); a
+    // token's own edit (its case) to the token.
+    if Trim(Copy(ATree.Source.Files[AFileId].Source, LAll[LIdx].Start + 1,
+      LAll[LIdx].Len)) = '' then
+      LAnchor := LAll[LIdx].Start + LAll[LIdx].Len
+    else
+      LAnchor := LAll[LIdx].Start;
+    if (LAnchor >= AStart) and (LAnchor < AEnd) then
+    begin
+      Result[LCount] := LAll[LIdx];
+      Inc(LCount);
+    end;
+  end;
+  SetLength(Result, LCount);
 end;
 
 function PasFormatText(const AText, AFileName: string;
