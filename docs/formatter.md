@@ -200,6 +200,17 @@ spelling.
 - F5 - wrapping at a right margin and alignment; off by default.
 - F6 - range mode, include files formatted as themselves, and the
   compile-compare gate over every corpus.
-- F7 - the `.dcu` interface source formatted with the host's options.
+- F7 - the `.dcu` interface source formatted with the host's options
+  (done in the library): `TPasSourceManager.DcuTextFilter` is what every
+  generated text goes through before anything reads it - a host sets it to
+  `PasFormatText` with its options - and `LoadFileTolerant`'s overload
+  takes the same filter, so a tab that opens a compiled unit shows the text
+  the analysis ran on and navigation lands where it should. `PasFormatText`
+  formats a text of its own, parsed with no symbol defined: for generated
+  code. Setting the filter forgets the texts generated before it; a filter
+  that raises leaves the text as generated. The generator's own layout is
+  already near the default (six Studio units: 5.4% of lines moved, all of
+  it the indentation of types nested in a class), so the filter matters
+  for a style of the user's.
 - F8 - the LSP server (`textDocument/formatting`, `rangeFormatting`), the
   IDE plugin's options page, the MCP server.
