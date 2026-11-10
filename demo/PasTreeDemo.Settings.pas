@@ -25,6 +25,25 @@ unit PasTreeDemo.Settings;
       Project0=C:\Repos\...\Some.dproj
       Project1=...
 
+      [Format]
+      IndentStep=2
+      TabWidth=8
+      MaxBlankLines=2
+      BeginOnNewLine=1
+      ElseOnNewLine=1
+      StatementAfterThenDo=Always
+      OneStatementPerLine=1
+      OneDeclPerLine=1
+      IndentNestedRoutines=1
+      KeepDirectivesAtColumn1=1
+      KeepCommentsAtColumn1=1
+
+  [Format] is TPasFormatOptions field for field, under the field's own name;
+  an absent or unreadable key takes TPasFormatOptions.Default's value, so an
+  empty section IS the default style. StatementAfterThenDo is spelled
+  Always / Keep (TPasFormatBreak without its prefix). There is no options
+  dialog - the section is written back on exit so it can be hand-edited.
+
   Recent entries are most-recent-first, deduplicated by full path (case-
   insensitively, matching the filesystem), and capped - see RECENT_MAX.
 }
@@ -32,7 +51,8 @@ unit PasTreeDemo.Settings;
 interface
 
 uses
-  System.SysUtils, System.Classes, System.IniFiles;
+  System.SysUtils, System.Classes, System.IniFiles,
+  PasTree.Format;
 
 const
   // Twenty still fits a drop-down without scrolling on any usable screen, and
@@ -65,6 +85,13 @@ type
     property LightLibraries: Boolean read GetLightLibraries
       write SetLightLibraries;
 
+    { The formatter's style, section [Format]: each field read separately,
+      falling back to TPasFormatOptions.Default's value for that field. A
+      negative IndentStep or TabWidth, or a MaxBlankLines below -1, is
+      unreadable and takes the default too. }
+    function ReadFormatOptions: TPasFormatOptions;
+    procedure WriteFormatOptions(const AOptions: TPasFormatOptions);
+
     { Moves AProjectFile to the front, or inserts it there. Existence is NOT
       checked here: a project on a disconnected network share is still the last
       thing the user opened, and dropping it at save time would lose it for
@@ -92,6 +119,9 @@ const
   SEC_RECENT = 'Recent';
   KEY_PROJECT = 'Project';
   SET_LIGHTLIBRARIES = 'LightLibraries';
+  SEC_FORMAT = 'Format';
+  // TPasFormatBreak's values as the .ini spells them, in declaration order.
+  FORMAT_BREAK_NAMES: array[TPasFormatBreak] of string = ('Always', 'Keep');
 
 function DefaultSettingsFile: string;
 begin
@@ -172,6 +202,70 @@ end;
 procedure TDemoSettings.SetLightLibraries(AValue: Boolean);
 begin
   WriteInt(SET_LIGHTLIBRARIES, Ord(AValue));
+end;
+
+function TDemoSettings.ReadFormatOptions: TPasFormatOptions;
+
+  function ReadIntAtLeast(const AName: string; AMin, ADefault: Integer): Integer;
+  begin
+    Result := FIni.ReadInteger(SEC_FORMAT, AName, ADefault);
+    if Result < AMin then
+      Result := ADefault;
+  end;
+
+  function ReadFlag(const AName: string; ADefault: Boolean): Boolean;
+  begin
+    Result := FIni.ReadInteger(SEC_FORMAT, AName, Ord(ADefault)) <> 0;
+  end;
+
+var
+  LDef: TPasFormatOptions;
+  LBreak: TPasFormatBreak;
+  LText: string;
+begin
+  LDef := TPasFormatOptions.Default;
+  // Starts from the default record, so a field a later stage adds to
+  // TPasFormatOptions has its default here before this unit learns its key.
+  Result := LDef;
+  Result.IndentStep := ReadIntAtLeast('IndentStep', 0, LDef.IndentStep);
+  Result.TabWidth := ReadIntAtLeast('TabWidth', 1, LDef.TabWidth);
+  Result.MaxBlankLines := ReadIntAtLeast('MaxBlankLines', -1,
+    LDef.MaxBlankLines);
+  Result.BeginOnNewLine := ReadFlag('BeginOnNewLine', LDef.BeginOnNewLine);
+  Result.ElseOnNewLine := ReadFlag('ElseOnNewLine', LDef.ElseOnNewLine);
+  LText := FIni.ReadString(SEC_FORMAT, 'StatementAfterThenDo', '');
+  for LBreak := Low(TPasFormatBreak) to High(TPasFormatBreak) do
+    if SameText(LText, FORMAT_BREAK_NAMES[LBreak]) then
+      Result.StatementAfterThenDo := LBreak;
+  Result.OneStatementPerLine := ReadFlag('OneStatementPerLine',
+    LDef.OneStatementPerLine);
+  Result.OneDeclPerLine := ReadFlag('OneDeclPerLine', LDef.OneDeclPerLine);
+  Result.IndentNestedRoutines := ReadFlag('IndentNestedRoutines',
+    LDef.IndentNestedRoutines);
+  Result.KeepDirectivesAtColumn1 := ReadFlag('KeepDirectivesAtColumn1',
+    LDef.KeepDirectivesAtColumn1);
+  Result.KeepCommentsAtColumn1 := ReadFlag('KeepCommentsAtColumn1',
+    LDef.KeepCommentsAtColumn1);
+end;
+
+procedure TDemoSettings.WriteFormatOptions(const AOptions: TPasFormatOptions);
+begin
+  FIni.WriteInteger(SEC_FORMAT, 'IndentStep', AOptions.IndentStep);
+  FIni.WriteInteger(SEC_FORMAT, 'TabWidth', AOptions.TabWidth);
+  FIni.WriteInteger(SEC_FORMAT, 'MaxBlankLines', AOptions.MaxBlankLines);
+  FIni.WriteInteger(SEC_FORMAT, 'BeginOnNewLine', Ord(AOptions.BeginOnNewLine));
+  FIni.WriteInteger(SEC_FORMAT, 'ElseOnNewLine', Ord(AOptions.ElseOnNewLine));
+  FIni.WriteString(SEC_FORMAT, 'StatementAfterThenDo',
+    FORMAT_BREAK_NAMES[AOptions.StatementAfterThenDo]);
+  FIni.WriteInteger(SEC_FORMAT, 'OneStatementPerLine',
+    Ord(AOptions.OneStatementPerLine));
+  FIni.WriteInteger(SEC_FORMAT, 'OneDeclPerLine', Ord(AOptions.OneDeclPerLine));
+  FIni.WriteInteger(SEC_FORMAT, 'IndentNestedRoutines',
+    Ord(AOptions.IndentNestedRoutines));
+  FIni.WriteInteger(SEC_FORMAT, 'KeepDirectivesAtColumn1',
+    Ord(AOptions.KeepDirectivesAtColumn1));
+  FIni.WriteInteger(SEC_FORMAT, 'KeepCommentsAtColumn1',
+    Ord(AOptions.KeepCommentsAtColumn1));
 end;
 
 procedure TDemoSettings.AddRecent(const AProjectFile: string);

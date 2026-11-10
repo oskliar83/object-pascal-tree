@@ -506,6 +506,18 @@ object frmMain: TfrmMain
         Caption = 'errors'
         TabOrder = 5
       end
+      object lblFormat: TPanel
+        AlignWithMargins = True
+        Left = 506
+        Top = 3
+        Width = 137
+        Height = 27
+        Align = alRight
+        BevelOuter = bvLowered
+        ParentShowHint = False
+        ShowHint = True
+        TabOrder = 7
+      end
       object btnShowASTJson: TButton
         Left = 4
         Top = 2
@@ -737,6 +749,22 @@ object frmMain: TfrmMain
       OnExecute = RenameActionExecute
       OnUpdate = RenameActionUpdate
     end
+    object FormatAction: TAction
+      Caption = 'Format'
+      Hint =
+        'Formats the editor buffer (indentation and line breaks); one undo' +
+        ' step. The style is the [Format] section of PasTreeDemo.ini'
+      ShortCut = 16452
+      OnExecute = FormatActionExecute
+      OnUpdate = FormatActionUpdate
+    end
+    object FormatSelectionAction: TAction
+      Caption = 'Format Selection'
+      Hint = 'Formats the selected lines only; one undo step'
+      ShortCut = 24644
+      OnExecute = FormatSelectionActionExecute
+      OnUpdate = FormatSelectionActionUpdate
+    end
   end
   object SourcePopupMenu: TPopupMenu
     Left = 548
@@ -809,6 +837,15 @@ object frmMain: TfrmMain
     end
     object Rename1: TMenuItem
       Action = RenameAction
+    end
+    object FormatSep1: TMenuItem
+      Caption = '-'
+    end
+    object Format1: TMenuItem
+      Action = FormatAction
+    end
+    object FormatSelection1: TMenuItem
+      Action = FormatSelectionAction
     end
     object NavSep1: TMenuItem
       Caption = '-'

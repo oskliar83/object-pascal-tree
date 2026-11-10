@@ -155,8 +155,10 @@ with tabs), `MaxBlankLines` (2; -1 keeps all), `BeginOnNewLine`,
   rule for spacing: a gap may shrink to zero only when the two tokens re-lex
   unchanged (spec B.2).
 - F3 - the default tuned against the RTL and VCL by the edit rate above.
-- F4 - the demo: Format (Ctrl+D) and Format Selection through the editor's
-  undo, the options in its settings.
+- F4 - the demo: Format (Ctrl+D) and Format Selection (Ctrl+Shift+D)
+  through the editor's undo, the options in its settings (`[Format]`).
+  Done in 0.175.1 - `docs/editor-features.md` sec. 14. Format Selection
+  filters the whole file's edit list in the demo until F6's range mode.
 - F5 - wrapping at a right margin and alignment; off by default.
 - F6 - range mode, include files formatted as themselves, and the
   compile-compare gate over every corpus.

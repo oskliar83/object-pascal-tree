@@ -1,7 +1,8 @@
 program DemoSettingsSmoke;
 
 { The demo's persisted settings: the recent-projects list (order, dedup, cap,
-  round-trip through the file) and the value getters.
+  round-trip through the file), the value getters and the [Format] section -
+  plus the text arithmetic of the Format / Format Selection commands.
 
   Worth a suite despite living in the demo, for one reason: none of this is
   checkable by looking at the running program. The list only shows itself when
@@ -16,6 +17,8 @@ uses
   System.IOUtils,
   PasTreeDemo.Settings in '..\demo\PasTreeDemo.Settings.pas',
   PasTreeDemo.Includes in '..\demo\PasTreeDemo.Includes.pas',
+  PasTreeDemo.Format in '..\demo\PasTreeDemo.Format.pas',
+  PasTree.Format,
   PasTree.TestKit in 'PasTree.TestKit.pas';
 
 var
@@ -70,6 +73,152 @@ begin
   Result := '';
   for LIdx := 0 to High(A) do
     Result := Result + LowerCase(TPath.GetFileName(A[LIdx])) + ';';
+end;
+
+// Field by field: a record of Booleans and an enum has padding, so a memory
+// compare could fail two equal values.
+function SameFormatOptions(const A, B: TPasFormatOptions): Boolean;
+begin
+  Result := (A.IndentStep = B.IndentStep) and (A.TabWidth = B.TabWidth) and
+    (A.MaxBlankLines = B.MaxBlankLines) and
+    (A.BeginOnNewLine = B.BeginOnNewLine) and
+    (A.ElseOnNewLine = B.ElseOnNewLine) and
+    (A.StatementAfterThenDo = B.StatementAfterThenDo) and
+    (A.OneStatementPerLine = B.OneStatementPerLine) and
+    (A.OneDeclPerLine = B.OneDeclPerLine) and
+    (A.IndentNestedRoutines = B.IndentNestedRoutines) and
+    (A.KeepDirectivesAtColumn1 = B.KeepDirectivesAtColumn1) and
+    (A.KeepCommentsAtColumn1 = B.KeepCommentsAtColumn1);
+end;
+
+function TextEdit(AStart, ALen: Integer; const AText: string): TPasTextEdit;
+begin
+  Result.Start := AStart;
+  Result.Len := ALen;
+  Result.Text := AText;
+end;
+
+// The [Format] section: defaults from an empty file, a full round trip of
+// every field set away from its default, and unreadable values falling back
+// one field at a time.
+procedure CheckFormatSection;
+var
+  LSet: TDemoSettings;
+  LIni: string;
+  LOpts, LGot, LDef: TPasFormatOptions;
+begin
+  LDef := TPasFormatOptions.Default;
+  LIni := TPath.Combine(GDir, 'format.ini');
+  LSet := TDemoSettings.Create(LIni);
+  try
+    Ok('[Format]: an empty file reads as the default style',
+      SameFormatOptions(LSet.ReadFormatOptions, LDef));
+    LOpts := LDef;
+    LOpts.IndentStep := 4;
+    LOpts.TabWidth := 4;
+    LOpts.MaxBlankLines := -1;
+    LOpts.BeginOnNewLine := not LDef.BeginOnNewLine;
+    LOpts.ElseOnNewLine := not LDef.ElseOnNewLine;
+    LOpts.StatementAfterThenDo := fbKeep;
+    LOpts.OneStatementPerLine := not LDef.OneStatementPerLine;
+    LOpts.OneDeclPerLine := not LDef.OneDeclPerLine;
+    LOpts.IndentNestedRoutines := not LDef.IndentNestedRoutines;
+    LOpts.KeepDirectivesAtColumn1 := not LDef.KeepDirectivesAtColumn1;
+    LOpts.KeepCommentsAtColumn1 := not LDef.KeepCommentsAtColumn1;
+    LSet.WriteFormatOptions(LOpts);
+    LSet.Save;
+  finally
+    LSet.Free;
+  end;
+  LSet := TDemoSettings.Create(LIni);
+  try
+    LGot := LSet.ReadFormatOptions;
+    Ok('[Format]: every field round-trips', SameFormatOptions(LGot, LOpts));
+    LSet.WriteFormatOptions(LDef);
+    Ok('[Format]: the defaults written read back as the defaults',
+      SameFormatOptions(LSet.ReadFormatOptions, LDef));
+  finally
+    LSet.Free;
+  end;
+
+  // Hand-edited: an unreadable value takes the default for THAT field only.
+  TFile.WriteAllText(LIni, '[Format]'#13#10'IndentStep=-3'#13#10 +
+    'TabWidth=0'#13#10'MaxBlankLines=-2'#13#10 +
+    'StatementAfterThenDo=Sometimes'#13#10'BeginOnNewLine=0'#13#10 +
+    'ElseOnNewLine=yes'#13#10);
+  LSet := TDemoSettings.Create(LIni);
+  try
+    LGot := LSet.ReadFormatOptions;
+    Ok('[Format]: a negative indent, a zero tab, -2 blank lines fall back',
+      (LGot.IndentStep = LDef.IndentStep) and (LGot.TabWidth = LDef.TabWidth)
+      and (LGot.MaxBlankLines = LDef.MaxBlankLines));
+    Ok('[Format]: an unknown break word falls back',
+      LGot.StatementAfterThenDo = LDef.StatementAfterThenDo);
+    Ok('[Format]: a valid field next to them is read',
+      not LGot.BeginOnNewLine);
+    Ok('[Format]: a non-number flag falls back',
+      LGot.ElseOnNewLine = LDef.ElseOnNewLine);
+  finally
+    LSet.Free;
+  end;
+  TFile.WriteAllText(LIni, '[Format]'#13#10'StatementAfterThenDo=keep'#13#10);
+  LSet := TDemoSettings.Create(LIni);
+  try
+    Ok('[Format]: the break word ignores case',
+      LSet.ReadFormatOptions.StatementAfterThenDo = fbKeep);
+  finally
+    LSet.Free;
+  end;
+end;
+
+// Format / Format Selection: line starts, the selection filter and the
+// caret's new offset, over hand-made edit lists.
+procedure CheckFormatArithmetic;
+const
+  // Line 1 `begin` (0), line 2 `    A;` (7), line 3 `  B;` (15), line 4
+  // `end.` (21).
+  SRC = 'begin'#13#10'    A;'#13#10'  B;'#13#10'end.';
+var
+  LStarts: TArray<Integer>;
+  LLine, LCol: Integer;
+  LEdits, LKept: TPasTextEdits;
+begin
+  LStarts := LineStartsOf(SRC);
+  Ok('line starts: CRLF', (Length(LStarts) = 4) and (LStarts[1] = 7) and
+    (LStarts[2] = 15) and (LStarts[3] = 21));
+  Ok('line starts: a lone LF and a lone CR break too',
+    Length(LineStartsOf('a'#10'b'#13'c')) = 3);
+  Ok('line starts: an empty text is one line', Length(LineStartsOf('')) = 1);
+  OffsetToLineCol(LStarts, 11, LLine, LCol);
+  Ok('offset -> line/col', (LLine = 2) and (LCol = 5));
+  OffsetToLineCol(LStarts, 0, LLine, LCol);
+  Ok('offset 0 -> 1:1', (LLine = 1) and (LCol = 1));
+  OffsetToLineCol(LStarts, Length(SRC), LLine, LCol);
+  Ok('the end of the text -> the last line', (LLine = 4) and (LCol = 5));
+
+  // The gap before `A` (5..10: a line break and four blanks) re-indented to
+  // two, and the gap before `end.` (19..20) given a blank line. The gap
+  // before `B` is untouched, so it has no edit.
+  LEdits := [TextEdit(5, 6, #13#10'  '), TextEdit(19, 2, #13#10#13#10)];
+  LKept := EditsForLines(LStarts, LEdits, 2, 3);
+  Ok('selection keeps the gap whose next token is on a selected line',
+    (Length(LKept) = 1) and (LKept[0].Start = 5));
+  LKept := EditsForLines(LStarts, LEdits, 4, 4);
+  Ok('...the gap starting on the line above lays out the first selected one',
+    (Length(LKept) = 1) and (LKept[0].Start = 19));
+  Ok('...and none for a line no gap ends on',
+    Length(EditsForLines(LStarts, LEdits, 1, 1)) = 0);
+
+  Ok('caret before the edits stays', OffsetAfterEdits(LEdits, 3) = 3);
+  Ok('caret at a gap''s start stays', OffsetAfterEdits(LEdits, 5) = 5);
+  Ok('caret inside a gap lands on the next token',
+    OffsetAfterEdits(LEdits, 8) = 9);
+  Ok('caret on the token after a gap moves with it',
+    OffsetAfterEdits(LEdits, 11) = 9);
+  Ok('caret after both edits shifts by their sum (-2 + 2)',
+    OffsetAfterEdits(LEdits, 23) = 23);
+  Ok('caret between them shifts by the first only',
+    OffsetAfterEdits(LEdits, 17) = 15);
 end;
 
 var
@@ -157,6 +306,9 @@ begin
   finally
     LSet.Free;
   end;
+
+  CheckFormatSection;
+  CheckFormatArithmetic;
 
   TDirectory.Delete(GDir, True);
 
