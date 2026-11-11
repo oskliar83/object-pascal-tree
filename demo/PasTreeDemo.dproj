@@ -142,6 +142,7 @@
             <Form>frmGoTo</Form>
         </DCCReference>
         <DCCReference Include="PasTreeDemo.Coverage.pas"/>
+        <DCCReference Include="PasTreeDemo.Format.pas"/>
         <DCCReference Include="..\tests\PasTree.TestKit.pas"/>
         <DCCReference Include="..\tests\PasTree.Tests.Parser.pas"/>
         <DCCReference Include="..\tests\PasTree.Tests.Roundtrip.pas"/>
@@ -158,6 +159,7 @@
         <DCCReference Include="..\source\PasTree.Ast.Json.pas"/>
         <DCCReference Include="..\source\PasTree.Ast.Check.pas"/>
         <DCCReference Include="..\source\PasTree.Printer.pas"/>
+        <DCCReference Include="..\source\PasTree.Format.pas"/>
         <DCCReference Include="..\source\PasTree.Parser.pas"/>
         <DCCReference Include="..\source\PasTree.Project.pas"/>
         <DCCReference Include="..\source\PasTree.DProj.pas"/>

@@ -39,7 +39,7 @@ uses
   PasTreeDemo.Highlighter, PasTreeDemo.Settings, PasTreeDemo.NavHistory,
   PasTreeDemo.Includes, PasTreeDemo.UnitList, PasTreeDemo.UnitPicker,
   PasTreeDemo.GoToPicker, PasTree.Outline,
-  PasTreeDemo.Coverage,
+  PasTreeDemo.Coverage, PasTree.Format, PasTreeDemo.Format,
   Vcl.Menus, System.Actions, Vcl.ActnList, SynEditMiscClasses, SynEditSearch;
   // System
 
@@ -310,6 +310,12 @@ type
     FindAll1: TMenuItem;
     RenameAction: TAction;
     Rename1: TMenuItem;
+    FormatAction: TAction;
+    FormatSelectionAction: TAction;
+    FormatSep1: TMenuItem;
+    Format1: TMenuItem;
+    FormatSelection1: TMenuItem;
+    lblFormat: TPanel; // what the last Format / Format Selection did
     procedure FormCreate(Sender: TObject);
     procedure FormDestroy(Sender: TObject);
     procedure btnOpenClick(Sender: TObject);
@@ -391,6 +397,10 @@ type
     procedure FindUnreferencedUnitsActionExecute(Sender: TObject);
     procedure RenameActionUpdate(Sender: TObject);
     procedure RenameActionExecute(Sender: TObject);
+    procedure FormatActionUpdate(Sender: TObject);
+    procedure FormatActionExecute(Sender: TObject);
+    procedure FormatSelectionActionUpdate(Sender: TObject);
+    procedure FormatSelectionActionExecute(Sender: TObject);
     procedure pgcBottomMouseDown(Sender: TObject; Button: TMouseButton;
       Shift: TShiftState; X, Y: Integer);
     procedure CloseSearchTabClick(Sender: TObject);
@@ -592,6 +602,9 @@ type
     FComplDefines: TPasDefines;
     FComplPP: TPasPreprocessor;
     FLastDefines: TArray<string>;  // defines the LAST analysis ran with
+    // The formatter's style: [Format] of the settings file, read on start,
+    // written back on exit (no dialog - the .ini is edited by hand).
+    FFormatOptions: TPasFormatOptions;
     procedure ApplyHighlighterContext(AHL: TPasTreeSynHighlighter;
       const APath: string);
     // Semantic highlighting: hand one tab / every open tab the analysis's
@@ -677,6 +690,10 @@ type
     procedure SetupControls;
     procedure InvalidateComplPipeline;
     function EnsureComplPP: Boolean;
+    { Format / Format Selection: the active tab's BUFFER formatted with
+      FFormatOptions, in one undo step. See the implementation. }
+    procedure FormatActiveEditor(ASelectionOnly: Boolean);
+    procedure SetFormatStatus(const ACaption, AText: string; AWarn: Boolean);
     procedure ComplExecute(Kind: SynCompletionType; Sender: TObject;
       var CurrentInput: string; var x, y: Integer; var CanExecute: Boolean);
     procedure ApplyPasTreePalette(AHL: TSynPasSyn);
@@ -2196,6 +2213,174 @@ begin
   end;
   TAction(Sender).Enabled := ActiveSymbolTarget(LTMid, LSym, LName) or
     ActiveUnitTarget(LTMid, LName);
+end;
+
+{ Format (Ctrl+D, as in the IDE) and Format Selection (Ctrl+Shift+D), on the
+  editor's context menu too. The formatter (PasTree.Format) over the active
+  tab's BUFFER, never the file on disk: the text is parsed as completion
+  parses it - EnsureComplPP's preprocessor, i.e. the platform's define set
+  plus the analysis's own defines and search paths - and PasFormatEdits'
+  edit list is applied in place. A read-only tab (a .dcu's generated text)
+  is not formatted. }
+procedure TfrmMain.FormatActionUpdate(Sender: TObject);
+var
+  LEditor: TSynEdit;
+begin
+  LEditor := ActiveEditor;
+  TAction(Sender).Enabled := Assigned(LEditor) and not LEditor.ReadOnly;
+end;
+
+procedure TfrmMain.FormatActionExecute(Sender: TObject);
+begin
+  FormatActiveEditor(False);
+end;
+
+procedure TfrmMain.FormatSelectionActionUpdate(Sender: TObject);
+var
+  LEditor: TSynEdit;
+begin
+  LEditor := ActiveEditor;
+  TAction(Sender).Enabled := Assigned(LEditor) and not LEditor.ReadOnly and
+    LEditor.SelAvail;
+end;
+
+procedure TfrmMain.FormatSelectionActionExecute(Sender: TObject);
+begin
+  FormatActiveEditor(True);
+end;
+
+// The panel is narrow: a short caption, the whole sentence in its hint, and
+// a warning in the Messages pane as well.
+procedure TfrmMain.SetFormatStatus(const ACaption, AText: string;
+  AWarn: Boolean);
+begin
+  lblFormat.Caption := ACaption;
+  lblFormat.Hint := AText;
+  if AWarn then
+    Log(AText);
+  if AWarn then
+    lblFormat.Font.Color := clRed
+  else
+    lblFormat.Font.Color := clWindowText;
+end;
+
+{ The edits go into the buffer from the LAST to the first, so every offset
+  still to be applied is in text no edit has touched yet - each one is
+  mapped to a line and column of the ORIGINAL text, once. All of them are
+  one undo block: one Ctrl+Z restores the buffer. The caret stays on the
+  token it was on (OffsetAfterEdits), and the view keeps the caret's row
+  where it was on the screen.
+
+  A buffer with parse diagnostics is formatted anyway - the library keeps a
+  flagged unit as written (error-tolerant is the primary mode: the
+  half-typed statement at the caret is left alone) - but the status panel
+  says so in red, since what is around the error may not be laid out. }
+procedure TfrmMain.FormatActiveEditor(ASelectionOnly: Boolean);
+var
+  LEditor: TSynEdit;
+  LTab: TSourceTab;
+  LSource: string;
+  LPre: TPasPreprocessed;
+  LDiags: TArray<TPasParseDiag>;
+  LTree: TPasTree;
+  LEdits: TPasTextEdits;
+  LStarts: TArray<Integer>;
+  LIdx, LLine, LCol, LEndLine, LEndCol, LCaretOfs, LScreenRow: Integer;
+  LFirstSel, LLastSel, LDiagCount: Integer;
+  LCaret: TBufferCoord;
+  LWhat: string;
+begin
+  LEditor := ActiveEditor;
+  if not Assigned(LEditor) or LEditor.ReadOnly then
+    Exit;
+  LTab := TSourceTab(pgc.ActivePage);
+  if not EnsureComplPP then
+  begin
+    SetFormatStatus('not formatted', 'Format: no analysis configuration ' +
+      'yet (defines, search paths) - Parse first', True);
+    Exit;
+  end;
+  LSource := LEditor.Text;
+  try
+    LPre := FComplPP.ProcessText(LTab.FilePath, LSource);
+    // The edits' offsets are into Files[0].Source; were that ever not the
+    // buffer's text verbatim, applying them would corrupt the buffer.
+    if (Length(LPre.Files) = 0) or (LPre.Files[0].Source <> LSource) then
+    begin
+      SetFormatStatus('not formatted', 'Format: the preprocessed text is ' +
+        'not the buffer''s - nothing changed', True);
+      Exit;
+    end;
+    LTree := TPasParser.ParseFile(LPre, LDiags);
+    LEdits := PasFormatEdits(LTree, 0, FFormatOptions);
+  except
+    on E: Exception do
+    begin
+      SetFormatStatus('format failed', 'Format failed: ' + E.Message, True);
+      Exit;
+    end;
+  end;
+  LDiagCount := Length(LDiags) + Length(LPre.Diagnostics);
+
+  LStarts := LineStartsOf(LSource);
+  if ASelectionOnly then
+  begin
+    // F1 has no range mode in the library yet: the whole file's edit list,
+    // filtered here to the selected lines (see EditsForLines for which gap
+    // belongs to which line). A selection ending at column 1 of a line does
+    // not select that line.
+    LFirstSel := LEditor.BlockBegin.Line;
+    LLastSel := LEditor.BlockEnd.Line;
+    if (LLastSel > LFirstSel) and (LEditor.BlockEnd.Char = 1) then
+      Dec(LLastSel);
+    LEdits := EditsForLines(LStarts, LEdits, LFirstSel, LLastSel);
+    LWhat := Format('Format Selection (lines %d-%d)', [LFirstSel, LLastSel]);
+  end
+  else
+    LWhat := 'Format';
+
+  if Length(LEdits) > 0 then
+  begin
+    LCaret := LEditor.CaretXY;
+    LCaretOfs := LStarts[EnsureRange(LCaret.Line, 1, Length(LStarts)) - 1] +
+      LCaret.Char - 1;
+    LScreenRow := LEditor.DisplayY - LEditor.TopLine;
+    LEditor.BeginUpdate;
+    LEditor.BeginUndoBlock;
+    try
+      for LIdx := High(LEdits) downto 0 do
+      begin
+        OffsetToLineCol(LStarts, LEdits[LIdx].Start, LLine, LCol);
+        OffsetToLineCol(LStarts, LEdits[LIdx].Start + LEdits[LIdx].Len,
+          LEndLine, LEndCol);
+        LEditor.BlockBegin := BufferCoord(LCol, LLine);
+        LEditor.BlockEnd := BufferCoord(LEndCol, LEndLine);
+        LEditor.SelText := LEdits[LIdx].Text;
+      end;
+      // The caret's new place, in the NEW text's lines.
+      LCaretOfs := OffsetAfterEdits(LEdits, LCaretOfs);
+      LStarts := LineStartsOf(LEditor.Text);
+      OffsetToLineCol(LStarts, LCaretOfs, LLine, LCol);
+      LEditor.CaretXY := BufferCoord(LCol, LLine);
+    finally
+      LEditor.EndUndoBlock;
+      LEditor.EndUpdate;
+    end;
+    LEditor.TopLine := Max(1, LEditor.DisplayY - LScreenRow);
+  end;
+
+  if LDiagCount > 0 then
+    SetFormatStatus(Format('%d edits, %d diags', [Length(LEdits),
+      LDiagCount]), Format('%s of %s: %d edits; the buffer has %d parse ' +
+      'diagnostics - the code they flag is kept as written',
+      [LWhat, TPath.GetFileName(LTab.FilePath), Length(LEdits), LDiagCount]),
+      True)
+  else if Length(LEdits) = 0 then
+    SetFormatStatus('formatted already', LWhat + ': nothing to change',
+      False)
+  else
+    SetFormatStatus(Format('%d edits', [Length(LEdits)]),
+      Format('%s: %d edits', [LWhat, Length(LEdits)]), False);
 end;
 
 { Ctrl+Shift+E / the editor's context menu. Ask for the new name (pre-filled with
@@ -3948,6 +4133,13 @@ begin
   Result.OnKeyUp := EditorKeyUp;
   Result.OnChange := EditorChange;   // edits debounce a nav re-analysis
   Result.OnStatusChange := EditorStatusChange; // "same identifier" highlight
+  // Ctrl+D is Format (FormatAction), as in the IDE; SynEdit's default binds it
+  // to ecCopyLineDown. The form's action list sees the key first anyway -
+  // dropped here so a disabled action (a read-only .dcu tab) cannot fall
+  // through to duplicating a line.
+  var LKey := Result.Keystrokes.FindShortcut(ShortCut(Ord('D'), [ssCtrl]));
+  if LKey >= 0 then
+    Result.Keystrokes.Delete(LKey);
   Result.PopupMenu := SourcePopupMenu;
   Result.SearchEngine := SynEditSearch1;
 
@@ -6090,6 +6282,7 @@ begin
     Ord(chkShowErrors.Checked)) <> 0;
   chkShowSyntax.Checked := FSettings.ReadInt(SET_SHOWSYNTAX,
     Ord(chkShowSyntax.Checked)) <> 0;
+  FFormatOptions := FSettings.ReadFormatOptions;
   // Before any project opens (LoadSettings runs first): no analysis to redo.
   chkLightLibs.OnClick := nil;
   try
@@ -6123,6 +6316,9 @@ begin
   FSettings.WriteInt(SET_SHOWERRORS, Ord(chkShowErrors.Checked));
   FSettings.WriteInt(SET_SHOWSYNTAX, Ord(chkShowSyntax.Checked));
   FSettings.LightLibraries := chkLightLibs.Checked;
+  // Written back unchanged, so the section is there to hand-edit after the
+  // first run - the only way to change the style until the plugin has one.
+  FSettings.WriteFormatOptions(FFormatOptions);
   if (cbStudio.ItemIndex >= 0) and (cbStudio.ItemIndex <= High(FStudios)) then
     FSettings.WriteString(SET_STUDIO, FormatFloat('0.0',
       FStudios[cbStudio.ItemIndex].Version, TFormatSettings.Invariant));
