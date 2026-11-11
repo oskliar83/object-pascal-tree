@@ -605,6 +605,7 @@ type
     // The formatter's style: [Format] of the settings file, read on start,
     // written back on exit (no dialog - the .ini is edited by hand).
     FFormatOptions: TPasFormatOptions;
+    FFormatDcuText: Boolean;   // [Format] FormatDcuText - see DcuTextFilter
     procedure ApplyHighlighterContext(AHL: TPasTreeSynHighlighter;
       const APath: string);
     // Semantic highlighting: hand one tab / every open tab the analysis's
@@ -724,6 +725,11 @@ type
     function TryModuleReanalyze(const APath: string): Boolean;
     // The light trees for the next analysis: none unless chkLightLibs.
     function LightTrees: TArray<string>;
+    { What a compiled unit's generated interface text goes through, for the
+      analysis (TPasSemaProject.DcuTextFilter) and for a .dcu tab
+      (LoadFileTolerant) alike: PasFormatText with FFormatOptions, or nil
+      when [Format] FormatDcuText=0. }
+    function DcuTextFilter: TPasTextFilter;
     // Starts the promotion of the first open tab whose unit is light.
     procedure TryPromoteOpenTab;
     // The workspace: see FWS. SetAnalysis takes a new analysis (nil: none),
@@ -2536,7 +2542,7 @@ var
     if not LTexts.ContainsKey(LPathKey) then
     begin
       if not FRenameBuffers.TryGetValue(LPathKey, LText) then
-        LText := TPasSourceManager.LoadFileTolerant(APath);
+        LText := TPasSourceManager.LoadFileTolerant(APath, DcuTextFilter());
       LNew := TStringList.Create;
       LNew.Text := LText;
       LTexts.Add(LPathKey, LNew);
@@ -4187,7 +4193,10 @@ begin
         FRenameBuffers.Remove(LowerCase(TPath.GetFullPath(APath)));
       end
       else
-        Result.Text := TPasSourceManager.LoadFileTolerant(APath);
+        // A .dcu's text through the analysis' own filter: the positions
+        // navigation lands on are positions in THAT text.
+        Result.Text := TPasSourceManager.LoadFileTolerant(APath,
+          DcuTextFilter());
     except
       on E: Exception do
         Result.Text := '{ could not load: ' + E.Message + ' }';
@@ -4821,6 +4830,10 @@ begin
     Result.ReportUnresolvedMembers := True;
     Result.ReportGuessedIfs := True;   // same philosophy: show the guesses
     Result.LightPaths := LightTrees;   // chkLightLibs
+    // Every project - the analysis and the workspace's rebuilds - is new, so
+    // its source manager has no text cached: the filter set here is the one
+    // every .dcu text of this run goes through.
+    Result.DcuTextFilter := DcuTextFilter();
     // The .dproj's DCC_* switches and console target, as msbuild hands them
     // to dcc: $IFOPT and CONSOLE read them.
     if Assigned(FDProj) then
@@ -5301,6 +5314,30 @@ end;
   that holds the project's own sources: the project directory and the files
   the .dproj lists (PasTree exempts the project directory itself, but a file
   the .dproj lists from elsewhere is only safe if no tree holds it). }
+function TfrmMain.DcuTextFilter: TPasTextFilter;
+var
+  LOptions: TPasFormatOptions;
+begin
+  if not FFormatDcuText then
+    Exit(nil);
+  // A copy: the analysis calls the filter on its worker threads, so it must
+  // not read the form. PasFormatText builds its own source manager and
+  // preprocessor per call - nothing shared between threads.
+  LOptions := FFormatOptions;
+  Result :=
+    function(const APath, AText: string): string
+    begin
+      // The manager already keeps the generated text when a filter raises;
+      // LoadFileTolerant does not, so the tab would show the error instead
+      // of the unit. Both now see the same text either way.
+      try
+        Result := PasFormatText(AText, APath, LOptions);
+      except
+        Result := AText;
+      end;
+    end;
+end;
+
 function TfrmMain.LightTrees: TArray<string>;
 var
   LTrees, LOwn: TArray<string>;
@@ -6283,6 +6320,7 @@ begin
   chkShowSyntax.Checked := FSettings.ReadInt(SET_SHOWSYNTAX,
     Ord(chkShowSyntax.Checked)) <> 0;
   FFormatOptions := FSettings.ReadFormatOptions;
+  FFormatDcuText := FSettings.FormatDcuText;
   // Before any project opens (LoadSettings runs first): no analysis to redo.
   chkLightLibs.OnClick := nil;
   try
@@ -6319,6 +6357,7 @@ begin
   // Written back unchanged, so the section is there to hand-edit after the
   // first run - the only way to change the style until the plugin has one.
   FSettings.WriteFormatOptions(FFormatOptions);
+  FSettings.FormatDcuText := FFormatDcuText;
   if (cbStudio.ItemIndex >= 0) and (cbStudio.ItemIndex <= High(FStudios)) then
     FSettings.WriteString(SET_STUDIO, FormatFloat('0.0',
       FStudios[cbStudio.ItemIndex].Version, TFormatSettings.Invariant));

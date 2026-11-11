@@ -1449,3 +1449,16 @@ tab (a `.dcu`'s generated text) is not formatted.
   options page (F8). `tests\DemoSettingsSmoke` holds the section (defaults,
   a round trip of every field, per-field fallback) and the selection
   filter's and the caret's arithmetic.
+- **A compiled unit's text** (a `.dcu`-only unit, formatter stage F7) is
+  shown in the same style: every project the demo configures
+  (`NewConfiguredProject` - the analysis and the workspace's rebuilds) gets
+  `TPasSemaProject.DcuTextFilter` set to `PasFormatText` with the `[Format]`
+  options, and the tab that opens such a unit (`OpenFileTab`, and the
+  offline copy a rename verifies against) loads it with
+  `TPasSourceManager.LoadFileTolerant` and the same filter. The tab shows
+  the text the analysis ran on, so `Ctrl+Click` into the unit lands on the
+  right line. The options are read once on start, and each run builds a
+  new project, so no text formatted in another style is ever cached. A
+  filter that raises leaves the generated text, in the tab and the
+  analysis alike. `[Format] FormatDcuText=0` turns it off - the text as
+  `PasTree.Dcu.Source` prints it; default `1`.
