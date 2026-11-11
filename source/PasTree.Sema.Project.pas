@@ -819,6 +819,8 @@ type
     function RedecideNewcomers(const AIds: TArray<Integer>;
       out AWhy: string): Boolean;
     procedure SetLightPaths(const AValue: TArray<string>);
+    function GetDcuTextFilter: TPasTextFilter;
+    procedure SetDcuTextFilter(const AValue: TPasTextFilter);
     procedure SnapLightExempt(const ARoots: TArray<string>);
     function CancelRequested: Boolean; inline;
     // Runs ABody for 0..AHi - one worker per core, or a plain loop when
@@ -1678,6 +1680,16 @@ type
       light unit, today's behaviour. Set BEFORE a run; changing it between
       runs is allowed (a donor of the other kind is not reused). }
     property LightPaths: TArray<string> read FLightPaths write SetLightPaths;
+    { The project's source manager's DcuTextFilter (TPasSourceManager): what
+      a compiled unit's generated interface text goes through before the
+      analysis reads it - a host sets it to PasFormatText with its style, and
+      opens a .dcu tab with TPasSourceManager.LoadFileTolerant and the same
+      filter, so the tab shows the text the positions are in. Setting it
+      forgets every text generated so far. Set BEFORE a run: a model already
+      built from a text keeps that text's positions. Called from the
+      analysis' worker threads - the filter must be thread-safe. }
+    property DcuTextFilter: TPasTextFilter read GetDcuTextFilter
+      write SetDcuTextFilter;
     { Whether APath would load as a light unit: under a LightPaths tree and
       not exempt. Exempt: every file the host pinned (PinUnitFile - own
       always wins), the run's roots, anything under the project directory
@@ -3892,6 +3904,16 @@ end;
 function TPasSemaProject.SearchPathUnitNames: TArray<string>;
 begin
   Result := FSM.SearchPathUnitNames;
+end;
+
+function TPasSemaProject.GetDcuTextFilter: TPasTextFilter;
+begin
+  Result := FSM.DcuTextFilter;
+end;
+
+procedure TPasSemaProject.SetDcuTextFilter(const AValue: TPasTextFilter);
+begin
+  FSM.DcuTextFilter := AValue;
 end;
 
 function TPasSemaProject.SymDocComment(AMid, ASym: Integer): string;
