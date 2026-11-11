@@ -33,6 +33,7 @@ uses
   System.Classes,
   System.SyncObjs,
   PasTree.Platforms,
+  PasTree.SourceManager,
   PasTree.Preprocessor,
   PasTree.Sema.Project;
 
@@ -182,6 +183,12 @@ type
       units are analyzed interface-only (docs/library-light-mode.md). Set
       BEFORE Start, like the switches above. }
     procedure SetLightPaths(const APaths: TArray<string>);
+    { Forwarded to the inner project's DcuTextFilter: what a compiled unit's
+      generated interface text goes through before the analysis reads it
+      (PasTree.Format.PasFormatText with the host's style). Set BEFORE Start:
+      a model built from a text keeps that text's positions. Called on the
+      analysis' worker threads - the filter must be thread-safe. }
+    procedure SetDcuTextFilter(const AFilter: TPasTextFilter);
     procedure Start;
     { Request cooperative cancellation; the worker stops at the next module/
       stage boundary. Does not block. }
@@ -367,6 +374,12 @@ procedure TPasAsyncSession.SetLightPaths(const APaths: TArray<string>);
 begin
   CheckNotStarted('SetLightPaths');
   FProject.LightPaths := APaths;
+end;
+
+procedure TPasAsyncSession.SetDcuTextFilter(const AFilter: TPasTextFilter);
+begin
+  CheckNotStarted('SetDcuTextFilter');
+  FProject.DcuTextFilter := AFilter;
 end;
 
 procedure TPasAsyncSession.RunBody;
