@@ -44,6 +44,7 @@ unit PasTreeDemo.Settings;
       ReservedWordCase=Lower
       DirectiveWordCase=Lower
       CompilerDirectiveCase=Upper
+      FormatDcuText=1
 
   [Format] is TPasFormatOptions field for field, under the field's own name;
   an absent or unreadable key takes TPasFormatOptions.Default's value, so an
@@ -51,6 +52,9 @@ unit PasTreeDemo.Settings;
   Always / Keep (TPasFormatBreak without its prefix), the three case keys
   Lower / Upper / Keep (TPasFormatCase without its prefix). There is no options
   dialog - the section is written back on exit so it can be hand-edited.
+  FormatDcuText is the demo's own key, not an options field: whether a
+  compiled unit's generated interface text is analyzed and shown in that
+  style (TPasSemaProject.DcuTextFilter); default on.
 
   Recent entries are most-recent-first, deduplicated by full path (case-
   insensitively, matching the filesystem), and capped - see RECENT_MAX.
@@ -99,6 +103,13 @@ type
       unreadable and takes the default too. }
     function ReadFormatOptions: TPasFormatOptions;
     procedure WriteFormatOptions(const AOptions: TPasFormatOptions);
+    { [Format] FormatDcuText: a .dcu-only unit's generated text goes through
+      the formatter with ReadFormatOptions' style before the analysis and
+      the unit's tab read it. Default ON - the demo shows the feature. }
+    function GetFormatDcuText: Boolean;
+    procedure SetFormatDcuText(AValue: Boolean);
+    property FormatDcuText: Boolean read GetFormatDcuText
+      write SetFormatDcuText;
 
     { Moves AProjectFile to the front, or inserts it there. Existence is NOT
       checked here: a project on a disconnected network share is still the last
@@ -128,6 +139,7 @@ const
   KEY_PROJECT = 'Project';
   SET_LIGHTLIBRARIES = 'LightLibraries';
   SEC_FORMAT = 'Format';
+  FMT_DCUTEXT = 'FormatDcuText';
   // TPasFormatBreak's values as the .ini spells them, in declaration order.
   FORMAT_BREAK_NAMES: array[TPasFormatBreak] of string = ('Always', 'Keep');
   FORMAT_CASE_NAMES: array[TPasFormatCase] of string = ('Lower', 'Upper',
@@ -279,6 +291,16 @@ begin
     LDef.DirectiveWordCase);
   Result.CompilerDirectiveCase := ReadCase('CompilerDirectiveCase',
     LDef.CompilerDirectiveCase);
+end;
+
+function TDemoSettings.GetFormatDcuText: Boolean;
+begin
+  Result := FIni.ReadInteger(SEC_FORMAT, FMT_DCUTEXT, 1) <> 0;
+end;
+
+procedure TDemoSettings.SetFormatDcuText(AValue: Boolean);
+begin
+  FIni.WriteInteger(SEC_FORMAT, FMT_DCUTEXT, Ord(AValue));
 end;
 
 procedure TDemoSettings.WriteFormatOptions(const AOptions: TPasFormatOptions);

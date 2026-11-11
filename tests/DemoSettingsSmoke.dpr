@@ -166,6 +166,29 @@ begin
   try
     Ok('[Format]: the break word ignores case',
       LSet.ReadFormatOptions.StatementAfterThenDo = fbKeep);
+    Ok('[Format] FormatDcuText: on when absent', LSet.FormatDcuText);
+    LSet.FormatDcuText := False;
+    LSet.Save;
+  finally
+    LSet.Free;
+  end;
+  LSet := TDemoSettings.Create(LIni);
+  try
+    Ok('[Format] FormatDcuText: off round-trips, under its own key',
+      not LSet.FormatDcuText and
+      (TFile.ReadAllText(LIni).Contains('FormatDcuText=0')));
+    Ok('[Format] FormatDcuText: the option fields are untouched by it',
+      LSet.ReadFormatOptions.StatementAfterThenDo = fbKeep);
+    LSet.FormatDcuText := True;
+    Ok('[Format] FormatDcuText: ...and turns on again', LSet.FormatDcuText);
+  finally
+    LSet.Free;
+  end;
+  TFile.WriteAllText(LIni, '[Format]'#13#10'FormatDcuText=0'#13#10);
+  LSet := TDemoSettings.Create(LIni);
+  try
+    Ok('[Format] FormatDcuText: a hand-written 0 turns it off',
+      not LSet.FormatDcuText);
   finally
     LSet.Free;
   end;
