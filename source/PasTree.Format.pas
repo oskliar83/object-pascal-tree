@@ -120,6 +120,22 @@ type
     DirectiveWordCase: TPasFormatCase; // fcLower
     // A compiler directive's name: `{$IFDEF`, `{$R`.
     CompilerDirectiveCase: TPasFormatCase; // fcUpper
+    // Wrapping (F5). A line whose code ends right of RightMargin breaks at
+    // its best point: after a `,` of a list (`;` of a parameter list), after
+    // a binary operator - the shallowest, the lowest precedence - and, last,
+    // after `:=`; the new line one IndentStep right of its statement's or
+    // declaration's column. Only adds line breaks; a line with no such
+    // point stays long. 0 is no margin.
+    RightMargin: Integer;             // 0 (120 is the margin when on)
+    WrapLongLines: Boolean;           // False
+    // Alignment (F5), each over consecutive single-line items - a blank
+    // line, a comment line or another construct ends a group of them:
+    // `:=` of assignments in one statement list,
+    AlignAssignments: Boolean;        // False
+    // `:` / `=` of declarations in one section or member list,
+    AlignDeclColons: Boolean;         // False
+    // the comment that ends a line, at one column down the lines.
+    AlignTrailingComments: Boolean;   // False
     class function Default: TPasFormatOptions; static;
   end;
 
@@ -206,6 +222,11 @@ begin
   Result.ReservedWordCase := fcLower;
   Result.DirectiveWordCase := fcLower;
   Result.CompilerDirectiveCase := fcUpper;
+  Result.RightMargin := 0;
+  Result.WrapLongLines := False;
+  Result.AlignAssignments := False;
+  Result.AlignDeclColons := False;
+  Result.AlignTrailingComments := False;
 end;
 
 const
@@ -265,6 +286,14 @@ type
     NL: TArray<Integer>;            // per item: line breaks of the gap before it
     ItemCol: TArray<Integer>;       // per item: its output column
     CommentCont: TArray<Boolean>;   // per item: continues a trailing comment
+    Kept: TArray<Boolean>;          // per item: the gap before it is copied
+    // F5. Per item: the spaces of the gap before it inside a line (-1: the
+    // F2 rule), the column of a line a wrap started (-1: none), its output
+    // line. Per vis: its item.
+    GapSet: TArray<Integer>;
+    WrapColAt: TArray<Integer>;
+    OutLine: TArray<Integer>;
+    VisItem: TArray<Integer>;
     LineBreak: string;
     IdentCase: TPasIdentCaseFunc;
     procedure Init(const ATree: TPasTree; AFileId: Integer;
@@ -300,6 +329,18 @@ type
     function SpaceRule(AA, AB: Integer): Integer;
     function MayTouch(AA, AB: Integer): Boolean;
     function ItemText(AItem: Integer): string;
+    procedure Layout(AEmit: Boolean; var AEdits: TPasTextEdits;
+      var ACount: Integer);
+    function ItemLen(AItem: Integer): Integer;
+    function Spans(AItem: Integer): Boolean;
+    function LineEnd(AItem: Integer): Integer;
+    function PlainLine(AFirst, AEnd: Integer): Boolean;
+    function WrapRank(AItem: Integer): Integer;
+    function WrapLine(AFirst, AEnd: Integer): Integer;
+    function WrapLines: Integer;
+    function AlignTok(ANode: Integer): Integer;
+    procedure AlignGaps(ABaseOnly: Boolean);
+    procedure AlignComments;
     function Run: TPasTextEdits;
   end;
 
@@ -1222,24 +1263,611 @@ begin
   end;
 end;
 
-function TFormatter.Run: TPasTextEdits;
+function TFormatter.ItemLen(AItem: Integer): Integer;
+begin
+  Result := Items[AItem].EndPos - Items[AItem].Start;
+end;
+
+function TFormatter.Spans(AItem: Integer): Boolean;
+begin
+  Result := LineOf(Items[AItem].EndPos) <> LineOf(Items[AItem].Start);
+end;
+
+// The last item of AItem's output line.
+function TFormatter.LineEnd(AItem: Integer): Integer;
+begin
+  Result := AItem;
+  while (Result < High(Items)) and (OutLine[Result + 1] = OutLine[AItem]) do
+    Inc(Result);
+end;
+
+// The output line of items AFirst .. AEnd - 1 is one F5 may lay out: it
+// starts with code, holds no directive (no wrap or alignment next to one),
+// no inactive branch, no asm, nothing after the final `end.`, no flagged
+// unit, no caret character, no item over several lines, no gap kept as
+// written and no tab - a column read off it is the column it has.
+function TFormatter.PlainLine(AFirst, AEnd: Integer): Boolean;
 var
-  LCount, LIdx, LBreaks, LCol, LLineIndent, LLineFirstOrig, LEditCount,
-    LShift, LSpaces, LOrigSpaces: Integer;
-  LKeep, LStarts: Boolean;
-  LPrev, LCur: TFmtItem;
+  LIdx: Integer;
+begin
+  Result := False;
+  if (Items[AFirst].Kind <> fiCode) or Kept[AFirst] then
+    Exit;
+  for LIdx := AFirst to AEnd - 1 do
+  begin
+    if (Items[LIdx].Kind in [fiDirective, fiOpaque]) or Items[LIdx].InAsm or
+      Items[LIdx].AfterEnd or Spans(LIdx) then
+      Exit;
+    if (Items[LIdx].Kind = fiCode) and VisFlagged(Items[LIdx].Vis) then
+      Exit;
+    // A caret in operand position reads the character after it, a blank
+    // included (spec B.6.2): no gap near one is laid out.
+    if (Items[LIdx].Kind = fiCode) and (VisKind(Items[LIdx].Vis) = tkCaret) and
+      (Kind(Own.Owner[Items[LIdx].Vis]) = nkCaretChar) then
+      Exit;
+    if (LIdx > AFirst) and Kept[LIdx] then
+      Exit;
+  end;
+  for LIdx := Items[AFirst].Start to Items[AEnd - 1].EndPos - 1 do
+    if Src[LIdx + 1] = #9 then
+      Exit;
+  Result := True;
+end;
+
+// May a wrap break the line in the gap before item AItem (both it and the
+// item before it code on one line), and how good a point is it: 0 after a
+// `,` of a list (a `;` of a parameter list), 1..3 after a binary operator
+// (relational, additive, multiplicative), 9 after `:=`; -1 not here. Never
+// inside a literal or type arguments, before a caret, inside an anonymous
+// method written on one line.
+function TFormatter.WrapRank(AItem: Integer): Integer;
+const
+  LIST_KINDS = [nkCall, nkSetCtor, nkIndex, nkUsesClause, nkEnumType,
+    nkVarDecl, nkParam, nkCaseLabels, nkExportsClause, nkWithStmt,
+    nkInlineVar, nkProgramParams, nkAttrGroup, nkAttribute, nkInherited];
+var
+  LA, LB, LOa, LOb: Integer;
+begin
+  Result := -1;
+  LA := Items[AItem - 1].Vis;
+  LB := Items[AItem].Vis;
+  LOa := Own.Owner[LA];
+  LOb := Own.Owner[LB];
+  if (LOa < 0) or (LOb < 0) or (VisKind(LB) = tkCaret) then
+    Exit;
+  if (Kind(LOa) in [nkTypeArgs, nkGenericParams, nkStrLit, nkCaretChar,
+    nkFormattedArg]) or (Kind(LOb) in [nkTypeArgs, nkGenericParams]) then
+    Exit;
+  case VisKind(LA) of
+    tkComma:
+      if Kind(LOa) in LIST_KINDS then
+        Result := 0;
+    tkSemicolon:
+      if Kind(LOa) = nkParams then
+        Result := 0;
+    tkAssign:
+      if Kind(LOa) = nkAssign then
+        Result := 9;
+  else
+    // After the operator's last token (`is not`, `not in` own two).
+    if (Kind(LOa) = nkBinaryOp) and (LOb <> LOa) then
+      case VisKind(LA) of
+        tkEqual, tkNotEqual, tkLess, tkGreater, tkLessEqual, tkGreaterEqual,
+        tkIn, tkIs, tkNot:
+          Result := 1;
+        tkPlus, tkMinus, tkOr, tkXor:
+          Result := 2;
+      else
+        Result := 3;
+      end;
+  end;
+  if (Result >= 0) and OneLineAnon(LOb) then
+    Result := -1;
+end;
+
+// Wrap the output line of items AFirst .. AEnd - 1 if its code ends right
+// of the margin; the breaks it added. A break goes at the best point that
+// leaves the line before it inside the margin - the shallowest, then the
+// lowest rank (WrapRank), then the rightmost; `:=` only when nothing else
+// will do - or, when none does, at the leftmost of the best; the rest of
+// the line is wrapped again. The new line takes the column a later format
+// of the result reads back for it: one IndentStep right of its unit's
+// first token (a continuation keeps its offset from it, CodeCol), a uses
+// item its unit's column.
+function TFormatter.WrapLine(AFirst, AEnd: Integer): Integer;
+var
+  LLast, LIdx, LSeg, LDepth, LRank, LWrap, LBest, LBestWrap, LShift: Integer;
+  LCol, LDepthAt: TArray<Integer>;
+  LKey, LBestKey: array[0..4] of Integer;
+  LFits, LBetter: Boolean;
+
+  function WrapCol(AItem: Integer): Integer;
+  var
+    LVis, LLead, LUnit: Integer;
+  begin
+    Result := -1;
+    LVis := Items[AItem].Vis;
+    if UnitAt[LVis] <> NIL_NODE then
+    begin
+      if Kind(UnitAt[LVis]) = nkUsesItem then
+        Result := CodeCol(LVis);
+      Exit;
+    end;
+    if CloserOwner(LVis) <> NIL_NODE then
+      Exit;
+    LUnit := NearUnit[Own.Owner[LVis]];
+    if LUnit = NIL_NODE then
+      Exit;
+    LLead := Lead[LUnit];
+    if not InFile(LLead) or (LLead >= LVis) or (TokCol[LLead] < 0) then
+      Exit;
+    // One step right of the line the unit starts on, never left of the
+    // line being broken (an author's continuation under its `(`).
+    if (VisItem[LLead] >= AFirst) and (VisItem[LLead] < AEnd) then
+      Result := LCol[0] + O.IndentStep
+    else
+      Result := LineIndentAt[LLead] + O.IndentStep;
+    if Result < LCol[0] then
+      Result := LCol[0];
+  end;
+
+begin
+  Result := 0;
+  LLast := AEnd - 1;
+  while (LLast >= AFirst) and (Items[LLast].Kind <> fiCode) do
+    Dec(LLast);
+  // The code is measured, not a comment after it.
+  if (LLast < AFirst) or (ItemCol[LLast] + ItemLen(LLast) <= O.RightMargin) or
+    not PlainLine(AFirst, AEnd) then
+    Exit;
+  SetLength(LCol, AEnd - AFirst);
+  SetLength(LDepthAt, AEnd - AFirst);
+  LDepth := 0;
+  for LIdx := AFirst to AEnd - 1 do
+  begin
+    LCol[LIdx - AFirst] := ItemCol[LIdx];
+    LDepthAt[LIdx - AFirst] := LDepth;
+    if Items[LIdx].Kind = fiCode then
+      case VisKind(Items[LIdx].Vis) of
+        tkLParen, tkLBracket:
+          Inc(LDepth);
+        tkRParen, tkRBracket:
+          Dec(LDepth);
+      end;
+  end;
+  LSeg := AFirst;
+  while LCol[LLast - AFirst] + ItemLen(LLast) > O.RightMargin do
+  begin
+    LBest := -1;
+    LBestWrap := -1;
+    for LIdx := LSeg + 1 to LLast do
+    begin
+      if (Items[LIdx].Kind <> fiCode) or (Items[LIdx - 1].Kind <> fiCode) then
+        Continue;
+      LRank := WrapRank(LIdx);
+      if LRank < 0 then
+        Continue;
+      LWrap := WrapCol(LIdx);
+      if (LWrap < 0) or (LWrap >= LCol[LIdx - AFirst]) then
+        Continue;                     // no shorter for it
+      LFits := LCol[LIdx - 1 - AFirst] + ItemLen(LIdx - 1) <= O.RightMargin;
+      LKey[0] := Ord(not LFits);
+      LKey[1] := Ord(LRank = 9);
+      LKey[2] := LDepthAt[LIdx - AFirst];
+      LKey[3] := LRank;
+      if LFits then
+        LKey[4] := -LIdx
+      else
+        LKey[4] := LIdx;
+      LBetter := LBest < 0;
+      if not LBetter then
+        for LDepth := 0 to 4 do
+          if LKey[LDepth] <> LBestKey[LDepth] then
+          begin
+            LBetter := LKey[LDepth] < LBestKey[LDepth];
+            Break;
+          end;
+      if LBetter then
+      begin
+        LBest := LIdx;
+        LBestWrap := LWrap;
+        LBestKey := LKey;
+      end;
+    end;
+    if LBest < 0 then
+      Break;
+    NL[LBest] := 1;
+    WrapColAt[LBest] := LBestWrap;
+    Inc(Result);
+    LShift := LBestWrap - LCol[LBest - AFirst];
+    for LIdx := LBest to AEnd - 1 do
+      Inc(LCol[LIdx - AFirst], LShift);
+    LSeg := LBest;
+  end;
+end;
+
+function TFormatter.WrapLines: Integer;
+var
+  LIdx, LEnd: Integer;
+begin
+  Result := 0;
+  LIdx := 0;
+  while LIdx <= High(Items) do
+  begin
+    LEnd := LineEnd(LIdx) + 1;
+    Inc(Result, WrapLine(LIdx, LEnd));
+    LIdx := LEnd;
+  end;
+end;
+
+// The token alignment lines up in a unit: an assignment's `:=`, a variable
+// declaration's `:`, a constant's `:` (typed) or `=`, a type's `=`; -1 for
+// any other unit or one the options leave alone.
+function TFormatter.AlignTok(ANode: Integer): Integer;
+var
+  LIdx, LVis: Integer;
+  LKind: TPasNodeKind;
+begin
+  Result := -1;
+  LKind := Kind(ANode);
+  if LKind = nkAssign then
+  begin
+    if not O.AlignAssignments or (Parent(ANode) = NIL_NODE) or
+      not (Kind(Parent(ANode)) in [nkBlock, nkInitSec, nkFinalSec]) then
+      Exit;
+  end
+  else if not (O.AlignDeclColons and (LKind in [nkVarDecl, nkConstDecl,
+    nkTypeDecl])) then
+    Exit;
+  for LIdx := Own.OwnStart[ANode] to Own.OwnStart[ANode + 1] - 1 do
+  begin
+    LVis := Own.Own[LIdx];
+    case VisKind(LVis) of
+      tkAssign:
+        if LKind = nkAssign then
+          Exit(LVis);
+      tkColon:
+        if LKind in [nkVarDecl, nkConstDecl] then
+          Exit(LVis);
+      tkEqual:
+        if (LKind in [nkConstDecl, nkTypeDecl]) and (Result < 0) then
+          Result := LVis;             // a typed constant's `:` comes first
+    end;
+  end;
+end;
+
+// ABaseOnly: every gap alignment owns before `:=`, `:`, `=` takes its one
+// rule width (1, 0, 1), the width wrapping measures with - so a format of
+// the result, whose gaps hold the padding, wraps the same. Otherwise the
+// groups: consecutive output lines, each one unit of one kind under one
+// parent written on that line alone; in a group of two or more the token
+// goes one column right of the longest text before it (a `:` touches it
+// when that text is as long on every line); a unit in no group keeps F2's
+// rule.
+procedure TFormatter.AlignGaps(ABaseOnly: Boolean);
+var
+  LCand, LGroup: TArray<Integer>;
+  LNode, LVis, LTok, LItem, LLeadItem, LLast, LEnd, LCount, LPrevLine,
+    LPrevParent: Integer;
+  LPrevKind: TPasNodeKind;
+  LPrevTok: TPasTokenKind;
+
+  procedure Close;
+  var
+    LIdx, LMax, LPad, LEndCol: Integer;
+    LSame: Boolean;
+  begin
+    if LCount >= 2 then
+    begin
+      LMax := 0;
+      LSame := True;
+      for LIdx := 0 to LCount - 1 do
+      begin
+        LEndCol := ItemCol[LGroup[LIdx] - 1] + ItemLen(LGroup[LIdx] - 1);
+        if (LIdx > 0) and (LEndCol <> LMax) then
+          LSame := False;
+        if LEndCol > LMax then
+          LMax := LEndCol;
+      end;
+      LPad := 1;
+      if (VisKind(Items[LGroup[0]].Vis) = tkColon) and LSame then
+        LPad := 0;
+      for LIdx := 0 to LCount - 1 do
+        GapSet[LGroup[LIdx]] := LMax + LPad -
+          (ItemCol[LGroup[LIdx] - 1] + ItemLen(LGroup[LIdx] - 1));
+    end;
+    LCount := 0;
+  end;
+
+begin
+  SetLength(LCand, Length(T^.Source.Visible));
+  for LVis := 0 to High(LCand) do
+    LCand[LVis] := NIL_NODE;
+  for LNode := 0 to High(T^.Nodes) do
+  begin
+    if (Lead[LNode] < 0) or not InFile(Lead[LNode]) then
+      Continue;
+    LTok := AlignTok(LNode);
+    if (LTok < 0) or not InFile(LTok) then
+      Continue;
+    LItem := VisItem[LTok];
+    if (LItem <= 0) or (NL[LItem] > 0) or Kept[LItem] or
+      (Items[LItem - 1].Kind <> fiCode) then
+      Continue;
+    if ABaseOnly then
+    begin
+      if VisKind(LTok) = tkColon then
+        GapSet[LItem] := 0
+      else
+        GapSet[LItem] := 1;
+    end
+    else
+    begin
+      GapSet[LItem] := -1;
+      LCand[Lead[LNode]] := LNode;
+    end;
+  end;
+  if ABaseOnly then
+    Exit;
+  SetLength(LGroup, 16);
+  LCount := 0;
+  LPrevLine := -2;
+  LPrevParent := NIL_NODE;
+  LPrevKind := nkError;
+  LPrevTok := tkEndOfFile;
+  for LVis := 0 to High(LCand) do
+  begin
+    LNode := LCand[LVis];
+    if LNode = NIL_NODE then
+      Continue;
+    LTok := AlignTok(LNode);
+    LItem := VisItem[LTok];
+    LLeadItem := VisItem[LVis];
+    LLast := T^.Nodes[LNode].LastToken;
+    // The unit alone on its line: from its first token to its last, a `;`
+    // after it, comments after that.
+    if (LLeadItem < 0) or ((LLeadItem > 0) and (NL[LLeadItem] = 0)) or
+      not InFile(LLast) or (VisItem[LLast] < 0) or
+      (OutLine[VisItem[LLast]] <> OutLine[LLeadItem]) then
+    begin
+      Close;
+      Continue;
+    end;
+    LEnd := LineEnd(LLeadItem);
+    while Items[LEnd].Kind <> fiCode do
+      Dec(LEnd);
+    if not ((Items[LEnd].Vis = LLast) or ((Items[LEnd].Vis = LLast + 1) and
+      (VisKind(LLast + 1) = tkSemicolon))) or
+      not PlainLine(LLeadItem, LineEnd(LLeadItem) + 1) then
+    begin
+      Close;
+      Continue;
+    end;
+    if (LCount > 0) and ((OutLine[LLeadItem] <> LPrevLine + 1) or
+      (Parent(LNode) <> LPrevParent) or (Kind(LNode) <> LPrevKind) or
+      (VisKind(LTok) <> LPrevTok)) then
+      Close;
+    if LCount = Length(LGroup) then
+      SetLength(LGroup, LCount * 2);
+    LGroup[LCount] := LItem;
+    Inc(LCount);
+    LPrevLine := OutLine[LLeadItem];
+    LPrevParent := Parent(LNode);
+    LPrevKind := Kind(LNode);
+    LPrevTok := VisKind(LTok);
+  end;
+  Close;
+end;
+
+// Trailing comments: the comment after the last code of a line, on
+// consecutive code lines of one indentation (a blank line, a comment line,
+// another indentation ends the group), at one column - one right of the
+// longest code before one of them. A comment alone keeps its gap.
+procedure TFormatter.AlignComments;
+var
+  LGroup: TArray<Integer>;
+  LIdx, LEnd, LLast, LCount, LPrevLine, LPrevIndent: Integer;
+
+  procedure Close;
+  var
+    LK, LMax: Integer;
+  begin
+    if LCount >= 2 then
+    begin
+      LMax := 0;
+      for LK := 0 to LCount - 1 do
+        if ItemCol[LGroup[LK] - 1] + ItemLen(LGroup[LK] - 1) > LMax then
+          LMax := ItemCol[LGroup[LK] - 1] + ItemLen(LGroup[LK] - 1);
+      for LK := 0 to LCount - 1 do
+        GapSet[LGroup[LK]] := LMax + 1 -
+          (ItemCol[LGroup[LK] - 1] + ItemLen(LGroup[LK] - 1));
+    end;
+    LCount := 0;
+  end;
+
+begin
+  SetLength(LGroup, 16);
+  LCount := 0;
+  LPrevLine := -2;
+  LPrevIndent := -1;
+  LIdx := 0;
+  while LIdx <= High(Items) do
+  begin
+    LEnd := LineEnd(LIdx) + 1;
+    LLast := LEnd - 1;
+    while (LLast >= LIdx) and (Items[LLast].Kind <> fiCode) do
+      Dec(LLast);
+    if (LLast >= LIdx) and PlainLine(LIdx, LEnd) then
+    begin
+      // A code line of the group's indentation without a comment of its
+      // own keeps the group going.
+      if (LCount > 0) and ((OutLine[LIdx] <> LPrevLine + 1) or
+        (ItemCol[LIdx] <> LPrevIndent)) then
+        Close;
+      if (LLast + 1 < LEnd) and (Items[LLast + 1].Kind = fiComment) then
+      begin
+        if LCount = Length(LGroup) then
+          SetLength(LGroup, LCount * 2);
+        LGroup[LCount] := LLast + 1;
+        Inc(LCount);
+      end;
+      LPrevLine := OutLine[LIdx];
+      LPrevIndent := ItemCol[LIdx];
+    end
+    else
+      Close;
+    LIdx := LEnd;
+  end;
+  Close;
+end;
+
+// Pass 2: the columns of every item, in order (a continuation reads the
+// columns before it), its output line, and - AEmit - the edits.
+procedure TFormatter.Layout(AEmit: Boolean; var AEdits: TPasTextEdits;
+  var ACount: Integer);
+var
+  LCount, LIdx, LBreaks, LCol, LLineIndent, LLineFirstOrig, LShift, LSpaces,
+    LOrigSpaces: Integer;
+  LStarts: Boolean;
+  LCur: TFmtItem;
   LFirstBreak, LGap, LNew: string;
-  LKept: TArray<Boolean>;
 
   procedure AddEdit(AStart, ALen: Integer; const AText: string);
   begin
-    if LEditCount = Length(Result) then
-      SetLength(Result, LEditCount * 2);
-    Result[LEditCount].Start := AStart;
-    Result[LEditCount].Len := ALen;
-    Result[LEditCount].Text := AText;
-    Inc(LEditCount);
+    if not AEmit then
+      Exit;
+    if ACount = Length(AEdits) then
+      SetLength(AEdits, ACount * 2 + 64);
+    AEdits[ACount].Start := AStart;
+    AEdits[ACount].Len := ALen;
+    AEdits[ACount].Text := AText;
+    Inc(ACount);
   end;
+
+begin
+  LCount := Length(Items);
+  for LIdx := 0 to High(ColMemo) do
+    ColMemo[LIdx] := -2;
+  for LIdx := 0 to High(CodeColMemo) do
+  begin
+    CodeColMemo[LIdx] := -2;
+    TokCol[LIdx] := -1;
+    LineIndentAt[LIdx] := 0;
+    StartsLineAt[LIdx] := False;
+  end;
+  for LIdx := 0 to LCount - 1 do
+    CommentCont[LIdx] := False;
+  LShift := 0;
+  LLineIndent := OrigCol(Items[0].Start);
+  LLineFirstOrig := LLineIndent;
+  for LIdx := 0 to LCount - 1 do
+  begin
+    LCur := Items[LIdx];
+    if LIdx = 0 then
+      OutLine[LIdx] := 0
+    else
+      OutLine[LIdx] := OutLine[LIdx - 1] + NL[LIdx] +
+        LineOf(Items[LIdx - 1].EndPos) - LineOf(Items[LIdx - 1].Start);
+    LStarts := (LIdx = 0) or (NL[LIdx] > 0);
+    if LStarts then
+    begin
+      if Kept[LIdx] then
+        LCol := OrigCol(LCur.Start)
+      else if WrapColAt[LIdx] >= 0 then
+        LCol := WrapColAt[LIdx]       // a line a wrap started (F5)
+      else
+        case LCur.Kind of
+          fiCode:
+            LCol := CodeCol(LCur.Vis);
+          fiDirective:
+            if O.KeepDirectivesAtColumn1 and (OrigCol(LCur.Start) = 0) then
+              LCol := 0
+            else
+              LCol := CommentCol(LIdx);
+        else
+          LCol := CommentCol(LIdx);
+        end;
+      LLineIndent := LCol;
+      LLineFirstOrig := OrigCol(LCur.Start);
+      if (LIdx > 0) and not Kept[LIdx] then
+      begin
+        CountBreaks(Items[LIdx - 1].EndPos, LCur.Start, LFirstBreak);
+        if LFirstBreak = '' then
+          LFirstBreak := LineBreak;
+        LNew := '';
+        for LBreaks := 1 to NL[LIdx] do
+          LNew := LNew + LFirstBreak;
+        LNew := LNew + StringOfChar(' ', LCol);
+        LGap := Copy(Src, Items[LIdx - 1].EndPos + 1,
+          LCur.Start - Items[LIdx - 1].EndPos);
+        if LGap <> LNew then
+          AddEdit(Items[LIdx - 1].EndPos, LCur.Start - Items[LIdx - 1].EndPos,
+            LNew);
+      end;
+      LShift := 0;
+    end
+    else if (GapSet[LIdx] >= 0) and not Kept[LIdx] then
+    begin
+      // A gap alignment (or wrapping's measure) sets (F5).
+      LOrigSpaces := OrigCol(LCur.Start) - OrigCol(Items[LIdx - 1].EndPos);
+      LNew := StringOfChar(' ', GapSet[LIdx]);
+      if Copy(Src, Items[LIdx - 1].EndPos + 1,
+        LCur.Start - Items[LIdx - 1].EndPos) <> LNew then
+        AddEdit(Items[LIdx - 1].EndPos, LCur.Start - Items[LIdx - 1].EndPos,
+          LNew);
+      Inc(LShift, GapSet[LIdx] - LOrigSpaces);
+    end
+    else if O.NormalizeSpaces and not Kept[LIdx] and
+      (LCur.Kind = fiCode) and (Items[LIdx - 1].Kind = fiCode) then
+    begin
+      // A gap inside a line, between two code tokens (F2).
+      LSpaces := SpaceRule(Items[LIdx - 1].Vis, LCur.Vis);
+      LOrigSpaces := OrigCol(LCur.Start) - OrigCol(Items[LIdx - 1].EndPos);
+      if (LSpaces = 1) and (LOrigSpaces = 0) then
+      begin
+        AddEdit(LCur.Start, 0, ' ');
+        Inc(LShift);
+      end
+      else if (LSpaces = 0) and (LOrigSpaces > 0) and
+        // `Name    : Type` - colons aligned down a declaration list are the
+        // author's alignment, as several spaces are where one is asked.
+        not ((LOrigSpaces > 1) and (VisKind(LCur.Vis) = tkColon)) and
+        MayTouch(LIdx - 1, LIdx) then
+      begin
+        AddEdit(Items[LIdx - 1].EndPos, LCur.Start - Items[LIdx - 1].EndPos, '');
+        Dec(LShift, LOrigSpaces);
+      end;
+    end;
+    if AEmit and (LCur.Kind in [fiCode, fiDirective]) then
+    begin
+      LNew := ItemText(LIdx);
+      if LNew <> Copy(Src, LCur.Start + 1, LCur.EndPos - LCur.Start) then
+        AddEdit(LCur.Start, LCur.EndPos - LCur.Start, LNew);
+    end;
+    ItemCol[LIdx] := LLineIndent + OrigCol(LCur.Start) - LLineFirstOrig + LShift;
+    if LCur.Kind = fiCode then
+    begin
+      StartsLineAt[LCur.Vis] := LStarts;
+      LineIndentAt[LCur.Vis] := LLineIndent;
+      TokCol[LCur.Vis] := ItemCol[LIdx];
+    end;
+    // An item that spans lines (a block comment, a multiline string, a
+    // skipped region): what follows it on its last line stays where it is.
+    if LineOf(LCur.EndPos) <> LineOf(LCur.Start) then
+    begin
+      LLineIndent := 0;
+      LLineFirstOrig := 0;
+      LShift := 0;
+    end;
+  end;
+end;
+
+function TFormatter.Run: TPasTextEdits;
+var
+  LCount, LIdx, LBreaks, LEditCount, LIter: Integer;
+  LPrev, LCur: TFmtItem;
+  LFirstBreak: string;
+  LAlign: Boolean;
 
   // Only comments stand before item AIdx on its line, and the line starts
   // with one of them: the line is already AIdx's (`{class} function F;`, a
@@ -1272,16 +1900,29 @@ begin
   SetLength(NL, LCount);
   SetLength(ItemCol, LCount);
   SetLength(CommentCont, LCount);
-  SetLength(LKept, LCount);
+  SetLength(Kept, LCount);
+  SetLength(GapSet, LCount);
+  SetLength(WrapColAt, LCount);
+  SetLength(OutLine, LCount);
+  SetLength(VisItem, Length(T^.Source.Visible));
+  for LIdx := 0 to High(VisItem) do
+    VisItem[LIdx] := -1;
+  for LIdx := 0 to LCount - 1 do
+  begin
+    GapSet[LIdx] := -1;
+    WrapColAt[LIdx] := -1;
+    if Items[LIdx].Kind = fiCode then
+      VisItem[Items[LIdx].Vis] := LIdx;
+  end;
   // Pass 1: the line breaks of every gap.
-  LKept[0] := True;
+  Kept[0] := True;
   for LIdx := 1 to LCount - 1 do
   begin
     LPrev := Items[LIdx - 1];
     LCur := Items[LIdx];
     LBreaks := CountBreaks(LPrev.EndPos, LCur.Start, LFirstBreak);
-    LKeep := Opaque(LPrev) or Opaque(LCur);
-    if not LKeep then
+    Kept[LIdx] := Opaque(LPrev) or Opaque(LCur);
+    if not Kept[LIdx] then
     begin
       if (O.MaxBlankLines >= 0) and (LBreaks > O.MaxBlankLines + 1) then
         LBreaks := O.MaxBlankLines + 1;
@@ -1290,97 +1931,33 @@ begin
         LBreaks := 1;
     end;
     NL[LIdx] := LBreaks;
-    LKept[LIdx] := LKeep;
   end;
-  // Pass 2: columns, in order (a continuation reads the columns before it),
-  // and the edits.
-  SetLength(Result, 64);
   LEditCount := 0;
-  LShift := 0;
-  LLineIndent := OrigCol(Items[0].Start);
-  LLineFirstOrig := LLineIndent;
-  for LIdx := 0 to LCount - 1 do
+  // F5. Wrapping measures with every gap alignment owns at its rule width
+  // and adds breaks until no line it may break is too long; alignment then
+  // reads the columns of the lines as wrapped, the trailing comments last
+  // (after the padding of the code before them).
+  LAlign := O.AlignAssignments or O.AlignDeclColons;
+  if LAlign then
+    AlignGaps(True);
+  if O.WrapLongLines and (O.RightMargin > 0) then
+    for LIter := 1 to 32 do
+    begin
+      Layout(False, Result, LEditCount);
+      if WrapLines = 0 then
+        Break;
+    end;
+  if LAlign then
   begin
-    LCur := Items[LIdx];
-    LStarts := (LIdx = 0) or (NL[LIdx] > 0);
-    if LStarts then
-    begin
-      if LKept[LIdx] then
-        LCol := OrigCol(LCur.Start)
-      else
-        case LCur.Kind of
-          fiCode:
-            LCol := CodeCol(LCur.Vis);
-          fiDirective:
-            if O.KeepDirectivesAtColumn1 and (OrigCol(LCur.Start) = 0) then
-              LCol := 0
-            else
-              LCol := CommentCol(LIdx);
-        else
-          LCol := CommentCol(LIdx);
-        end;
-      LLineIndent := LCol;
-      LLineFirstOrig := OrigCol(LCur.Start);
-      if (LIdx > 0) and not LKept[LIdx] then
-      begin
-        CountBreaks(Items[LIdx - 1].EndPos, LCur.Start, LFirstBreak);
-        if LFirstBreak = '' then
-          LFirstBreak := LineBreak;
-        LNew := '';
-        for LBreaks := 1 to NL[LIdx] do
-          LNew := LNew + LFirstBreak;
-        LNew := LNew + StringOfChar(' ', LCol);
-        LGap := Copy(Src, Items[LIdx - 1].EndPos + 1,
-          LCur.Start - Items[LIdx - 1].EndPos);
-        if LGap <> LNew then
-          AddEdit(Items[LIdx - 1].EndPos, LCur.Start - Items[LIdx - 1].EndPos,
-            LNew);
-      end;
-      LShift := 0;
-    end
-    else if O.NormalizeSpaces and not LKept[LIdx] and
-      (LCur.Kind = fiCode) and (Items[LIdx - 1].Kind = fiCode) then
-    begin
-      // A gap inside a line, between two code tokens (F2).
-      LSpaces := SpaceRule(Items[LIdx - 1].Vis, LCur.Vis);
-      LOrigSpaces := OrigCol(LCur.Start) - OrigCol(Items[LIdx - 1].EndPos);
-      if (LSpaces = 1) and (LOrigSpaces = 0) then
-      begin
-        AddEdit(LCur.Start, 0, ' ');
-        Inc(LShift);
-      end
-      else if (LSpaces = 0) and (LOrigSpaces > 0) and
-        // `Name    : Type` - colons aligned down a declaration list are the
-        // author's alignment, as several spaces are where one is asked.
-        not ((LOrigSpaces > 1) and (VisKind(LCur.Vis) = tkColon)) and
-        MayTouch(LIdx - 1, LIdx) then
-      begin
-        AddEdit(Items[LIdx - 1].EndPos, LCur.Start - Items[LIdx - 1].EndPos, '');
-        Dec(LShift, LOrigSpaces);
-      end;
-    end;
-    if LCur.Kind in [fiCode, fiDirective] then
-    begin
-      LNew := ItemText(LIdx);
-      if LNew <> Copy(Src, LCur.Start + 1, LCur.EndPos - LCur.Start) then
-        AddEdit(LCur.Start, LCur.EndPos - LCur.Start, LNew);
-    end;
-    ItemCol[LIdx] := LLineIndent + OrigCol(LCur.Start) - LLineFirstOrig + LShift;
-    if LCur.Kind = fiCode then
-    begin
-      StartsLineAt[LCur.Vis] := LStarts;
-      LineIndentAt[LCur.Vis] := LLineIndent;
-      TokCol[LCur.Vis] := ItemCol[LIdx];
-    end;
-    // An item that spans lines (a block comment, a multiline string, a
-    // skipped region): what follows it on its last line stays where it is.
-    if LineOf(LCur.EndPos) <> LineOf(LCur.Start) then
-    begin
-      LLineIndent := 0;
-      LLineFirstOrig := 0;
-      LShift := 0;
-    end;
+    Layout(False, Result, LEditCount);
+    AlignGaps(False);
   end;
+  if O.AlignTrailingComments then
+  begin
+    Layout(False, Result, LEditCount);
+    AlignComments;
+  end;
+  Layout(True, Result, LEditCount);
   SetLength(Result, LEditCount);
 end;
 

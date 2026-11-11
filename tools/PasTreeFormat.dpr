@@ -19,12 +19,17 @@ program PasTreeFormat;
 
   Usage:
     PasTreeFormat <root-dir|file> [-p:<platform>] [-max:<n>] [-out:<dir>]
+                  [-wrap[:<margin>]] [-align]
     PasTreeFormat <file> -print [-p:<platform>]
 
   -out writes every formatted file under <dir>, at its path relative to the
   root, for a diff against the corpus. -print writes one file's format to
   stdout and nothing else.
 
+  -wrap formats with WrapLongLines on at RightMargin <margin> (120), -align
+  with AlignAssignments, AlignDeclColons and AlignTrailingComments on (stage
+  F5): the same gates, and the lines longer than the margin counted before
+  and after (comments included, which wrapping does not measure).
   Exit code: 0 every gate held, 1 a gate failed, 2 usage or I/O error.
 }
 
@@ -56,6 +61,7 @@ type
     Files, Clean, Exceptions, Lines: Int64;
     Changed, Edits, IndentOnly, BreakAdded, BlankDropped: Int64;
     SpaceEdits, CaseEdits: Int64;
+    LongIn, LongOut: Int64;            // -wrap: lines over the margin
     TokFail, IdemFail, TreeFail: Int64;
   end;
 
@@ -67,6 +73,19 @@ var
   GOutDir, GRoot: string;
   GWordsMode, GHistMode: Boolean;
   GWords: TDictionary<string, Int64>;
+  GOpts: TPasFormatOptions;
+
+// The lines of AText longer than the margin, trailing blanks aside (a crude
+// measure: a comment after the code counts, a tab is one column).
+function LongLines(const AText: string): Integer;
+var
+  LLine: string;
+begin
+  Result := 0;
+  for LLine in AText.Split([#13#10, #10]) do
+    if Length(TrimRight(LLine)) > GOpts.RightMargin then
+      Inc(Result);
+end;
 
 procedure Report(const AFile, AGate, AMsg: string);
 begin
@@ -207,7 +226,9 @@ begin
     end;
     LSource := LPre.Files[0].Source;
     Inc(GTotals.Lines, Breaks(LSource) + 1);
-    LEdits := PasFormatEdits(LTree, 0, TPasFormatOptions.Default);
+    if GOpts.RightMargin > 0 then
+      Inc(GTotals.LongIn, LongLines(LSource));
+    LEdits := PasFormatEdits(LTree, 0, GOpts);
     LOut := PasApplyEdits(LSource, LEdits);
     if Length(LEdits) > 0 then
       Inc(GTotals.Changed);
@@ -228,6 +249,8 @@ begin
       if GHistMode then
         CountEdit(LSource, LEdits[LIdx], LOld);
     end;
+    if GOpts.RightMargin > 0 then
+      Inc(GTotals.LongOut, LongLines(LOut));
     if GOutDir <> '' then
     begin
       LMsg := TPath.Combine(GOutDir, ExtractRelativePath(
@@ -244,7 +267,7 @@ begin
     // Parsed as the file it replaces: its includes resolve the same.
     LPre := GPP.ProcessText(AFile, LOut);
     LTree := TPasParser.ParseFile(LPre, LDiags);
-    LAgain := PasFormatEdits(LTree, 0, TPasFormatOptions.Default);
+    LAgain := PasFormatEdits(LTree, 0, GOpts);
     if Length(LAgain) > 0 then
     begin
       Inc(GTotals.IdemFail);
@@ -350,7 +373,7 @@ begin
       LPre := GPP.Process(TPath.GetFullPath(AFile));
       LTree := TPasParser.ParseFile(LPre, LDiags);
       Write(PasApplyEdits(LPre.Files[0].Source,
-        PasFormatEdits(LTree, 0, TPasFormatOptions.Default)));
+        PasFormatEdits(LTree, 0, GOpts)));
     end);
 end;
 
@@ -373,6 +396,7 @@ begin
   try
     GPlatform := pfWin64;
     GPrintMode := False;
+    GOpts := TPasFormatOptions.Default;
     GArg := '';
     for GIdx := 1 to ParamCount do
       if ParamStr(GIdx).StartsWith('-p:', True) then
@@ -393,12 +417,24 @@ begin
         GWordsMode := True
       else if SameText(ParamStr(GIdx), '-hist') then
         GHistMode := True
+      else if SameText(ParamStr(GIdx), '-wrap') or
+        ParamStr(GIdx).StartsWith('-wrap:', True) then
+      begin
+        GOpts.WrapLongLines := True;
+        GOpts.RightMargin := StrToIntDef(Copy(ParamStr(GIdx), 7, MaxInt), 120);
+      end
+      else if SameText(ParamStr(GIdx), '-align') then
+      begin
+        GOpts.AlignAssignments := True;
+        GOpts.AlignDeclColons := True;
+        GOpts.AlignTrailingComments := True;
+      end
       else
         GArg := ParamStr(GIdx);
     if GArg = '' then
     begin
       Writeln('Usage: PasTreeFormat <root-dir|file> [-p:<platform>] ' +
-        '[-max:<n>] [-out:<dir>] | <file> -print');
+        '[-max:<n>] [-out:<dir>] [-wrap[:<n>]] [-align] | <file> -print');
       Halt(2);
     end;
     if GPrintMode then
@@ -430,6 +466,9 @@ begin
        Pct(GTotals.Edits, GTotals.Lines), GTotals.IndentOnly,
        GTotals.BreakAdded, GTotals.BlankDropped, GTotals.SpaceEdits,
        GTotals.CaseEdits]));
+    if GOpts.RightMargin > 0 then
+      Writeln(Format('Lines longer than %d: %d before, %d after',
+        [GOpts.RightMargin, GTotals.LongIn, GTotals.LongOut]));
     Writeln(Format('Gates: G-tok %d, G-idem %d, G-tree %d failures',
       [GTotals.TokFail, GTotals.IdemFail, GTotals.TreeFail]));
     Writeln(Format('Elapsed: %.1f s', [GWatch.ElapsedMilliseconds / 1000]));
