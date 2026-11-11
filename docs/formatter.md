@@ -228,8 +228,10 @@ spelling.
 - F1 - indentation and line breaks (done).
 - F2 - spacing inside a line and case (done).
 - F3 - the default tuned against the RTL and VCL (done, sec. 4).
-- F4 - the demo: Format (Ctrl+D) and Format Selection through the editor's
-  undo, the options in its settings.
+- F4 - the demo: Format (Ctrl+D) and Format Selection (Ctrl+Shift+D) in the
+  editor's context menu, through the editor's undo, the options in its
+  settings (`[Format]`). Done in 0.175.1, merged in 0.178.1 -
+  `docs/editor-features.md` sec. 14.
 - F5 - wrapping at a right margin and alignment; off by default.
 - F6 - range mode, include files, the compile-compare gate. Done in the
   library: `PasFormatRangeEdits` keeps the edits of a selection - a gap's

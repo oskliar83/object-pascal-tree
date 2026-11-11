@@ -1406,3 +1406,46 @@ its interfaces:
   another project is opened.
 - **Rename** of a library identifier is refused whatever the mode (it is
   under `LibraryPaths`).
+
+## 14. Format / Format Selection (`PasTree.Format.PasFormatEdits` + demo wiring)
+
+The formatter (`docs/formatter.md`: indentation, line breaks, spacing inside
+a line, the case of words) on the editor's buffer. Both commands are on the editor's context menu and
+work on the active source tab's BUFFER, never the file on disk; a read-only
+tab (a `.dcu`'s generated text) is not formatted.
+
+- **Format** - `Ctrl+D`, as in the IDE. The buffer is preprocessed the way
+  code completion preprocesses it (the platform's define set plus the last
+  analysis's defines and search paths - `EnsureComplPP`), parsed, and
+  `PasFormatEdits(Tree, 0, Options)` gives a minimal edit list over its
+  text. The edits are applied from the last to the first, so every offset
+  still to be applied lies in untouched text, all inside ONE undo block:
+  a single `Ctrl+Z` restores the buffer. The caret stays on the token it
+  was on (a caret inside a re-laid gap lands on the token after it), and
+  the caret's row keeps its place on the screen. SynEdit's own `Ctrl+D`
+  (copy line down) is removed from each editor's keystrokes.
+- **Format Selection** - `Ctrl+Shift+D`; enabled with a selection. The
+  library has no range mode yet (F6), so the demo filters the whole file's
+  edit list (`PasTreeDemo.Format.EditsForLines`): an edit is kept when the
+  token AFTER its gap is on a selected line. The indentation of a line is
+  the tail of the gap that starts on the line above, so the first selected
+  line is laid out and the line after the selection is not; such a gap may
+  reach above the selection, but only through whitespace. A selection that
+  ends in column 1 does not take that line.
+- **Parse diagnostics** do not stop it: the library keeps a flagged unit as
+  written and formats the rest (error-tolerant is the primary mode). The
+  status panel beside the diagnostics count then reads `N edits, M diags`
+  in red, the Messages pane logs the sentence, and the panel's hint holds
+  it. Without them the panel shows the number of edits, or
+  `formatted already`.
+- **Before any analysis** there is no define set or search path to parse
+  with; the command says so and changes nothing.
+- **The style** is the `[Format]` section of `PasTreeDemo.ini`, one key per
+  `TPasFormatOptions` field under the field's name (`StatementAfterThenDo`
+  spelled `Always` / `Keep`), read on start and written back on exit, so the
+  section is there to edit by hand after the first run. An absent or
+  unreadable key takes `TPasFormatOptions.Default`'s value for that field.
+  There is no options dialog in the demo; tuning belongs to the IDE plugin's
+  options page (F8). `tests\DemoSettingsSmoke` holds the section (defaults,
+  a round trip of every field, per-field fallback) and the selection
+  filter's and the caret's arithmetic.
