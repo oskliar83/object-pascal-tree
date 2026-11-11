@@ -1777,7 +1777,8 @@ Still open, roughly in the order we're tackling it:
   the printer's regeneration, whose canonical form rewrites spellings and
   holds no comment, directive or inactive branch. F1 lays out indentation
   and line breaks, F2 the spacing inside a line and the case of words, F6
-  adds a range mode, include files and the compile-compare mode `tf`, F7
+  adds a range mode, include files and the compile-compare mode `tf`, F5
+  wrapping at a right margin and alignment (both off by default), F7
   the `.dcu` interface source in the host's style; over the self-host and
   the Studio rtl, vcl and fmx (1,034 clean files) the output holds the same
   tokens, formats to itself and parses to the same tree
@@ -2091,7 +2092,8 @@ Still open, roughly in the order we're tackling it:
 - **Formatter** - reformat source to a configurable style, off the same AST
   the highlighter and navigation already use rather than a separate
   regex-based pass. Started: stage F1 is `source/PasTree.Format.pas`
-  (`docs/formatter.md`); the demo command is stage F4.
+  (`docs/formatter.md`); the demo command is stage F4, wrapping and
+  alignment stage F5.
 - **PasTree's own diagnostics, beside dcc's.** Today every diagnostic is one
   dcc would give (its code, its wording), so what dcc accepts in silence is
   not reported at all - and some of it is a mistake waiting to bite. The case

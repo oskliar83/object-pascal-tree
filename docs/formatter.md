@@ -1,12 +1,13 @@
 # The formatter
 
 `source/PasTree.Format.pas` lays out a unit by a style: indentation, line
-breaks, spacing, case, and in a later stage wrapping and alignment. It is
-built in stages; this document says what each stage does, what it keeps as
-written, and how it is proven safe. Done in the library: F1 (indentation
-and line breaks), F2 (spacing inside a line, case), F3 (the default tuned
-against the RTL), F6 (range mode, include files, the compile-compare mode)
-and F7 (the generated .dcu source); the stages are listed at the end.
+breaks, spacing, case, wrapping and alignment. It is built in stages; this
+document says what each stage does, what it keeps as written, and how it
+is proven safe. Done in the library: F1 (indentation and line breaks), F2
+(spacing inside a line, case), F3 (the default tuned against the RTL), F5
+(wrapping at a right margin, alignment - both off by default), F6 (range
+mode, include files, the compile-compare mode) and F7 (the generated .dcu
+source); the stages are listed at the end.
 
 ## 1. The model: rewrite the gaps, never a token
 
@@ -84,8 +85,8 @@ Per gap:
   a pointer type's (`RemoveSpaces`). Where one space is asked for, a gap
   with none gets one and a gap with several keeps them - that is the
   author's alignment (`toEOF     = Char(0);`), and so are two or more
-  spaces before a `:` (`Name    : Type`), which wrapping and alignment
-  (F5) will own. Where none is asked for, the gap shrinks to nothing only
+  spaces before a `:` (`Name    : Type`) - alignment (F5, sec. 2b), when
+  on, owns those gaps. Where none is asked for, the gap shrinks to nothing only
   when the two tokens lex back as the same two (spec B.2: `( *` stays,
   `- -B` stays two operators); the check lexes them after an operand, as
   they stand. Kept as written: the gap inside one literal's elements
@@ -104,6 +105,90 @@ Per gap:
   identifier a leaf holds - its declaration's spelling, for a caller that
   resolves names; the function may change the case only. A token in a
   flagged unit keeps its case.
+
+## 2b. What F5 decides (off by default)
+
+**Wrapping** (`WrapLongLines`, `RightMargin`). A line whose CODE ends right
+of the margin - a comment after it is not measured: breaking code because
+of its comment moves the comment, not the problem - is broken at its best
+point, and what is left of it again, until it fits or no point is left:
+
+- the points: after a `,` of a list (an argument, parameter, index, set,
+  enumeration, uses, case-label, variable-name, attribute list) or a `;` of
+  a parameter list; after a binary operator; after `:=`;
+- the best one: of the points that leave the line before them inside the
+  margin, the shallowest (fewest open `(` / `[`), then a list's separator
+  before an operator and a relational operator before an additive before a
+  multiplicative one, then the rightmost; `:=` only when nothing else will
+  do. When no point fits, the leftmost of the best - the first piece is as
+  short as it gets;
+- the new line: one `IndentStep` right of the line its statement or
+  declaration starts on (never left of the line being broken, an author's
+  continuation aligned under its `(`); a uses item at its uses list's
+  column.
+
+Read off the Studio RTL and VCL (1.7M lines, crude census): of the lines
+that end in `,` inside an open `(`, the next line is one step (2) right of
+the line 2,866 times, under the `(` 271, four right 55 - so a step. And a
+broken expression keeps its operator at the END of the line 4,041 times, at
+the start of the next 795 - so the break goes after the operator (the brief
+of the stage had asked for before; the corpus decided). Measured over the
+same corpus, 91% of the lines are within 80 columns and 2.3% beyond 120:
+`RightMargin` is 0 (no wrapping) by default and 120 is the margin the tools
+use when wrapping is on.
+
+Never wrapped: a line with a directive, an inactive branch, asm, a flagged
+unit, a caret character (`^M`, spec B.6.2), an item over several lines
+(a block comment, a multiline string) or a tab in it; inside a literal, type arguments or generic parameters, an
+anonymous method written on one line; before a caret. Wrapping only ADDS
+line breaks: F1's rule that an author's break is kept stays, and a line no
+point can shorten is left long.
+
+Idempotence is by construction: the column a wrapped line gets is the one a
+later format reads back for it (a continuation keeps its offset from its
+unit's first token, CodeCol), the breaks are added until a pass adds none
+(a wrap can move what follows - an anonymous method's body), and the margin
+is measured with every gap alignment owns at its rule width - so a format
+of the result, whose gaps hold the padding, finds the same lines too long.
+
+**Alignment**, each option alone, over GROUPS: consecutive output lines, each
+holding one unit of one kind under one parent, written on that line alone
+(its `;` and comments after it allowed); a blank line, a comment line, a
+unit over several lines or another kind ends a group. In a group of two or
+more the aligned token goes one column right of the longest text before it
+on the group's lines; a unit in no group keeps F2's rule (several spaces
+the author wrote stay).
+
+- `AlignAssignments`: the `:=` of assignments in one statement list.
+- `AlignDeclColons`: the `:` of variable and field declarations and typed
+  constants, the `=` of constants and types, down one section or member
+  list (`=` and `:` never in one group). A `:` touches the longest name
+  when every name of the group is as long - `X: Integer` / `Y: string` stay
+  - and otherwise stands one right of it, the RTL's own aligned shape
+  (`time_zone_minutes : int16_t` / `year              : uint16_t`).
+- `AlignTrailingComments`: the comment after the last code of a line, on
+  consecutive code lines of one indentation - a line with no comment of its
+  own keeps the group going - one column right of the longest code that
+  carries one. A trailing comment alone keeps its gap.
+
+Measured (Win64 defines; `tools\PasTreeFormat <dir> -wrap -align`, and
+`-wrap:80 -align`): G-tok, G-idem, G-tree 0 failures over the self-host
+(33 clean files), Studio `rtl` (559), `vcl` (118), `fmx` (324), each with
+wrapping alone, alignment alone, both, and both at margin 80. Lines longer
+than 120 before / after `-wrap` (comments counted, which wrapping does not
+measure): self-host 3 / 3, rtl 36,260 / 19,638, vcl 712 / 228, fmx 14,064
+/ 827. What stays long (sampled over the rtl): comment text - a long
+`//` line, code commented out inside a block comment -, a literal, a line
+with a tab, and declarations with no point to break at: a routine header
+with one parameter (the generated WinRT units), `class(TGeneric<A, B>)`
+(type arguments are never broken). Alignment alone adds 9,282 spacing
+edits over the self-host's 115,470 lines and 102,234 over the rtl's
+1,230,840. With the default
+options the edits are those of 0.178 to the edit.
+
+Not aligned: the lines wrapping never touches (above). Alignment may push
+a line past the margin; wrapping does not chase it
+(see idempotence).
 
 ## 3. What is kept as written
 
@@ -133,7 +218,12 @@ so none of them applies. F2 adds a space only between tokens of different
 nodes (never inside a literal or after an operand's caret) and removes one
 only when the two tokens re-lex unchanged. A case change is a spelling of
 the same word (B.3: identifiers and reserved words are case-insensitive;
-B.2.2: a directive's name).
+B.2.2: a directive's name). F5 inserts a line break into a gap between two
+code tokens of different nodes, never next to a comment or a directive,
+never inside a literal, never before a caret - B.2's "line breaks between
+tokens" - and alignment widens a gap that is already one between two
+tokens of different nodes (before `:=`, `:`, `=`, a trailing comment) on
+a line with no caret character.
 
 That is the argument; the gates are the proof, each total over a corpus:
 
@@ -193,7 +283,9 @@ equal dumps (every routine's code and data bytes, its fixups, the
 declarations) is `OK  lines`. Over the self-host 33 of 33 units, over the
 Studio RTL's Win64 units (`BuildWinRTL.dpk`) 309 of 309 that compile on
 their own are OK; with assertions on, 15 RTL units differed - each in a
-routine holding an `assert`, which is what found the rule.
+routine holding an `assert`, which is what found the rule. With the F5 options
+on (`fidelity.ps1 -Mode tf -FmtOpts wrap=80,align`, and `wrap,align`) the
+self-host is again 33 of 33 OK (spec B.2, 99400e7).
 
 ## 5. The default style
 
@@ -223,6 +315,10 @@ default); `ReservedWordCase` and `DirectiveWordCase` (`fcLower`),
 `PasFormatEdits`: only a caller that resolves names knows a declaration's
 spelling.
 
+F5, all off by default: `RightMargin` (0: none; 120 the tools' margin when
+on) with `WrapLongLines` (False), `AlignAssignments`, `AlignDeclColons`,
+`AlignTrailingComments` (False).
+
 ## 7. The stages
 
 - F1 - indentation and line breaks (done).
@@ -232,7 +328,10 @@ spelling.
   editor's context menu, through the editor's undo, the options in its
   settings (`[Format]`). Done in 0.175.1, merged in 0.178.1 -
   `docs/editor-features.md` sec. 14.
-- F5 - wrapping at a right margin and alignment; off by default.
+- F5 - wrapping at a right margin and alignment, off by default (done in
+  0.179.0, sec. 2b). `tools\PasTreeFormat -wrap[:N] -align` runs the gates
+  with them on, `PasTreeXform -fmtopts:wrap[=N],align` (`fidelity.ps1
+  -FmtOpts`) the compile-compare mode.
 - F6 - range mode, include files, the compile-compare gate. Done in the
   library: `PasFormatRangeEdits` keeps the edits of a selection - a gap's
   by the token after it - computed over the whole file, so a range formats

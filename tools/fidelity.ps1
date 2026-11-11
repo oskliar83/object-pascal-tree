@@ -107,6 +107,9 @@
     own source\) then compiles each one standalone against the others'
     ORIGINAL .dcu files.
 
+  -FmtOpts reaches PasTreeXform -fmtopts: (tf only): the formatter with
+  wrapping and alignment on, judged the same way.
+
   -XformDefine / -XformUndefine reach PasTreeXform only, never dcc: a way to
   hand the preprocessor a corrected predefined set and see past a known
   define-set difference. -Jobs N runs N worker processes over slices of the
@@ -151,6 +154,9 @@ param(
   # ts, t1, t2: apply only these sites (PasTreeXform -sites:, `1-40,57`) - for
   # probing one site of a unit by hand.
   [string] $Sites = '',
+  # tf: the formatter options PasTreeXform -fmtopts: takes (`wrap,align`,
+  # `wrap=80`) - the F5 options, off in the default style.
+  [string] $FmtOpts = '',
   # Internal: set on a worker (see -Jobs) - the parent's parameters, as JSON;
   # -List is then the worker's slice.
   [string] $Worker = ''
@@ -222,6 +228,7 @@ if ($Worker -ne '') {
   $Base = [bool]$p.Base; $Oracle = [bool]$p.Oracle; $OraclePath = & $strings $p.OraclePath
   $Localize = [bool]$p.Localize; $NoLocalize = [bool]$p.NoLocalize; $LocalizeBudget = [int]$p.LocalizeBudget
   $Sites = "$($p.Sites)"
+  $FmtOpts = "$($p.FmtOpts)"
 }
 # ts, tqs and tms are selftests: every planted site is wrong by construction.
 $selfMode = $Mode -in @('ts', 'tqs', 'tms')
@@ -552,6 +559,7 @@ function Xform-Args([string] $u, [string] $XfOut, [string] $SiteList = '') {
   elseif ($Mode -in $qModes) { $xa += @(('-S:' + ($OraclePath -join ';')), "-NS:$Namespaces") }
   if ($SiteList -ne '') { $xa += "-sites:$SiteList" }
   elseif ($Sites -ne '') { $xa += "-sites:$Sites" }
+  if ($FmtOpts -ne '') { $xa += "-fmtopts:$FmtOpts" }
   return ,$xa
 }
 
@@ -1003,7 +1011,7 @@ if ($Jobs -le 1) {
     Define = @($Define); XformDefine = @($XformDefine); XformUndefine = @($XformUndefine)
     Switches = @($Switches); Base = [bool]$Base; Oracle = [bool]$Oracle
     OraclePath = @($OraclePath); Localize = [bool]$Localize; NoLocalize = [bool]$NoLocalize
-    LocalizeBudget = $LocalizeBudget; Sites = $Sites }
+    LocalizeBudget = $LocalizeBudget; Sites = $Sites; FmtOpts = $FmtOpts }
   $paramFile = Join-Path $jobDir 'params.json'
   [IO.File]::WriteAllText($paramFile, ($params | ConvertTo-Json))
   [IO.File]::WriteAllText((Join-Path $Out 'base-fail.json'), ($baseFail | ConvertTo-Json))

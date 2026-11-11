@@ -137,7 +137,9 @@ program PasTreeXform;
         PasTree.Format with the default style - whitespace and case only,
         so the code must stay; compiled without line and reference
         records, which follow the lines (spec B.2). The include files are
-        copied as they are.
+        copied as they are. -fmtopts:wrap[=N],align (also assign, colons,
+        comments) turns the F5 options on: wrapping at a margin (120),
+        alignment.
 
   Usage:
     PasTreeXform <unit.pas> -mode:t0|ts|t0f|t1|t2|t3|t3x|tq|tqs|tm|tqm|tms|tf -out:<dir> [-p:<platform>]
@@ -4552,6 +4554,7 @@ var
   GInfo: TPasPlatformInfo;
   GIncDirs, GDefNames, GUndefNames, GSearch: TList<string>;
   GOracle, GOracleUsed: Boolean;
+  GFmtOpts: TPasFormatOptions;        // tf: the style (-fmtopts)
   GProject: TPasSemaProject;
   GProjectId: Integer;
   GLiveness: TLivenessRun;
@@ -4594,6 +4597,7 @@ begin
     GSearch := TList<string>.Create;
     GSiteRanges := TList<TSiteRange>.Create;
     GOracle := False;
+    GFmtOpts := TPasFormatOptions.Default;
     GOracleUsed := False;
     GProject := nil;
     for GIdx := 1 to ParamCount do
@@ -4623,6 +4627,32 @@ begin
       if GArg.StartsWith('-sites:', True) then
       begin
         ParseSiteList(Copy(GArg, 8, MaxInt));
+        Continue;
+      end;
+      // tf: -fmtopts:wrap[=N],align,assign,colons,comments - the F5 options
+      // on (wrap: RightMargin N, 120 by default; align: all three).
+      if GArg.StartsWith('-fmtopts:', True) then
+      begin
+        for GName in LowerCase(Copy(GArg, 10, MaxInt)).Split([',']) do
+          if (GName = 'wrap') or GName.StartsWith('wrap=') then
+          begin
+            GFmtOpts.WrapLongLines := True;
+            GFmtOpts.RightMargin := StrToIntDef(Copy(GName, 6, MaxInt), 120);
+          end
+          else if GName = 'align' then
+          begin
+            GFmtOpts.AlignAssignments := True;
+            GFmtOpts.AlignDeclColons := True;
+            GFmtOpts.AlignTrailingComments := True;
+          end
+          else if GName = 'assign' then
+            GFmtOpts.AlignAssignments := True
+          else if GName = 'colons' then
+            GFmtOpts.AlignDeclColons := True
+          else if GName = 'comments' then
+            GFmtOpts.AlignTrailingComments := True
+          else
+            raise Exception.Create('unknown -fmtopts item: ' + GName);
         Continue;
       end;
       if GArg.StartsWith('-mode:', True) then
@@ -4678,7 +4708,7 @@ begin
       Writeln(ErrOutput, 'Usage: PasTreeXform <unit.pas> -mode:t0|ts|t0f|t1|t2|t3|t3x|tq|tqs|tm|tqm|tms|tf ' +
         '-out:<dir> [-p:<platform>] [-D:X;Y]... [-Undef:X;Y]... ' +
         '[-I:<dir>[;<dir>]]... [-oracle [-S:<dir>[;<dir>]]...] ' +
-        '[-sites:<ids>]');
+        '[-sites:<ids>] [-fmtopts:wrap[=N],align]');
       ExitCode := 1;
       Exit;
     end;
@@ -4892,7 +4922,7 @@ begin
           raise Exception.CreateFmt('the unit parses with %d diagnostics: ' +
             'not formatted', [Length(GDiags)]);
         GUnitName := HeaderName;
-        for GFmtEdit in PasFormatEdits(GTree, 0, TPasFormatOptions.Default) do
+        for GFmtEdit in PasFormatEdits(GTree, 0, GFmtOpts) do
         begin
           GEdit := Default(TEdit);
           GEdit.FileId := 0;

@@ -683,6 +683,186 @@ begin
     'finalization',
     '  B;',
     'end.']));
+
+  // F5, wrapping: off by default, a long line stays as it is.
+  Check('wrap off', U([
+    'procedure P;',
+    'begin',
+    '  Foo(Alpha, Beta, Gamma, Delta, Epsilon);',
+    'end;']), U([
+    'procedure P;',
+    'begin',
+    '  Foo(Alpha, Beta, Gamma, Delta, Epsilon);',
+    'end;']));
+
+  LOpt := TPasFormatOptions.Default;
+  LOpt.WrapLongLines := True;
+  LOpt.RightMargin := 40;
+  Check('wrap: after the last comma that fits', U([
+    'procedure P;',
+    'begin',
+    '  Foo(Alpha, Beta, Gamma, Delta, Epsilon);',
+    'end;']), U([
+    'procedure P;',
+    'begin',
+    '  Foo(Alpha, Beta, Gamma, Delta,',
+    '    Epsilon);',
+    'end;']), LOpt);
+
+  LOpt.RightMargin := 30;
+  Check('wrap: lowest operator, := last, uses items', Lines([
+    'unit U;',
+    'interface',
+    'uses',
+    '  SysUtils, Classes, Generics.Collections, Types;',
+    'implementation',
+    'procedure P;',
+    'begin',
+    '  Result := AlphaValue + BetaValue * GammaValue;',
+    '  S := ''a very long string literal'';',
+    '  WriteLn(''a very long string literal'');',
+    '  Foo(Alpha, {$IFDEF X}Beta,{$ENDIF} Gamma, Delta);',
+    'end;',
+    'end.']), Lines([
+    'unit U;',
+    'interface',
+    'uses',
+    '  SysUtils, Classes,',
+    '  Generics.Collections, Types;',
+    'implementation',
+    'procedure P;',
+    'begin',
+    '  Result := AlphaValue +',
+    '    BetaValue * GammaValue;',
+    '  S :=',
+    '    ''a very long string literal'';',
+    '  WriteLn(''a very long string literal'');',
+    '  Foo(Alpha, {$IFDEF X}Beta,{$ENDIF} Gamma, Delta);',
+    'end;',
+    'end.']), LOpt);
+
+  // F5, alignment: each option off keeps the author's spacing, on aligns
+  // a group of consecutive lines and leaves a line alone as F2 has it.
+  Check('align off', U([
+    'var',
+    '  A: Integer;',
+    '  LongName: string;',
+    'procedure P;',
+    'begin',
+    '  A := 1; // one',
+    '  LongName := 2; // two',
+    'end;']), U([
+    'var',
+    '  A: Integer;',
+    '  LongName: string;',
+    'procedure P;',
+    'begin',
+    '  A := 1; // one',
+    '  LongName := 2; // two',
+    'end;']));
+
+  LOpt := TPasFormatOptions.Default;
+  LOpt.AlignAssignments := True;
+  Check('align assignments', U([
+    'procedure P;',
+    'begin',
+    '  A := 1;',
+    '  LongName := 2;',
+    '',
+    '  B     := 3;',
+    '  Foo;',
+    '  CC := 4;',
+    '  D := Foo(1,',
+    '    2);',
+    'end;']), U([
+    'procedure P;',
+    'begin',
+    '  A        := 1;',
+    '  LongName := 2;',
+    '',
+    '  B     := 3;',
+    '  Foo;',
+    '  CC := 4;',
+    '  D := Foo(1,',
+    '    2);',
+    'end;']), LOpt);
+
+  LOpt := TPasFormatOptions.Default;
+  LOpt.AlignDeclColons := True;
+  Check('align declaration colons', U([
+    'var',
+    '  A: Integer;',
+    '  LongName: string;',
+    '  X: Integer;',
+    '',
+    '  Y: Integer;',
+    '  Z: string;',
+    'const',
+    '  C = 1;',
+    '  LongC = 2;',
+    '  T: Integer = 3;',
+    'type',
+    '  TA = Integer;',
+    '  TLonger = string;']), U([
+    'var',
+    '  A        : Integer;',
+    '  LongName : string;',
+    '  X        : Integer;',
+    '',
+    '  Y: Integer;',
+    '  Z: string;',
+    'const',
+    '  C     = 1;',
+    '  LongC = 2;',
+    '  T: Integer = 3;',
+    'type',
+    '  TA      = Integer;',
+    '  TLonger = string;']), LOpt);
+
+  LOpt := TPasFormatOptions.Default;
+  LOpt.AlignTrailingComments := True;
+  Check('align trailing comments', U([
+    'procedure P;',
+    'begin',
+    '  A := 1; // one',
+    '  Longer := 2; // two',
+    '  Foo;',
+    '  B := 3;    // three',
+    '  // a comment line ends the group',
+    '  C := 4;     // alone: kept',
+    'end;']), U([
+    'procedure P;',
+    'begin',
+    '  A := 1;      // one',
+    '  Longer := 2; // two',
+    '  Foo;',
+    '  B := 3;      // three',
+    '  // a comment line ends the group',
+    '  C := 4;     // alone: kept',
+    'end;']), LOpt);
+
+  LOpt.AlignAssignments := True;
+  LOpt.AlignDeclColons := True;
+  LOpt.WrapLongLines := True;
+  LOpt.RightMargin := 30;
+  Check('wrap and align together', U([
+    'procedure P;',
+    'var',
+    '  I: Integer; // a',
+    '  Name: string; // b',
+    'begin',
+    '  I := 1; // c',
+    '  Name := Foo(Alpha, Beta, Gamma);',
+    'end;']), U([
+    'procedure P;',
+    'var',
+    '  I    : Integer; // a',
+    '  Name : string;  // b',
+    'begin',
+    '  I := 1; // c',
+    '  Name := Foo(Alpha, Beta,',
+    '    Gamma);',
+    'end;']), LOpt);
 end;
 
 begin
