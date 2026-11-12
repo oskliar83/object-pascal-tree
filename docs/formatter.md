@@ -319,6 +319,51 @@ F5, all off by default: `RightMargin` (0: none; 120 the tools' margin when
 on) with `WrapLongLines` (False), `AlignAssignments`, `AlignDeclColons`,
 `AlignTrailingComments` (False).
 
+## 6a. The style of a project (F9)
+
+`PasFormatTally` and `PasInferFormatOptions` read the options a set of files
+is written in - what sec. 5 did by hand for the RTL, for any project.
+
+**The formatter is the judge.** Counting the edits each value would make
+cannot decide most options: their "off" keeps the text as written and always
+costs nothing. So a tally run formats a file with every rule on, and at each
+place a rule decides - a break `ForcedUnit` / `ForcedCloser` forces, a gap
+`SpaceRule` sets, a word `ItemText` spells, a group alignment would line up -
+notes the rule and whether the text already reads that way. A sample is
+therefore exactly the rules the formatter applies, and a rule added later is
+measured the same way. A break no option decides (`case` selectors, `except`
+parts) is no site; asm, skipped regions and flagged units count nothing.
+Alignment counts only a group whose texts end at different columns (a group
+already even says nothing), agreeing when its tokens stand at one column.
+
+**The decision.** A rule on at 90% of its sites or more, off at 10% or less;
+between, off and marked mixed - the formatter then keeps the text, the one
+choice that is right for both halves. A word class lower or upper at 90%,
+else as written; alignment on at 60%. The indent step (2, 3, 4) and nested
+routines' indentation are measured black-box: the pair that re-indents the
+fewest lines when nothing else changes. The blank-line cap is the smallest
+that 99% of the runs of blank lines fit under; the right margin the smallest
+of 80, 100, 120 that 99.5% of the lines fit in, wrapping on with it. Fewer
+than 20 sites (alignment 10) keep the default; `TabWidth` and the column-1
+options keep theirs, since they keep text and never change it.
+
+**Read against sec. 5** (`tools\PasTreeFormat -infer`, which prints each
+option with its evidence and the default it differs from):
+
+| corpus | differs from the default | evidence |
+|---|---|---|
+| Studio RTL (559 units) | `ElseOnNewLine`, `StatementAfterThenDo` off, mixed | each agrees at 89.8% - just under the bar |
+| Studio VCL (118 units) | `StatementAfterThenDo` off, mixed; `MaxBlankLines` 1; margin 120 with wrapping | 83.5%; 274 of 28,188 blank runs longer; 712 of 300,096 lines over 120 |
+| this repository (33 units) | `MaxBlankLines` 1; margin 80 with wrapping; trailing comments aligned | 15 of 4,222 runs longer; 548 of 111,369 lines over 80 |
+
+Everything else - step 2, nested routines indented, `begin` alone, one
+statement and one declaration per line, every space rule, lower-case words
+and upper-case directive names, no alignment of `:=` or `:` - comes out as
+the hand-read default. A tally formats a file seven times (the tally run and
+three steps by nested routines on and off): the RTL's 1.1M lines in a
+minute, so a host samples a large project (pastree-lsp samples within a
+time budget).
+
 ## 7. The stages
 
 - F1 - indentation and line breaks (done).

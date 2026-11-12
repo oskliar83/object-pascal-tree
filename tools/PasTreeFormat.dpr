@@ -21,10 +21,15 @@ program PasTreeFormat;
     PasTreeFormat <root-dir|file> [-p:<platform>] [-max:<n>] [-out:<dir>]
                   [-wrap[:<margin>]] [-align]
     PasTreeFormat <file> -print [-p:<platform>]
+    PasTreeFormat <root-dir|file> -infer [-p:<platform>]
 
   -out writes every formatted file under <dir>, at its path relative to the
   root, for a diff against the corpus. -print writes one file's format to
   stdout and nothing else.
+
+  -infer formats nothing: it measures the files' own style (PasFormatTally)
+  and prints the options PasInferFormatOptions derives, each with its
+  evidence and the default it differs from (stage F9).
 
   -wrap formats with WrapLongLines on at RightMargin <margin> (120), -align
   with AlignAssignments, AlignDeclColons and AlignTrailingComments on (stage
@@ -71,7 +76,8 @@ var
   GMax: Integer = 200;
   GPrinted: Integer;
   GOutDir, GRoot: string;
-  GWordsMode, GHistMode: Boolean;
+  GWordsMode, GHistMode, GInferMode: Boolean;
+  GSample: TPasFormatSample;
   GWords: TDictionary<string, Int64>;
   GOpts: TPasFormatOptions;
 
@@ -222,6 +228,11 @@ begin
     if GWordsMode then
     begin
       CountWords(LTree);
+      Exit;
+    end;
+    if GInferMode then
+    begin
+      PasFormatTally(LTree, 0, GSample);
       Exit;
     end;
     LSource := LPre.Files[0].Source;
@@ -385,6 +396,33 @@ begin
     Result := 100.0 * A / B;
 end;
 
+// -infer: the derived options, one per line, and those that differ from the
+// default marked.
+procedure PrintInferred;
+var
+  LNotes, LDefNotes: TArray<TPasFormatInferNote>;
+  LIdx: Integer;
+  LMark: string;
+begin
+  PasInferFormatOptions(GSample, LNotes);
+  // The default's own values, as the notes spell them: a sample of nothing
+  // decides every option as its default.
+  PasInferFormatOptions(Default(TPasFormatSample), LDefNotes);
+  Writeln;
+  for LIdx := 0 to High(LNotes) do
+  begin
+    LMark := '';
+    if (LIdx <= High(LDefNotes)) and
+      (LDefNotes[LIdx].Option = LNotes[LIdx].Option) and
+      (LDefNotes[LIdx].Value <> LNotes[LIdx].Value) then
+      LMark := ' (default ' + LDefNotes[LIdx].Value + ')';
+    if LNotes[LIdx].Mixed then
+      LMark := LMark + ' MIXED';
+    Writeln(Format('%-24s %-10s %s%s', [LNotes[LIdx].Option,
+      LNotes[LIdx].Value, LNotes[LIdx].Evidence, LMark]));
+  end;
+end;
+
 var
   GPlatform: TPasPlatform;
   GArg: string;
@@ -417,6 +455,8 @@ begin
         GWordsMode := True
       else if SameText(ParamStr(GIdx), '-hist') then
         GHistMode := True
+      else if SameText(ParamStr(GIdx), '-infer') then
+        GInferMode := True
       else if SameText(ParamStr(GIdx), '-wrap') or
         ParamStr(GIdx).StartsWith('-wrap:', True) then
       begin
@@ -453,6 +493,8 @@ begin
         for LFile in GFiles do
           JudgeFile(LFile);
       end);
+    if GInferMode then
+      PrintInferred;
     if GWordsMode or GHistMode then
       for GArg in GWords.Keys do
         Writeln(GWords[GArg]:10, '  ', GArg);
