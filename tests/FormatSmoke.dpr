@@ -132,6 +132,102 @@ begin
   Result := UNIT_HEAD + Lines(ABody) + UNIT_TAIL;
 end;
 
+function SameOptions(const A, B: TPasFormatOptions): Boolean;
+begin
+  Result := (A.IndentStep = B.IndentStep) and (A.TabWidth = B.TabWidth) and
+    (A.MaxBlankLines = B.MaxBlankLines) and
+    (A.BeginOnNewLine = B.BeginOnNewLine) and
+    (A.ElseOnNewLine = B.ElseOnNewLine) and
+    (A.StatementAfterThenDo = B.StatementAfterThenDo) and
+    (A.OneStatementPerLine = B.OneStatementPerLine) and
+    (A.OneDeclPerLine = B.OneDeclPerLine) and
+    (A.IndentNestedRoutines = B.IndentNestedRoutines) and
+    (A.KeepDirectivesAtColumn1 = B.KeepDirectivesAtColumn1) and
+    (A.KeepCommentsAtColumn1 = B.KeepCommentsAtColumn1) and
+    (A.NormalizeSpaces = B.NormalizeSpaces) and
+    (A.SpaceAroundOperators = B.SpaceAroundOperators) and
+    (A.SpaceAfterSeparators = B.SpaceAfterSeparators) and
+    (A.RemoveSpaces = B.RemoveSpaces) and
+    (A.ReservedWordCase = B.ReservedWordCase) and
+    (A.DirectiveWordCase = B.DirectiveWordCase) and
+    (A.CompilerDirectiveCase = B.CompilerDirectiveCase) and
+    (A.RightMargin = B.RightMargin) and (A.WrapLongLines = B.WrapLongLines) and
+    (A.AlignAssignments = B.AlignAssignments) and
+    (A.AlignDeclColons = B.AlignDeclColons) and
+    (A.AlignTrailingComments = B.AlignTrailingComments);
+end;
+
+// Style inference (F9): a unit written in a style far from the default -
+// four-space steps, upper-case reserved words, `then begin`, colons aligned -
+// infers that style, the `begin` split between two layouts reads as mixed,
+// and the unit formatted with what was inferred stays as it is.
+procedure InferCase;
+var
+  LText, LMsg: string;
+  LIdx, LDiags: Integer;
+  LTree: TPasTree;
+  LSample: TPasFormatSample;
+  LOpts: TPasFormatOptions;
+  LNotes: TArray<TPasFormatInferNote>;
+  LMixed: Boolean;
+begin
+  LText := 'UNIT U;' + #13#10 + #13#10 + 'INTERFACE' + #13#10 + #13#10 +
+    'IMPLEMENTATION' + #13#10;
+  for LIdx := 1 to 25 do
+    LText := LText + #13#10 + Lines([
+      'PROCEDURE P' + IntToStr(LIdx) + ';',
+      'VAR',
+      '    A   : Integer;',
+      '    Bcd : STRING;',
+      'BEGIN',
+      '    IF A = 0 THEN BEGIN',
+      '        A := 1;',
+      '    END;',
+      'END;']);
+  LText := LText + #13#10 + 'END.' + #13#10;
+  LTree := Parse(LText, LDiags);
+  if LDiags > 0 then
+  begin
+    Fail('infer', 'the sample does not parse clean');
+    Exit;
+  end;
+  LSample := Default(TPasFormatSample);
+  PasFormatTally(LTree, 0, LSample);
+  LOpts := PasInferFormatOptions(LSample, LNotes);
+  LMsg := '';
+  if LOpts.IndentStep <> 4 then
+    LMsg := LMsg + ' IndentStep ' + IntToStr(LOpts.IndentStep);
+  if LOpts.ReservedWordCase <> fcUpper then
+    LMsg := LMsg + ' ReservedWordCase';
+  if LOpts.BeginOnNewLine then
+    LMsg := LMsg + ' BeginOnNewLine';
+  if not LOpts.AlignDeclColons then
+    LMsg := LMsg + ' AlignDeclColons';
+  if LOpts.AlignAssignments then
+    LMsg := LMsg + ' AlignAssignments';
+  if LOpts.MaxBlankLines <> 1 then
+    LMsg := LMsg + ' MaxBlankLines ' + IntToStr(LOpts.MaxBlankLines);
+  LMixed := False;
+  for LIdx := 0 to High(LNotes) do
+    if LNotes[LIdx].Option = 'BeginOnNewLine' then
+      LMixed := LNotes[LIdx].Mixed;
+  if not LMixed then
+    LMsg := LMsg + ' BeginOnNewLine not mixed';
+  if Length(PasFormatEdits(LTree, 0, LOpts)) > 0 then
+    LMsg := LMsg + ' the sample changes: ' + Visible(PasApplyEdits(LText,
+      PasFormatEdits(LTree, 0, LOpts)));
+  if LMsg <> '' then
+    Fail('infer', LMsg)
+  else
+    Inc(GPassed);
+  // A sample of nothing decides every option as its default.
+  LOpts := PasInferFormatOptions(Default(TPasFormatSample), LNotes);
+  if not SameOptions(LOpts, TPasFormatOptions.Default) then
+    Fail('infer nothing', 'not the default')
+  else
+    Inc(GPassed);
+end;
+
 // The identifier-case callback: a leaf's identifier takes the spelling the
 // caller gives, and a spelling that is not the same word is refused.
 procedure IdentCaseCase;
@@ -635,6 +731,7 @@ begin
   IdentCaseCase;
   RangeCase;
   IncludeCase;
+  InferCase;
 
   LOpt := TPasFormatOptions.Default;
   LOpt.StatementAfterThenDo := fbKeep;

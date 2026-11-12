@@ -152,6 +152,47 @@ type
   end;
   TPasTextEdits = TArray<TPasTextEdit>;
 
+  { Style inference (F9): the rules of the formatter whose sites a sample
+    counts - a site is a place the rule decides, and it agrees when the text
+    already reads as the rule (on) would make it. }
+  TPasFormatFact = (ffBeginOnNewLine, ffElseOnNewLine, ffStatementAfterThenDo,
+    ffOneStatementPerLine, ffOneDeclPerLine, ffRemoveSpaces,
+    ffSpaceAfterSeparators, ffSpaceAroundOperators, ffAlignAssignments,
+    ffAlignDeclColons, ffAlignTrailingComments);
+
+  TPasFormatTally = record
+    Sites, Agree: Int64;
+  end;
+
+  { The classes of words a case option spells. }
+  TPasFormatWordClass = (fwReserved, fwDirective, fwCompilerDirective);
+
+  { What a set of files says about its own style, summed file by file
+    (PasFormatTally) and read by PasInferFormatOptions. }
+  TPasFormatSample = record
+    Files: Integer;
+    Lines: Int64;                     // lines with code or a comment
+    Facts: array[TPasFormatFact] of TPasFormatTally;
+    Lower, Upper, Mixed: array[TPasFormatWordClass] of Int64;
+    // Gaps of N blank lines (10: ten or more).
+    BlankRuns: array[1..10] of Int64;
+    // Lines by length, trailing blanks aside (400: 400 or longer).
+    LineLen: array[0..400] of Int64;
+    // The lines a format re-indents with IndentStep 2, 3, 4, nested routines
+    // indented or not, nothing else changed.
+    Reindent: array[2..4, Boolean] of Int64;
+    procedure Add(const AOther: TPasFormatSample);
+  end;
+
+  { One option as PasInferFormatOptions decided it. }
+  TPasFormatInferNote = record
+    Option: string;     // the TPasFormatOptions field
+    Value: string;
+    Evidence: string;   // what the sample showed
+    Mixed: Boolean;     // no clear majority: the value keeps the text as is
+                        // or is the default
+  end;
+
 { The edits that format file AFileId of ATree (0: the main file), in
   ascending order, none overlapping. ATree must come from a parse of that
   file's current text. }
@@ -192,6 +233,27 @@ function PasApplyEdits(const ASource: string;
   first difference. }
 function PasSameTokens(const AOld, ANew: string; out AMsg: string;
   AWordCase: Boolean = True): Boolean;
+
+{ Style inference (F9). Adds what file AFileId of ATree shows about its
+  style to ASample: the formatter is run over it with every rule on and
+  counts, at each place a rule decides, whether the text already agrees -
+  so a sample measures exactly the rules the formatter applies. Asm, a
+  skipped region and a unit the parse flagged count nothing. }
+procedure PasFormatTally(const ATree: TPasTree; AFileId: Integer;
+  var ASample: TPasFormatSample);
+
+{ The options a sample's files are written in, and a note per option: a rule
+  that agrees at 90% of its sites or more is on, one that agrees at 10% or
+  less off; between, off - the formatter keeps the text as written - and
+  the note says Mixed. A case class is lower or upper at 90% and kept
+  otherwise; alignment is on at 60%. The indent step and nested routines'
+  indentation are those that re-indent the fewest lines, the blank-line cap
+  the smallest that 99% of the blank runs fit under, the right margin (and
+  wrapping) the smallest of 80, 100, 120 that 99.5% of the lines fit in. A
+  rule with fewer than 20 sites (alignment 10) keeps its default. TabWidth
+  and the column-1 options keep theirs: they keep text, never change it. }
+function PasInferFormatOptions(const ASample: TPasFormatSample;
+  out ANotes: TArray<TPasFormatInferNote>): TPasFormatOptions;
 
 implementation
 
@@ -296,6 +358,18 @@ type
     VisItem: TArray<Integer>;
     LineBreak: string;
     IdentCase: TPasIdentCaseFunc;
+    // F9, a tally run: the sample counted into (nil otherwise), the rule the
+    // last ForcedUnit / ForcedCloser / SpaceRule consulted (Ord of a
+    // TPasFormatFact; -1 none, -2 a break no option decides) and, per vis,
+    // the rule that forces the break before it.
+    Tally: ^TPasFormatSample;
+    LastFact: Integer;
+    FactAt: TArray<Integer>;
+    function Rule(AOn: Boolean; AFact: TPasFormatFact): Boolean;
+    procedure CountWord(AClass: TPasFormatWordClass; const AText: string);
+    procedure TallySpace(AItem, ASpaces, AOrigSpaces: Integer);
+    procedure TallyGroup(AFact: TPasFormatFact; const AGroup: TArray<Integer>;
+      ACount: Integer);
     procedure Init(const ATree: TPasTree; AFileId: Integer;
       const AOptions: TPasFormatOptions);
     procedure BuildItems;
@@ -314,6 +388,7 @@ type
     function OneLineAnon(ANode: Integer): Boolean;
     function UnitFlagged(AUnit: Integer): Boolean;
     function VisFlagged(AVis: Integer): Boolean;
+    procedure NoteFact(AVis: Integer);
     function ForcedUnit(AUnit: Integer): Boolean;
     function CloserOwner(AVis: Integer): Integer;
     function ForcedCloser(AVis: Integer): Boolean;
@@ -641,12 +716,112 @@ begin
     if (Kind(LNode) in [nkError, nkMissing]) and (NearUnit[LNode] <> NIL_NODE) then
       Flagged[NearUnit[LNode]] := True;
   end;
+  if Tally <> nil then
+  begin
+    SetLength(FactAt, Length(ForcedAt));
+    for LVis := 0 to High(FactAt) do
+      FactAt[LVis] := -1;
+  end;
   for LNode := 0 to LCount - 1 do
     if (Lead[LNode] >= 0) and ForcedUnit(LNode) then
+    begin
       ForcedAt[Lead[LNode]] := True;
+      NoteFact(Lead[LNode]);
+    end;
   for LVis := 0 to High(ForcedAt) do
     if (Own.Owner[LVis] >= 0) and ForcedCloser(LVis) then
+    begin
       ForcedAt[LVis] := True;
+      NoteFact(LVis);
+    end;
+end;
+
+// A tally run's options have every rule on, so a forced break is a site of
+// the rule that forced it; a break no option decides is no site, whatever
+// else asks for it.
+procedure TFormatter.NoteFact(AVis: Integer);
+begin
+  if Tally = nil then
+    Exit;
+  if LastFact = -2 then
+    FactAt[AVis] := -2
+  else if (LastFact >= 0) and (FactAt[AVis] = -1) then
+    FactAt[AVis] := LastFact;
+end;
+
+// A gap inside a line SpaceRule decided by rule LastFact: 1 agrees with a
+// space or more, 0 with none - or with several before a `:`, the author's
+// alignment F2 keeps; a gap that may not shrink is no site.
+procedure TFormatter.TallySpace(AItem, ASpaces, AOrigSpaces: Integer);
+var
+  LAgree: Boolean;
+begin
+  if ASpaces = 1 then
+    LAgree := AOrigSpaces >= 1
+  else if AOrigSpaces = 0 then
+    LAgree := True
+  else if (AOrigSpaces > 1) and (VisKind(Items[AItem].Vis) = tkColon) then
+    LAgree := True
+  else if MayTouch(AItem - 1, AItem) then
+    LAgree := False
+  else
+    Exit;
+  Inc(Tally^.Facts[TPasFormatFact(LastFact)].Sites);
+  if LAgree then
+    Inc(Tally^.Facts[TPasFormatFact(LastFact)].Agree);
+end;
+
+// A group alignment would line up (AGroup: the items of the aligned tokens,
+// each after the text it is aligned past): a site when that text ends at
+// different columns in the original on each line, agreeing when the tokens
+// already stand at one column.
+procedure TFormatter.TallyGroup(AFact: TPasFormatFact;
+  const AGroup: TArray<Integer>; ACount: Integer);
+var
+  LIdx, LEnd0, LCol0: Integer;
+  LDiffer, LAligned: Boolean;
+begin
+  if ACount < 2 then
+    Exit;
+  LEnd0 := OrigCol(Items[AGroup[0] - 1].EndPos);
+  LCol0 := OrigCol(Items[AGroup[0]].Start);
+  LDiffer := False;
+  LAligned := True;
+  for LIdx := 0 to ACount - 1 do
+  begin
+    // Both on one original line: the token was written after its text.
+    if LineOf(Items[AGroup[LIdx] - 1].EndPos) <>
+      LineOf(Items[AGroup[LIdx]].Start) then
+      Exit;
+    if OrigCol(Items[AGroup[LIdx] - 1].EndPos) <> LEnd0 then
+      LDiffer := True;
+    if OrigCol(Items[AGroup[LIdx]].Start) <> LCol0 then
+      LAligned := False;
+  end;
+  if not LDiffer then
+    Exit;
+  Inc(Tally^.Facts[AFact].Sites);
+  if LAligned then
+    Inc(Tally^.Facts[AFact].Agree);
+end;
+
+function TFormatter.Rule(AOn: Boolean; AFact: TPasFormatFact): Boolean;
+begin
+  LastFact := Ord(AFact);
+  Result := AOn;
+end;
+
+procedure TFormatter.CountWord(AClass: TPasFormatWordClass;
+  const AText: string);
+begin
+  if (Tally = nil) or (AText = '') then
+    Exit;
+  if AText = LowerCase(AText) then
+    Inc(Tally^.Lower[AClass])
+  else if AText = UpperCase(AText) then
+    Inc(Tally^.Upper[AClass])
+  else
+    Inc(Tally^.Mixed[AClass]);
 end;
 
 function TFormatter.HasMembers(AStruct: Integer): Boolean;
@@ -706,6 +881,7 @@ var
   LKind: TPasNodeKind;
 begin
   Result := False;
+  LastFact := -1;
   LParent := Parent(AUnit);
   LKind := Kind(AUnit);
   if (LParent <> NIL_NODE) and OneLineAnon(AUnit) then
@@ -713,30 +889,39 @@ begin
   if LParent = NIL_NODE then
     Exit;
   if LKind = nkUsesItem then
-    Exit(O.OneDeclPerLine and (T^.Nodes[LParent].FirstChild = AUnit));
+  begin
+    if T^.Nodes[LParent].FirstChild = AUnit then
+      Result := Rule(O.OneDeclPerLine, ffOneDeclPerLine);
+    Exit;
+  end;
   if LKind in STMT_KINDS then
   begin
     case Kind(LParent) of
       nkBlock, nkInitSec, nkFinalSec:
-        Result := O.OneStatementPerLine;
+        Result := Rule(O.OneStatementPerLine, ffOneStatementPerLine);
       nkRoutineBody:
-        Result := O.BeginOnNewLine;
+        Result := Rule(O.BeginOnNewLine, ffBeginOnNewLine);
       nkUnit, nkProgram, nkLibrary, nkPackage:
-        Result := True;               // a program's main block
+        begin
+          Result := True;             // a program's main block
+          LastFact := -2;
+        end;
       nkTryStmt, nkFinallyPart, nkRepeatStmt, nkExceptPart, nkCaseStmt:
-        Result := HeadlessBlock(AUnit) and O.OneStatementPerLine;
+        if HeadlessBlock(AUnit) then
+          Result := Rule(O.OneStatementPerLine, ffOneStatementPerLine);
       nkIfStmt, nkWhileStmt, nkForStmt, nkForInStmt, nkWithStmt, nkExceptOn:
         if T^.Nodes[LParent].FirstChild = AUnit then
           Result := False             // a for's inline var counter
         else if LKind = nkBlock then
-          Result := O.BeginOnNewLine
+          Result := Rule(O.BeginOnNewLine, ffBeginOnNewLine)
         else if (Kind(LParent) = nkIfStmt) and (LKind = nkIfStmt) and
           (T^.LastChild(LParent) = AUnit) and
           (T^.Nodes[LParent].FirstChild <> NIL_NODE) and
           (T^.Nodes[T^.Nodes[LParent].FirstChild].NextSibling <> AUnit) then
           Result := False             // `else if`
         else
-          Result := O.StatementAfterThenDo = fbAlways;
+          Result := Rule(O.StatementAfterThenDo = fbAlways,
+            ffStatementAfterThenDo);
     end;
     Exit;
   end;
@@ -748,16 +933,21 @@ begin
     Exit;
   case LKind of
     nkCaseSel, nkExceptOn, nkExceptPart, nkFinallyPart:
-      Result := True;
+      begin
+        Result := True;
+        LastFact := -2;
+      end;
     nkVarDecl:
       // `class var FNull: TBinaryWriter;` - a struct's var section keeps its
       // first field on its head word's line.
-      Result := O.OneDeclPerLine and (Kind(LParent) <> nkVariantBranch) and
+      if (Kind(LParent) <> nkVariantBranch) and
         not ((Kind(LParent) = nkVarSec) and (Parent(LParent) <> NIL_NODE) and
         (Kind(Parent(LParent)) in STRUCT_KINDS) and
-        (T^.Nodes[LParent].FirstChild = AUnit));
+        (T^.Nodes[LParent].FirstChild = AUnit)) then
+        Result := Rule(O.OneDeclPerLine, ffOneDeclPerLine);
   else
-    Result := O.OneDeclPerLine and (LKind in DECL_KINDS + SECTION_KINDS);
+    if LKind in DECL_KINDS + SECTION_KINDS then
+      Result := Rule(O.OneDeclPerLine, ffOneDeclPerLine);
   end;
 end;
 
@@ -793,18 +983,25 @@ var
 begin
   LOwner := CloserOwner(AVis);
   Result := False;
+  LastFact := -1;
   if LOwner = NIL_NODE then
     Exit;
   if OneLineAnon(LOwner) then
     Exit;
   if Kind(LOwner) in STRUCT_KINDS then
-    Result := O.OneDeclPerLine and HasMembers(LOwner)
+  begin
+    if HasMembers(LOwner) then
+      Result := Rule(O.OneDeclPerLine, ffOneDeclPerLine);
+  end
   else if (VisKind(AVis) = tkElse) and (Kind(LOwner) = nkIfStmt) then
-    Result := O.ElseOnNewLine
+    Result := Rule(O.ElseOnNewLine, ffElseOnNewLine)
   else if Kind(LOwner) = nkBlock then
-    Result := O.OneStatementPerLine
+    Result := Rule(O.OneStatementPerLine, ffOneStatementPerLine)
   else
+  begin
     Result := True;
+    LastFact := -2;
+  end;
 end;
 
 function TFormatter.AnonCol(AAnon: Integer): Integer;
@@ -1113,6 +1310,7 @@ var
 
 begin
   Result := -1;
+  LastFact := -1;
   LKa := VisKind(AA);
   LKb := VisKind(AB);
   LOa := Own.Owner[AA];
@@ -1131,6 +1329,7 @@ begin
     Exit;                             // `Write(X:10:2)`
   if O.RemoveSpaces then
   begin
+    LastFact := Ord(ffRemoveSpaces);
     if (LKb in [tkComma, tkSemicolon, tkRParen, tkRBracket, tkColon]) or
       (LKa in [tkLParen, tkLBracket]) then
       Exit(0);
@@ -1150,17 +1349,23 @@ begin
       Exit(0);
     if (LKa = tkCaret) and (LNa = nkPointerType) then
       Exit(0);
+    LastFact := -1;
   end;
   if O.SpaceAfterSeparators and (LKa in [tkComma, tkSemicolon, tkColon]) then
+  begin
+    LastFact := Ord(ffSpaceAfterSeparators);
     Exit(1);
+  end;
   if O.SpaceAroundOperators then
   begin
+    LastFact := Ord(ffSpaceAroundOperators);
     if (LKa = tkAssign) or (LKb = tkAssign) then
       Exit(1);
     if IsOperatorOf(AA, LOa) or IsOperatorOf(AB, LOb) then
       Exit(1);
     if IsDeclEqual(AA, LOa) or IsDeclEqual(AB, LOb) then
       Exit(1);
+    LastFact := -1;
   end;
 end;
 
@@ -1227,6 +1432,7 @@ begin
         while (LEnd <= Length(LText)) and CharInSet(LText[LEnd],
           ['A'..'Z', 'a'..'z', '_']) do
           Inc(LEnd);
+        CountWord(fwCompilerDirective, Copy(LText, LIdx + 1, LEnd - LIdx - 1));
         Result := Copy(LText, 1, LIdx) +
           ApplyCase(Copy(LText, LIdx + 1, LEnd - LIdx - 1),
           O.CompilerDirectiveCase) + Copy(LText, LEnd, MaxInt);
@@ -1238,7 +1444,10 @@ begin
           Exit;
         LOwner := Own.Owner[LVis];
         if VisKind(LVis) in [tkAnd..tkXor] then
-          Result := ApplyCase(LText, O.ReservedWordCase)
+        begin
+          CountWord(fwReserved, LText);
+          Result := ApplyCase(LText, O.ReservedWordCase);
+        end
         else if VisKind(LVis) = tkIdentifier then
         begin
           // The kinds that own a directive word in valid code - every one
@@ -1249,7 +1458,10 @@ begin
             nkObjectType, nkRecordType, nkHelperType, nkInterfaceType,
             nkProcType, nkRoutine, nkRaiseStmt, nkParam, nkExceptOn,
             nkVarDecl, nkExportsItem, nkConstraint]) then
-            Result := ApplyCase(LText, O.DirectiveWordCase)
+          begin
+            CountWord(fwDirective, LText);
+            Result := ApplyCase(LText, O.DirectiveWordCase);
+          end
           else if Assigned(IdentCase) and (LOwner >= 0) and
             (Kind(LOwner) = nkIdent) then
           begin
@@ -1557,6 +1769,15 @@ var
     LIdx, LMax, LPad, LEndCol: Integer;
     LSame: Boolean;
   begin
+    if Tally <> nil then
+    begin
+      if (LCount >= 2) and (VisKind(Items[LGroup[0]].Vis) = tkAssign) then
+        TallyGroup(ffAlignAssignments, LGroup, LCount)
+      else
+        TallyGroup(ffAlignDeclColons, LGroup, LCount);
+      LCount := 0;
+      Exit;
+    end;
     if LCount >= 2 then
     begin
       LMax := 0;
@@ -1672,6 +1893,12 @@ var
   var
     LK, LMax: Integer;
   begin
+    if Tally <> nil then
+    begin
+      TallyGroup(ffAlignTrailingComments, LGroup, LCount);
+      LCount := 0;
+      Exit;
+    end;
     if LCount >= 2 then
     begin
       LMax := 0;
@@ -1823,6 +2050,8 @@ begin
       // A gap inside a line, between two code tokens (F2).
       LSpaces := SpaceRule(Items[LIdx - 1].Vis, LCur.Vis);
       LOrigSpaces := OrigCol(LCur.Start) - OrigCol(Items[LIdx - 1].EndPos);
+      if AEmit and (Tally <> nil) and (LastFact >= 0) then
+        TallySpace(LIdx, LSpaces, LOrigSpaces);
       if (LSpaces = 1) and (LOrigSpaces = 0) then
       begin
         AddEdit(LCur.Start, 0, ' ');
@@ -1924,6 +2153,20 @@ begin
     Kept[LIdx] := Opaque(LPrev) or Opaque(LCur);
     if not Kept[LIdx] then
     begin
+      if Tally <> nil then
+      begin
+        if LBreaks > High(Tally^.BlankRuns) then
+          Inc(Tally^.BlankRuns[High(Tally^.BlankRuns)])
+        else if LBreaks >= 2 then
+          Inc(Tally^.BlankRuns[LBreaks - 1]);
+        if (LCur.Kind = fiCode) and (FactAt[LCur.Vis] >= 0) and
+          (LPrev.Kind <> fiDirective) and not LineOfComments(LIdx) then
+        begin
+          Inc(Tally^.Facts[TPasFormatFact(FactAt[LCur.Vis])].Sites);
+          if LBreaks > 0 then
+            Inc(Tally^.Facts[TPasFormatFact(FactAt[LCur.Vis])].Agree);
+        end;
+      end;
       if (O.MaxBlankLines >= 0) and (LBreaks > O.MaxBlankLines + 1) then
         LBreaks := O.MaxBlankLines + 1;
       if (LBreaks = 0) and (LCur.Kind = fiCode) and ForcedAt[LCur.Vis] and
@@ -1938,7 +2181,7 @@ begin
   // reads the columns of the lines as wrapped, the trailing comments last
   // (after the padding of the code before them).
   LAlign := O.AlignAssignments or O.AlignDeclColons;
-  if LAlign then
+  if LAlign and (Tally = nil) then
     AlignGaps(True);
   if O.WrapLongLines and (O.RightMargin > 0) then
     for LIter := 1 to 32 do
@@ -2098,6 +2341,370 @@ begin
   Result := (LI > High(LOld.Tokens)) = (LJ > High(LNew.Tokens));
   if not Result then
     AMsg := 'token count differs';
+end;
+
+{ TPasFormatSample }
+
+procedure TPasFormatSample.Add(const AOther: TPasFormatSample);
+var
+  LFact: TPasFormatFact;
+  LClass: TPasFormatWordClass;
+  LIdx: Integer;
+  LNested: Boolean;
+begin
+  Inc(Files, AOther.Files);
+  Inc(Lines, AOther.Lines);
+  for LFact := Low(TPasFormatFact) to High(TPasFormatFact) do
+  begin
+    Inc(Facts[LFact].Sites, AOther.Facts[LFact].Sites);
+    Inc(Facts[LFact].Agree, AOther.Facts[LFact].Agree);
+  end;
+  for LClass := Low(TPasFormatWordClass) to High(TPasFormatWordClass) do
+  begin
+    Inc(Lower[LClass], AOther.Lower[LClass]);
+    Inc(Upper[LClass], AOther.Upper[LClass]);
+    Inc(Mixed[LClass], AOther.Mixed[LClass]);
+  end;
+  for LIdx := Low(BlankRuns) to High(BlankRuns) do
+    Inc(BlankRuns[LIdx], AOther.BlankRuns[LIdx]);
+  for LIdx := Low(LineLen) to High(LineLen) do
+    Inc(LineLen[LIdx], AOther.LineLen[LIdx]);
+  for LIdx := Low(Reindent) to High(Reindent) do
+    for LNested := False to True do
+      Inc(Reindent[LIdx, LNested], AOther.Reindent[LIdx, LNested]);
+end;
+
+const
+  // The indent steps a sample measures (TPasFormatSample.Reindent).
+  INFER_STEPS: array[0..2] of Integer = (2, 3, 4);
+
+// Options under which a format only re-indents: every break, space and case
+// rule keeps the text as written.
+function IndentOnlyOptions: TPasFormatOptions;
+begin
+  Result := TPasFormatOptions.Default;
+  Result.MaxBlankLines := -1;
+  Result.BeginOnNewLine := False;
+  Result.ElseOnNewLine := False;
+  Result.StatementAfterThenDo := fbKeep;
+  Result.OneStatementPerLine := False;
+  Result.OneDeclPerLine := False;
+  Result.NormalizeSpaces := False;
+  Result.ReservedWordCase := fcKeep;
+  Result.DirectiveWordCase := fcKeep;
+  Result.CompilerDirectiveCase := fcKeep;
+end;
+
+procedure PasFormatTally(const ATree: TPasTree; AFileId: Integer;
+  var ASample: TPasFormatSample);
+var
+  LFmt: TFormatter;
+  LOpts: TPasFormatOptions;
+  LSrc: string;
+  LStep, LPos, LEnd, LLen: Integer;
+  LNested: Boolean;
+begin
+  if (AFileId < 0) or (AFileId > High(ATree.Source.Files)) or
+    (Length(ATree.Nodes) = 0) then
+    Exit;
+  Inc(ASample.Files);
+  // Every rule on, so each place a rule decides is visited; blank lines
+  // uncapped, so the runs are the text's.
+  LOpts := TPasFormatOptions.Default;
+  LOpts.MaxBlankLines := -1;
+  LOpts.AlignAssignments := True;
+  LOpts.AlignDeclColons := True;
+  LOpts.AlignTrailingComments := True;
+  LFmt := Default(TFormatter);
+  LFmt.Init(ATree, AFileId, LOpts);
+  LFmt.Tally := @ASample;
+  LFmt.Run;
+  LOpts := IndentOnlyOptions;
+  for LStep in INFER_STEPS do
+    for LNested := False to True do
+    begin
+      LOpts.IndentStep := LStep;
+      LOpts.IndentNestedRoutines := LNested;
+      Inc(ASample.Reindent[LStep, LNested],
+        Length(PasFormatEdits(ATree, AFileId, LOpts)));
+    end;
+  // Line lengths, trailing blanks aside; a tab is one column.
+  LSrc := ATree.Source.Files[AFileId].Source;
+  LPos := 1;
+  while LPos <= Length(LSrc) do
+  begin
+    LEnd := LPos;
+    while (LEnd <= Length(LSrc)) and not CharInSet(LSrc[LEnd], [#10, #13]) do
+      Inc(LEnd);
+    LLen := LEnd - LPos;
+    while (LLen > 0) and CharInSet(LSrc[LPos + LLen - 1], [' ', #9]) do
+      Dec(LLen);
+    if LLen > 0 then
+    begin
+      Inc(ASample.Lines);
+      if LLen > High(ASample.LineLen) then
+        LLen := High(ASample.LineLen);
+      Inc(ASample.LineLen[LLen]);
+    end;
+    if (LEnd < Length(LSrc)) and (LSrc[LEnd] = #13) and
+      (LSrc[LEnd + 1] = #10) then
+      Inc(LEnd);
+    LPos := LEnd + 1;
+  end;
+end;
+
+function PasInferFormatOptions(const ASample: TPasFormatSample;
+  out ANotes: TArray<TPasFormatInferNote>): TPasFormatOptions;
+const
+  MIN_SITES = 20;
+  MIN_ALIGN_SITES = 10;
+var
+  LCount: Integer;
+  LDefault: TPasFormatOptions;
+
+  procedure Note(const AOption, AValue, AEvidence: string;
+    AMixed: Boolean = False);
+  begin
+    if LCount = Length(ANotes) then
+      SetLength(ANotes, LCount * 2 + 16);
+    ANotes[LCount].Option := AOption;
+    ANotes[LCount].Value := AValue;
+    ANotes[LCount].Evidence := AEvidence;
+    ANotes[LCount].Mixed := AMixed;
+    Inc(LCount);
+  end;
+
+  function Pct(A, B: Int64): Double;
+  begin
+    if B = 0 then
+      Result := 0
+    else
+      Result := 100.0 * A / B;
+  end;
+
+  function OnOff(AOn: Boolean): string;
+  begin
+    if AOn then
+      Result := 'on'
+    else
+      Result := 'off';
+  end;
+
+  // A rule on at AOnAt of its sites or more, off at AOffAt or less, off and
+  // mixed between; its default with fewer than AMin sites.
+  function Decide(AFact: TPasFormatFact; const AOption: string;
+    ADefault: Boolean; AMin: Integer; AOnAt, AOffAt: Double): Boolean;
+  var
+    LTally: TPasFormatTally;
+    LShare: Double;
+    LEvidence: string;
+  begin
+    LTally := ASample.Facts[AFact];
+    LShare := Pct(LTally.Agree, LTally.Sites);
+    LEvidence := Format('agrees at %.1f%% of %d sites', [LShare, LTally.Sites]);
+    if LTally.Sites < AMin then
+    begin
+      Result := ADefault;
+      Note(AOption, OnOff(Result), Format('%d sites, too few: the default',
+        [LTally.Sites]));
+    end
+    else if LShare >= AOnAt then
+    begin
+      Result := True;
+      Note(AOption, OnOff(Result), LEvidence);
+    end
+    else
+    begin
+      Result := False;
+      Note(AOption, OnOff(Result), LEvidence, LShare > AOffAt);
+    end;
+  end;
+
+  function CaseOf(AClass: TPasFormatWordClass; const AOption: string;
+    ADefault: TPasFormatCase): TPasFormatCase;
+  const
+    NAMES: array[TPasFormatCase] of string = ('lower', 'upper', 'as written');
+  var
+    LAll: Int64;
+    LLower, LUpper: Double;
+  begin
+    LAll := ASample.Lower[AClass] + ASample.Upper[AClass] +
+      ASample.Mixed[AClass];
+    LLower := Pct(ASample.Lower[AClass], LAll);
+    LUpper := Pct(ASample.Upper[AClass], LAll);
+    if LAll < MIN_SITES then
+    begin
+      Result := ADefault;
+      Note(AOption, NAMES[Result], Format('%d words, too few: the default',
+        [LAll]));
+      Exit;
+    end;
+    if LLower >= 90 then
+      Result := fcLower
+    else if LUpper >= 90 then
+      Result := fcUpper
+    else
+      Result := fcKeep;
+    Note(AOption, NAMES[Result], Format('%.1f%% lower, %.1f%% upper of %d words',
+      [LLower, LUpper, LAll]), Result = fcKeep);
+  end;
+
+  procedure Indentation;
+  var
+    LStep, LBest: Integer;
+    LNested, LBestNested: Boolean;
+    LMin: Int64;
+  begin
+    LBest := 0;
+    LBestNested := LDefault.IndentNestedRoutines;
+    LMin := High(Int64);
+    for LStep in INFER_STEPS do
+      for LNested := False to True do
+        if (ASample.Reindent[LStep, LNested] < LMin) or
+          ((ASample.Reindent[LStep, LNested] = LMin) and
+          (LNested = LDefault.IndentNestedRoutines)) then
+        begin
+          LMin := ASample.Reindent[LStep, LNested];
+          LBest := LStep;
+          LBestNested := LNested;
+        end;
+    if ASample.Lines < MIN_SITES then
+    begin
+      Note('IndentStep', IntToStr(Result.IndentStep),
+        Format('%d lines, too few: the default', [ASample.Lines]));
+      Exit;
+    end;
+    Result.IndentStep := LBest;
+    Note('IndentStep', IntToStr(LBest), Format(
+      '%.1f%% of %d lines keep their indentation; with 2: %.1f%%, ' +
+      '3: %.1f%%, 4: %.1f%%', [100 - Pct(LMin, ASample.Lines), ASample.Lines,
+      100 - Pct(ASample.Reindent[2, LBestNested], ASample.Lines),
+      100 - Pct(ASample.Reindent[3, LBestNested], ASample.Lines),
+      100 - Pct(ASample.Reindent[4, LBestNested], ASample.Lines)]),
+      Pct(LMin, ASample.Lines) > 20);
+    if ASample.Reindent[LBest, True] = ASample.Reindent[LBest, False] then
+      Note('IndentNestedRoutines', OnOff(Result.IndentNestedRoutines),
+        'no line tells: the default')
+    else
+    begin
+      Result.IndentNestedRoutines := LBestNested;
+      Note('IndentNestedRoutines', OnOff(LBestNested), Format(
+        '%d lines re-indented on, %d off', [ASample.Reindent[LBest, True],
+        ASample.Reindent[LBest, False]]));
+    end;
+  end;
+
+  procedure BlankLines;
+  var
+    LAll, LOver: Int64;
+    LIdx, LCap: Integer;
+  begin
+    LAll := 0;
+    for LIdx := Low(ASample.BlankRuns) to High(ASample.BlankRuns) do
+      Inc(LAll, ASample.BlankRuns[LIdx]);
+    if LAll < MIN_SITES then
+    begin
+      Note('MaxBlankLines', IntToStr(Result.MaxBlankLines),
+        Format('%d blank runs, too few: the default', [LAll]));
+      Exit;
+    end;
+    for LCap := 1 to High(ASample.BlankRuns) - 1 do
+    begin
+      LOver := 0;
+      for LIdx := LCap + 1 to High(ASample.BlankRuns) do
+        Inc(LOver, ASample.BlankRuns[LIdx]);
+      if LOver * 100 <= LAll then
+      begin
+        Result.MaxBlankLines := LCap;
+        Note('MaxBlankLines', IntToStr(LCap), Format(
+          '%d of %d runs of blank lines are longer', [LOver, LAll]));
+        Exit;
+      end;
+    end;
+    Result.MaxBlankLines := -1;
+    Note('MaxBlankLines', 'all kept', Format(
+      'runs of blank lines vary (%d runs)', [LAll]), True);
+  end;
+
+  procedure Margin;
+  const
+    MARGINS: array[0..2] of Integer = (80, 100, 120);
+  var
+    LMargin, LIdx: Integer;
+    LOver: Int64;
+  begin
+    if ASample.Lines < MIN_SITES then
+    begin
+      Note('RightMargin', 'off', Format('%d lines, too few: the default',
+        [ASample.Lines]));
+      Exit;
+    end;
+    for LMargin in MARGINS do
+    begin
+      LOver := 0;
+      for LIdx := LMargin + 1 to High(ASample.LineLen) do
+        Inc(LOver, ASample.LineLen[LIdx]);
+      if LOver * 1000 <= ASample.Lines * 5 then
+      begin
+        Result.RightMargin := LMargin;
+        Result.WrapLongLines := True;
+        Note('RightMargin', IntToStr(LMargin), Format(
+          '%d of %d lines are longer', [LOver, ASample.Lines]));
+        Note('WrapLongLines', 'on', Format('the lines fit in %d', [LMargin]));
+        Exit;
+      end;
+    end;
+    Note('RightMargin', 'off', Format(
+      '%.1f%% of %d lines are longer than 120: no margin holds',
+      [Pct(LOver, ASample.Lines), ASample.Lines]));
+    Note('WrapLongLines', 'off', 'no margin holds');
+  end;
+
+begin
+  LCount := 0;
+  ANotes := nil;
+  LDefault := TPasFormatOptions.Default;
+  Result := LDefault;
+  Indentation;
+  BlankLines;
+  Result.BeginOnNewLine := Decide(ffBeginOnNewLine, 'BeginOnNewLine',
+    LDefault.BeginOnNewLine, MIN_SITES, 90, 10);
+  Result.ElseOnNewLine := Decide(ffElseOnNewLine, 'ElseOnNewLine',
+    LDefault.ElseOnNewLine, MIN_SITES, 90, 10);
+  if Decide(ffStatementAfterThenDo, 'StatementAfterThenDo',
+    LDefault.StatementAfterThenDo = fbAlways, MIN_SITES, 90, 10) then
+    Result.StatementAfterThenDo := fbAlways
+  else
+    Result.StatementAfterThenDo := fbKeep;
+  Result.OneStatementPerLine := Decide(ffOneStatementPerLine,
+    'OneStatementPerLine', LDefault.OneStatementPerLine, MIN_SITES, 90, 10);
+  Result.OneDeclPerLine := Decide(ffOneDeclPerLine, 'OneDeclPerLine',
+    LDefault.OneDeclPerLine, MIN_SITES, 90, 10);
+  Result.SpaceAroundOperators := Decide(ffSpaceAroundOperators,
+    'SpaceAroundOperators', LDefault.SpaceAroundOperators, MIN_SITES, 90, 10);
+  Result.SpaceAfterSeparators := Decide(ffSpaceAfterSeparators,
+    'SpaceAfterSeparators', LDefault.SpaceAfterSeparators, MIN_SITES, 90, 10);
+  Result.RemoveSpaces := Decide(ffRemoveSpaces, 'RemoveSpaces',
+    LDefault.RemoveSpaces, MIN_SITES, 90, 10);
+  Result.NormalizeSpaces := Result.SpaceAroundOperators or
+    Result.SpaceAfterSeparators or Result.RemoveSpaces;
+  Note('NormalizeSpaces', OnOff(Result.NormalizeSpaces),
+    'on when one of the space rules is');
+  Result.ReservedWordCase := CaseOf(fwReserved, 'ReservedWordCase',
+    LDefault.ReservedWordCase);
+  Result.DirectiveWordCase := CaseOf(fwDirective, 'DirectiveWordCase',
+    LDefault.DirectiveWordCase);
+  Result.CompilerDirectiveCase := CaseOf(fwCompilerDirective,
+    'CompilerDirectiveCase', LDefault.CompilerDirectiveCase);
+  Margin;
+  Result.AlignAssignments := Decide(ffAlignAssignments, 'AlignAssignments',
+    LDefault.AlignAssignments, MIN_ALIGN_SITES, 60, 20);
+  Result.AlignDeclColons := Decide(ffAlignDeclColons, 'AlignDeclColons',
+    LDefault.AlignDeclColons, MIN_ALIGN_SITES, 60, 20);
+  Result.AlignTrailingComments := Decide(ffAlignTrailingComments,
+    'AlignTrailingComments', LDefault.AlignTrailingComments, MIN_ALIGN_SITES,
+    60, 20);
+  SetLength(ANotes, LCount);
 end;
 
 end.
