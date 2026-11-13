@@ -5700,7 +5700,17 @@ begin
         Result := oaLeft   // `St - [e1]` is St's type; `[e1] + St` is not
       else if (AOp = tkMinus) and (AL.Cat = tcPointer) and
               (AR.Cat = tcInteger) then
-        Result := oaLeft;
+        Result := oaLeft
+      // Two pointers: the distance in elements, a NativeInt (`PA - PB`
+      // Integer on 32-bit targets, Int64 on 64-bit ones; 4.2.1).
+      else if (AOp = tkMinus) and (AL.Cat = tcPointer) and
+              (AR.Cat = tcPointer) then
+      begin
+        if AIs64 then
+          Result := oaInt64
+        else
+          Result := oaInteger;
+      end;
     tkSlash:
       if LNum then
         Result := RealAns;
@@ -9881,6 +9891,15 @@ begin
     if (ASym = NInt) or (ASym = NUInt) then
       Exit(NInt);
     if RankOf(ASym) = 4 then
+      Exit(I64);
+  end;
+  // A subrange past 32 bits is an Int64 (`Abs(X)` of a `0..5000000000`,
+  // 4.11.4).
+  if (ASym <> NIL_SYM) and (CatOf(ASym) = tcInteger) then
+  begin
+    var LOrd := OrdFacts(NIL_NODE, ASym);
+    if LOrd.HasRange and ((LOrd.Lo < Low(Integer)) or
+       (LOrd.Hi > High(Cardinal))) then
       Exit(I64);
   end;
   Result := Int;

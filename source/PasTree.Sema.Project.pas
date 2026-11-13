@@ -23823,6 +23823,11 @@ begin
     if FModels[LC.UnitId].Symbols[LC.Sym].NumRank = 4 then
       Exit(BuiltinX(AMid, 'int64'));
   end;
+  // A subrange past 32 bits is an Int64 (4.11.4).
+  var LLo, LHi: Int64;
+  if (XCatOf(LC) = tcInteger) and FConv.OrdRange(LC, LLo, LHi) and
+     ((LLo < Low(Integer)) or (LHi > High(Cardinal))) then
+    Exit(BuiltinX(AMid, 'int64'));
   Result := BuiltinX(AMid, 'integer');
 end;
 

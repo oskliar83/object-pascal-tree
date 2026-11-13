@@ -12839,7 +12839,7 @@ const
     '  K := H(Cd or Sh).W;'#10'  K := J(Bt and -1).W;'#10;
   VARS =
     'var K: Integer; Bt, Bt2: Byte; W, W2: Word; Su, Su2: TSub; X3G: T3G;'#10 +
-    '  Cd: Cardinal; Sh: ShortInt;'#10;
+    '  Cd: Cardinal; Sh: ShortInt; X5G: T5G; PA1, PA2: PAnsiChar;'#10;
   PAIRS: array[0..15] of string = ('A(X: Int64): TRA',
     'A(X: Cardinal): TRW', 'B(X: Integer): TRA', 'B(X: SmallInt): TRW',
     'C(X: Integer): TRA', 'C(X: ShortInt): TRW', 'D(X: Integer): TRA',
@@ -12860,7 +12860,7 @@ begin
   LUnit := 'unit OrA;'#10'interface'#10'type'#10 +
     '  TRA = record A: Integer; end;'#10 +
     '  TRW = record W: Integer; end;'#10 +
-    '  TSub = 0..9; T3G = 0..3000000000;'#10 + LDecl +
+    '  TSub = 0..9; T3G = 0..3000000000; T5G = 0..5000000000;'#10 + LDecl +
     'procedure UnitCalls;'#10'implementation'#10 + LImpl +
     'procedure UnitCalls;'#10 + VARS + 'begin'#10 + CALLS + 'end;'#10 +
     'end.'#10;
@@ -12874,7 +12874,7 @@ begin
     'program OrP;'#10'uses OrA;'#10 + VARS + 'var P: Pointer;'#10 +
     'begin'#10 + CALLS +
     '  P := X3G + Bt;'#10'  P := Su + Cd;'#10'  P := Cd or Sh;'#10 +
-    '  P := Cd and Sh;'#10 + 'end.'#10);
+    '  P := Cd and Sh;'#10'  P := Abs(X5G);'#10'  P := PA1 - PA2;'#10 + 'end.'#10);
   GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
   try
     GProj.ReportUnresolvedMembers := True;
@@ -12906,7 +12906,7 @@ begin
           LTypes := LTypes + '? ';
       end;
     Ok('subrange and bitwise operands type as dcc''s [' + LTypes + ']',
-      LTypes = 'Cardinal Cardinal Int64 Cardinal ');
+      LTypes = 'Cardinal Cardinal Int64 Cardinal Int64 Int64 ');
   finally
     GProj.Free;
     if TDirectory.Exists(LDir) then
