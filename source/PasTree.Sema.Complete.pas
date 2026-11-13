@@ -4113,42 +4113,13 @@ begin
     Result := AModel.Tree.Nodes[Result].Parent;
 end;
 
-// Can this member be named on the TYPE itself (TFoo.X)? Constructors, class
-// methods (nkRoutine.Aux = 1), class properties (nkPropertyDecl.Aux = 1),
-// class vars (their nkVarSec's Aux = 1), nested types, consts, enum values.
+// Can this member be named on the TYPE itself (TFoo.X)? The model's rule
+// (TPasSemaModel.ClassSideMember), which the project's class-reference
+// check (E2124 / E2076 / E2233) shares.
 function TPasCompletion.ClassSideMember(AModel: TPasSemaModel;
   ASym: Integer): Boolean;
-var
-  LNode: Integer;
 begin
-  case AModel.Symbols[ASym].Kind of
-    skType, skConst, skEnumValue:
-      Result := True;
-    skVar, skField:
-      Result := AModel.IsClassVar(ASym);
-    skRoutine:
-      begin
-        // RoutineHead, not a raw VisibleToken read: this runs during member
-        // LIST BUILDING over foreign models, which may be text-demoted - the
-        // head word is exactly what DemoteText snapshots per symbol.
-        LNode := RoutineNodeOf(AModel, ASym);
-        Result := (LNode <> NIL_NODE) and
-          ((AModel.Tree.Nodes[LNode].Aux = 1) and
-             (AModel.RoutineHead(ASym) <> rhDestructor) or
-           (AModel.RoutineHead(ASym) = rhConstructor));
-      end;
-    skProperty:
-      begin
-        LNode := AModel.Symbols[ASym].DeclNode;
-        if LNode <> NIL_NODE then
-          LNode := AModel.Tree.Nodes[LNode].Parent;
-        Result := (LNode <> NIL_NODE) and
-          (AModel.Tree.Nodes[LNode].Kind = nkPropertyDecl) and
-          (AModel.Tree.Nodes[LNode].Aux = 1);
-      end;
-  else
-    Result := False;
-  end;
+  Result := AModel.ClassSideMember(ASym);
 end;
 
 // The caret struct's bridged ancestor chain, for the protected-visibility

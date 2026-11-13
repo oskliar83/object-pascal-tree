@@ -510,9 +510,10 @@ of less work, not a gap in following the language; its consequences are in
 ## 15-class-mechanics-helpers.md
 
 ### 15.2.1 `class of` types
-- member/constructor access through a metaclass value is
-  not typed intra-unit, and the project-level walk reaches instance members
-  through `class of` values without filtering them out.
+- member/constructor access through a metaclass value is not typed by the
+  intra-unit pass: a unit analyzed without the project passes binds no member
+  of `C.` (`C: class of TBase` of the unit itself); the project pass binds and
+  types them, and refuses the instance ones (E2124 / E2233 / E2076).
 
 ### 15.3.3 Helper scope-resolution rule
 - the active helper is decided per unit, not per position: a unit's own
