@@ -7902,6 +7902,23 @@ begin
     LWS.EnsureDispatch([UKey(LWS.Project, 'V')], nil);
     Ok('workspace: ...asked again, nothing to do',
       (LWS.Status.Rounds = 0) and not LWS.Status.Changed);
+    // EnsureFiles: several files made full in one query - two light units
+    // and one the light closure has not loaded.
+    LWS.Adopt(Run(True));
+    LWS.EnsureFiles(nil);
+    Ok('workspace: EnsureFiles of nothing - no round',
+      (LWS.Status.Rounds = 0) and not LWS.Status.Changed);
+    LWS.EnsureFiles([Lib('LibV.pas'), Lib('LibX.pas'), Lib('LibW.pas')]);
+    Ok('workspace: EnsureFiles of LibV, LibX, LibW - all full, one query',
+      LWS.Status.Changed and (LWS.Status.Promoted >= 2) and
+      (LWS.Project.ModelIdOf(Lib('LibV.pas')) >= 0) and
+      not LWS.Project.IsLight(LWS.Project.ModelIdOf(Lib('LibV.pas'))) and
+      not LWS.Project.IsLight(LWS.Project.ModelIdOf(Lib('LibX.pas'))) and
+      (LWS.Project.ModelIdOf(Lib('LibW.pas')) >= 0) and
+      not LWS.Project.IsLight(LWS.Project.ModelIdOf(Lib('LibW.pas'))));
+    LWS.EnsureFiles([Lib('LibV.pas'), Lib('LibX.pas'), Lib('LibW.pas')]);
+    Ok('workspace: ...asked again, nothing to do',
+      (LWS.Status.Rounds = 0) and not LWS.Status.Changed);
     // A position: Go to Implementation lands in a light unit's body.
     LWS.Adopt(Run(True));
     Ok('workspace: Adopt takes a new analysis, LibU light again',
