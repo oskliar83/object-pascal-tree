@@ -144,10 +144,22 @@ type
       the list's own scope too (a climb from inside it lands there). }
     procedure DeclareParamList(AParams, AScope: Integer);
     { The implicit `Result` of a function - a routine or a literal - in its
-      scope, typed by ATypeNode (NIL_NODE: the procedure literal's shadow).
-      A parameter already named Result is E2004 when AReport (03 3.1.3, 17). }
-    procedure DeclareImplicitResult(AScope, ATypeNode: Integer;
-      AReport: Boolean);
+      scope, typed by ATypeNode (NIL_NODE: the procedure literal's shadow),
+      unless a parameter already holds the name (ReportHeldParam's E2004). }
+    procedure DeclareImplicitResult(AScope, ATypeNode: Integer);
+    // The routine header ANode's name - its last segment's ident - or
+    // NIL_NODE (a header cut short after a dot).
+    function RoutineNameNode(ANode: Integer): Integer;
+    // The method's OWN nkGenericParams (`procedure TC.M<T>`), not its
+    // class's (`procedure TG<T>.M`), of the routine scope ARoutine; NIL_NODE.
+    function OwnGenericParams(ARoutine: Integer): Integer;
+    // Does the body of the routine scope ARoutine hold `Self`? False when
+    // that is not known (see the implementation).
+    function MethodHasSelf(ARoutine: Integer): Boolean;
+    // A parameter named AKey that the body of ARoutine holds - of its own
+    // header, or of the declaration a header without a list completes.
+    function HeldParam(ARoutine: Integer; const AKey: TSemaKey): Integer;
+    procedure ReportHeldParam(ARoutine, AAnchor: Integer; AResult: Boolean);
     function BodyScope(AScope: Integer): Integer;
     function RedeclaresOwnName(AScope: Integer; AKind: TSemaSymbolKind;
       ADeclNode: Integer; const AKey: TSemaKey): Boolean;
@@ -1121,8 +1133,7 @@ begin
   end;
 end;
 
-procedure TPasSemaResolver.DeclareImplicitResult(AScope, ATypeNode: Integer;
-  AReport: Boolean);
+procedure TPasSemaResolver.DeclareImplicitResult(AScope, ATypeNode: Integer);
 var
   LRes: Integer;
 begin
@@ -1132,9 +1143,160 @@ begin
     LRes := FModel.AddSymbol(AScope, skVar, 'Result', NIL_NODE, 'result');
     FModel.Symbols[LRes].TypeNode := ATypeNode;
     FModel.BindName(AScope, LRes);
-  end
-  else if AReport and (FModel.Symbols[LRes].Kind = skParam) then
-    ReportRedeclared(FModel.Symbols[LRes].DeclNode);
+  end;
+end;
+
+function TPasSemaResolver.RoutineNameNode(ANode: Integer): Integer;
+var
+  LChild: Integer;
+begin
+  Result := NIL_NODE;
+  LChild := SkipAttr(FirstChild(ANode));
+  while (LChild <> NIL_NODE) and IsDeclName(LChild) do
+  begin
+    if KindOf(LChild) = nkMissing then
+      Exit(NIL_NODE);
+    Result := LChild;
+    LChild := NextSib(LChild);
+    while (LChild <> NIL_NODE) and (KindOf(LChild) = nkGenericParams) do
+      LChild := NextSib(LChild);
+  end;
+end;
+
+function TPasSemaResolver.OwnGenericParams(ARoutine: Integer): Integer;
+var
+  LName: Integer;
+begin
+  Result := NIL_NODE;
+  LName := RoutineNameNode(FModel.Scopes[ARoutine].OwnerNode);
+  if LName <> NIL_NODE then
+  begin
+    LName := NextSib(LName);
+    if (LName <> NIL_NODE) and (KindOf(LName) = nkGenericParams) then
+      Result := LName;
+  end;
+end;
+
+{ 3.1.3 (dcc64 37.0, probed 2026-11-13): an instance method has Self - a
+  record's and a helper's, a constructor and a destructor too - and of the
+  class methods only a non-static `class procedure` or `class function`; a
+  `class ... static` one, a class constructor or destructor and a class
+  operator do not. Only the declaration says `static`, so a class method's
+  implementation is paired with it as the header binding pairs it
+  (CompletionOf) - a header pairing with none is not known, and answers
+  False, as a routine that is no method does. }
+function TPasSemaResolver.MethodHasSelf(ARoutine: Integer): Boolean;
+var
+  LStruct, LNode, LName, LDecl: Integer;
+begin
+  LStruct := FModel.Scopes[ARoutine].StructSym;
+  if LStruct = NIL_SYM then
+    Exit(False);
+  LNode := FModel.Scopes[ARoutine].OwnerNode;
+  if FTree.Nodes[LNode].Aux <> 1 then
+    Exit(True);
+  LName := RoutineNameNode(LNode);
+  if (LName = NIL_NODE) or
+     (FModel.Symbols[LStruct].MemberScope = NIL_SCOPE) then
+    Exit(False);
+  LDecl := CompletionOf(FModel.FindLocal(FModel.Symbols[LStruct].MemberScope,
+    NodeKey(LName)), LNode, FModel.Scopes[ARoutine].Parent, False);
+  if LDecl = NIL_SYM then
+    Exit(False);
+  LNode := FTree.Nodes[FModel.Symbols[LDecl].DeclNode].Parent;
+  Result := (FTree.Nodes[LNode].Aux = 1) and
+    (FModel.RoutineHead(LDecl) in [rhProcedure, rhFunction]) and
+    not HasDirective(LNode, 'static');
+end;
+
+function TPasSemaResolver.HeldParam(ARoutine: Integer;
+  const AKey: TSemaKey): Integer;
+var
+  LAdd: TArray<Integer>;
+  LIdx: Integer;
+begin
+  Result := FModel.FindLocal(ARoutine, AKey);
+  if (Result <> NIL_SYM) and (FModel.Symbols[Result].Kind = skParam) then
+    Exit;
+  LAdd := FModel.Scopes[ARoutine].Additional;
+  for LIdx := 0 to High(LAdd) do
+    if FModel.Scopes[LAdd[LIdx]].Kind = sckRoutine then
+    begin
+      Result := FModel.FindLocal(LAdd[LIdx], AKey);
+      if (Result <> NIL_SYM) and (FModel.Symbols[Result].Kind = skParam) then
+        Exit;
+    end;
+  Result := NIL_SYM;
+end;
+
+{ 3.1.3, 17 (dcc64 37.0, probed 2026-11-13): a body declares the names its
+  routine brings - the method's own type parameters, Self, Result - and a
+  parameter already holding one is E2004, once per body: the first such
+  parameter that is Self or a type parameter, in parameter order, else one
+  named Result (`G<T>(T, Self: Integer)` reports T, `M<T>(Result, Self, T:
+  Integer)` and `F(Result, Self: Integer)` Self), at AAnchor: a routine's first token after its heading (its first
+  local declaration, or its `begin`), a literal's alike. A declaration
+  without a body brings nothing; a class's own type parameter (`procedure
+  TG<T>.M(T: Integer)`) is no clash. AResult: the routine is a function. }
+procedure TPasSemaResolver.ReportHeldParam(ARoutine, AAnchor: Integer;
+  AResult: Boolean);
+
+  procedure Report(AParam: Integer);
+  var
+    LFileId, LLine, LCol: Integer;
+  begin
+    if FReported = nil then
+      SetLength(FReported, Length(FTree.Nodes));
+    if FReported[AAnchor] then
+      Exit;
+    FReported[AAnchor] := True;
+    NodePos(AAnchor, LFileId, LLine, LCol);
+    FModel.AddDiag(MakeDiag('E2004', Format(SE2004_IdentifierRedeclared,
+      [NodeText(FModel.Symbols[AParam].DeclNode)]), AAnchor, LFileId, LLine,
+      LCol));
+  end;
+
+var
+  LFirst: Integer;
+
+  // AParam, if it comes before the first one taken so far.
+  procedure Take(AParam: Integer);
+  begin
+    if (AParam <> NIL_SYM) and ((LFirst = NIL_SYM) or
+       (FModel.Symbols[AParam].DeclNode < FModel.Symbols[LFirst].DeclNode)) then
+      LFirst := AParam;
+  end;
+
+var
+  LGen, LParam, LName: Integer;
+begin
+  if AAnchor = NIL_NODE then
+    Exit;
+  LFirst := NIL_SYM;
+  LGen := OwnGenericParams(ARoutine);
+  if LGen <> NIL_NODE then
+  begin
+    // ident -> nkGenericParam -> nkGenericParams
+    LParam := FirstChild(LGen);
+    while LParam <> NIL_NODE do
+    begin
+      LName := FirstChild(LParam);
+      while LName <> NIL_NODE do
+      begin
+        if KindOf(LName) = nkIdent then
+          Take(HeldParam(ARoutine, NodeKey(LName)));
+        LName := NextSib(LName);
+      end;
+      LParam := NextSib(LParam);
+    end;
+  end;
+  LParam := HeldParam(ARoutine, SemaKey('self'));
+  if (LParam <> NIL_SYM) and MethodHasSelf(ARoutine) then
+    Take(LParam);
+  if (LFirst = NIL_SYM) and AResult then
+    LFirst := HeldParam(ARoutine, SemaKey('result'));
+  if LFirst <> NIL_SYM then
+    Report(LFirst);
 end;
 
 procedure TPasSemaResolver.ReportRedeclared(ADeclNode: Integer);
@@ -1308,28 +1470,24 @@ end;
     that omits them reaches through the declaration's own parameter scope -
     CollectRoutine joins it in. The struct's member scope is joined too and
     is not the body's: a local may hide a field;
-  - Self, in an instance method's implementation - a routine qualified by
-    its struct (StructSym) that is not a class method. A class method's is
-    not modelled: a static one has none, and only its declaration says so;
+  - Self, where the method has one (MethodHasSelf: an instance method, a
+    non-static class procedure or function);
   - the method's own type parameters, not its class's: `procedure TC.M<T>;
     begin var T := 1; end;` is E2004, the same in `procedure TG<T>.M;`
     compiles. The two share the scope CollectRoutine opens between the
-    routine and its parent, and a parameter's nkGenericParams tells them
-    apart - the method's own is followed by no other name segment. }
+    routine and its parent; OwnGenericParams tells them apart. }
 function TPasSemaResolver.RoutineHolds(ARoutine: Integer;
   const AKey: TSemaKey): Boolean;
 var
   LAdd: TArray<Integer>;
-  LIdx, LGen, LSym, LParams, LNext: Integer;
+  LIdx, LGen, LSym, LOwn: Integer;
 begin
   LAdd := FModel.Scopes[ARoutine].Additional;
   for LIdx := 0 to High(LAdd) do
     if (FModel.Scopes[LAdd[LIdx]].Kind = sckRoutine) and
        HoldsName(LAdd[LIdx], AKey) then
       Exit(True);
-  if (FModel.Scopes[ARoutine].StructSym <> NIL_SYM) and
-     (FTree.Nodes[FModel.Scopes[ARoutine].OwnerNode].Aux <> 1) and
-     SemaKeyEquals('self', AKey) then
+  if SemaKeyEquals('self', AKey) and MethodHasSelf(ARoutine) then
     Exit(True);
   LGen := FModel.Scopes[ARoutine].Parent;
   if (LGen <> NIL_SCOPE) and (FModel.Scopes[LGen].Kind = sckGenericParams) and
@@ -1338,11 +1496,10 @@ begin
     LSym := FModel.FindLocal(LGen, AKey);
     if (LSym <> NIL_SYM) and (FModel.Symbols[LSym].Kind = skGenericParam) then
     begin
+      LOwn := OwnGenericParams(ARoutine);
       // ident -> nkGenericParam -> nkGenericParams
-      LParams := FTree.Nodes[FTree.Nodes[FModel.Symbols[LSym].DeclNode]
-        .Parent].Parent;
-      LNext := NextSib(LParams);
-      Exit((LNext = NIL_NODE) or not IsDeclName(LNext));
+      Exit((LOwn <> NIL_NODE) and (FTree.Nodes[FTree.Nodes[
+        FModel.Symbols[LSym].DeclNode].Parent].Parent = LOwn));
     end;
   end;
   Result := False;
@@ -2586,7 +2743,19 @@ begin
     case KindOf(LChild) of
       nkParams:
         DeclareParamList(LChild, LRoutine);
-      nkGenericParams, nkRoutineBody, nkDirective, nkAttrGroup:
+      nkRoutineBody:
+        begin
+          // A parameter holding a name the body brings (T, Self, Result),
+          // before the body's own declarations are judged. `operator` is the
+          // one head that lexes as an identifier; it has a Result too.
+          var LHead := FTree.Nodes[ANode].FirstToken;
+          ReportHeldParam(LRoutine, LChild, (LHead >= 0) and
+            ((FTree.Source.VisibleKind(LHead) = tkFunction) or
+             FTree.Source.VisibleTextEquals(LHead, 'operator')) and
+            not PasResultWithheld(FTree, ANode, False));
+          Collect(LChild, LRoutine);
+        end;
+      nkGenericParams, nkDirective, nkAttrGroup:
         Collect(LChild, LRoutine);
     else
       if LResultNode <> NIL_NODE then
@@ -2604,12 +2773,11 @@ begin
         // means the function result). Declared here, before the body: a
         // local or an inline var named Result is E2004 (dcc64 37.0), which
         // DeclareSym reports only against a Result already in the scope. A
-        // parameter named Result is E2004 as well - once, at a body's begin,
-        // where dcc declares Result - so a bodiless declaration stays silent.
+        // parameter named Result is E2004 as well - once, where the body
+        // starts (ReportHeldParam) - so a bodiless declaration stays silent.
         // No Result under {$X-} at the body (PasResultWithheld).
         if not PasResultWithheld(FTree, ANode, False) then
-          DeclareImplicitResult(LRoutine, LResultNode,
-            FindChildKind(ANode, nkRoutineBody) <> NIL_NODE);
+          DeclareImplicitResult(LRoutine, LResultNode);
       end;
     end;
     LChild := NextSib(LChild);
@@ -2855,6 +3023,7 @@ begin
         var LAnon := FModel.AddScope(sckRoutine, AScope, ANode);
         FNodeScope[ANode] := LAnon;
         LChild := FirstChild(ANode);
+        var LFunc := False;
         while LChild <> NIL_NODE do
         begin
           if KindOf(LChild) = nkParams then
@@ -2865,11 +3034,16 @@ begin
           end;
           // The result type is the child that is neither the parameters, a
           // directive (`procedure stdcall begin`) nor the body. A parameter
-          // named Result is E2004, as in a named function (17: dcc64 37.0
-          // reports it at the literal's begin).
-          if not (KindOf(LChild) in [nkDirective, nkRoutineBody]) and
+          // named Result is E2004, as in a named function and where its body
+          // starts (17, dcc64 37.0). No Result under {$X-} (PasResultWithheld).
+          if KindOf(LChild) = nkRoutineBody then
+            ReportHeldParam(LAnon, LChild, LFunc)
+          else if (KindOf(LChild) <> nkDirective) and
              not PasResultWithheld(FTree, ANode, False) then
-            DeclareImplicitResult(LAnon, LChild, True);
+          begin
+            DeclareImplicitResult(LAnon, LChild);
+            LFunc := True;
+          end;
           Collect(LChild, LAnon);
           LChild := NextSib(LChild);
         end;
@@ -2883,7 +3057,7 @@ begin
            (LOuterRes <> NIL_SYM) and
            (FModel.Symbols[LOuterRes].DeclNode = NIL_NODE) and
            (FModel.Symbols[LOuterRes].Kind = skVar) then
-          DeclareImplicitResult(LAnon, NIL_NODE, False);
+          DeclareImplicitResult(LAnon, NIL_NODE);
       end;
 
     nkMethodResolution:
