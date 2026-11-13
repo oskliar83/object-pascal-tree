@@ -147,6 +147,9 @@ type
     procedure SkipCaret;
     procedure SkipStringElements;
     procedure Error(const AMsg: string);
+    // An error at the visible token AVis, not the cursor; no stall guard -
+    // the caller moves on.
+    procedure ErrorAt(AVis: Integer; const AMsg: string);
     // expressions
     function ParseExpression(AEqualEnds: Boolean = False): Integer;
     function ParseSimpleExpr: Integer;
@@ -584,6 +587,15 @@ begin
       SkipCaret
     else
       Next;
+end;
+
+procedure TPasParser.ErrorAt(AVis: Integer; const AMsg: string);
+begin
+  if FDiagCount = Length(FDiags) then
+    SetLength(FDiags, Length(FDiags) * 2 + 8);
+  FDiags[FDiagCount].VisIndex := AVis;
+  FDiags[FDiagCount].Msg := AMsg;
+  Inc(FDiagCount);
 end;
 
 procedure TPasParser.Error(const AMsg: string);
@@ -2293,6 +2305,7 @@ end;
 function TPasParser.ParseAttrGroups: Integer;
 var
   LAttr: Integer;
+  LTarget: Boolean;
   LNameLower: string;
 begin
   // 19.3.2: one node collecting all adjacent [ ... ] groups.
@@ -2309,13 +2322,30 @@ begin
       // attribute's, not the group's (`[Tag, Result: Other]`, dcc64 37.0,
       // local/probe-b56 R1, R2). dcc takes any word there and drops an
       // attribute with a target other than Result (W1074, PasAttrIsName).
-      if (CurKind = tkIdentifier) and (PeekKind(1) = tkColon) then
+      LTarget := (CurKind = tkIdentifier) and (PeekKind(1) = tkColon);
+      if LTarget then
       begin
         FB.AddFlag(LAttr, nfAttrTarget);
         Next;
         Next;
       end;
-      if AttrIsName then
+      if not LTarget and (CurKind = tkIdentifier) and (IsWord('result') or
+              FSrc.VisibleTextEquals(FPos, '&result')) then
+      begin
+        // `Result` with no `:` after it - `[Result]`, `[Result(1)]`, `[Result,
+        // Tag]` - is dcc's `E2029 ':' expected but ']' found` at the next
+        // token, and the attribute is dropped (W1074, PasAttrIsName); a `.`
+        // after it is a second E2029 (dcc64 37.0, 2026-11-13). Read as one
+        // expression, as a dropped attribute is.
+        ErrorAt(FPos + 1, Format('%s expected but %s found',
+          [QuotedStr(':'), QuotedStr(FSrc.VisibleText(FPos + 1))]));
+        if PeekKind(1) = tkDot then
+          ErrorAt(FPos + 1, Format('%s or %s expected but %s found',
+            [QuotedStr(','), QuotedStr(']'), QuotedStr('.')]));
+        FB.Adopt(LAttr, ParseRangeElem);
+        FB.SetAux(LAttr, amaNone);
+      end
+      else if AttrIsName then
       begin
         // 19.3.3: captured BEFORE ParseTypeRef consumes it -- simple-name
         // only (none of the compiler-recognized names is ever realistically
