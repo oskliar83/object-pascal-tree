@@ -482,14 +482,9 @@ of less work, not a gap in following the language; its consequences are in
   type's last-good analysis, so one typed since then is not seen.
 
 ### 13.1.4 Default array properties
-- `L[I]` is a use of L's default array property with no name written: bound
-  by CrossType, keyed on the nkIndex node (a Find References hit at the `[`,
-  `Implicit`). The property is the first one `DefaultArrayPropX` meets up
-  the ancestors - two default properties overloaded by index type are not
-  told apart. A class helper's default property is not consulted. A comma
-  list carried from an array into a default property (`A[0, 1]` over
-  `array of TCells`) is dcc's E2016 (object-pascal-spec 13.1.4); PasTree
-  types and binds it leniently, through the property.
+- two default properties overloaded by index type are told apart by the
+  cross-type pass only: completion after `L['a'].` (and its signature help
+  inside the brackets) reads the first one declared.
 
 ## 14-interfaces.md
 

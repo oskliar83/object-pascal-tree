@@ -3448,7 +3448,7 @@ begin
           // property takes the bracket's indices (a comma list read on past
           // it is dcc's E2016 - typed leniently, as the project typer does).
           if not FProj.DefaultArrayPropX(LCur.X, LPropMid, LPropSym,
-             LOwner) then
+             LOwner, FProjMid) then
             Exit;
           LCur := TypeOfProjectSym(LPropMid, LPropSym, LOwner.Inst,
             ADepth + 1);
@@ -6996,7 +6996,8 @@ begin
         begin
           // `L[I]` is L.Items[I]: the default property's parameter, in the
           // frame it was found in (a dictionary's TKey).
-          if FProj.DefaultArrayPropX(LCur.X, LMid, LSym, LOwner) then
+          if FProj.DefaultArrayPropX(LCur.X, LMid, LSym, LOwner,
+             FProjMid) then
             Result.X := FProj.ArrayPropParamX(LMid, LSym, AIndex, LOwner.Inst);
           Exit;
         end;

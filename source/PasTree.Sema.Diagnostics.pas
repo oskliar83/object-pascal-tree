@@ -67,6 +67,8 @@ const
   SE2018_RecordObjectClassRequired =
     'E2018 Record, object or class type required';
   SE2064_LeftSideCannotBeAssigned = 'E2064 Left side cannot be assigned to';
+  // An index list run past what indexes (13.1.4). Names nothing.
+  SE2016_ArrayTypeRequired = 'E2016 Array type required';
   // 11 sec. 11.2.1. The single %s is the QUALIFIED member name, `TType.Member`,
   // which is how dcc spells it.
   SE2361_CannotAccessPrivate = 'E2361 Cannot access private symbol %s';
