@@ -930,6 +930,11 @@ type
       on a demoted model, from the snapshot DemoteText took. rhNone for a
       symbol that is not a routine or has no routine node. }
     function RoutineHead(ASym: Integer): TPasRoutineHead;
+    { ASym, a field or variable, is a struct's `class var`: the nkVarSec its
+      declaration sits in has Aux = 1 (the parser eats both keywords and
+      marks the run - a plain field written after `class var` stays one).
+      Read off the tree, so a demoted model answers too. }
+    function IsClassVar(ASym: Integer): Boolean;
     { ASym, a routine, carries `overload` on its declaration or on the header
       its parameters live under (an implementation may leave it off). Read
       from sfOverloadDirective, so a demoted model answers too. }
@@ -3234,6 +3239,21 @@ begin
         LCand := Symbols[LCand].NextOverload;
       end;
     end;
+end;
+
+function TPasSemaModel.IsClassVar(ASym: Integer): Boolean;
+var
+  LNode: Integer;
+begin
+  if not (Symbols[ASym].Kind in [skVar, skField]) then
+    Exit(False);
+  LNode := Symbols[ASym].DeclNode;
+  while (LNode <> NIL_NODE) and (Tree.Nodes[LNode].Kind <> nkVarSec) and
+        not (Tree.Nodes[LNode].Kind in [nkClassType, nkRecordType,
+          nkInterfaceType, nkObjectType, nkHelperType]) do
+    LNode := Tree.Nodes[LNode].Parent;
+  Result := (LNode <> NIL_NODE) and (Tree.Nodes[LNode].Kind = nkVarSec) and
+    (Tree.Nodes[LNode].Aux = 1);
 end;
 
 function TPasSemaModel.RoutineHead(ASym: Integer): TPasRoutineHead;
