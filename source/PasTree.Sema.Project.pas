@@ -26487,6 +26487,45 @@ begin
     // Innermost enclosing struct's ancestry, then the OUTER segments of a
     // qualified method name (see OuterStructsOfNode), then the ordinary
     // uses/System fallbacks - dcc's own precedence order.
+    // An attribute's name (19.3.2, dcc64 37.0, 2026-11-13): `XAttribute`
+    // first, through the whole order, the bare name only when the suffixed
+    // one is nowhere - on `procedure TD.M([Foo(1)] A: Integer)` a used unit's
+    // FooAttribute beats an inherited method Foo. And outside a routine body
+    // - a struct's declaration, a method implementation's parameters - an
+    // attribute sees no ancestor's member, the same unit's or another's: the
+    // struct's own were Phase 1's (its member scope joined), an ancestor's
+    // nested ZedAttribute there is W1074. In a body the member walk stands.
+    if IsAttributeTypeRef(LModel, LNode) then
+    begin
+      var LInBody := NodeInRoutineBody(LModel.Tree, LNode);
+      if not LInBody and (LBound <> NIL_SYM) then
+        Continue;
+      if LBound = NIL_SYM then
+      begin
+        var LSuffixed := LNameLower + 'attribute';
+        if (LInBody and FindSelfMemberX(AId, LNode, LStruct, LSuffixed, LUid,
+             LSym, LCtx)) or
+           FindInUsesMemo(AId, LSuffixed, LUid, LSym) or
+           FindInSystemUnit(LSuffixed, LUid, LSym) or
+           (not LInBody and (FindInUsesMemo(AId, LNameLower, LUid, LSym) or
+             FindInSystemUnit(LNameLower, LUid, LSym))) then
+        begin
+          LPend.Node := LNode;
+          LPend.Ext.UnitId := LUid;
+          LPend.Ext.Sym := LSym;
+          LPend.X := XNil;
+          LOut[LPendCount] := LPend;
+          Inc(LPendCount);
+          Continue;
+        end;
+        if not LInBody then
+        begin
+          if UndeclaredReported(LModel) then
+            EmitE2003(LModel, LNode, AId);
+          Continue;
+        end;
+      end;
+    end;
     // A member the method cannot see - an ancestor's private one of another
     // unit - is passed over (FindVisibleMemberX, F38).
     LFound := FindSelfMemberX(AId, LNode, LStruct, LNameLower, LUid, LSym,

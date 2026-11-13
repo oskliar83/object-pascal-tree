@@ -532,6 +532,11 @@ type
     group's (`<[A] K, [B] V: class>`, 19.3.2) - are read through it. }
   function PasSkipAttrGroups(const ATree: TPasTree; ANode: Integer): Integer;
 
+  { ANode lies inside a routine's or an anonymous method's body (an
+    nkRoutineBody: its local declarations and its block), not in a header or
+    a declaration around it. }
+  function NodeInRoutineBody(const ATree: TPasTree; ANode: Integer): Boolean;
+
   { The ANCESTOR reference of a class, interface or object definition node:
     its FIRST child when that is a type reference (nkIdent, nkMember,
     nkTypeArgs) - the heritage list leads the children and its first entry
@@ -648,6 +653,20 @@ begin
   // dropped: the parser reads it as an expression.
   Result := not (ATree.NodeTextEquals(AAttr, 'result') or
     ATree.NodeTextEquals(AAttr, '&result'));
+end;
+
+function NodeInRoutineBody(const ATree: TPasTree; ANode: Integer): Boolean;
+var
+  LNode: Integer;
+begin
+  LNode := ANode;
+  while LNode <> NIL_NODE do
+  begin
+    if ATree.Nodes[LNode].Kind = nkRoutineBody then
+      Exit(True);
+    LNode := ATree.Nodes[LNode].Parent;
+  end;
+  Result := False;
 end;
 
 function PasSkipAttrGroups(const ATree: TPasTree; ANode: Integer): Integer;
