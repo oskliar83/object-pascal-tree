@@ -214,11 +214,13 @@ of less work, not a gap in following the language; its consequences are in
   constant or another unit's name - and for every inline-var initializer.
   An operand that Phase 1 bound to a TYPE name (an inherited cross-unit
   member named `Word`) types the operator as nothing and is not judged.
-- an arithmetic result over two Bytes or Words is an anonymous subrange of
-  Integer in dcc, and so is `B and 300` (dcc's E2010 names both Integer,
-  but its overload resolution then prefers a narrower parameter); PasTree
-  says Integer. A rankless subrange operand computes as an Integer
-  (`Sub and Sub` over `0..9` is ShortInt in dcc). A constant operand
+- the type `var X :=` infers for `and` / `or` / `xor` over a narrow
+  SUBRANGE operand is Integer here; dcc's follows neither the hull of the
+  operands nor their order alone (`Su and Su2` of two `0..9` ShortInt, `W
+  and Su` Word, `X128 and X200` Byte but `X200 and X128` Integer, spec
+  4.2.1), so it is not modelled - overload ranking reads such an operator
+  as dcc does (OpRangeConv). `-1 and B` ranks as `B and -1` (a SmallInt)
+  here, as an Integer in dcc. A constant operand
   adapts to the other operand by its value when it is a literal, an
   integer operator over constants folded as dcc folds it (FoldedIntValue:
   `C + (N + 1)`, `C + (K shl 2)`, `not`, the shifts wrapping), `Hi` / `Lo`

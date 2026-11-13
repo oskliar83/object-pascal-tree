@@ -1286,6 +1286,10 @@ type
     function LiteralTypeX(AMid, ANode: Integer; ANegated: Boolean): TSemaXType;
     function IsSignedLiteral(AMid, ANode: Integer;
       out ALit: Integer; out ANegated: Boolean): Boolean;
+    // An operator operand ANode beside a Cardinal (OpNonNegAsked): AF.NonNeg
+    // when its anonymous subrange cannot be negative (MarkOpNonNeg).
+    procedure OpNonNegX(AMid, ANode: Integer; AOp: TPasTokenKind;
+      var AF: TSemaOpFacts);
     function OperatorResultX(AMid, AOpNode: Integer;
       const AL, AR: TSemaXType): TSemaXType;
     function StorageBaseX(const AX: TSemaXType): TSemaXType;
@@ -17307,6 +17311,27 @@ var
       Result := XPlain(AId, LM.IntraType(N));
   end;
 
+  // An integer operator argument ranks by dcc's anonymous subrange of it,
+  // read from its operands (OpRangeConv, 4.2.1 / 6.3.1).
+  procedure OpRangeArgX(ACore: Integer; var AConv: TSemaArgConv);
+  var
+    LLeaves: TSemaOpRangeLeaves;
+    LLeafX: TSemaXType;
+    I: Integer;
+  begin
+    if not OpRangeLeaves(LM.Tree, ACore, AConv, LLeaves) then
+      Exit;
+    var LFacts := ConstFactsX(AId);
+    for I := 0 to LLeaves.Count - 1 do
+    begin
+      LLeafX := GetX(LLeaves.Nodes[I]);
+      if XValid(LLeafX) then
+        SetOpRangeLeaf(LLeaves, I, ArgConvX(AId, LLeaves.Nodes[I], LLeafX),
+          LM.Tree, LFacts);
+    end;
+    OpRangeConv(LM.Tree, ACore, LLeaves, AConv);
+  end;
+
   // Does the routine set headed by AHead let the search go on - which decides
   // whether a further set joins a call's candidates (6.3.1)? A member saying
   // `overload` does, and so does an `override`: overriding is not hiding,
@@ -17981,6 +18006,7 @@ var
         if LArgConvCore <> LCore then
         begin
           LArgConv := ArgConvX(AId, LCore, LArgX);
+          OpRangeArgX(LCore, LArgConv);
           LArgConvCore := LCore;
         end;
         LCanonArgX := CanonTypeX(LArgX);
@@ -18190,6 +18216,7 @@ var
         if LArgConvCore <> LCore then
         begin
           LArgConv := ArgConvX(AId, LCore, LArgX);
+          OpRangeArgX(LCore, LArgConv);
           LArgConvCore := LCore;
         end;
         LConv := @LArgConv;
@@ -24630,6 +24657,36 @@ end;
   constant's OWN dcc type is narrower still - value-sized, `100` a ShortInt
   for helper lookup - and that is not modelled; see docs/coverage.md,
   3.2.1. }
+procedure TPasSemaProject.OpNonNegX(AMid, ANode: Integer;
+  AOp: TPasTokenKind; var AF: TSemaOpFacts);
+var
+  LLeaves: TSemaOpRangeLeaves;
+  LArg: TSemaArgConv;
+  LX: TSemaXType;
+  LM: TPasSemaModel;
+begin
+  LArg := Default(TSemaArgConv);
+  LArg.Facts := AF;
+  LArg.Kind := cnkInteger;
+  LM := FModels[AMid];
+  if not OpRangeLeaves(LM.Tree, ANode, LArg, LLeaves) then
+    Exit;
+  // Each operand by the type this pass gave it, else the unit's.
+  var LFacts := ConstFactsX(AMid);
+  for var I := 0 to LLeaves.Count - 1 do
+  begin
+    var N := LLeaves.Nodes[I];
+    if not LM.ExprTypeX.TryGetValue(N, LX) then
+      if LM.IntraType(N) <> NIL_SYM then
+        LX := XPlain(AMid, LM.IntraType(N))
+      else
+        LX := XNil;
+    if XValid(LX) then
+      SetOpRangeLeaf(LLeaves, I, ArgConvX(AMid, N, LX), LM.Tree, LFacts);
+  end;
+  MarkOpNonNeg(LM.Tree, ANode, AOp, LLeaves, AF);
+end;
+
 function TPasSemaProject.OperatorResultX(AMid, AOpNode: Integer;
   const AL, AR: TSemaXType): TSemaXType;
 var
@@ -24694,8 +24751,15 @@ begin
     LNodeR := LM.Tree.Nodes[LNodeL].NextSibling;
 
   // The one 4.2.1 table, shared with the unit's typer (audit A4-15, D2-08).
-  Result := OpAnswerX(AMid, OperatorAnswer(LOp, LUnary,
-    OpFactsX(AMid, LNodeL, LL), OpFactsX(AMid, LNodeR, LR),
+  var LFL := OpFactsX(AMid, LNodeL, LL);
+  var LFR := OpFactsX(AMid, LNodeR, LR);
+  // An operator operand beside a Cardinal: its anonymous subrange.
+  if not LUnary then
+    if OpNonNegAsked(LOp, LFL, LFR) then
+      OpNonNegX(AMid, LNodeL, LOp, LFL)
+    else if OpNonNegAsked(LOp, LFR, LFL) then
+      OpNonNegX(AMid, LNodeR, LOp, LFR);
+  Result := OpAnswerX(AMid, OperatorAnswer(LOp, LUnary, LFL, LFR,
     not LUnary and XSameType(LL, LR), FInfo.Is64Bit), LL, LR,
     LUnary and (LOp = tkNot));
   // Dynamic-array concatenation is the array operand's own type: both
@@ -24868,6 +24932,13 @@ begin
   LS := FModels[LB.UnitId].Symbols[LB.Sym];
   if LS.Kind <> skBuiltinType then
   begin
+    // An integer subrange computes by its range (SubrangeOpFacts).
+    if (Result.Cat = tcInteger) and not Result.IntConst then
+    begin
+      var LLo, LHi: Int64;
+      if FConv.OrdRange(AX, LLo, LHi) then
+        SubrangeOpFacts(LLo, LHi, Result);
+    end;
     // `string[N]` is a ShortString; `UTF8String = type AnsiString(65001)`
     // reads as a call of the string type, RawByteString is the $ffff one.
     if Result.Cat = tcString then
