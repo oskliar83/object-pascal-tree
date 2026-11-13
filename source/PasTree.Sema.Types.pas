@@ -245,6 +245,12 @@ type
     Rank: Byte;
     Unsigned, Curr, Comp, IntConst, IntFolded, RealLit, CurrLit,
       CurrNamed: Boolean;
+    // An integer SUBRANGE (SubrangeOpFacts): NonNeg a rankless one whose
+    // values cannot be negative, an Integer that meets a Cardinal as
+    // unsigned; SubBase one past Integer's range, Rank / Unsigned its base -
+    // for the operators only: as an argument it still ranks by its range
+    // (ConvArgKindOf answers no kind, SubrangeConv reads the range).
+    NonNeg, SubBase: Boolean;
     IntValue: Int64;
     SetCtor: Boolean;
     Text: TSemaTextKind;
@@ -271,11 +277,27 @@ type
     // narrowest integer holding the range.
     SubRange: Boolean;
     SubLo, SubHi: Int64;
+    // An integer operator whose anonymous subrange (OpRangeConv) ranks
+    // otherwise than its type: no type is its exact match, Kind / SubRange
+    // say how it ranks (`B + B`, typed Integer, takes F(Cardinal) over
+    // F(Int64) and is no exact match for F(Integer)'s neighbours' sake).
+    OpRange: Boolean;
     // `@S[I]` of a string under {$T+} (4.8, 6.3.1): a PChar / PAnsiChar
     // value that takes its string kind over its own pointer type.
     StrElemAddr: Boolean;
   end;
   PSemaArgConv = ^TSemaArgConv;
+
+  { The nodes below an integer operator argument or operand, its operators
+    and leaves (OpRangeLeaves), each leaf's range once its typer has read it
+    (SetOpRangeLeaf) - what OpRangeOf computes dcc's anonymous subrange of
+    the operator from. At most 16 nodes; a larger tree is not read. }
+  TSemaOpRangeLeaves = record
+    Count: Integer;
+    Nodes: array[0..15] of Integer;
+    IsOp, Known: array[0..15] of Boolean;
+    Lo, Hi: array[0..15] of Int64;
+  end;
 
   { What Ord, Pred / Succ and Low / High read of an ordinal argument
     (4.11.4; OrdAnswer, OrdStepAnswer). Builtin: the NameLower of the
@@ -653,6 +675,15 @@ type
     // An argument against an UNTYPED parameter (ParamIsUntyped): its
     // UntypedParamRank on the candidates' scale, 0 for no evidence.
     function UntypedArgScore(AArg, AAt: Integer): Integer;
+    // An integer operator argument ANode ranks by dcc's anonymous subrange
+    // of it (OpRangeConv), its operands read by this unit's types.
+    procedure OpRangeArg(ANode: Integer; var AArg: TSemaArgConv);
+    // An operator operand ANode beside a Cardinal (OpNonNegAsked): AF.NonNeg
+    // when its anonymous subrange cannot be negative.
+    procedure OpNonNeg(ANode: Integer; AOp: TPasTokenKind; var AF: TSemaOpFacts);
+    // The ranges of an operator's operands (OpRangeLeaves' list), read by
+    // this unit's types as ScoreArgRanked reads an argument.
+    procedure FillOpRange(var ALeaves: TSemaOpRangeLeaves);
     // ScoreArg's rule against the type APt, on ArgFitCanonX's scale (3 a
     // one-character literal for a Char, 2 exact, 1 assignable, 0 no
     // evidence, -1 out), with the rank (ConvRank) of a conversion fit (1)
@@ -1169,6 +1200,51 @@ function ConvRawRank(const AArg: TSemaArgConv; AParKind: TSemaConvKind;
   holding the range. }
 procedure SubrangeArgConv(var AConv: TSemaArgConv; ALo, AHi: Int64);
 
+{ An integer OPERATOR argument (4.2.1, 6.3.1; local/cov-exprs-2026-11
+  m1-m6) ranks by the anonymous subrange dcc computes it in, read from the
+  ranges of its LEAVES - the operands below its integer operators, parens
+  peeled: `+ - * div mod shl shr` and a sign over leaves inside Integer's
+  range are `0..High(Integer)` when no leaf can be negative and no `-` is
+  met, all of Integer otherwise; `and` / `or` / `xor` the hull of their
+  operands' ranges, a hull inside `0..127` a ShortInt; an operand that
+  folds (`B and -1`, `B and (K + 1)`) by its value. Closure-free, as
+  CrossType's node typer is a nested routine: OpRangeLeaves lists the
+  nodes below an operator argument - its operators and leaves (False: not
+  one, or too large - the ranking stays its type's); the caller reads each
+  one's argument conversion with its own typer and hands it to
+  SetOpRangeLeaf (a constant's value, a leaf's subrange or integer kind),
+  and OpRangeConv applies the answer. Both typers and the completion
+  overlay go through these (TSemaOpRangeLeaves). }
+function OpRangeLeaves(const ATree: TPasTree; ANode: Integer;
+  const AArg: TSemaArgConv; out ALeaves: TSemaOpRangeLeaves): Boolean;
+procedure SetOpRangeLeaf(var ALeaves: TSemaOpRangeLeaves; AIndex: Integer;
+  const AConv: TSemaArgConv; const ATree: TPasTree;
+  const AFacts: TSemaConstFactsFunc);
+procedure OpRangeConv(const ATree: TPasTree; ANode: Integer;
+  const ALeaves: TSemaOpRangeLeaves; var AArg: TSemaArgConv);
+// The range of the anonymous subrange of operator node ANode, its leaves
+// filled (SetOpRangeLeaf); False when a leaf is unknown or arithmetic leaves
+// Integer's range. A shift reads its left operand alone.
+function OpRangeOf(const ATree: TPasTree; ANode: Integer;
+  const ALeaves: TSemaOpRangeLeaves; out ALo, AHi: Int64): Boolean;
+
+{ The same anonymous subrange in a 32-bit mix (4.2.1): an operator operand
+  that cannot be negative meets a Cardinal as unsigned - `C + (B + B2)`, `C
+  or (B shl I)`, `C xor (W div 3)` are Cardinal, `C + (B - B2)`, `C or (I
+  shl 2)` Int64 (dcc64 37.0, 2026-11-13, local/cov-exprs-2026-11 sh, sh2).
+  OpNonNegAsked: does operand AF beside AOther need it read (an Integer
+  operator result beside a Cardinal, for an arithmetic or bitwise AOp)?
+  The typer then fills the leaves of the operand's node as for an argument
+  and MarkOpNonNeg sets AF.NonNeg. A range it cannot read - an operand of
+  no known type, a constant it does not fold (`SizeOf(T) shl 16`) - leaves
+  the answer as before: `or` / `xor` Cardinal (AF.NonNeg set: no evidence
+  it can be negative), the arithmetic Int64. }
+function OpNonNegAsked(AOp: TPasTokenKind; const AF,
+  AOther: TSemaOpFacts): Boolean;
+procedure MarkOpNonNeg(const ATree: TPasTree; ANode: Integer;
+  AOp: TPasTokenKind; const ALeaves: TSemaOpRangeLeaves;
+  var AF: TSemaOpFacts);
+
 { The raw rank (ConvRawRank's scale) of the integer argument AArg - a
   variable, a constant, a subrange value - for a parameter of an integer
   SUBRANGE type APLo..APHi: one holding the argument's range ranks with the
@@ -1530,6 +1606,17 @@ function IsBracketToScalar(ADst: TSemaTypeCat): Boolean;
   type (`NI + I` is Int64 on Win64). }
 function OperatorAnswer(AOp: TPasTokenKind; AUnary: Boolean;
   const AL, AR: TSemaOpFacts; ASameType, AIs64: Boolean): TSemaOpAnswer;
+
+{ The operator facts of an integer SUBRANGE operand ALo..AHi (4.2.1; dcc64
+  37.0, 2026-11-13, local/cov-exprs-2026-11 inf2, inf3): one inside
+  Integer's range stays rankless - it computes as an Integer - and, when it
+  cannot be negative, meets a Cardinal as unsigned (`Su + C`, `C - Su`, `C
+  div X300` are Cardinal; `XN5 + C` Int64); one past it computes in its
+  base, a Cardinal for a non-negative range, else an Int64 (`X3G + B`,
+  `X3G - B`, `Su + X3G` of a `0..3000000000` are Cardinal, `X3G + I`,
+  `XN3G + B` of a `-1..3000000000`, `X5G + B` Int64). Called by both typers
+  where the operand's type is no builtin. }
+procedure SubrangeOpFacts(ALo, AHi: Int64; var AF: TSemaOpFacts);
 
 { `+` over two text operands (4.2.1, dcc32 / dcc64 37.0, local/probe-b36 M2
   N1; audit A3-34): a literal takes the other operand's string type when
@@ -2861,7 +2948,7 @@ begin
   if (AConv <> nil) and (AConv.Kind <> cnkNone) then
   begin
     if not (AConv.Facts.IntConst and not AConv.TypedConst or
-            AConv.Facts.RealLit) and
+            AConv.Facts.RealLit or AConv.OpRange) and
        (Same(AParX, AArgX) or Same(ACanonParX, ACanonArgX)) then
       Exit(2);
     LRank := ConvRank(AConv^, ParConvKind(ACanonParX), FWideExt);
@@ -4031,7 +4118,9 @@ begin
   Result := cnkNone;
   case AF.Cat of
     tcInteger:
-      if AF.Rank in [1..4] then
+      // A subrange's base is the operators' (SubrangeOpFacts): it ranks by
+      // its range, as an argument (SubrangeConv) and as a parameter.
+      if (AF.Rank in [1..4]) and not AF.SubBase then
         Result := INTS[AF.Rank, AF.Unsigned];
     tcFloat:
       if AF.Curr then
@@ -4304,6 +4393,258 @@ begin
       AConv.SubHi := AHi;
       Exit;
     end;
+end;
+
+// The operator token of an nkBinaryOp / nkUnaryOp node.
+function OpNodeTok(const ATree: TPasTree; ANode: Integer): TPasTokenKind;
+begin
+  if (ATree.Nodes[ANode].Aux >= 0) and
+     (ATree.Nodes[ANode].Aux <= High(ATree.Source.Visible)) then
+    Result := ATree.Source.VisibleKind(ATree.Nodes[ANode].Aux)
+  else
+    Result := tkUnknown;
+end;
+
+// Is ANode (parens peeled) an operator OpRangeLeaves walks into?
+function IsRangeOpNode(const ATree: TPasTree; ANode: Integer): Boolean;
+begin
+  case ATree.Nodes[ANode].Kind of
+    nkBinaryOp:
+      Result := OpNodeTok(ATree, ANode) in [tkPlus, tkMinus, tkStar, tkDiv,
+        tkMod, tkShl, tkShr, tkAnd, tkOr, tkXor];
+    nkUnaryOp:
+      Result := OpNodeTok(ATree, ANode) in [tkPlus, tkMinus];
+  else
+    Result := False;
+  end;
+end;
+
+function OpRangeLeaves(const ATree: TPasTree; ANode: Integer;
+  const AArg: TSemaArgConv; out ALeaves: TSemaOpRangeLeaves): Boolean;
+
+  function Walk(N, ADepth: Integer): Boolean;
+  var
+    LKid: Integer;
+    LOp: Boolean;
+  begin
+    N := PeelParens(ATree, N);
+    if (N = NIL_NODE) or (ADepth > 8) or (ALeaves.Count = Length(ALeaves.Nodes)) then
+      Exit(False);
+    LOp := IsRangeOpNode(ATree, N);
+    // The argument itself is no constant (the caller's facts say so).
+    if ADepth > 0 then
+    begin
+      ALeaves.Nodes[ALeaves.Count] := N;
+      ALeaves.IsOp[ALeaves.Count] := LOp;
+      ALeaves.Known[ALeaves.Count] := False;
+      Inc(ALeaves.Count);
+    end;
+    if not LOp then
+      Exit(True);
+    LKid := ATree.Nodes[N].FirstChild;
+    if LKid = NIL_NODE then
+      Exit(False);
+    while LKid <> NIL_NODE do
+    begin
+      if not Walk(LKid, ADepth + 1) then
+        Exit(False);
+      LKid := ATree.Nodes[LKid].NextSibling;
+    end;
+    Result := True;
+  end;
+
+var
+  LCore: Integer;
+begin
+  ALeaves.Count := 0;
+  Result := False;
+  // An integer value that is no constant (a folded one ranks by its value).
+  if (ANode = NIL_NODE) or (AArg.Facts.Cat <> tcInteger) or
+     AArg.Facts.IntConst or not (AArg.Kind in [cnkShortInt..cnkUInt64]) then
+    Exit;
+  LCore := PeelParens(ATree, ANode);
+  if (LCore = NIL_NODE) or not IsRangeOpNode(ATree, LCore) then
+    Exit;
+  Result := Walk(LCore, 0);
+end;
+
+function OpRangeOf(const ATree: TPasTree; ANode: Integer;
+  const ALeaves: TSemaOpRangeLeaves; out ALo, AHi: Int64): Boolean;
+const
+  CIntLo = -2147483648;
+  CIntHi = 2147483647;
+var
+  I, LKid: Integer;
+  LTok: TPasTokenKind;
+  LLo2, LHi2: Int64;
+begin
+  ANode := PeelParens(ATree, ANode);
+  // A leaf, or an operator that folds: its range as the caller read it.
+  for I := 0 to ALeaves.Count - 1 do
+    if ALeaves.Nodes[I] = ANode then
+    begin
+      if ALeaves.Known[I] then
+      begin
+        ALo := ALeaves.Lo[I];
+        AHi := ALeaves.Hi[I];
+        Exit(True);
+      end;
+      if not ALeaves.IsOp[I] then
+        Exit(False);
+      Break;
+    end;
+  if not IsRangeOpNode(ATree, ANode) then
+    Exit(False);
+  LTok := OpNodeTok(ATree, ANode);
+  LKid := ATree.Nodes[ANode].FirstChild;
+  if not OpRangeOf(ATree, LKid, ALeaves, ALo, AHi) then
+    Exit(False);
+  if ATree.Nodes[ANode].Kind = nkUnaryOp then
+  begin
+    // A sign: `+X` is X, `-X` computes in Integer.
+    if LTok = tkPlus then
+      Exit(True);
+    if (ALo < CIntLo) or (AHi > CIntHi) then
+      Exit(False);
+    ALo := CIntLo;
+    AHi := CIntHi;
+    Exit(True);
+  end;
+  // A shift: its left operand alone, the count whatever it is (`B shl I`,
+  // `1 shl (I - 1)` cannot be negative, `Sh shl 2` can).
+  if LTok in [tkShl, tkShr] then
+  begin
+    if (ALo < CIntLo) or (AHi > CIntHi) then
+      Exit(False);
+    if ALo < 0 then
+      ALo := CIntLo
+    else
+      ALo := 0;
+    AHi := CIntHi;
+    Exit(True);
+  end;
+  LKid := ATree.Nodes[LKid].NextSibling;
+  if (LKid = NIL_NODE) or not OpRangeOf(ATree, LKid, ALeaves, LLo2, LHi2) then
+    Exit(False);
+  if LTok in [tkAnd, tkOr, tkXor] then
+  begin
+    // The hull of the two.
+    if LLo2 < ALo then
+      ALo := LLo2;
+    if LHi2 > AHi then
+      AHi := LHi2;
+    Exit(True);
+  end;
+  // Arithmetic: Integer's, non-negative unless an operand can be or a `-`.
+  if (ALo < CIntLo) or (AHi > CIntHi) or (LLo2 < CIntLo) or
+     (LHi2 > CIntHi) then
+    Exit(False);
+  if (LTok = tkMinus) or (ALo < 0) or (LLo2 < 0) then
+    ALo := CIntLo
+  else
+    ALo := 0;
+  AHi := CIntHi;
+  Result := True;
+end;
+
+procedure SetOpRangeLeaf(var ALeaves: TSemaOpRangeLeaves; AIndex: Integer;
+  const AConv: TSemaArgConv; const ATree: TPasTree;
+  const AFacts: TSemaConstFactsFunc);
+var
+  LKnown: Boolean;
+  LN: Integer;
+begin
+  LKnown := True;
+  LN := ALeaves.Nodes[AIndex];
+  if AConv.Facts.Cat <> tcInteger then
+    LKnown := False
+  // A constant this typer does not fold (`SizeOf(T)`): its value unknown.
+  else if not AConv.Facts.IntConst and not ALeaves.IsOp[AIndex] and
+          MayFoldConvConst(ATree, LN) and
+          (ConstExprKind(ATree, LN, 0, AFacts) <> sckNone) then
+    LKnown := False
+  else if AConv.Facts.IntConst then
+  begin
+    ALeaves.Lo[AIndex] := AConv.Facts.IntValue;
+    ALeaves.Hi[AIndex] := AConv.Facts.IntValue;
+  end
+  // An operator that does not fold is read from its operands.
+  else if ALeaves.IsOp[AIndex] then
+    LKnown := False
+  else if AConv.SubRange then
+  begin
+    ALeaves.Lo[AIndex] := AConv.SubLo;
+    ALeaves.Hi[AIndex] := AConv.SubHi;
+  end
+  else if AConv.Kind in [cnkShortInt..cnkUInt64] then
+  begin
+    ALeaves.Lo[AIndex] := CIntKindLo[AConv.Kind];
+    ALeaves.Hi[AIndex] := CIntKindHi[AConv.Kind];
+  end
+  else
+    LKnown := False;
+  ALeaves.Known[AIndex] := LKnown;
+end;
+
+function OpNonNegAsked(AOp: TPasTokenKind; const AF,
+  AOther: TSemaOpFacts): Boolean;
+begin
+  Result := (AOp in [tkPlus, tkMinus, tkStar, tkDiv, tkMod, tkAnd, tkOr,
+    tkXor]) and (AF.Cat = tcInteger) and not AF.IntConst and
+    not AF.NonNeg and (AF.Rank = 3) and not AF.Unsigned and
+    (AOther.Cat = tcInteger) and (AOther.Rank = 3) and AOther.Unsigned;
+end;
+
+procedure MarkOpNonNeg(const ATree: TPasTree; ANode: Integer;
+  AOp: TPasTokenKind; const ALeaves: TSemaOpRangeLeaves;
+  var AF: TSemaOpFacts);
+var
+  LLo, LHi: Int64;
+begin
+  if OpRangeOf(ATree, ANode, ALeaves, LLo, LHi) then
+    AF.NonNeg := LLo >= 0
+  else
+    AF.NonNeg := AOp in [tkOr, tkXor];
+end;
+
+procedure OpRangeConv(const ATree: TPasTree; ANode: Integer;
+  const ALeaves: TSemaOpRangeLeaves; var AArg: TSemaArgConv);
+var
+  LLo, LHi: Int64;
+  K, LWas: TSemaConvKind;
+  LDone: Boolean;
+begin
+  if not OpRangeOf(ATree, ANode, ALeaves, LLo, LHi) then
+    Exit;
+  LWas := AArg.Kind;
+  AArg.SubRange := False;
+  LDone := False;
+  // A hull inside 0..127 ranks as a ShortInt (`Su and Su2` over `0..9`).
+  if (LLo >= 0) and (LHi <= 127) then
+  begin
+    AArg.Kind := cnkShortInt;
+    LDone := True;
+  end;
+  // A whole integer type's range is that type; else a subrange of it.
+  if not LDone then
+    for K := cnkShortInt to cnkInt64 do
+      if (CIntKindLo[K] = LLo) and (CIntKindHi[K] = LHi) then
+      begin
+        AArg.Kind := K;
+        LDone := True;
+        Break;
+      end;
+  if not LDone then
+    for K := cnkShortInt to cnkUInt64 do
+      if IntKindHolds(K, LLo, LHi) then
+      begin
+        AArg.Kind := K;
+        AArg.SubRange := True;
+        AArg.SubLo := LLo;
+        AArg.SubHi := LHi;
+        Break;
+      end;
+  AArg.OpRange := AArg.SubRange or (AArg.Kind <> LWas);
 end;
 
 function SubrangeParRawRank(const AArg: TSemaArgConv; APLo, APHi: Int64;
@@ -4999,6 +5340,25 @@ begin
   end;
 end;
 
+procedure SubrangeOpFacts(ALo, AHi: Int64; var AF: TSemaOpFacts);
+begin
+  if (ALo > AHi) or (AF.Cat <> tcInteger) then
+    Exit;
+  if (ALo >= Low(Integer)) and (AHi <= High(Integer)) then
+    AF.NonNeg := ALo >= 0
+  else
+  begin
+    AF.SubBase := True;
+    AF.Rank := 4;
+    AF.Unsigned := False;
+    if (ALo >= 0) and (AHi <= High(Cardinal)) then
+    begin
+      AF.Rank := 3;
+      AF.Unsigned := True;
+    end;
+  end;
+end;
+
 // The (rank, signedness) integer operand AF computes in beside AOther: a
 // rankless type is an Integer; a constant takes AOther's shape when its
 // value fits it, else the shape of its value.
@@ -5141,6 +5501,12 @@ function OperatorAnswer(AOp: TPasTokenKind; AUnary: Boolean;
     OpShape(AR, AL, LRR, LRU);
     if (LRL < 3) and (LRR < 3) then
       Exit(oaInteger);
+    // A subrange or an operator that cannot be negative meets a Cardinal
+    // as unsigned.
+    if AL.NonNeg and (LRR = 3) and LRU then
+      LLU := True;
+    if AR.NonNeg and (LRL = 3) and LLU then
+      LRU := True;
     if (LRL = 4) or (LRR = 4) then
       Exit(IntAns(4, ((LRL = 4) and LLU) or ((LRR = 4) and LRU), LRL, LRR,
         LLU, LRU));
@@ -5167,6 +5533,15 @@ function OperatorAnswer(AOp: TPasTokenKind; AUnary: Boolean;
     LLU, LRU: Boolean;
     LLo, LHi: Int64;
 
+    // Can operand AF (signed by OpShape: AUns False) hold a negative value?
+    // A constant only when its value is one, a subrange only when its range
+    // reaches below 0.
+    function MayBeNegative(const AF: TSemaOpFacts; AUns: Boolean): Boolean;
+    begin
+      Result := not AUns and not AF.NonNeg and
+        not (AF.IntConst and (AF.IntValue >= 0));
+    end;
+
     procedure Cover(ARank: Integer; AUns: Boolean);
     var
       LI: Integer;
@@ -5188,8 +5563,20 @@ function OperatorAnswer(AOp: TPasTokenKind; AUnary: Boolean;
       Exit(IntAns(4, ((LRL = 4) and LLU) or ((LRR = 4) and LRU), LRL, LRR,
         LLU, LRU));
     if (LRL = 3) or (LRR = 3) then
+    begin
+      // `or` / `xor` of a Cardinal with an operand that can be negative
+      // meet in Int64 (W1024: `C or Sh`, `C xor I`, `C or -1`, `C or XN5`
+      // of a `-5..5`); `and` stays Cardinal, and so does either with an
+      // unsigned operand, a non-negative constant (`$FF000000 or 0`) or a
+      // subrange that cannot be negative.
+      // Two constants fold, typed by their value (3.2.1): not this rule.
+      if (AOp in [tkOr, tkXor]) and not (AL.IntConst and AR.IntConst) and
+         (((LRL = 3) and LLU and MayBeNegative(AR, LRU)) or
+          ((LRR = 3) and LRU and MayBeNegative(AL, LLU))) then
+        Exit(oaInt64);
       Exit(IntAns(3, ((LRL = 3) and LLU) or ((LRR = 3) and LRU), LRL, LRR,
         LLU, LRU));
+    end;
     LLo := 0;
     LHi := 0;
     Cover(LRL, LLU);
@@ -6533,6 +6920,58 @@ begin
      not AArg.Facts.IntConst and (ANode <> NIL_NODE) and
      (MayFoldConvConst(T, ANode) or IsConstName(ANode)) then
     FoldConvConst(T, ANode, ConstFacts(), OrdNameValue(), AArg);
+  OpRangeArg(ANode, AArg);
+end;
+
+procedure TPasSemaTyper.OpRangeArg(ANode: Integer; var AArg: TSemaArgConv);
+var
+  LLeaves: TSemaOpRangeLeaves;
+begin
+  if OpRangeLeaves(T, ANode, AArg, LLeaves) then
+  begin
+    FillOpRange(LLeaves);
+    OpRangeConv(T, ANode, LLeaves, AArg);
+  end;
+end;
+
+procedure TPasSemaTyper.OpNonNeg(ANode: Integer; AOp: TPasTokenKind;
+  var AF: TSemaOpFacts);
+var
+  LLeaves: TSemaOpRangeLeaves;
+  LArg: TSemaArgConv;
+begin
+  LArg := Default(TSemaArgConv);
+  LArg.Facts := AF;
+  LArg.Kind := cnkInteger;
+  if OpRangeLeaves(T, ANode, LArg, LLeaves) then
+  begin
+    FillOpRange(LLeaves);
+    MarkOpNonNeg(T, ANode, AOp, LLeaves, AF);
+  end;
+end;
+
+procedure TPasSemaTyper.FillOpRange(var ALeaves: TSemaOpRangeLeaves);
+var
+  LLeaf: TSemaArgConv;
+  LAt, LN, I: Integer;
+begin
+  var LFacts := ConstFacts();
+  for I := 0 to ALeaves.Count - 1 do
+  begin
+    LN := ALeaves.Nodes[I];
+    LAt := M.IntraType(LN);
+    if LAt = NIL_SYM then
+      Continue;
+    // ScoreArgRanked's reading of an argument, for the operand.
+    LLeaf := Default(TSemaArgConv);
+    LLeaf.Kind := ConvKindSym(LAt, LN, True, LLeaf.Facts);
+    if (LLeaf.Kind <> cnkNone) and (LLeaf.Facts.Cat = tcInteger) and
+       not LLeaf.Facts.IntConst and
+       (MayFoldConvConst(T, LN) or IsConstName(LN)) then
+      FoldConvConst(T, LN, ConstFacts(), OrdNameValue(), LLeaf);
+    FConv.SubrangeConv(UX(LAt), LLeaf);
+    SetOpRangeLeaf(ALeaves, I, LLeaf, T, LFacts);
+  end;
 end;
 
 function TPasSemaTyper.Kind(N: Integer): TPasNodeKind;
@@ -7221,7 +7660,16 @@ begin
   else
     LB := WeakAliasEnd(ASym);
   if (LB = NIL_SYM) or (M.Symbols[LB].Kind <> skBuiltinType) then
+  begin
+    // An integer subrange computes by its range (SubrangeOpFacts).
+    if (Result.Cat = tcInteger) and not Result.IntConst then
+    begin
+      var LOrd := OrdFacts(NIL_NODE, ASym);
+      if LOrd.HasRange then
+        SubrangeOpFacts(LOrd.Lo, LOrd.Hi, Result);
+    end;
     Exit;
+  end;
   Result.Rank := M.Symbols[LB].NumRank;
   Result.Unsigned := (LB = Byt) or (LB = Wrd) or (LB = Card) or
     (LB = LWord) or (LB = U64) or (LB = NUInt);
@@ -7569,7 +8017,14 @@ begin
   end;
   if IsTypeNameOperand(LLeft) or IsTypeNameOperand(LRight) then
     Exit;
-  LAns := OperatorAnswer(LOp, False, OpFacts(LL, LLeft), OpFacts(LR, LRight),
+  var LFL := OpFacts(LL, LLeft);
+  var LFR := OpFacts(LR, LRight);
+  // An operator operand beside a Cardinal: its anonymous subrange.
+  if OpNonNegAsked(LOp, LFL, LFR) then
+    OpNonNeg(LLeft, LOp, LFL)
+  else if OpNonNegAsked(LOp, LFR, LFL) then
+    OpNonNeg(LRight, LOp, LFR);
+  LAns := OperatorAnswer(LOp, False, LFL, LFR,
     WeakAliasEnd(LL) = WeakAliasEnd(LR), FIs64);
   if LAns = oaNone then
   begin
@@ -8023,6 +8478,7 @@ begin
   LArgC := Default(TSemaArgConv);
   LArgC.Kind := ConvKindSym(AAt, LCore, True, LArgC.Facts);
   FConv.SubrangeConv(UX(AAt), LArgC);
+  OpRangeArg(LCore, LArgC);
   LDyn := False;
   if CatOf(AAt) = tcArray then
   begin
@@ -8401,6 +8857,7 @@ begin
        (MayFoldConvConst(T, LCore) or IsConstName(LCore)) then
       FoldConvConst(T, LCore, ConstFacts(), OrdNameValue(), LArgC);
     FConv.SubrangeConv(UX(AAt), LArgC);
+    OpRangeArg(LCore, LArgC);
     LConv := @LArgC;
   end;
   LParX := UX(APt);

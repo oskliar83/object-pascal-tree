@@ -12634,6 +12634,124 @@ begin
   end;
 end;
 
+// The calls in AModel bound to an overload whose result type is TRW: by the
+// unit pass's type of the call (AX False) or the project pass's (AX True).
+function TrwCallCount(AModel: TPasSemaModel; AX: Boolean): Integer;
+var
+  LX: TSemaXType;
+begin
+  Result := 0;
+  for var N := 0 to High(AModel.Tree.Nodes) do
+    if AModel.Tree.Nodes[N].Kind = nkCall then
+      if AX then
+      begin
+        if AModel.ExprTypeX.TryGetValue(N, LX) and
+           (GProj.Model(LX.UnitId).Symbols[LX.Sym].NameLower = 'trw') then
+          Inc(Result);
+      end
+      else if (AModel.ExprType[N] <> NIL_SYM) and
+              (AModel.Symbols[AModel.ExprType[N]].NameLower = 'trw') then
+        Inc(Result);
+end;
+
+// 4.2.1 / 6.3.1: an integer operator argument ranks by dcc's anonymous
+// subrange of it (OpRangeConv; local/cov-exprs-2026-11 m1-m6): `+ * div mod
+// shl shr` over operands that cannot be negative as `0..High(Integer)` (A:
+// Cardinal over Int64 for `Bt + Bt2`, `Su + 1`), `and` / `or` / `xor` by
+// the hull of their operands (B, D: `Bt and 300` SmallInt over Integer, Word
+// over Integer; C: `Su and Su2` of two `0..9` a ShortInt); a `-` stays
+// Integer (E: Int64 over Cardinal). A subrange operand computes by its
+// range (SubrangeOpFacts): `Su + Cd` is Cardinal (A), `X3G + Bt` of a
+// `0..3000000000` Cardinal (G); `Cd or Sh` is Int64 where `and` would be
+// Cardinal (H). J: `Bt and -1` (SmallInt) binds alike before and after.
+// Every call binds the TRW overload, declared second - in the unit's own
+// body (the unit pass, ExprType) and from the program (the project pass,
+// ExprTypeX). Each compiles with dcc64 37.0 as written.
+procedure TestOpRangeRanking;
+const
+  CALLS =
+    '  K := A(Bt + Bt2).W;'#10'  K := A(Su + 1).W;'#10 +
+    '  K := A(Su + Cd).W;'#10'  K := B(Bt and 300).W;'#10 +
+    '  K := C(Su and Su2).W;'#10'  K := D(Bt and 300).W;'#10 +
+    '  K := E(W - W2).W;'#10'  K := G(X3G + Bt).W;'#10 +
+    '  K := H(Cd or Sh).W;'#10'  K := J(Bt and -1).W;'#10;
+  VARS =
+    'var K: Integer; Bt, Bt2: Byte; W, W2: Word; Su, Su2: TSub; X3G: T3G;'#10 +
+    '  Cd: Cardinal; Sh: ShortInt;'#10;
+  PAIRS: array[0..15] of string = ('A(X: Int64): TRA',
+    'A(X: Cardinal): TRW', 'B(X: Integer): TRA', 'B(X: SmallInt): TRW',
+    'C(X: Integer): TRA', 'C(X: ShortInt): TRW', 'D(X: Integer): TRA',
+    'D(X: Word): TRW', 'E(X: Cardinal): TRA', 'E(X: Int64): TRW',
+    'G(X: Integer): TRA', 'G(X: Cardinal): TRW', 'H(X: Cardinal): TRA',
+    'H(X: Int64): TRW', 'J(X: Integer): TRA', 'J(X: SmallInt): TRW');
+
+var
+  LDir, LUnit, LDecl, LImpl: string;
+begin
+  LDecl := '';
+  LImpl := '';
+  for var LP in PAIRS do
+  begin
+    LDecl := LDecl + 'function ' + LP + '; overload;'#10;
+    LImpl := LImpl + 'function ' + LP + '; begin end;'#10;
+  end;
+  LUnit := 'unit OrA;'#10'interface'#10'type'#10 +
+    '  TRA = record A: Integer; end;'#10 +
+    '  TRW = record W: Integer; end;'#10 +
+    '  TSub = 0..9; T3G = 0..3000000000;'#10 + LDecl +
+    'procedure UnitCalls;'#10'implementation'#10 + LImpl +
+    'procedure UnitCalls;'#10 + VARS + 'begin'#10 + CALLS + 'end;'#10 +
+    'end.'#10;
+  LDir := FreshDir('pastree_sema_oprange');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'OrA.pas'), LUnit);
+  // The types themselves (the `P := ...` lines).
+  TFile.WriteAllText(TPath.Combine(LDir, 'OrP.dpr'),
+    'program OrP;'#10'uses OrA;'#10 + VARS + 'var P: Pointer;'#10 +
+    'begin'#10 + CALLS +
+    '  P := X3G + Bt;'#10'  P := Su + Cd;'#10'  P := Cd or Sh;'#10 +
+    '  P := Cd and Sh;'#10 + 'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'OrP.dpr'));
+    var LU := TrwCallCount(ModelByName('ora'), False);
+    Ok('operator range ranking: the unit pass binds dcc''s overload [' +
+      IntToStr(LU) + ' of 10]', LU = 10);
+    var LP := TrwCallCount(ModelByName('orp'), True);
+    Ok('operator range ranking: the project pass binds dcc''s overload [' +
+      IntToStr(LP) + ' of 10]', LP = 10);
+    Ok('operator range ranking: no E2003 [' +
+      IntToStr(DiagCount(ModelByName('orp'), 'E2003')) + ']',
+      DiagCount(ModelByName('orp'), 'E2003') = 0);
+    // The right side of each `P := ...`, by the project pass's type, else
+    // the unit pass's.
+    var LTypes := '';
+    var LPM := ModelByName('orp');
+    for var N := 0 to High(LPM.Tree.Nodes) do
+      if (LPM.Tree.Nodes[N].Kind = nkAssign) and
+         (LPM.Tree.NodeText(LPM.Tree.Nodes[N].FirstChild) = 'P') then
+      begin
+        var LRhs := LPM.Tree.Nodes[LPM.Tree.Nodes[N].FirstChild].NextSibling;
+        var LRX: TSemaXType;
+        if LPM.ExprTypeX.TryGetValue(LRhs, LRX) then
+          LTypes := LTypes + GProj.XTypeText(LRX) + ' '
+        else if LPM.ExprType[LRhs] <> NIL_SYM then
+          LTypes := LTypes + LPM.Symbols[LPM.ExprType[LRhs]].Name + ' '
+        else
+          LTypes := LTypes + '? ';
+      end;
+    Ok('subrange and bitwise operands type as dcc''s [' + LTypes + ']',
+      LTypes = 'Cardinal Cardinal Int64 Cardinal ');
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // A class or record helper's set marked `overload` and the helped type's own
 // set are one overload set (15.3.3; local/type-conv-2026-11/helper-ovl): the
 // helped class's GetString(TBy) and GetString(TBy, I, N) stay callable beside
@@ -20711,6 +20829,7 @@ begin
   TestProcConvRanking;
   TestArrConvRanking;
   TestPtrConvRanking;
+  TestOpRangeRanking;
   TestModeConvRanking;
   TestLeftoverRanking;
   TestOverloadTies;
