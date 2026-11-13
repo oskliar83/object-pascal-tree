@@ -12654,6 +12654,67 @@ begin
         Inc(Result);
 end;
 
+// 2.2.1 / 6.3.1: on an LP64 target (OSX64 here) LongInt and LongWord are
+// 8-byte types of their own, ranked by their width: `F(Lg)` beside
+// F(Integer) and F(Int64) takes the Int64 one, `F(Lw)` too, `G(Lw)` beside
+// G(Cardinal) and G(UInt64) the UInt64 one - in the unit's own body and from
+// the program (dccosx64, dccosxarm64, dcciosarm64, dccaarm64 37.0,
+// 2026-11-13). On Win64 `F(Lg)` takes F(Integer), `H(Lw)` H(Int64) (dcc64).
+procedure TestLp64Ranking;
+const
+  DECLS: array[0..5] of string = ('F(X: Integer): TRA', 'F(X: Int64): TRW',
+    'H(X: Integer): TRA', 'H(X: Int64): TRW', 'G(X: Cardinal): TRA',
+    'G(X: UInt64): TRW');
+  BODY =
+    'var K: Integer; Lg: LongInt; Lw: LongWord;'#10 + 'begin'#10 +
+    '  K := F(Lg).W;'#10'  K := H(Lw).W;'#10'  K := G(Lw).W;'#10;
+var
+  LDir, LDecl, LImpl: string;
+begin
+  LDecl := '';
+  LImpl := '';
+  for var LD in DECLS do
+  begin
+    LDecl := LDecl + 'function ' + LD + '; overload;'#10;
+    LImpl := LImpl + 'function ' + LD + '; begin end;'#10;
+  end;
+  for var LPlat in [pfMacOS64, pfWin64] do
+  begin
+    LDir := FreshDir('pastree_sema_lp64');
+    TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+      'unit System;'#10'interface'#10'type TObject = class end;'#10 +
+      'implementation'#10'end.'#10);
+    TFile.WriteAllText(TPath.Combine(LDir, 'LpA.pas'),
+      'unit LpA;'#10'interface'#10'type'#10 +
+      '  TRA = record A: Integer; end;'#10 +
+      '  TRW = record W: Integer; end;'#10 + LDecl +
+      'procedure UnitCalls;'#10'implementation'#10 + LImpl +
+      'procedure UnitCalls;'#10 + BODY + 'end;'#10'end.'#10);
+    TFile.WriteAllText(TPath.Combine(LDir, 'LpP.dpr'),
+      'program LpP;'#10'uses LpA;'#10 + BODY + 'end.'#10);
+    GProj := TPasSemaProject.Create(LPlat, [LDir], []);
+    try
+      GProj.AnalyzeProject(TPath.Combine(LDir, 'LpP.dpr'));
+      var LU := TrwCallCount(ModelByName('lpa'), False);
+      var LP := TrwCallCount(ModelByName('lpp'), True);
+      if LPlat = pfMacOS64 then
+        Ok('LP64 ranking: LongInt / LongWord take the 64-bit overloads [unit ' +
+          IntToStr(LU) + ', project ' + IntToStr(LP) + ' of 3]',
+          (LU = 3) and (LP = 3))
+      else
+        // Win64: LongInt is Integer, LongWord Cardinal - H(Lw) alone takes
+        // the Int64 one, a Cardinal's lossless conversion over Integer.
+        Ok('LP64 ranking: on Win64 only a Cardinal takes the Int64 one [unit ' +
+          IntToStr(LU) + ', project ' + IntToStr(LP) + ' of 1]',
+          (LU = 1) and (LP = 1));
+    finally
+      GProj.Free;
+      if TDirectory.Exists(LDir) then
+        TDirectory.Delete(LDir, True);
+    end;
+  end;
+end;
+
 // 4.2.1 / 6.3.1: an integer operator argument ranks by dcc's anonymous
 // subrange of it (OpRangeConv; local/cov-exprs-2026-11 m1-m6): `+ * div mod
 // shl shr` over operands that cannot be negative as `0..High(Integer)` (A:
@@ -20830,6 +20891,7 @@ begin
   TestArrConvRanking;
   TestPtrConvRanking;
   TestOpRangeRanking;
+  TestLp64Ranking;
   TestModeConvRanking;
   TestLeftoverRanking;
   TestOverloadTies;
