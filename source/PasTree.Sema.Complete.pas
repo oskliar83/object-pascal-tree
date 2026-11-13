@@ -4121,19 +4121,7 @@ begin
     skType, skConst, skEnumValue:
       Result := True;
     skVar, skField:
-      begin
-        // The decl chain: name ident -> nkVarDecl -> nkVarSec (Aux = 1 for
-        // a `class var` run - the parser eats both keywords and marks it).
-        LNode := AModel.Symbols[ASym].DeclNode;
-        while (LNode <> NIL_NODE) and
-              (AModel.Tree.Nodes[LNode].Kind <> nkVarSec) and
-              not (AModel.Tree.Nodes[LNode].Kind in [nkClassType,
-                nkRecordType, nkInterfaceType, nkObjectType, nkHelperType]) do
-          LNode := AModel.Tree.Nodes[LNode].Parent;
-        Result := (LNode <> NIL_NODE) and
-          (AModel.Tree.Nodes[LNode].Kind = nkVarSec) and
-          (AModel.Tree.Nodes[LNode].Aux = 1);
-      end;
+      Result := AModel.IsClassVar(ASym);
     skRoutine:
       begin
         // RoutineHead, not a raw VisibleToken read: this runs during member

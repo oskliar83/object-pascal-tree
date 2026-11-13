@@ -2633,6 +2633,21 @@ begin
       Inc(Result);
 end;
 
+// Every ACode diagnostic of AModel as `line:col` in report order, joined by
+// spaces - an assertion names the exact sites, so one too many fails too.
+function DiagSites(AModel: TPasSemaModel; const ACode: string): string;
+begin
+  Result := '';
+  for var LIdx := 0 to High(AModel.Diags) do
+    if AModel.Diags[LIdx].Code = ACode then
+    begin
+      if Result <> '' then
+        Result := Result + ' ';
+      Result := Result + Format('%d:%d', [AModel.Diags[LIdx].Line,
+        AModel.Diags[LIdx].Col]);
+    end;
+end;
+
 // Does any ACode diagnostic in AModel mention ASubstr?
 function DiagHasText(AModel: TPasSemaModel; const ACode, ASubstr: string):
   Boolean;
@@ -9416,6 +9431,73 @@ begin
     Ok('clsself: a class method''s Self picks the class-reference overload,' +
       ' an instance method''s the instance one - no E2003',
       DiagCount(ModelByName('csp'), 'E2003') = 0);
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
+{ Spec 3.2.2 (dcc64 37.0): a record aggregate's label naming no member is
+  E2003, one naming a member that is no field E2461 - but a label failing
+  right after another failed one of the same declaration, with no good label
+  between, is reported by neither. A variant part's fields and its tag are
+  fields; a record of another unit, an array's element record, a nested
+  record field and an initialized var are judged alike. }
+procedure TestAggregateLabelDiags;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_aggrdiag');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10'  TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'AgU.pas'),
+    'unit AgU;'#10'interface'#10'type'#10 +
+    '  TIn = record Q: Integer; end;'#10 +
+    '  TURec = record A: Integer; R: TIn; S: TIn; end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'AgP.dpr'),
+    'program AgP;'#10 +                                              // 1
+    'uses AgU;'#10 +                                                 // 2
+    'type'#10 +                                                      // 3
+    '  TV = record A: Integer; case B: Byte of 0: (V0: Integer); 1: (V1: Byte); end;'#10 + // 4
+    '  TM = record X: Integer; function M: Integer; property P: Integer read X; const K = 5; class var CV: Integer; end;'#10 + // 5
+    'function TM.M: Integer; begin Result := 0; end;'#10 +           // 6
+    'const'#10 +                                                     // 7
+    '  C1: TV = (A: 1; B: 0; V0: 2);'#10 +                           // 8  valid
+    '  C2: TURec = (A: 1; R: (Q: 1); S: (Q: 2));'#10 +               // 9  valid
+    '  C3: array[0..1] of TURec = ((A: 1), (R: (Q: 3)));'#10 +       // 10 valid
+    '  C4: TV = (A: 1; Zz: 2);'#10 +                                 // 11 Zz col 19
+    '  C5: TM = (P: 1);'#10 +                                        // 12 P col 13
+    '  C6: TM = (M: 1);'#10 +                                        // 13 M col 13
+    '  C7: TM = (K: 1);'#10 +                                        // 14 K col 13
+    '  C8: TURec = (A: 1; Zz: 2; Yy: 3);'#10 +                       // 15 Zz col 22
+    '  C9: TURec = (Zz: 1; A: 2; Yy: 3);'#10 +                       // 16 Zz 16, Yy 29
+    '  D1: array[0..1] of TURec = ((A: 1; Zz: 1), (Yy: 1));'#10 +   // 17 Zz 38
+    '  D2: array[0..1] of TURec = ((A: 1; Zz: 1), (A: 2; Yy: 1));'#10 + // 18 Zz 38, Yy 53
+    '  D3: TURec = (R: (Zz: 1); Yy: 3);'#10 +                        // 19 Zz 20
+    '  D4: TURec = (R: (Ww: 1); S: (Vv: 1));'#10 +                   // 20 Ww 20, Vv 32
+    '  D5: TM = (M: 1; Yy: 3);'#10 +                                 // 21 M col 13
+    '  D6: TM = (CV: 1);'#10 +                                       // 22 CV col 13
+    'var'#10 +                                                       // 23
+    '  G: TURec = (Uu: 1);'#10 +                                     // 24 Uu col 15
+    'begin'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'AgP.dpr'));
+    LM := ModelByName('agp');
+    Ok('aggrdiag: E2003 on every label naming no field but one right after ' +
+      'another failed one [' + DiagSites(LM, 'E2003') + ']',
+      DiagSites(LM, 'E2003') =
+      '11:19 15:22 16:16 16:29 17:38 18:38 18:53 19:20 20:20 20:32 24:15');
+    Ok('aggrdiag: E2461 on a property, method, constant and class var label [' +
+      DiagSites(LM, 'E2461') + ']',
+      DiagSites(LM, 'E2461') = '12:13 13:13 14:13 21:13 22:13');
+    Ok('aggrdiag: the message names the label',
+      DiagHasText(LM, 'E2461', '''P'' is not an instance field'));
+    Ok('aggrdiag: nothing else', Length(LM.Diags) = 16);
   finally
     FreeAndNil(GProj);
     if TDirectory.Exists(LDir) then
@@ -20211,6 +20293,7 @@ begin
   TestSystemOverloadJoins;
   TestInlineProcType;
   TestClassMethodSelf;
+  TestAggregateLabelDiags;
   TestAmbiguousGenericArgs;
   TestNestedTypeArgFrame;
   TestOpenArrayInference;

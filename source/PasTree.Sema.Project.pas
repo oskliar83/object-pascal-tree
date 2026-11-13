@@ -16416,13 +16416,35 @@ end;
   (inline, named, two indices, nested, a record field's type) and wherever
   the record is declared. Phase 1 (TPasSemaResolver.ResolveAggregates) binds
   a same-unit named record's; this binds the rest, through the declared
-  type's cross-model type. A label that names no field stays unbound, as in
-  Phase 1: dcc's E2003 there is not reported (docs/coverage.md 3.2.2). }
+  type's cross-model type.
+  A label of a RECORD aggregate that names no member is E2003, one naming a
+  member that is no instance field (a method, a property, a constant, a
+  class var) E2461 - but not
+  a label that fails right after another failed one of the same declaration,
+  in source order with no good label between: dcc reports neither there
+  (spec 3.2.2, probed). A level this cannot type (a type unread, an `object`)
+  silences the rest of its declaration, whose failures dcc may count. }
 procedure TPasSemaProject.BindAggregateLabelsX(AId: Integer;
   ANewExt: TDictionary<Integer, TPasExtRef>);
 var
   LM: TPasSemaModel;
   LDone: TDictionary<Integer, Boolean>;
+  // Per declaration: the label read last failed; a level was not typed.
+  LFailed, LBlind: Boolean;
+
+  // A failed label: reported unless the one before failed too.
+  procedure Fail(AName: Integer; const ACode, AFmt: string);
+  begin
+    if not (LFailed or LBlind) and LM.AllUsesResolved and
+       not LM.HasDiagAt(AName) then
+    begin
+      if ACode = 'E2003' then
+        EmitE2003(LM, AName, AId)
+      else
+        EmitAt(LM, AName, ACode, Format(AFmt, [LM.Tree.NodeText(AName)]));
+    end;
+    LFailed := True;
+  end;
 
   // AAggr against the type AT spells - a type node ATNode of model ATMid
   // with ADims of its array dimensions still to peel (-1: not begun), or,
@@ -16432,6 +16454,7 @@ var
   var
     LTree: TPasTree;
     LChild, LName, LValue, LMemMid, LMemSym, LCtx, LDef: Integer;
+    LRec, LNoField: Boolean;
     LExt: TPasExtRef;
   begin
     if (ADepth > 64) or (AAggr = NIL_NODE) or
@@ -16460,7 +16483,10 @@ var
     end;
     AX := CanonTypeX(AX);
     if not XValid(AX) then
+    begin
+      LBlind := True;
       Exit;
+    end;
     // A named array type: its definition is the node to peel.
     LDef := TypeDefNodeOf(AX.UnitId, AX.Sym);
     if (LDef <> NIL_NODE) and
@@ -16469,6 +16495,9 @@ var
       Labels(AAggr, AX.UnitId, LDef, -1, XNil, ADepth + 1);
       Exit;
     end;
+    // Only a record's labels are judged; its member set is the whole answer.
+    LRec := (XCatOf(AX) = tcRecord) and
+      (FModels[AX.UnitId].Symbols[AX.Sym].MemberScope <> NIL_SCOPE);
     LChild := LM.Tree.Nodes[AAggr].FirstChild;
     while LChild <> NIL_NODE do
     begin
@@ -16488,10 +16517,11 @@ var
             LMemSym := LExt.Sym;
           end
           else if FindMemberX(AId, AX, PasNodeKey(LM.Tree, LName), LMemMid,
-                    LMemSym, LCtx, 0, True) and
-                  (FModels[LMemMid].Symbols[LMemSym].Kind = skField) then
+                    LMemSym, LCtx, 0, True) then
           begin
-            if LMemMid = AId then
+            if FModels[LMemMid].Symbols[LMemSym].Kind <> skField then
+              // Named, but no field: left unbound (a class var is bound).
+            else if LMemMid = AId then
               LM.RefMap[LName] := LMemSym
             else
             begin
@@ -16501,6 +16531,19 @@ var
             end;
           end
           else
+            LMemMid := -1;
+          LNoField := (LMemMid >= 0) and
+            ((FModels[LMemMid].Symbols[LMemSym].Kind <> skField) or
+             FModels[LMemMid].IsClassVar(LMemSym));
+          if not LRec then
+            LBlind := True
+          else if LMemMid < 0 then
+            Fail(LName, 'E2003', '')
+          else if LNoField then
+            Fail(LName, 'E2461', SE2461_NotAnInstanceField)
+          else
+            LFailed := False;
+          if LNoField then
             LMemMid := -1;
           LValue := LM.Tree.Nodes[LName].NextSibling;
           if (LMemMid >= 0) and (LValue <> NIL_NODE) and
@@ -16538,7 +16581,11 @@ begin
       if LDone = nil then
         LDone := TDictionary<Integer, Boolean>.Create;
       if LDone.TryAdd(LInit, True) then
+      begin
+        LFailed := False;
+        LBlind := False;
         Labels(LInit, AId, LType, -1, XNil, 0);
+      end;
     end;
   finally
     LDone.Free;

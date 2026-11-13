@@ -211,12 +211,6 @@ of less work, not a gap in following the language; its consequences are in
 - a set constructor (`[1, 2]`, `[meA, meB]`) and `nil` give a constant no
   type: dcc's are anonymous, and nothing in PasTree can name them.
 
-### 3.2.2 Typed constants
-- an aggregate label that names no field of its record (`C: TRec = (A: 1;
-  Zz: 2)`) is not reported: dcc's E2003 there is left out, so a typo in a
-  label is silent. Every label that does name a field is bound - a record
-  from any unit, an array of records per dimension, an anonymous record.
-
 ### 3.3.2 Name resolution order
 - a forward class or interface is read from the start of its type section,
   not from the forward: a reference above `TFoo = class;` in that section
