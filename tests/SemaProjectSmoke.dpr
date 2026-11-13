@@ -4882,6 +4882,95 @@ begin
   end;
 end;
 
+{ 13.1.1 / 13.1.3: a property's accessor methods against the property - a
+  getter takes the array property's index parameters and then the `index`
+  ordinal, returns the property's identical type; a setter the same and
+  then the value; a getter is a function, a setter a procedure. dcc64 37.0
+  reports E2008 on exactly lines 17-20 and 25 of AC; an inherited getter
+  of another unit (line 22), an array property with an `index` (21) and an
+  overloaded getter of an array property (23) compile. }
+procedure TestPropertyAccessors;
+const
+  ABS =
+    'unit AB;'#13#10 +                                      // 1
+    'interface'#13#10 +                                     // 2
+    'type'#13#10 +                                          // 3
+    '  TAnc = class'#13#10 +                                // 4
+    '    function GetX(Index: Integer): Integer;'#13#10 +   // 5
+    '  end;'#13#10 +                                        // 6
+    'implementation'#13#10 +                                // 7
+    'function TAnc.GetX(Index: Integer): Integer; begin Result := Index; end;'#13#10 +// 8
+    'end.'#13#10;                                           // 9
+  ACS =
+    'unit AC;'#13#10 +                                      // 1
+    'interface'#13#10 +                                     // 2
+    'uses AB;'#13#10 +                                      // 3
+    'type'#13#10 +                                          // 4
+    '  TR = class(TAnc)'#13#10 +                            // 5
+    '    FI: Integer;'#13#10 +                              // 6
+    '    function GetC(Index: Integer): Integer;'#13#10 +   // 7
+    '    procedure SetC(Index: Integer; V: Integer);'#13#10 +// 8
+    '    function GetBad: Integer;'#13#10 +                 // 9
+    '    function GetS(Index: Integer): string;'#13#10 +    // 10
+    '    function GetE(Index: Integer): Byte;'#13#10 +      // 11
+    '    function GetP: PChar;'#13#10 +                     // 12
+    '    function GetA(const S: string; Index: Integer): Integer;'#13#10 +// 13
+    '    function GetO(I: Integer): Integer; overload;'#13#10 +// 14
+    '    function GetO(const S: string): Integer; overload;'#13#10 +// 15
+    '    property Left: Integer index 0 read GetC write SetC;'#13#10 +// 16
+    '    property Top: Integer index 1 read GetBad;'#13#10 +// 17
+    '    property Name: Integer index 2 read GetS;'#13#10 + // 18
+    '    property B: Integer index 3 read GetE;'#13#10 +    // 19
+    '    property PS: string read GetP;'#13#10 +            // 20
+    '    property Arr[const S: string]: Integer index 4 read GetA;'#13#10 +// 21
+    '    property Inh: Integer index 5 read GetX;'#13#10 +  // 22
+    '    property Ov[I: Integer]: Integer read GetO;'#13#10 +// 23
+    '    property Plain: Integer read FI write FI;'#13#10 + // 24
+    '    property Wr: Integer write GetC;'#13#10 +          // 25
+    '  end;'#13#10 +                                        // 26
+    'implementation'#13#10 +                                // 27
+    'function TR.GetC(Index: Integer): Integer; begin Result := Index; end;'#13#10 +// 28
+    'procedure TR.SetC(Index: Integer; V: Integer); begin end;'#13#10 +// 29
+    'function TR.GetBad: Integer; begin Result := 0; end;'#13#10 +// 30
+    'function TR.GetS(Index: Integer): string; begin end;'#13#10 +// 31
+    'function TR.GetE(Index: Integer): Byte; begin Result := 0; end;'#13#10 +// 32
+    'function TR.GetP: PChar; begin Result := nil; end;'#13#10 +// 33
+    'function TR.GetA(const S: string; Index: Integer): Integer; begin Result := 0; end;'#13#10 +// 34
+    'function TR.GetO(I: Integer): Integer; begin Result := 0; end;'#13#10 +// 35
+    'function TR.GetO(const S: string): Integer; begin Result := 0; end;'#13#10 +// 36
+    'end.'#13#10;                                           // 37
+var
+  LDir: string;
+  LSeen: TStringList;
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_prop_accessors');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'AB.pas'), ABS);
+  TFile.WriteAllText(TPath.Combine(LDir, 'AC.pas'), ACS);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  LSeen := TStringList.Create;
+  try
+    GProj.AnalyzeDirectory(LDir);
+    var LC := ModelByName('ac');
+    Ok('accessors: AC loaded', Assigned(LC));
+    if not Assigned(LC) then
+      Exit;
+    for var LD in LC.Diags do
+      LSeen.Add(Format('%d:%s', [LD.Line, LD.Code]));
+    LSeen.Sort;
+    Ok('accessors: dcc''s five E2008 [' + LSeen.CommaText + ']',
+      LSeen.CommaText = '17:E2008,18:E2008,19:E2008,20:E2008,25:E2008');
+  finally
+    LSeen.Free;
+    GProj.Free;
+    GProj := nil;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 { In a method of a NESTED type the outer type's members - its own and its
   ancestors' - come after the unit's own declarations made so far, and
   before the used units and System (F52 of the parser-fidelity plan; spec
@@ -21749,6 +21838,7 @@ begin
   TestProtectedVisibility;
   TestDefaultPropChoice;
   TestClassRefMembers;
+  TestPropertyAccessors;
   TestNestedOuterAfterUnit;
   TestDeclAfterUnit;
   TestDeclOrder;
