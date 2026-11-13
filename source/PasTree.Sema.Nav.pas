@@ -3585,7 +3585,7 @@ begin
           if LRef.Kind <> drDefine then
             Continue;
         end
-        else if not PasSameName(LRef.Name, AName) then
+        else if not PasSameSymbolName(LRef.Name, AName) then
           Continue;
         if (LRef.FileId < 0) or
            (LRef.FileId > High(LM.Tree.Source.FileNames)) then
@@ -3635,7 +3635,7 @@ begin
             if LSd.Ref.Kind <> drDefine then
               Continue;
           end
-          else if not PasSameName(LSd.Ref.Name, AName) then
+          else if not PasSameSymbolName(LSd.Ref.Name, AName) then
             Continue;
           if not LFileIds.TryGetValue(UpperCase(LSd.FilePath), LFile) then
           begin
@@ -3713,7 +3713,7 @@ begin
   LName := LM.Tree.Source.DefineRefs[LIdx].Name;
   for LDef := LIdx - 1 downto 0 do
     with LM.Tree.Source.DefineRefs[LDef] do
-      if (Kind = drDefine) and Active and PasSameName(Name, LName) then
+      if (Kind = drDefine) and Active and PasSameSymbolName(Name, LName) then
       begin
         ATarget := Default(TPasNavTarget);
         ATarget.UnitId := AMid;

@@ -216,6 +216,14 @@ type
   TPasSymbolValue = record
     IsStr: Boolean;
     Num: Double;
+    // A constant's exact value when it is an integer (IsInt; Int holds the
+    // bits of a UInt64 when Unsigned), or that it is a real (IsReal). An
+    // answer with neither is a number read from Num - an integer when
+    // integral (a size, a length). See TPasCondValue.
+    IsInt: Boolean;
+    Unsigned: Boolean;
+    IsReal: Boolean;
+    Int: Int64;
     Str: string;
     // Set when the oracle returned False because the NAME EXISTS NOWHERE, as
     // opposed to "it exists but I cannot fold its value". The two are
@@ -630,7 +638,8 @@ type
     constructor Create(ASourceManager: TPasSourceManager;
       ADefines: TPasDefines; ACompilerVersion: Double = DEFAULT_COMPILER_VERSION;
       APointerBytes: Integer = 8; AExtendedBytes: Integer = 8;
-      ALongBytes: Integer = 4; AExtendedAlign: Integer = 8);
+      ALongBytes: Integer = 4; AExtendedAlign: Integer = 8;
+      AExtended80Align: Integer = 8);
     destructor Destroy; override;
     { Working memory a parser keeps with this preprocessor for the next unit
       it prepares - the project's TPasNodeScratch (PasTree.Ast), which this
@@ -779,7 +788,7 @@ var
 
 function TDefinesNameComparer.Equals(const Left, Right: string): Boolean;
 begin
-  Result := PasSameName(Left, Right);
+  Result := PasSameSymbolName(Left, Right);
 end;
 
 { FNV-1a through PasFnv1a (PasTree.Types), whose header holds the overflow
@@ -790,9 +799,9 @@ end;
   record fields rather than a run of characters. }
 function TDefinesNameComparer.GetHashCode(const Value: string): Integer;
 begin
-  // FNV-1a over PasFoldChar-folded UTF-16 code units: dcc folds a
-  // conditional symbol as an identifier (local/probe-b65 D, DF1-DF5).
-  Result := Integer(PasFnv1a(PChar(Value), Length(Value), True));
+  // FNV-1a over the symbol fold: an identifier's and 14 letter pairs more
+  // (PasFoldSymbolChar; local/probe-b65 D, DF1-DF5).
+  Result := Integer(PasSymbolHash(Value));
 end;
 
 { Directive text helpers ---------------------------------------------------- }
@@ -1129,14 +1138,14 @@ end;
 constructor TPasPreprocessor.Create(ASourceManager: TPasSourceManager;
   ADefines: TPasDefines; ACompilerVersion: Double;
   APointerBytes: Integer; AExtendedBytes: Integer; ALongBytes: Integer;
-  AExtendedAlign: Integer);
+  AExtendedAlign: Integer; AExtended80Align: Integer);
 begin
   inherited Create;
   FSourceManager := ASourceManager;
   FBaseDefines := ADefines;
   FCompilerVersion := ACompilerVersion;
   FTarget := PasBuiltinTargetOf(APointerBytes, AExtendedBytes, AExtendedAlign,
-    ALongBytes);
+    ALongBytes, AExtended80Align);
   FSwitchStack := TStack<TPasOptState>.Create;
   FOptionRefs := TList<TPasOptionRef>.Create;
   FScopedEnumsEvents := TList<TPasStateEvent>.Create;

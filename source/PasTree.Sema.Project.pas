@@ -910,6 +910,11 @@ type
       ALog: TList<TPasOwnAnswer> = nil): TPasDeclaredQuery;
     function OwnDeclaredBefore(AM: TPasSemaModel; const ANameLower: string;
       const APos: TPasCondPos): Boolean;
+    function DeclaredOutside(AId: Integer; const ANameLower: string): Boolean;
+    function DeclaredUnitPrefix(AId: Integer; const ANameLower: string;
+      out AEnd: Integer): Integer;
+    function DeclaredMemberChain(AM: TPasSemaModel; ASym: Integer;
+      const ARest: string): Boolean;
     function OwnSymbolAt(AM: TPasSemaModel; const ANameLower: string;
       const APos: TPasCondPos; out ASym: Integer): Boolean;
     function OwnSymbolSite(AM: TPasSemaModel; const ANameLower: string;
@@ -1422,7 +1427,7 @@ type
       out ABytes: Double): Boolean;
     function OracleGenericParamNames(AGMid, AGSym: Integer): TArray<string>;
     function OracleHighLow(AMid, ASym, ADepth: Integer; AHigh: Boolean;
-      out ANum: Double): Boolean;
+      out AV: TPasSymbolValue): Boolean;
     function OracleSizeOf(AMid, ASym, ADepth: Integer;
       out ABytes: Double): Boolean;
     function OracleReadable(AMid: Integer): Boolean;
@@ -1441,6 +1446,11 @@ type
       out AAlign: Integer): Boolean;
     function OracleBoundIsChar(AMid, ANode, ADepth: Integer): Boolean;
     function OracleIsCharOrdinal(AMid, ANode, ADepth: Integer): Boolean;
+    function OracleOrdinalNameDef(AMid, ANode: Integer;
+      out ADefMid, ADefNode: Integer; out ABuiltin: string): Boolean;
+    function OracleDeclaredType(AMid, ASym: Integer): Integer;
+    function OracleHighLowOfType(AMid, ANode, ADepth: Integer;
+      AHigh: Boolean; out AV: TPasSymbolValue): Boolean;
     function OracleConstExpr(AMid, ANode, ADepth: Integer;
       out ANum: Double): Boolean;
     function OracleOrdinalCount(AMid, ANode, ADepth: Integer;
@@ -3315,7 +3325,7 @@ begin
   FPlatform := APlatform;
   FInfo := PlatformInfo(APlatform);
   FTarget := PasBuiltinTargetOf(FInfo.PointerBytes, FInfo.ExtendedBytes,
-    FInfo.ExtendedAlign, FInfo.LongBytes);
+    FInfo.ExtendedAlign, FInfo.LongBytes, FInfo.Extended80Align);
   FConv := TPasProjectConvView.Create(Self);
   FCompilerVersion := ACompilerVersion;
   FSM := TPasSourceManager.Create(ASearchPaths);
@@ -4382,38 +4392,60 @@ begin
     function(const AName: string; const APos: TPasCondPos;
       out ADeclared: Boolean): Boolean
     var
-      LLower: string;
-      LUid, LSym, LDot: Integer;
-      LOwnQualified: Boolean;
+      LLower, LRest: string;
+      LUid, LSym, LDot, LFirstDot, LUnitEnd: Integer;
+      LOwn: Boolean;
       LAnswer: TPasOwnAnswer;
     begin
       LLower := PasFoldName(AName);
       LDot := LLower.LastIndexOf('.');
+      LOwn := False;
       if LDot >= 0 then
       begin
-        // A designator (1.3.2): a unit's name declares (`System.SysUtils`),
-        // a qualified name what VisibleQualified finds - a used unit's
-        // interface, System's, SysInit's, a type's member (`UC.TE.e1`).
-        // The unit's own name qualifies by position, below; dcc64 37.0,
-        // local/probe-b58 P1 and UQ.
-        LUid := UnitNamedBy(AId, Copy(LLower, 1, LDot));
-        LOwnQualified := LUid = AId;
-        ADeclared := not LOwnQualified and
-          ((UnitNamedBy(AId, LLower) >= 0) or
-           (VisibleQualified(AId, LLower, LUid, LSym) and (LUid <> AId)));
+        // A designator (1.3.2; dcc64 37.0, local/probe-b58 P1, UQ and
+        // local/probe-cov-preproc DQ-DQ4). A unit's name declares
+        // (`System.SysUtils`). A name a unit qualifies - the longest prefix
+        // naming one, as code reads a qualifier (1.2.3) - is declared when
+        // every segment after the unit resolves, member by member
+        // (`UC.TE.e1`, `UCD.TR.F`; not `UC.TE.e9`); the unit's own name
+        // reads its declarations by position (OwnDeclaredBefore). With no
+        // unit in front, `Head.Member` is Declared(Head) - the member is
+        // not looked at (`TE.e9` and `TObject.Nope` are True) - and a
+        // longer name is False (`TO.TIn.K`, `TE.e1.Foo`).
+        LFirstDot := LLower.IndexOf('.');
+        LUid := DeclaredUnitPrefix(AId, LLower, LUnitEnd);
+        if UnitNamedBy(AId, LLower) >= 0 then
+          ADeclared := True
+        else if LUid = AId then
+          LOwn := True
+        else if LUid >= 0 then
+        begin
+          LRest := Copy(LLower, LUnitEnd + 2, MaxInt);
+          LFirstDot := LRest.IndexOf('.');
+          if LFirstDot < 0 then
+            LFirstDot := Length(LRest);
+          LSym := NIL_SYM;
+          if FModels[LUid].InterfaceScope <> NIL_SCOPE then
+            LSym := FModels[LUid].Resolve(FModels[LUid].InterfaceScope,
+              Copy(LRest, 1, LFirstDot));
+          ADeclared := (LSym <> NIL_SYM) and
+            DeclaredMemberChain(FModels[LUid], LSym,
+              Copy(LRest, LFirstDot + 2, MaxInt));
+        end
+        else if LFirstDot = LDot then
+        begin
+          ADeclared := DeclaredOutside(AId, Copy(LLower, 1, LFirstDot));
+          LOwn := not ADeclared;
+        end
+        else
+          ADeclared := False;
       end
       else
       begin
-        LOwnQualified := False;
-        ADeclared :=
-          (FindInUses(AId, LLower, LUid, LSym) and (LUid <> AId)) or
-          (FindInSystemUnit(LLower, LUid, LSym) and (LUid <> AId)) or
-          (FindInSysInitUnit(LLower, LUid, LSym) and (LUid <> AId)) or
-          ((FModels[AId].SystemScope <> NIL_SCOPE) and
-           (FModels[AId].Resolve(FModels[AId].SystemScope, LLower) <> NIL_SYM));
+        ADeclared := DeclaredOutside(AId, LLower);
+        LOwn := not ADeclared;
       end;
-      if not ADeclared and ((LDot < 0) or LOwnQualified or
-         PasSameName(LLower, FModels[AId].UnitNameLower)) then
+      if LOwn then
       begin
         if AOwn <> nil then
           ADeclared := OwnDeclaredBefore(AOwn, LLower, APos)
@@ -4429,6 +4461,61 @@ begin
       end;
       Result := True;   // this one always has an answer
     end;
+end;
+
+// A bare name declared for unit AId from outside its own text: its imports,
+// System, SysInit, the compiler-provided seed - never a hit in AId itself.
+function TPasSemaProject.DeclaredOutside(AId: Integer;
+  const ANameLower: string): Boolean;
+var
+  LUid, LSym: Integer;
+begin
+  Result :=
+    (FindInUses(AId, ANameLower, LUid, LSym) and (LUid <> AId)) or
+    (FindInSystemUnit(ANameLower, LUid, LSym) and (LUid <> AId)) or
+    (FindInSysInitUnit(ANameLower, LUid, LSym) and (LUid <> AId)) or
+    ((FModels[AId].SystemScope <> NIL_SCOPE) and
+     (FModels[AId].Resolve(FModels[AId].SystemScope, ANameLower) <> NIL_SYM));
+end;
+
+// The unit the longest PROPER prefix of the dotted ANameLower names for unit
+// AId (UnitNamedBy, 1.2.3), -1 for none; AEnd is that prefix's length.
+function TPasSemaProject.DeclaredUnitPrefix(AId: Integer;
+  const ANameLower: string; out AEnd: Integer): Integer;
+begin
+  AEnd := ANameLower.LastIndexOf('.');
+  while AEnd > 0 do
+  begin
+    Result := UnitNamedBy(AId, Copy(ANameLower, 1, AEnd));
+    if Result >= 0 then
+      Exit;
+    AEnd := ANameLower.LastIndexOf('.', AEnd - 1);
+  end;
+  Result := -1;
+end;
+
+// Does every dotted segment of ARest ('' for none) resolve as a member of
+// the one before it, from ASym of AM on - a type's own members and the
+// values of an enumeration it declares?
+function TPasSemaProject.DeclaredMemberChain(AM: TPasSemaModel; ASym: Integer;
+  const ARest: string): Boolean;
+var
+  LSeg: string;
+  LStart, LDot: Integer;
+begin
+  LStart := 0;
+  while LStart < Length(ARest) do
+  begin
+    LDot := ARest.IndexOf('.', LStart);
+    if LDot < 0 then
+      LDot := Length(ARest);
+    LSeg := Copy(ARest, LStart + 1, LDot - LStart);
+    if (ASym = NIL_SYM) or (AM.Symbols[ASym].MemberScope = NIL_SCOPE) then
+      Exit(False);
+    ASym := AM.FindLocalNoHelpers(AM.Symbols[ASym].MemberScope, SemaKey(LSeg));
+    LStart := LDot + 1;
+  end;
+  Result := ASym <> NIL_SYM;
 end;
 
 { The positional half of DeclaredQueryFor: is ANameLower declared in AM's
@@ -4447,17 +4534,46 @@ end;
   answer; an EARLIER guard the pass flips, adding or removing a declaration
   above, is what RunDeclaredPass's rounds catch. Answers False where the
   position cannot be placed - a file the model does not have, or has twice
-  (which inclusion is not known here), or a model whose NodeScope is gone. }
+  (which inclusion is not known here), or a model whose NodeScope is gone.
+
+  A dotted name answers by its HEAD's position (dcc64 37.0,
+  local/probe-cov-preproc DQ-DQ4): `TE.e2` is declared below `TE`'s
+  declaration and not above it, whatever follows - `TE.Nope` too, dcc never
+  looks at the member of `Head.Member` - and a longer name with no unit in
+  front is not declared at all. Qualified by the unit's own name, the head
+  after it answers by position and every member after that must resolve
+  (`UQ.TE.e1` declared, `UQ.TE.Nope` not). }
 function TPasSemaProject.OwnDeclaredBefore(AM: TPasSemaModel;
   const ANameLower: string; const APos: TPasCondPos): Boolean;
 var
-  LSym: Integer;
+  LSym, LLen, LHeadEnd: Integer;
+  LPrefix, LBody, LRest: string;
 begin
+  if AM = nil then
+    Exit(False);
   // The unit's own name: its header stands above every directive.
-  if (AM <> nil) and (AM.UnitNameLower <> '') and
-     (ANameLower = AM.UnitNameLower) then
+  if (AM.UnitNameLower <> '') and (ANameLower = AM.UnitNameLower) then
     Exit(True);
-  Result := OwnSymbolAt(AM, ANameLower, APos, LSym) and (LSym <> NIL_SYM);
+  LPrefix := '';
+  LBody := ANameLower;
+  LLen := Length(AM.UnitNameLower);
+  if (LLen > 0) and (Length(ANameLower) > LLen + 1) and
+     (ANameLower[LLen + 1] = '.') and
+     PasSameName(Copy(ANameLower, 1, LLen), AM.UnitNameLower) then
+  begin
+    LPrefix := Copy(ANameLower, 1, LLen + 1);
+    LBody := Copy(ANameLower, LLen + 2, MaxInt);
+  end;
+  LHeadEnd := LBody.IndexOf('.');
+  if LHeadEnd < 0 then
+    LHeadEnd := Length(LBody);
+  LRest := Copy(LBody, LHeadEnd + 2, MaxInt);
+  if (LPrefix = '') and (LRest.IndexOf('.') >= 0) then
+    Exit(False);
+  if not OwnSymbolAt(AM, LPrefix + Copy(LBody, 1, LHeadEnd), APos, LSym) or
+     (LSym = NIL_SYM) then
+    Exit(False);
+  Result := (LPrefix = '') or DeclaredMemberChain(AM, LSym, LRest);
 end;
 
 { The site of the declaration OwnSymbolAt finds - the file and offset of its
@@ -4808,9 +4924,7 @@ begin
   LVal := EvalCondNode(LM.Tree, LInit, LCtx);
   if LVal.Guessed then
     Exit;
-  AValue.IsStr := LVal.Kind = cvStr;
-  AValue.Str := LVal.Str;
-  AValue.Num := CondAsNum(LVal);
+  CondToSymbolValue(LVal, AValue);
   Result := True;
 end;
 
@@ -6007,9 +6121,8 @@ end;
 
 { The ordinal values an enum spans. Explicit values are honoured, and so is
   the rule that an implicit one continues from the last explicit: `(g1,
-  g2 = 300)` is 0..300, not 0..1. A negative value is legal and dcc sizes
-  the enum by the signed range (spec 2.2.4: `(z1 = -1, z2)` is 1 byte); the
-  signed sizing is not modelled, so it refuses (docs/coverage.md 2.2.4). }
+  g2 = 300)` is 0..300, not 0..1. A negative value is legal (OracleEnumLayout
+  sizes it by the signed range, spec 2.2.4: `(z1 = -1, z2)` is 1 byte). }
 function TPasSemaProject.OracleEnumRange(AMid, ADefNode, ADepth: Integer;
   out ALo, AHi: Double): Boolean;
 var
@@ -6036,8 +6149,12 @@ begin
       LThis := LNext
     else if not OracleConstExpr(AMid, LValue, ADepth, LThis) then
       Exit(False);
-    if (LThis < 0) or (Frac(LThis) <> 0) then
+    // A value is read as the signed 32-bit integer of its low bits (2.2.4:
+    // `(j0 = $80000000)` is -2147483648 for dcc); a fraction, or a value no
+    // 64 bits hold, refuses.
+    if (Frac(LThis) <> 0) or (Abs(LThis) >= 9223372036854775808.0) then
       Exit(False);
+    LThis := Integer(Cardinal(Trunc(LThis) and $FFFFFFFF));
     if not LAny then
     begin
       ALo := LThis;
@@ -6072,7 +6189,18 @@ begin
   AAlign := 1;
   if not OracleEnumRange(AMid, ADefNode, ADepth, LLo, LHi) then
     Exit(False);
-  if LHi <= 255 then
+  if LLo < 0 then
+  begin
+    // A negative value: the SIGNED range (2.2.4, dcc64 37.0: `(v1 = -1, v2
+    // = 200)` is 2 bytes although 200 fits a byte unsigned).
+    if (LLo >= -128) and (LHi <= 127) then
+      LNatural := 1
+    else if (LLo >= -32768) and (LHi <= 32767) then
+      LNatural := 2
+    else
+      LNatural := 4;
+  end
+  else if LHi <= 255 then
     LNatural := 1
   else if LHi <= 65535 then
     LNatural := 2
@@ -6099,7 +6227,7 @@ function TPasSemaProject.OracleOrdinalRange(AMid, ANode, ADepth: Integer;
 
 var
   LM: TPasSemaModel;
-  LLo, LHi, LMid2, LSym, LDef: Integer;
+  LLo, LHi, LMid2, LDef: Integer;
   LName: string;
 begin
   ALo := 0;
@@ -6121,38 +6249,72 @@ begin
       end;
     nkEnumType:
       Exit(OracleEnumRange(AMid, ANode, ADepth, ALo, AHi));   // inline, as a set base
-    nkIdent: ;
+    nkIdent, nkMember: ;
   else
     Exit(False);
   end;
-  LName := LM.Tree.NodeText(ANode);
-  // A named enum or subrange type - one nested in the enclosing class or
-  // record first (TStringList's `set of TOverriddenItem`), then what the name
-  // resolves to where it is written (OracleResolveFrom). A declaration hides
-  // a builtin of the same name; a builtin answers from the one table
-  // (PasBuiltinOrdinalRange, audit D2-02).
-  LDef := OracleNestedTypeDef(AMid, ANode, LM.Tree.NodeNameLower(ANode));
-  if LDef <> NIL_NODE then
-    LMid2 := AMid
-  else
-  begin
-    if OracleResolveFrom(AMid, ANode, LM.Tree.NodeNameLower(ANode), LMid2,
-         LSym) and (FModels[LMid2].Symbols[LSym].DeclNode <> NIL_NODE) then
-      LDef := TypeDefNodeOf(LMid2, LSym)
-    else
-    begin
-      var LKind: TPasCondKind;
-      Exit(PasBuiltinOrdinalRange(LName, FTarget, ALo, AHi, LKind));
-    end;
-  end;
+  if not OracleOrdinalNameDef(AMid, ANode, LMid2, LDef, LName) then
+    Exit(False);
   if LDef = NIL_NODE then
-    Exit(False);
+  begin
+    var LKind: TPasCondKind;
+    Exit(PasBuiltinOrdinalRange(LName, FTarget, ALo, AHi, LKind));
+  end;
   case FModels[LMid2].Tree.Nodes[LDef].Kind of
     nkEnumType: Result := OracleEnumRange(LMid2, LDef, ADepth, ALo, AHi);
-    nkSubrange, nkIdent:
+    nkSubrange, nkIdent, nkMember:
       Result := OracleOrdinalRange(LMid2, LDef, ADepth + 1, ALo, AHi);
   else
     Result := False;
+  end;
+end;
+
+// Where the ordinal type NAME ANode - a bare nkIdent or a qualified nkMember
+// (`array[UC.TE]`, `System.Byte`) - is defined, the one lookup of every
+// oracle walk over an ordinal type: a type nested in the enclosing class or
+// record first (TStringList's `set of TOverriddenItem`), then what the name
+// resolves to where it is written (OracleResolveFrom; a qualified name by
+// OracleQualified). A declaration hides a builtin of the same name. ADefNode
+// is NIL_NODE when the name is a builtin - a seeded name with no declaration,
+// or a bare name nothing declares - and ABuiltin is then its last segment,
+// for the one table (PasBuiltinOrdinalRange, audit D2-02). False for a
+// qualified name that resolves to nothing.
+function TPasSemaProject.OracleOrdinalNameDef(AMid, ANode: Integer;
+  out ADefMid, ADefNode: Integer; out ABuiltin: string): Boolean;
+var
+  LM: TPasSemaModel;
+  LSym, LDot: Integer;
+  LName: string;
+begin
+  Result := True;
+  LM := FModels[AMid];
+  ADefMid := AMid;
+  ADefNode := NIL_NODE;
+  ABuiltin := '';
+  if LM.Tree.Nodes[ANode].Kind = nkMember then
+  begin
+    LName := LM.Tree.DottedText(ANode);
+    if (LName = '') or not OracleQualified(AMid, LName, ADefMid, LSym) then
+      Exit(False);
+    if FModels[ADefMid].Symbols[LSym].DeclNode <> NIL_NODE then
+      ADefNode := TypeDefNodeOf(ADefMid, LSym)
+    else
+    begin
+      LDot := LName.LastIndexOf('.');
+      ABuiltin := Copy(LName, LDot + 2, MaxInt);
+    end;
+    Exit;
+  end;
+  ADefNode := OracleNestedTypeDef(AMid, ANode, LM.Tree.NodeNameLower(ANode));
+  if ADefNode <> NIL_NODE then
+    Exit;
+  if OracleResolveFrom(AMid, ANode, LM.Tree.NodeNameLower(ANode), ADefMid,
+       LSym) and (FModels[ADefMid].Symbols[LSym].DeclNode <> NIL_NODE) then
+    ADefNode := TypeDefNodeOf(ADefMid, LSym)
+  else
+  begin
+    ADefMid := AMid;
+    ABuiltin := LM.Tree.NodeText(ANode);
   end;
 end;
 
@@ -6162,7 +6324,8 @@ function TPasSemaProject.OracleIsCharOrdinal(AMid, ANode,
   ADepth: Integer): Boolean;
 var
   LM: TPasSemaModel;
-  LLo, LDef, LRMid, LRSym: Integer;
+  LLo, LDef, LRMid: Integer;
+  LName: string;
 begin
   Result := False;
   if ADepth > 8 then
@@ -6174,22 +6337,14 @@ begin
         LLo := LM.Tree.Nodes[ANode].FirstChild;
         Result := (LLo <> NIL_NODE) and OracleBoundIsChar(AMid, LLo, ADepth);
       end;
-    nkIdent:
+    nkIdent, nkMember:
+      if OracleOrdinalNameDef(AMid, ANode, LRMid, LDef, LName) then
       begin
-        LDef := OracleNestedTypeDef(AMid, ANode, LM.Tree.NodeNameLower(ANode));
         if LDef <> NIL_NODE then
-          Exit(OracleIsCharOrdinal(AMid, LDef, ADepth + 1));
-        if OracleResolveFrom(AMid, ANode, LM.Tree.NodeNameLower(ANode), LRMid,
-             LRSym) and (FModels[LRMid].Symbols[LRSym].DeclNode <> NIL_NODE) then
-        begin
-          LDef := TypeDefNodeOf(LRMid, LRSym);
-          Result := (LDef <> NIL_NODE) and
-            OracleIsCharOrdinal(LRMid, LDef, ADepth + 1);
-        end
+          Result := OracleIsCharOrdinal(LRMid, LDef, ADepth + 1)
         else
-          Result := LM.Tree.NodeTextEquals(ANode, 'Char') or
-            LM.Tree.NodeTextEquals(ANode, 'WideChar') or
-            LM.Tree.NodeTextEquals(ANode, 'AnsiChar');
+          Result := SameText(LName, 'Char') or SameText(LName, 'WideChar') or
+            SameText(LName, 'AnsiChar');
       end;
   end;
 end;
@@ -6822,8 +6977,7 @@ end;
 function TPasSemaProject.OracleLength(AMid, ASym, ADepth: Integer;
   out ALen: Double): Boolean;
 var
-  LM: TPasSemaModel;
-  LDecl, LParent, LType, LArrMid, LIdx, LElem: Integer;
+  LType, LArrMid, LIdx, LElem: Integer;
   LVal: TPasSymbolValue;
 begin
   Result := False;
@@ -6834,52 +6988,20 @@ begin
   // aborted the whole analysis (audit A2-01).
   if ADepth > 8 then
     Exit;
-  LM := FModels[AMid];
-  if not (LM.Symbols[ASym].Kind in [skConst, skVar]) then
-    Exit;
-  LDecl := LM.Symbols[ASym].DeclNode;
-  if LDecl = NIL_NODE then
-    Exit;
-  LParent := LM.Tree.Nodes[LDecl].Parent;
-  if LParent = NIL_NODE then
-    Exit;
-  // The declared type: a variable's follows its names; a typed constant's
-  // is the first of two children after its name, the value the second.
-  LType := NIL_NODE;
-  case LM.Tree.Nodes[LParent].Kind of
-    nkVarDecl:
-      begin
-        LType := LM.Tree.Nodes[LParent].FirstChild;
-        while (LType <> NIL_NODE) and
-              ((LM.Tree.Nodes[LType].Kind = nkAttrGroup) or
-               (nfName in LM.Tree.Nodes[LType].Flags)) do
-          LType := LM.Tree.Nodes[LType].NextSibling;
-      end;
-    nkConstDecl:
-      begin
-        LType := LM.Tree.Nodes[LDecl].NextSibling;
-        if (LType <> NIL_NODE) and
-           ((LM.Tree.Nodes[LType].NextSibling = NIL_NODE) or
-            (LM.Tree.Nodes[LM.Tree.Nodes[LType].NextSibling].Kind =
-             nkDirective)) then
-          LType := NIL_NODE;   // `= value` alone: an untyped constant
-        if LType = NIL_NODE then
-        begin
-          if OracleConstVal(AMid, ASym, ADepth + 1, LVal) and LVal.IsStr then
-          begin
-            ALen := Length(LVal.Str);
-            Result := True;
-          end;
-          Exit;
-        end;
-      end;
-  else
+  LType := OracleDeclaredType(AMid, ASym);
+  if LType = NIL_NODE then
+  begin
+    // An untyped constant: a string's length.
+    if (FModels[AMid].Symbols[ASym].Kind = skConst) and
+       OracleConstVal(AMid, ASym, ADepth + 1, LVal) and LVal.IsStr then
+    begin
+      ALen := Length(LVal.Str);
+      Result := True;
+    end;
     Exit;
   end;
-  if LType = NIL_NODE then
-    Exit;
   LArrMid := AMid;
-  if LM.Tree.Nodes[LType].Kind in [nkIdent, nkMember] then
+  if FModels[AMid].Tree.Nodes[LType].Kind in [nkIdent, nkMember] then
     if not OracleTypeDef(AMid, LType, ADepth + 1, LArrMid, LType) then
       Exit;
   if (FModels[LArrMid].Tree.Nodes[LType].Kind <> nkArrayType) or
@@ -7011,36 +7133,147 @@ begin
     sqSizeOfType: Result := OracleSizeOf(AMid, ASym, ADepth, AV.Num);
     sqLengthOf: Result := OracleLength(AMid, ASym, ADepth, AV.Num);
     sqHighOf, sqLowOf:
-      Result := OracleHighLow(AMid, ASym, ADepth, AQuery = sqHighOf, AV.Num);
+      Result := OracleHighLow(AMid, ASym, ADepth, AQuery = sqHighOf, AV);
   else
     Result := False;
   end;
 end;
 
-{ High(T) / Low(T) in a `$IF` for a type the oracle sees: an enum, a
-  subrange or an alias of a builtin ordinal - its OracleOrdinalRange
-  (`High(TE) = e3`, `High(TSub) = 9`; dcc64 37.0, local/probe-b59). A
-  builtin type name CondEval answers itself; anything else - an array
-  variable, a value - refuses. }
+{ High(X) / Low(X) in a `$IF` (1.3.2; dcc64 37.0, local/probe-b59 and
+  local/probe-cov-preproc H1): of a type, its bounds - an enum, a subrange,
+  an alias of a builtin ordinal (a builtin name CondEval answers itself), a
+  static array's first index (`array[2..7]`: 7 and 2, `array[TE]`: its last
+  and first value), a short string's length (`string[10]`: 10 and 0) - and of
+  a variable or a typed constant the same of its declared type (`High(VB) =
+  255` for a Byte, `High(VA) = 20` for an `array[10..20]`), although neither
+  is a constant to `$IF` itself. A character range answers characters
+  (`High(TC) = 'z'`). A true constant (whose bound is its narrow type's,
+  3.2.1), a dynamic array and anything else refuse. }
 function TPasSemaProject.OracleHighLow(AMid, ASym, ADepth: Integer;
-  AHigh: Boolean; out ANum: Double): Boolean;
+  AHigh: Boolean; out AV: TPasSymbolValue): Boolean;
 var
-  LDef: Integer;
-  LLo, LHi: Double;
+  LType: Integer;
+begin
+  AV := Default(TPasSymbolValue);
+  case FModels[AMid].Symbols[ASym].Kind of
+    skType: LType := TypeDefNodeOf(AMid, ASym);
+    skVar, skConst: LType := OracleDeclaredType(AMid, ASym);
+  else
+    LType := NIL_NODE;
+  end;
+  Result := (LType <> NIL_NODE) and
+    OracleHighLowOfType(AMid, LType, ADepth + 1, AHigh, AV);
+end;
+
+function TPasSemaProject.OracleHighLowOfType(AMid, ANode, ADepth: Integer;
+  AHigh: Boolean; out AV: TPasSymbolValue): Boolean;
+var
+  LM: TPasSemaModel;
+  LDefMid, LDef: Integer;
+  LLo, LHi, LLen: Double;
+  LName: string;
+  LVal: TPasCondValue;
 begin
   Result := False;
-  ANum := 0;
-  if FModels[AMid].Symbols[ASym].Kind <> skType then
+  AV := Default(TPasSymbolValue);
+  if ADepth > 8 then
     Exit;
-  LDef := TypeDefNodeOf(AMid, ASym);
-  if (LDef = NIL_NODE) or
-     not OracleOrdinalRange(AMid, LDef, ADepth + 1, LLo, LHi) then
-    Exit;
-  if AHigh then
-    ANum := LHi
+  LM := FModels[AMid];
+  case LM.Tree.Nodes[ANode].Kind of
+    nkArrayType:
+      begin
+        // A static array: its first dimension, the first child of several
+        // (the last is the element type).
+        LDef := LM.Tree.Nodes[ANode].FirstChild;
+        if (LM.Tree.Nodes[ANode].Aux = 1) or (LDef = NIL_NODE) or
+           (LDef = LM.Tree.LastChild(ANode)) then
+          Exit;
+        Exit(OracleHighLowOfType(AMid, LDef, ADepth + 1, AHigh, AV));
+      end;
+    nkStringType:
+      begin
+        LDef := LM.Tree.Nodes[ANode].FirstChild;
+        if (LDef = NIL_NODE) or
+           not OracleConstExpr(AMid, LDef, ADepth + 1, LLen) then
+          Exit;
+        if AHigh then
+          AV.Num := LLen;
+        Exit(True);
+      end;
+    nkIdent, nkMember:
+      begin
+        if not OracleOrdinalNameDef(AMid, ANode, LDefMid, LDef, LName) then
+          Exit;
+        if LDef = NIL_NODE then
+        begin
+          // A builtin, exactly (High(Int64) is no Double).
+          if not PasBuiltinOrdinalBound(LName, FTarget, AHigh, LVal) then
+            Exit;
+          CondToSymbolValue(LVal, AV);
+          Exit(True);
+        end;
+        // A named type: what it defines - an array, a short string, an
+        // ordinal.
+        Exit(OracleHighLowOfType(LDefMid, LDef, ADepth + 1, AHigh, AV));
+      end;
+    nkSubrange, nkEnumType: ;
   else
-    ANum := LLo;
+    Exit;
+  end;
+  if not OracleOrdinalRange(AMid, ANode, ADepth + 1, LLo, LHi) then
+    Exit;
+  if not AHigh then
+    LHi := LLo;
+  if OracleIsCharOrdinal(AMid, ANode, ADepth + 1) then
+  begin
+    if (LHi < 0) or (LHi > $FFFF) then
+      Exit;
+    AV.IsStr := True;
+    AV.Str := Char(Trunc(LHi));
+  end
+  else
+    AV.Num := LHi;
   Result := True;
+end;
+
+// The type node a variable or a TYPED constant is declared with -
+// a variable's follows its names, a typed constant's is the first of two
+// children after its name (the value the second) - or NIL_NODE (an untyped
+// constant, anything else).
+function TPasSemaProject.OracleDeclaredType(AMid, ASym: Integer): Integer;
+var
+  LM: TPasSemaModel;
+  LDecl, LParent: Integer;
+begin
+  Result := NIL_NODE;
+  LM := FModels[AMid];
+  if not (LM.Symbols[ASym].Kind in [skConst, skVar]) then
+    Exit;
+  LDecl := LM.Symbols[ASym].DeclNode;
+  if LDecl = NIL_NODE then
+    Exit;
+  LParent := LM.Tree.Nodes[LDecl].Parent;
+  if LParent = NIL_NODE then
+    Exit;
+  case LM.Tree.Nodes[LParent].Kind of
+    nkVarDecl:
+      begin
+        Result := LM.Tree.Nodes[LParent].FirstChild;
+        while (Result <> NIL_NODE) and
+              ((LM.Tree.Nodes[Result].Kind = nkAttrGroup) or
+               (nfName in LM.Tree.Nodes[Result].Flags)) do
+          Result := LM.Tree.Nodes[Result].NextSibling;
+      end;
+    nkConstDecl:
+      begin
+        Result := LM.Tree.Nodes[LDecl].NextSibling;
+        if (Result <> NIL_NODE) and
+           ((LM.Tree.Nodes[Result].NextSibling = NIL_NODE) or
+            (LM.Tree.Nodes[LM.Tree.Nodes[Result].NextSibling].Kind =
+             nkDirective)) then
+          Result := NIL_NODE;   // `= value` alone: an untyped constant
+      end;
+  end;
 end;
 
 function TPasSemaProject.OracleCondCtx(AMid, ADepth: Integer): TPasCondContext;
@@ -7707,7 +7940,7 @@ function TPasSemaProject.NewPP: TPasPreprocessor;
 begin
   Result := TPasPreprocessor.Create(FSM, FDefines, FCompilerVersion,
     FInfo.PointerBytes, FInfo.ExtendedBytes, FInfo.LongBytes,
-    FInfo.ExtendedAlign);
+    FInfo.ExtendedAlign, FInfo.Extended80Align);
   ConfigurePP(Result);
 end;
 
@@ -13160,9 +13393,9 @@ begin
         Exit(mirUnknown);
       LCtx := OracleCondCtx(AMid, 0);
       LVal := EvalCondNode(LM.Tree, LExpr, LCtx);
-      if LVal.Guessed or (LVal.Kind = cvStr) then
+      if LVal.Guessed or not LVal.IsInt then
         Exit(mirUnknown);
-      AId := Trunc(CondAsNum(LVal));
+      AId := LVal.Int;
       Exit(mirId);
     end;
     LChild := LM.Tree.Nodes[LChild].NextSibling;

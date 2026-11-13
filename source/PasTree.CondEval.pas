@@ -71,7 +71,17 @@ type
   TPasCondValue = record
     Kind: TPasCondKind;
     Bool: Boolean;
+    // A number's value as a Double - for a reader that wants a magnitude.
+    // An INTEGER (IsInt) carries its exact value in Int as well, and that is
+    // what the evaluator computes and compares with (1.3.2: dcc folds
+    // integers in 64 bits, exactly past 2^53): the bits of an Int64, or of a
+    // UInt64 when Unsigned - a literal above High(Int64), High(UInt64), a
+    // UInt64 cast, or a result computed in dcc's unsigned mode. A number
+    // that is not IsInt is a real, computed in Double.
     Num: Double;
+    IsInt: Boolean;
+    Unsigned: Boolean;
+    Int: Int64;
     Str: string;
     // A guessed leaf contributed to THIS value. Cleared when an and/or was
     // settled by a clean side alone - the flag's consumer is the
@@ -151,6 +161,13 @@ procedure CollectCondSpans(const AExpr: string;
 function CondAsBool(const AValue: TPasCondValue): Boolean;
 function CondAsNum(const AValue: TPasCondValue): Double;
 
+{ An oracle's answer as the value `$IF` computes with, and back - the one
+  place a number crosses between the two records, so an integer keeps its
+  exact 64 bits both ways. }
+function CondOfSymbolValue(const AValue: TPasSymbolValue): TPasCondValue;
+procedure CondToSymbolValue(const AValue: TPasCondValue;
+  var ASym: TPasSymbolValue);
+
 { SizeOf(X) for the SEEDED builtin types only, parameterized by target.
   Public because the projects symbol oracle sizes record FIELDS with it. }
 function PasBuiltinSizeOf(const AName: string;
@@ -174,9 +191,16 @@ function PasBuiltinOrdinalRange(const AName: string;
   const ATarget: TPasBuiltinTarget; out ALo, AHi: Double;
   out AKind: TPasCondKind): Boolean;
 
-{ A target from its four facts (tests and hosts that hold no platform). }
+{ High or Low of a builtin ordinal type as the value `$IF` compares, exactly:
+  a number (a UInt64 one for High(UInt64)), a character or a Boolean. False
+  for any other name. }
+function PasBuiltinOrdinalBound(const AName: string;
+  const ATarget: TPasBuiltinTarget; AHigh: Boolean;
+  out AValue: TPasCondValue): Boolean;
+
+{ A target from its facts (tests and hosts that hold no platform). }
 function PasBuiltinTargetOf(APointerBytes, AExtendedBytes, AExtendedAlign,
-  ALongBytes: Integer): TPasBuiltinTarget;
+  ALongBytes: Integer; AExtended80Align: Integer = 8): TPasBuiltinTarget;
 
 implementation
 
@@ -192,11 +216,42 @@ begin
   Result.Bool := AValue;
 end;
 
-function MkNum(AValue: Double): TPasCondValue;
+// An integer: the bits of an Int64, or of a UInt64 when AUnsigned.
+function MkInt(AValue: Int64; AUnsigned: Boolean = False): TPasCondValue;
+begin
+  Result := Default(TPasCondValue);
+  Result.Kind := cvNum;
+  Result.IsInt := True;
+  Result.Int := AValue;
+  Result.Unsigned := AUnsigned;
+  if AUnsigned then
+    Result.Num := UInt64(AValue)
+  else
+    Result.Num := AValue;
+end;
+
+// A real: computed in Double.
+function MkReal(AValue: Double): TPasCondValue;
 begin
   Result := Default(TPasCondValue);
   Result.Kind := cvNum;
   Result.Num := AValue;
+end;
+
+// A number known only as a Double - a size, a length, an oracle's answer
+// that says no more: an integer when it is integral and fits 64 bits, a
+// real otherwise.
+function MkNum(AValue: Double): TPasCondValue;
+const
+  P63 = 9223372036854775808.0;     // 2^63
+  P64 = 18446744073709551616.0;    // 2^64
+begin
+  if (Frac(AValue) = 0) and (AValue >= -P63) and (AValue < P63) then
+    Result := MkInt(Trunc(AValue))
+  else if (Frac(AValue) = 0) and (AValue >= P63) and (AValue < P64) then
+    Result := MkInt(Trunc(AValue - P63) or Low(Int64), True)
+  else
+    Result := MkReal(AValue);
 end;
 
 // The leaf guess: False for a boolean position, 0 where a number is wanted
@@ -284,17 +339,189 @@ begin
   end;
 end;
 
+{ Integer arithmetic as dcc folds it in a `$IF` (1.3.2; dcc64 37.0 and
+  dcc32, PasTree local/probe-cov-preproc I1-I3): 64 bits, exact. An
+  operation is UNSIGNED - UInt64 arithmetic, a UInt64 result - when an
+  operand is a UInt64 and the other is no negative signed value; a negative
+  signed value meeting a UInt64 makes it signed over the UInt64's bits (dcc's
+  W1073: `-1 + $FFFFFFFFFFFFFFFF = -2`); two signed operands are signed. A
+  comparison is exact whatever the types. A result past its type's range is
+  dcc's E2099 - code dcc refuses - and wraps here, as dcc's own value does.
+  The overflow checks are off for these routines alone: the wrap is the
+  arithmetic, and a host's checked build must not turn it into a raise. }
+{$IFOPT Q+}{$DEFINE CE_RESTORE_Q}{$OVERFLOWCHECKS OFF}{$ENDIF}
+{$IFOPT R+}{$DEFINE CE_RESTORE_R}{$RANGECHECKS OFF}{$ENDIF}
+
+// A UInt64 past High(Int64): its bits read as a negative Int64.
+function CondIntIsBig(const AValue: TPasCondValue): Boolean;
+begin
+  Result := AValue.Unsigned and (AValue.Int < 0);
+end;
+
+// -1, 0 or 1: L against R by value, exactly.
+function CondIntCompare(const L, R: TPasCondValue): Integer;
+begin
+  if CondIntIsBig(L) and CondIntIsBig(R) then
+  begin
+    if UInt64(L.Int) < UInt64(R.Int) then
+      Result := -1
+    else if UInt64(L.Int) > UInt64(R.Int) then
+      Result := 1
+    else
+      Result := 0;
+  end
+  else if CondIntIsBig(L) then
+    Result := 1
+  else if CondIntIsBig(R) then
+    Result := -1
+  else if L.Int < R.Int then
+    Result := -1
+  else if L.Int > R.Int then
+    Result := 1
+  else
+    Result := 0;
+end;
+
+function CondIntArith(AOp: TPasTokenKind; const L, R: TPasCondValue;
+  out AValue: TPasCondValue): Boolean;
+var
+  LUnsigned: Boolean;
+  LBits: UInt64;
+begin
+  Result := True;
+  LUnsigned := (L.Unsigned or R.Unsigned) and
+    not ((not L.Unsigned and (L.Int < 0)) or (not R.Unsigned and (R.Int < 0)));
+  case AOp of
+    tkPlus: LBits := UInt64(L.Int) + UInt64(R.Int);
+    tkMinus: LBits := UInt64(L.Int) - UInt64(R.Int);
+    tkStar:
+      if LUnsigned then
+        LBits := UInt64(L.Int) * UInt64(R.Int)
+      else
+        LBits := UInt64(L.Int * R.Int);
+    tkDiv, tkMod:
+      begin
+        if R.Int = 0 then
+          Exit(False);
+        if LUnsigned then
+        begin
+          if AOp = tkDiv then
+            LBits := UInt64(L.Int) div UInt64(R.Int)
+          else
+            LBits := UInt64(L.Int) mod UInt64(R.Int);
+        end
+        else if R.Int = -1 then
+        begin
+          // Low(Int64) div -1 traps on the CPU whatever the switches say.
+          if AOp = tkDiv then
+            LBits := 0 - UInt64(L.Int)
+          else
+            LBits := 0;
+        end
+        else if AOp = tkDiv then
+          LBits := UInt64(L.Int div R.Int)
+        else
+          LBits := UInt64(L.Int mod R.Int);
+      end;
+    tkAnd, tkOr, tkXor:
+      begin
+        // Bitwise; a UInt64 operand widens the result to one (dcc's W1024:
+        // `(-1 and $FFFFFFFFFFFFFFFF) = $FFFFFFFFFFFFFFFF`).
+        if AOp = tkAnd then
+          LBits := UInt64(L.Int) and UInt64(R.Int)
+        else if AOp = tkOr then
+          LBits := UInt64(L.Int) or UInt64(R.Int)
+        else
+          LBits := UInt64(L.Int) xor UInt64(R.Int);
+        LUnsigned := L.Unsigned or R.Unsigned;
+      end;
+  else
+    Exit(False);
+  end;
+  AValue := MkInt(Int64(LBits), LUnsigned);
+end;
+
+// Unary minus: of a UInt64 up to 2^63 a signed value (`-$8000000000000000 =
+// Low(Int64)`), past it a wrapped UInt64 (dcc's E2099: `-$FFFFFFFFFFFFFFFF
+// = 1`); of a signed value signed.
+function CondIntNegate(const AValue: TPasCondValue): TPasCondValue;
+begin
+  Result := MkInt(Int64(0 - UInt64(AValue.Int)),
+    CondIntIsBig(AValue) and (AValue.Int <> Low(Int64)));
+end;
+
+// Abs keeps the type: `Abs(Low(Int64))` is Low(Int64) for dcc.
+function CondIntAbs(const AValue: TPasCondValue): TPasCondValue;
+begin
+  if AValue.Unsigned or (AValue.Int >= 0) then
+    Result := AValue
+  else
+    Result := MkInt(Int64(0 - UInt64(AValue.Int)));
+end;
+
+// shl / shr over the left operand's 64 bits and type; shr is logical.
+function CondIntShift(const L: TPasCondValue; ALeft: Boolean;
+  ACount: Integer): TPasCondValue;
+begin
+  if ALeft then
+    Result := MkInt(Int64(UInt64(L.Int) shl ACount), L.Unsigned)
+  else
+    Result := MkInt(Int64(UInt64(L.Int) shr ACount), L.Unsigned);
+end;
+
+// Succ / Pred of an integer, in its type.
+function CondIntStep(const AValue: TPasCondValue; ADelta: Integer):
+  TPasCondValue;
+begin
+  Result := MkInt(Int64(UInt64(AValue.Int) + UInt64(Int64(ADelta))),
+    AValue.Unsigned);
+end;
+
+{$IFDEF CE_RESTORE_Q}{$OVERFLOWCHECKS ON}{$UNDEF CE_RESTORE_Q}{$ENDIF}
+{$IFDEF CE_RESTORE_R}{$RANGECHECKS ON}{$UNDEF CE_RESTORE_R}{$ENDIF}
+
+function CondOfSymbolValue(const AValue: TPasSymbolValue): TPasCondValue;
+begin
+  if AValue.IsStr then
+    Result := MkStr(AValue.Str)
+  else if AValue.IsInt then
+    Result := MkInt(AValue.Int, AValue.Unsigned)
+  else if AValue.IsReal then
+    Result := MkReal(AValue.Num)
+  else
+    Result := MkNum(AValue.Num);
+end;
+
+procedure CondToSymbolValue(const AValue: TPasCondValue;
+  var ASym: TPasSymbolValue);
+begin
+  ASym.IsStr := AValue.Kind = cvStr;
+  ASym.Str := AValue.Str;
+  ASym.Num := CondAsNum(AValue);
+  ASym.IsInt := AValue.IsInt;
+  ASym.Unsigned := AValue.Unsigned;
+  ASym.Int := AValue.Int;
+  ASym.IsReal := (AValue.Kind = cvNum) and not AValue.IsInt;
+  if AValue.Kind = cvBool then
+  begin
+    ASym.IsInt := True;
+    ASym.Int := Ord(AValue.Bool);
+  end;
+end;
+
 // Token text -> number. Handles what the LEXER can hand us: decimal, real,
 // $hex, %binary, digit separators. (The old string-walking evaluator only
 // knew bare decimals - `$IF $10 > 15` was a bad expression; the real lexer
 // tokenizes it, so it now evaluates.)
-function CondNumOfText(const AText: string; out ANum: Double): Boolean;
+function CondNumOfText(const AText: string; out AValue: TPasCondValue):
+  Boolean;
 var
   LClean: string;
   LU: UInt64;
   LIdx: Integer;
+  LNum: Double;
 begin
-  ANum := 0;
+  AValue := MkInt(0);
   LClean := PasNumLiteralText(AText);
   if LClean = '' then
     Exit(False);
@@ -305,7 +532,7 @@ begin
         // `$FFFFFFFFFFFFFFFF > 0` is True, `= -1` False (audit B1-08).
         Result := TryStrToUInt64(LClean, LU);
         if Result then
-          ANum := LU;
+          AValue := MkInt(Int64(LU), LU > UInt64(High(Int64)));
       end;
     '%':
       begin
@@ -329,11 +556,25 @@ begin
           else
             Exit(False);
           end;
-        ANum := LU;
+        AValue := MkInt(Int64(LU), LU > UInt64(High(Int64)));
         Result := True;
       end;
   else
-    Result := TryStrToFloat(LClean, ANum, TFormatSettings.Invariant);
+    // A decimal integer is Int64, UInt64 past High(Int64) (dcc64 37.0:
+    // `18446744073709551615 = $FFFFFFFFFFFFFFFF`); past that, or with a
+    // fraction or an exponent, a real.
+    if (LClean.IndexOfAny(['.', 'e', 'E']) < 0) and
+       TryStrToUInt64(LClean, LU) then
+    begin
+      AValue := MkInt(Int64(LU), LU > UInt64(High(Int64)));
+      Result := True;
+    end
+    else
+    begin
+      Result := TryStrToFloat(LClean, LNum, TFormatSettings.Invariant);
+      if Result then
+        AValue := MkReal(LNum);
+    end;
   end;
 end;
 
@@ -429,12 +670,13 @@ begin
 end;
 
 function PasBuiltinTargetOf(APointerBytes, AExtendedBytes, AExtendedAlign,
-  ALongBytes: Integer): TPasBuiltinTarget;
+  ALongBytes: Integer; AExtended80Align: Integer): TPasBuiltinTarget;
 begin
   Result.PointerBytes := APointerBytes;
   Result.ExtendedBytes := AExtendedBytes;
   Result.ExtendedAlign := AExtendedAlign;
   Result.LongBytes := ALongBytes;
+  Result.Extended80Align := AExtended80Align;
 end;
 
 function PasBuiltinSizeOf(const AName: string;
@@ -517,8 +759,8 @@ begin
   // Extended80: the 10-byte x87 storage type, aligned to 8 - except on
   // the targets whose Extended is the 16-byte one, where it IS Extended
   // (dccosx64 37.0: SizeOf 16, `record A: Byte; E: Extended80 end` 32;
-  // local/probe-b38 X80b). dccosxarm64 aligns its 10 bytes to 16, a fact
-  // TPasBuiltinTarget does not carry (docs/coverage.md 2.3.1).
+  // local/probe-b38 X80b); dccosxarm64 aligns its 10 bytes to 16, the
+  // target's Extended80Align (2.3.1).
   if SameText(AName, 'Extended80') then
   begin
     if ATarget.ExtendedBytes = 16 then
@@ -529,7 +771,7 @@ begin
     else
     begin
       ASize := 10;
-      AAlign := 8;
+      AAlign := ATarget.Extended80Align;
     end;
     Exit(True);
   end;
@@ -621,14 +863,14 @@ end;
   is a number a `$IF` can compare. Truncation is real (a cast to Byte wraps),
   so the folded value matches dcc rather than approximating it. }
 function PasBuiltinCast(const AName: string; const ATarget: TPasBuiltinTarget;
-  const AValue: TPasCondValue; out ANum: Double): Boolean;
+  const AValue: TPasCondValue; out AResult: TPasCondValue): Boolean;
 var
   LBytes, LBits: Integer;
   LSigned: Boolean;
   LRaw: Int64;
   LMask: UInt64;
 begin
-  ANum := 0;
+  AResult := MkInt(0);
   Result := False;
   if AValue.Kind = cvStr then
     Exit;
@@ -679,13 +921,16 @@ begin
   else
     Exit;
 
-  // A value outside Int64 has no bit pattern to mask - refuse rather than
-  // let Trunc raise (see CondTryTrunc): `{$IF Byte(1E300) = 0}` is a guess.
-  if not CondTryTrunc(CondAsNum(AValue), LRaw) then
+  // An integer casts by its bits. A real outside Int64 has no bit pattern
+  // to mask - refuse rather than let Trunc raise (see CondTryTrunc):
+  // `{$IF Byte(1E300) = 0}` is a guess.
+  if AValue.IsInt then
+    LRaw := AValue.Int
+  else if not CondTryTrunc(CondAsNum(AValue), LRaw) then
     Exit;
   LBits := LBytes * 8;
   if LBits >= 64 then
-    ANum := LRaw
+    AResult := MkInt(LRaw, not LSigned)
   else
   begin
     LMask := (UInt64(1) shl LBits) - 1;
@@ -694,14 +939,17 @@ begin
     // would read the bits back.
     if LSigned and ((UInt64(LRaw) and (UInt64(1) shl (LBits - 1))) <> 0) then
       LRaw := LRaw - Int64(LMask) - 1;
-    ANum := LRaw;
+    AResult := MkInt(LRaw);
   end;
   Result := True;
 end;
 
-function PasBuiltinOrdinalRange(const AName: string;
-  const ATarget: TPasBuiltinTarget; out ALo, AHi: Double;
-  out AKind: TPasCondKind): Boolean;
+// The one table of the builtin ordinals' ranges, exact: AHi holds the bits
+// of a UInt64 when AHiUnsigned (UInt64, and LongWord / NativeUInt where they
+// are 64 bits wide).
+function CondOrdinalRangeX(const AName: string;
+  const ATarget: TPasBuiltinTarget; out ALo, AHi: Int64;
+  out AHiUnsigned: Boolean; out AKind: TPasCondKind): Boolean;
 var
   LBits: Integer;
 begin
@@ -709,6 +957,7 @@ begin
   AKind := cvNum;
   ALo := 0;
   AHi := 0;
+  AHiUnsigned := False;
   if SameText(AName, 'Byte') or SameText(AName, 'UInt8') then
     AHi := 255
   else if SameText(AName, 'ShortInt') or SameText(AName, 'Int8') then
@@ -726,19 +975,22 @@ begin
   else if SameText(AName, 'Integer') or SameText(AName, 'Int32') or
           SameText(AName, 'FixedInt') then
   begin
-    ALo := -2147483648.0;
+    ALo := -2147483648;
     AHi := 2147483647;
   end
   else if SameText(AName, 'Cardinal') or SameText(AName, 'UInt32') or
           SameText(AName, 'FixedUInt') then
-    AHi := 4294967295.0
+    AHi := 4294967295
   else if SameText(AName, 'Int64') then
   begin
-    ALo := -9223372036854775808.0;
-    AHi := 9223372036854775807.0;
+    ALo := Low(Int64);
+    AHi := High(Int64);
   end
   else if SameText(AName, 'UInt64') then
-    AHi := 18446744073709551615.0
+  begin
+    AHi := -1;
+    AHiUnsigned := True;
+  end
   else if SameText(AName, 'LongInt') or SameText(AName, 'NativeInt') or
           SameText(AName, 'LongWord') or SameText(AName, 'NativeUInt') then
   begin
@@ -748,11 +1000,24 @@ begin
       LBits := ATarget.PointerBytes * 8;
     if SameText(AName, 'LongInt') or SameText(AName, 'NativeInt') then
     begin
-      AHi := Power(2, LBits - 1) - 1;
-      ALo := -Power(2, LBits - 1);
+      if LBits >= 64 then
+      begin
+        ALo := Low(Int64);
+        AHi := High(Int64);
+      end
+      else
+      begin
+        AHi := (Int64(1) shl (LBits - 1)) - 1;
+        ALo := -AHi - 1;
+      end;
+    end
+    else if LBits >= 64 then
+    begin
+      AHi := -1;
+      AHiUnsigned := True;
     end
     else
-      AHi := Power(2, LBits) - 1;
+      AHi := (Int64(1) shl LBits) - 1;
   end
   else if SameText(AName, 'Boolean') or SameText(AName, 'ByteBool') then
   begin
@@ -773,6 +1038,21 @@ begin
     Result := False;
 end;
 
+function PasBuiltinOrdinalRange(const AName: string;
+  const ATarget: TPasBuiltinTarget; out ALo, AHi: Double;
+  out AKind: TPasCondKind): Boolean;
+var
+  LLo, LHi: Int64;
+  LHiUnsigned: Boolean;
+begin
+  Result := CondOrdinalRangeX(AName, ATarget, LLo, LHi, LHiUnsigned, AKind);
+  ALo := LLo;
+  if LHiUnsigned then
+    AHi := UInt64(LHi)
+  else
+    AHi := LHi;
+end;
+
 // High or Low of a builtin ordinal type, as the value `$IF` compares: a
 // number, a character (`High(Char) = #65535`) or a Boolean (`High(Boolean)`).
 // dcc64 37.0, local/probe-b59 P1, P2. False for any other name.
@@ -780,19 +1060,23 @@ function PasBuiltinOrdinalBound(const AName: string;
   const ATarget: TPasBuiltinTarget; AHigh: Boolean;
   out AValue: TPasCondValue): Boolean;
 var
-  LLo, LHi: Double;
+  LLo, LHi: Int64;
+  LHiUnsigned: Boolean;
   LKind: TPasCondKind;
 begin
-  Result := PasBuiltinOrdinalRange(AName, ATarget, LLo, LHi, LKind);
+  Result := CondOrdinalRangeX(AName, ATarget, LLo, LHi, LHiUnsigned, LKind);
   if not Result then
     Exit;
   if not AHigh then
+  begin
     LHi := LLo;
+    LHiUnsigned := False;
+  end;
   case LKind of
     cvBool: AValue := MkBool(LHi <> 0);
-    cvStr: AValue := MkStr(Char(Trunc(LHi)));
+    cvStr: AValue := MkStr(Char(LHi));
   else
-    AValue := MkNum(LHi);
+    AValue := MkInt(LHi, LHiUnsigned);
   end;
 end;
 
@@ -801,7 +1085,12 @@ function CondOrdinal(const AValue: TPasCondValue; out AOrd: Int64): Boolean;
 begin
   AOrd := 0;
   case AValue.Kind of
-    cvNum: Result := (Frac(AValue.Num) = 0) and CondTryTrunc(AValue.Num, AOrd);
+    cvNum:
+      begin
+        Result := AValue.IsInt;
+        if Result then
+          AOrd := AValue.Int;
+      end;
     cvBool:
       begin
         AOrd := Ord(AValue.Bool);
@@ -827,9 +1116,14 @@ begin
   Result := False;
   if SameText(AName, 'Ord') then
   begin
-    if CondOrdinal(AArg, LOrd) then
+    if (AArg.Kind = cvNum) and AArg.IsInt then
     begin
-      AValue := MkNum(LOrd);
+      AValue := AArg;   // its own type: Ord(High(UInt64)) is a UInt64
+      Result := True;
+    end
+    else if CondOrdinal(AArg, LOrd) then
+    begin
+      AValue := MkInt(LOrd);
       Result := True;
     end;
   end
@@ -846,12 +1140,19 @@ begin
   begin
     if not CondOrdinal(AArg, LOrd) then
       Exit;
+    if AArg.Kind = cvNum then
+    begin
+      if SameText(AName, 'Succ') then
+        AValue := CondIntStep(AArg, 1)
+      else
+        AValue := CondIntStep(AArg, -1);
+      Exit(True);
+    end;
     if SameText(AName, 'Succ') then
       Inc(LOrd)
     else
       Dec(LOrd);
     case AArg.Kind of
-      cvNum: AValue := MkNum(LOrd);
       cvBool:
         if (LOrd < 0) or (LOrd > 1) then
           Exit
@@ -867,9 +1168,14 @@ begin
   end
   else if SameText(AName, 'Abs') then
   begin
-    if AArg.Kind = cvNum then
+    if (AArg.Kind = cvNum) and AArg.IsInt then
     begin
-      AValue := MkNum(Abs(AArg.Num));
+      AValue := CondIntAbs(AArg);
+      Result := True;
+    end
+    else if AArg.Kind = cvNum then
+    begin
+      AValue := MkReal(Abs(AArg.Num));
       Result := True;
     end;
   end
@@ -888,7 +1194,7 @@ end;
 function CondIsFoldingCallee(const AName: string;
   const ATarget: TPasBuiltinTarget): Boolean;
 var
-  LDummy: Double;
+  LDummy: TPasCondValue;
 begin
   Result := SameText(AName, 'Ord') or SameText(AName, 'Chr') or
     SameText(AName, 'Succ') or SameText(AName, 'Pred') or
@@ -924,14 +1230,7 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
     if Assigned(ACtx.OnSymbol) then
     begin
       if ACtx.OnSymbol(AQuery, AName, ACtx.DirPos, LAns) then
-      begin
-        if not LAns.IsStr then
-          Exit(MkNum(LAns.Num));
-        Result := Default(TPasCondValue);
-        Result.Kind := cvStr;
-        Result.Str := LAns.Str;
-        Exit;
-      end;
+        Exit(CondOfSymbolValue(LAns));
       // The name exists NOWHERE: not an open question but a determined dcc
       // verdict, so it is neither guessed nor recorded - it is copied. Only
       // the const-value query can say this; a SizeOf/Length question about a
@@ -1096,8 +1395,8 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
       begin
         if CondFoldIntrinsic(LName, LArgVal, Result) then
           Exit;
-        if PasBuiltinCast(LName, ACtx.Target, LArgVal, LSize) then
-          Exit(MkNum(LSize));
+        if PasBuiltinCast(LName, ACtx.Target, LArgVal, Result) then
+          Exit;
       end;
       Result := MkGuess;
       // Anything else (Ord(x), a unit function, ...) stays a guess - but the
@@ -1154,6 +1453,25 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
       // version-guard idiom (`$IF gsIdVersion >= '10.5.5'`), which a blanket
       // False answered by taking the wrong branch every time.
       LCmp := CompareStr(L.Str, R.Str);
+      if AOp = tkEqual then
+        Result := MkBool(LCmp = 0)
+      else if AOp = tkNotEqual then
+        Result := MkBool(LCmp <> 0)
+      else if AOp = tkLess then
+        Result := MkBool(LCmp < 0)
+      else if AOp = tkGreater then
+        Result := MkBool(LCmp > 0)
+      else if AOp = tkLessEqual then
+        Result := MkBool(LCmp <= 0)
+      else
+        Result := MkBool(LCmp >= 0);
+    end
+    else if L.IsInt and R.IsInt then
+    begin
+      // Two integers compare exactly, a UInt64 against a negative value too
+      // (`$FFFFFFFFFFFFFFFF = -1` is False, `$8000000000000000 >
+      // $7FFFFFFFFFFFFFFF` True).
+      LCmp := CondIntCompare(L, R);
       if AOp = tkEqual then
         Result := MkBool(LCmp = 0)
       else if AOp = tkNotEqual then
@@ -1306,15 +1624,9 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
     // and/or/xor of two integers are BITWISE in a constant expression:
     // `(6 and 1) <> 0` is False, `(1 or 2) = 3` True (audit E2-22).
     if (LOp in [tkAnd, tkOr, tkXor]) and (L.Kind = cvNum) and
-       (R.Kind = cvNum) and (Frac(L.Num) = 0) and (Frac(R.Num) = 0) and
-       CondTryTrunc(L.Num, LLeft) and CondTryTrunc(R.Num, LRight) then
+       (R.Kind = cvNum) and L.IsInt and R.IsInt and
+       CondIntArith(LOp, L, R, Result) then
     begin
-      case LOp of
-        tkAnd: Result := MkNum(LLeft and LRight);
-        tkOr: Result := MkNum(LLeft or LRight);
-      else
-        Result := MkNum(LLeft xor LRight);
-      end;
       Result.Guessed := L.Guessed or R.Guessed;
       Exit;
     end;
@@ -1392,26 +1704,35 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
       Exit;
     end;
 
-    if LOp = tkPlus then
-      Result := MkNum(CondAsNum(L) + CondAsNum(R))
+    // Two integers (a Boolean counts as its ordinal) compute in 64 bits,
+    // exactly (CondIntArith); `/`, and anything with a real in it, in
+    // Double.
+    if L.IsInt and R.IsInt and
+       (LOp in [tkPlus, tkMinus, tkStar, tkDiv, tkMod]) then
+    begin
+      if not CondIntArith(LOp, L, R, Result) then
+        Exit(MkGuess);   // division by zero
+    end
+    else if (LOp in [tkShl, tkShr]) and L.IsInt then
+    begin
+      if not CondShiftCount(R, LShift) then
+        Exit;
+      Result := CondIntShift(L, LOp = tkShl, LShift);
+    end
+    else if LOp = tkPlus then
+      Result := MkReal(CondAsNum(L) + CondAsNum(R))
     else if LOp = tkMinus then
-      Result := MkNum(CondAsNum(L) - CondAsNum(R))
+      Result := MkReal(CondAsNum(L) - CondAsNum(R))
     else if LOp = tkStar then
-      Result := MkNum(CondAsNum(L) * CondAsNum(R))
+      Result := MkReal(CondAsNum(L) * CondAsNum(R))
     else if (LOp = tkSlash) and (CondAsNum(R) <> 0) then
-      Result := MkNum(CondAsNum(L) / CondAsNum(R))
+      Result := MkReal(CondAsNum(L) / CondAsNum(R))
     else if (LOp = tkDiv) and CondTryTrunc(CondAsNum(L), LLeft) and
             CondTryTrunc(CondAsNum(R), LRight) and (LRight <> 0) then
       Result := MkNum(LLeft div LRight)
     else if (LOp = tkMod) and CondTryTrunc(CondAsNum(L), LLeft) and
             CondTryTrunc(CondAsNum(R), LRight) and (LRight <> 0) then
       Result := MkNum(LLeft mod LRight)
-    else if (LOp = tkShl) and CondShiftCount(R, LShift) and
-            CondTryTrunc(CondAsNum(L), LLeft) then
-      Result := MkNum(LLeft shl LShift)
-    else if (LOp = tkShr) and CondShiftCount(R, LShift) and
-            CondTryTrunc(CondAsNum(L), LLeft) then
-      Result := MkNum(LLeft shr LShift)
     else
       // Division by zero, an out-of-range shift count, an operand too big to
       // be an integer at all - a guess, never a crash.
@@ -1421,7 +1742,6 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
 
 var
   LText: string;
-  LNum: Double;
   LChild: Integer;
   LVal: TPasCondValue;
 begin
@@ -1430,8 +1750,8 @@ begin
     Exit;
   case ATree.Nodes[ANode].Kind of
     nkIntLit, nkRealLit:
-      if CondNumOfText(ATree.NodeText(ANode), LNum) then
-        Result := MkNum(LNum);
+      if CondNumOfText(ATree.NodeText(ANode), LVal) then
+        Result := LVal;
     nkStrLit:
       if CondStrOfNode(ATree, ANode, LText) then
         Result := MkStr(LText);
@@ -1444,7 +1764,7 @@ begin
           Result := MkBool(False)
         else if SameText(LText, 'CompilerVersion') or
                 SameText(LText, 'RTLVersion') then
-          Result := MkNum(ACtx.CompilerVersion)
+          Result := MkReal(ACtx.CompilerVersion)
         else
           // Any other bare name is a CONSTANT only semantics could resolve
           // (`$IF GenericVariants`, System.VarUtils) - the oracle's
@@ -1463,7 +1783,7 @@ begin
         // takes `$IF System.CompilerVersion >= 36`, local/probe-b58 P1).
         if SameText(LText, 'System.CompilerVersion') or
            SameText(LText, 'System.RTLVersion') then
-          Result := MkNum(ACtx.CompilerVersion)
+          Result := MkReal(ACtx.CompilerVersion)
         else if LText <> '' then
           Result := AskSymbol(sqConstValue, LText, MkBool(False));
       end;
@@ -1502,15 +1822,17 @@ begin
         end;
         if (LOpKind = tkNot) and (LVal.Kind = cvNum) then
         begin
-          // Bitwise on an integer: `not 0 = -1` (audit E2-22).
-          var LInt: Int64;
-          if (Frac(LVal.Num) = 0) and CondTryTrunc(LVal.Num, LInt) then
-            Result := MkNum(not LInt);
+          // Bitwise on an integer, in its type: `not 0 = -1` (audit E2-22),
+          // `not $FFFFFFFFFFFFFFFF = 0`.
+          if LVal.IsInt then
+            Result := MkInt(not LVal.Int, LVal.Unsigned);
         end
         else if LOpKind = tkNot then
           Result := MkBool(not CondAsBool(LVal))
+        else if (LOpKind = tkMinus) and LVal.IsInt then
+          Result := CondIntNegate(LVal)
         else if LOpKind = tkMinus then
-          Result := MkNum(-CondAsNum(LVal))
+          Result := MkReal(-CondAsNum(LVal))
         else if LOpKind = tkPlus then
           Result := LVal;
         Result.Guessed := Result.Guessed or LVal.Guessed;

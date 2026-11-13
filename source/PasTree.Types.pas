@@ -26,6 +26,9 @@ type
     PointerBytes: Integer;
     ExtendedBytes: Integer;
     ExtendedAlign: Integer;
+    // Extended80's alignment: 16 on OSXARM64 (10 bytes aligned to 16) and
+    // where Extended80 is the 16-byte Extended, 8 elsewhere (2.3.1).
+    Extended80Align: Integer;
     LongBytes: Integer;
   end;
 
@@ -259,9 +262,8 @@ var
   other cases). A character from $80 up never folds into ASCII, and the
   fold is idempotent, so a pure-ASCII key is unchanged. THE fold of every
   name key, hash and compare: they must agree bit for bit (audit E2-27,
-  D1-11). Conditional symbols fold the same way (dcc differs on 14 of the
-  1925 pairs, all title-case digraphs and Greek or letterlike symbol
-  variants; spec 1.3.1). }
+  D1-11). A conditional symbol folds a little more (PasFoldSymbolChar,
+  spec 1.3.2). }
 function PasFoldChar(ACh: Char): Char; inline;
 { FNV-1a (32-bit) over the ALen UTF-16 code units at AText, each through
   PasFoldChar first when AFold - THE hash of every name key, spelling and
@@ -277,6 +279,19 @@ function PasNeedsFold(ACh: Char): Boolean; inline;
 function PasFoldName(const AName: string): string;
 { PasFoldName's equality, without building either string. }
 function PasSameName(const A, B: string): Boolean;
+{ The fold of a CONDITIONAL SYMBOL's name (1.3.2; dcc64 37.0, local/probe-b65
+  DF1-DF5): PasFoldChar's, and on top of it the 14 of 1925 probed letter
+  pairs a symbol name folds more - a title-case digraph (U+01C5, U+01C8,
+  U+01CB, U+01F2) is its upper and lower case, the final sigma is sigma,
+  U+03F5 epsilon, U+1FBE iota, and the ohm, Angstrom and capital sharp s
+  signs omega, a-ring and sharp s. Each extra letter joins its partner's
+  class (an equivalence: the define set hashes by it), so the final sigma
+  also meets the plain sigma. PasSameSymbolName is its equality,
+  PasSymbolHash its FNV-1a - the define set's comparer and every define
+  lookup of the navigator read these. }
+function PasFoldSymbolChar(ACh: Char): Char;
+function PasSameSymbolName(const A, B: string): Boolean;
+function PasSymbolHash(const AName: string): Cardinal;
 
 { The ONE row order of every search result and rename plan: file
   (CompareText), line, column. The column breaks ties because TArray.Sort
@@ -534,6 +549,50 @@ begin
       Exit(False);
   Result := True;
 end;
+
+function PasFoldSymbolChar(ACh: Char): Char;
+begin
+  case Ord(ACh) of
+    $01C5: Result := PasFoldChar(#$01C4);
+    $01C8: Result := PasFoldChar(#$01C7);
+    $01CB: Result := PasFoldChar(#$01CA);
+    $01F2: Result := PasFoldChar(#$01F1);
+    $03C2: Result := PasFoldChar(#$03A3);
+    $03F5: Result := PasFoldChar(#$0395);
+    $1FBE: Result := PasFoldChar(#$0399);
+    $2126: Result := PasFoldChar(#$03C9);
+    $212B: Result := PasFoldChar(#$00E5);
+    $1E9E: Result := PasFoldChar(#$00DF);
+  else
+    Result := PasFoldChar(ACh);
+  end;
+end;
+
+function PasSameSymbolName(const A, B: string): Boolean;
+var
+  LIdx: Integer;
+begin
+  if Length(A) <> Length(B) then
+    Exit(False);
+  for LIdx := 1 to Length(A) do
+    if (A[LIdx] <> B[LIdx]) and
+       (PasFoldSymbolChar(A[LIdx]) <> PasFoldSymbolChar(B[LIdx])) then
+      Exit(False);
+  Result := True;
+end;
+
+{$IFOPT Q+}{$DEFINE PT_RESTORE_Q}{$OVERFLOWCHECKS OFF}{$ENDIF}
+function PasSymbolHash(const AName: string): Cardinal;
+var
+  LIdx: Integer;
+begin
+  // PasFnv1a's algorithm, over PasFoldSymbolChar.
+  Result := 2166136261;
+  for LIdx := 1 to Length(AName) do
+    Result := (Result xor Cardinal(Ord(PasFoldSymbolChar(AName[LIdx])))) *
+      16777619;
+end;
+{$IFDEF PT_RESTORE_Q}{$OVERFLOWCHECKS ON}{$UNDEF PT_RESTORE_Q}{$ENDIF}
 
 procedure BuildFoldTable;
 var
