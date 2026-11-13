@@ -18,7 +18,7 @@ The spec keeps exactly one PasTree-facing convention, and it earns its place:
 the `*AST:*` hints, which name the node kind a construct lowers to. Those are
 a vocabulary contract, and `tools/KindsCheck` mechanically cross-checks them.
 
-**Status: as of v0.144.3 (2026-10-29).** A gap is either listed here or it is
+**Status: as of v0.181.2 (2026-11-13).** A gap is either listed here or it is
 not a known gap. When you close one, delete the entry in the same commit.
 
 Not listed here, deliberately: bugs (those are fixed, not documented) and
@@ -189,17 +189,19 @@ of less work, not a gap in following the language; its consequences are in
   the target record does not carry, so a `SizeOf` of a record holding one
   is short there.
 
-### 2.5.1 Type aliases - weak vs. distinct
-- the parser marks distinctness (Aux=1); CanonTypeX and the helper map stop
-  there, and the operator table computes a distinct number in its base's
-  storage (StorageBaseX - `TMyI64 + TMyI64` is Int64, `not MW` keeps
-  TMyW). What is not modelled is assignment identity: a distinct type is
-  assignable wherever its base is.
-
 ### 2.6.1 Identity, compatibility, assignment-compatibility
-- the intra-unit typer implements only category-level
-  scalar rules - no ordinal-range compatibility, no type identity, no
-  string-kind distinctions.
+- assignment-compatibility is checked (E2010) at an assignment, an
+  initialized variable or typed constant, an inline variable, a `for`
+  counter's bounds and a `for-in` variable, by the one conversion rule set
+  of 6.3.1 (the project's CheckAssigns, the unit typer's CheckAssign for a
+  unit analyzed alone); a side typed only loosely (through a generic
+  parameter, an overloaded call's result) is not judged. Not reported: an
+  argument of a routine that is not overloaded against its parameter -
+  dcc's E2010 (`PL(S)` for `PL(X: Integer)`), E2033 for a `var` / `out`
+  argument of another type (a Byte, a distinct `type Integer` for `var X:
+  Integer`), E2197 for a constant there; in an overload set the same rules
+  only rank (E2250, 6.3.1). A constant out of its target's range (`B :=
+  300`, `PB(300)` for a Byte: E1012) is not reported either.
 
 ## 03-variables-constants.md
 
@@ -332,9 +334,15 @@ of less work, not a gap in following the language; its consequences are in
   type for) is no constant.
 
 ## 4.12 Operator overloading (cross-reference)
-- declared `class operator` overloads are never consulted
-  by the analyzer's typing - non-scalar operands are exempted wholesale from
-  operator checks.
+- an operator on a record operand is typed by the `class operator` it
+  calls (RecordOperatorX, 9.3.1): the arithmetic, logical and unary ones,
+  and the comparisons and `in`, whose result need not be Boolean (4.5); the
+  unit's own typer leaves them to the project's. Not reported: an operator
+  no `class operator` of the record takes (`R + 1` beside only `Add(TR,
+  TR)`, `P = P2` for a record with no `Equal`: E2015), and an arithmetic
+  operator on a class or interface operand (E2015) - only two scalar
+  operands are judged. Best-scoring overloads that disagree on their result
+  type leave the expression untyped.
 
 ## 05-statements.md
 
@@ -582,9 +590,11 @@ of less work, not a gap in following the language; its consequences are in
   list in that bracket (`[GT, S]`, S's GUID) is read as an attribute group.
 
 ### 14.2.1 Classes implementing interfaces
-- heritage walks (member lookup, descent checks) follow
-  only the FIRST heritage entry - a class's implemented interfaces (second
-  and later entries) are invisible to member search and descent tests.
+- the list after a class's ancestor is read where dcc reads it - a
+  conversion to an interface (XImplementsX, 6.3.1) and an interface
+  constraint (16.4.1) reach what the class's or an ancestor class's list
+  names, member lookup none of it - but the methods are not matched:
+  `E2291 Missing implementation of interface method` is never reported.
 
 ## 15-class-mechanics-helpers.md
 
@@ -627,9 +637,13 @@ of less work, not a gap in following the language; its consequences are in
   ...`), read as type arguments.
 
 ### 16.4.1 Type-parameter constraints
-- interface constraints and the `constructor` constraint
-  are not validated at instantiation sites (class/record/class-type
-  constraints are); constraint members are available for lookup.
+- the `constructor` constraint is not validated at instantiation sites
+  (E2513; class, record, class-type and interface constraints are);
+  constraint members are available for lookup. An interface constraint
+  leaves a typed pointer and a procedural type argument unjudged (dcc:
+  E2514, but a `reference to` type meets `T: IInterface`), and a generic
+  class whose list names another instance of the interface
+  (`TGImpl<string>` for `T: IG<Integer>`).
 - an explicitly instantiated generic METHOD (`F.Pick<TObject>(O)`) is checked
   against the overload the call bound; a call whose overload is not decided
   is not checked.
@@ -677,11 +691,10 @@ of less work, not a gap in following the language; its consequences are in
 ## B-lexical-grammar.md
 
 ### B.3 Identifiers & case rules
-- identifier characters are dcc's (every non-surrogate unit from $80 up), in
-  the lexer, the conditional-symbol scan, rename's name check, the outline's
-  spans and lint; case folding is still ASCII only, so a define tested with
-  another case of a non-ASCII letter (`{$IFDEF` a-umlaut X after
-  `{$DEFINE` A-umlaut X) is not defined, where dcc folds it (audit B65).
+- identifier characters and the fold of a name are dcc's (every
+  non-surrogate unit from $80 up; PasFoldChar - two names are one when
+  Windows' CharLowerBuffW lowers them alike). A conditional symbol folds
+  further in dcc on a few letter pairs: 1.3.2.
 
 ### B.6.1 Quoted string & character literals
 - the lexer emits adjacent string elements as separate

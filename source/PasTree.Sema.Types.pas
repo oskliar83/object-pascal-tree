@@ -7523,7 +7523,15 @@ begin
   LOp := OpKind(N);
   if LOp in [tkEqual, tkNotEqual, tkLess, tkLessEqual, tkGreater,
      tkGreaterEqual, tkIn, tkIs] then
+  begin
+    // A record's comparison is its `class operator`'s, whose result need
+    // not be Boolean (4.5): left to the project's typing (RecordOperatorX),
+    // as a record's arithmetic is.
+    if (LOp <> tkIs) and
+       ((CatOf(LL) = tcRecord) or (CatOf(LR) = tcRecord)) then
+      Exit;
     Exit(Bool);
+  end;
   if IsTypeNameOperand(LLeft) or IsTypeNameOperand(LRight) then
     Exit;
   LAns := OperatorAnswer(LOp, False, OpFacts(LL, LLeft), OpFacts(LR, LRight),
