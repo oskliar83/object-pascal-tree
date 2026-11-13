@@ -1396,6 +1396,12 @@ type
       first segment, or past a unit qualifier the segment it qualifies
       (`[System.MaxInt]`); NIL_NODE when the name is no designator. }
     function AttrDecidingName(AId, AAttr: Integer): Integer;
+    { A dotted `uses` name of AModel that only the search's tolerance found:
+      a file of another unit's name by the dotted name's last segment
+      (`uses MVCFramework.Serializer.Commons` reaching a `Commons.pas`),
+      which dcc would not compile against. A name looked up through that
+      unit got no complete lookup, so an attribute's W1074 is no verdict. }
+    function UsesLeafGuessed(AModel: TPasSemaModel): Boolean;
     function IgnoredResolutionTarget(AModel: TPasSemaModel; ANode: Integer;
       AId: Integer): Boolean;
     function UsesUnitOf(AId, ASym: Integer): Integer;
@@ -9878,6 +9884,28 @@ begin
     Result := LParent;
 end;
 
+function TPasSemaProject.UsesLeafGuessed(AModel: TPasSemaModel): Boolean;
+var
+  LIdx, LUid: Integer;
+  LWritten, LGot: string;
+begin
+  Result := False;
+  for LIdx := 0 to High(AModel.UsesList) do
+  begin
+    LUid := AModel.UsesList[LIdx].UnitId;
+    if (LUid < 0) or (LUid >= FModels.Count) or
+       (AModel.UsesList[LIdx].InPath <> '') then
+      Continue;
+    LWritten := LowerCase(AModel.UsesList[LIdx].NameFull);
+    if Pos('.', LWritten) = 0 then
+      Continue;
+    LGot := FModels[LUid].UnitNameLower;
+    // The name as written, or a unit scope prefix before it (-NS).
+    if (LGot <> LWritten) and not LGot.EndsWith('.' + LWritten) then
+      Exit(True);
+  end;
+end;
+
 function TPasSemaProject.AttrDecidingName(AId, AAttr: Integer): Integer;
 var
   LM: TPasSemaModel;
@@ -10334,7 +10362,8 @@ begin
   if LSilent then
   begin
     LAttr := AttrOfNameHead(AModel, ANode);
-    if (LAttr <> NIL_NODE) and not AModel.HasDiagAt(LAttr) then
+    if (LAttr <> NIL_NODE) and not AModel.HasDiagAt(LAttr) and
+       not UsesLeafGuessed(AModel) then
       EmitAt(AModel, LAttr, 'W1074', SW1074_UnknownCustomAttribute);
     Exit;
   end;
@@ -12138,7 +12167,7 @@ begin
     // except a TRUE constant in an interface's first bracket, which is the
     // GUID: `[S]`, and `[GT, S]` after a dropped typed TGUID constant GT
     // (InterfaceGuidBracket). An undeclared one is EmitE2003's W1074.
-    if LM.AllUsesResolved then
+    if LM.AllUsesResolved and not UsesLeafGuessed(LM) then
     begin
       LHead := AttrDecidingName(AId, LNode);
       if LHead <> NIL_NODE then
