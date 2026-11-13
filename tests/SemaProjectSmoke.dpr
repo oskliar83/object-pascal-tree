@@ -9798,6 +9798,74 @@ begin
   end;
 end;
 
+{ Spec 1.2.3 (dcc64 37.0, 2026-11-13): a unit qualifier's missing member is
+  E2003 in a method body, a type declaration and a with body too, once the
+  inherited and with passes left the qualifier the unit's: `UPr.Count` where
+  an inherited field or a with target's field is named UPr is that field's,
+  `UPr.Missing2` in a class with no such member, `UPr.TMissing` in a type
+  declaration and `System.Missing1` in a method are E2003. }
+procedure TestLateUnitMembers;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_lateunit');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10'  TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UPr.pas'),
+    'unit UPr;'#10'interface'#10'const X = 1;'#10'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UBq.pas'),
+    'unit UBq;'#10'interface'#10'type'#10 +
+    '  TObj = class Count: Integer; end;'#10 +
+    '  TBase = class'#10'    UPr: TObj;'#10'  end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'Q.dpr'),
+    'program Q;'#10 +                                   // 1
+    'uses UPr, UBq;'#10 +                               // 2
+    'type'#10 +                                         // 3
+    '  TR = record UPr: TObj; end;'#10 +                // 4
+    '  TR2 = record Z: Integer; end;'#10 +              // 5
+    '  TD = class(TBase)'#10 +                          // 6
+    '    procedure M;'#10 +                             // 7
+    '  end;'#10 +                                       // 8
+    '  TE = class'#10 +                                 // 9
+    '    F: UPr.TMissing;'#10 +                         // 10 E2003 col 12
+    '    procedure N;'#10 +                             // 11
+    '  end;'#10 +                                       // 12
+    'procedure TD.M;'#10 +                              // 13
+    'begin'#10 +                                        // 14
+    '  UPr.Count := UPr.Count + 1;'#10 +                // 15
+    '  System.Missing1;'#10 +                           // 16 E2003 col 10
+    'end;'#10 +                                         // 17
+    'procedure TE.N;'#10 +                              // 18
+    'begin'#10 +                                        // 19
+    '  UPr.Missing2;'#10 +                              // 20 E2003 col 7
+    'end;'#10 +                                         // 21
+    'var R: TR; R2: TR2;'#10 +                          // 22
+    'begin'#10 +                                        // 23
+    '  with R do'#10 +                                  // 24
+    '    UPr.Count := 1;'#10 +                          // 25
+    '  with R2 do'#10 +                                 // 26
+    '    UPr.Missing3 := 1;'#10 +                       // 27 E2003 col 9
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'Q.dpr'));
+    LM := ModelByName('q');
+    Ok('lateunit: E2003 for each missing member of a unit qualifier [' +
+      DiagSites(LM, 'E2003') + ']',
+      DiagSites(LM, 'E2003') = '10:12 16:10 20:7 27:9');
+    Ok('lateunit: the inherited and the with field''s Count are bound',
+      CrossRefCountInUnit(LM, 'Count', 'Count', 'ubq') = 3);
+    Ok('lateunit: nothing else', Length(LM.Diags) = 4);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 { Spec 3.3.2 point 3 (dcc64 37.0, 2026-11-13): an implementation heading
   names its types where it stands - below the implementation's `TX = Byte`
   `procedure TK.M(A: TX)` is not the declaration's `M(A: TX)`, which took
@@ -20622,6 +20690,7 @@ begin
   TestGuidClauseDrops;
   TestForwardPosition;
   TestHeadingPairE2037;
+  TestLateUnitMembers;
   TestAttributeGuidAndPositions;
   TestHelperVisibility;
   TestBuiltinIdentity;
