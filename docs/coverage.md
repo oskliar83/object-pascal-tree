@@ -466,12 +466,13 @@ of less work, not a gap in following the language; its consequences are in
 ## 12-inheritance-polymorphism.md
 
 ### 12.1.2 `inherited`
-- intra-unit, the name after `inherited` binds as an ordinary name - to the
-  class's own member when the class redeclares it - and the expression is
-  untyped; only a `with` target is modelled there. The project pass
-  re-points the name to the ancestor's member and types it, so what reads
-  the unit's own bindings alone (the completion overlay, a unit analyzed
-  without the project passes) sees the class's member.
+- intra-unit, the name after `inherited` binds to the ancestor's member when
+  the unit's own ancestry declares it; a member only an ancestor in another
+  unit declares is bound by the project pass, and before it the name binds as
+  an ordinary name - to the class's own member when it redeclares one. The
+  intra-unit typer leaves the `inherited` expression untyped: typing it there
+  read an overload set's head (false E2010 / E2015 on the Studio sources);
+  the project pass types it.
 
 ## 13-properties-events.md
 

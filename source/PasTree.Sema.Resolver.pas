@@ -233,6 +233,7 @@ type
     function IsArrayPropDesignator(ABaseNode: Integer): Boolean;
     function DefaultArrayPropTypeSym(ATypeSym: Integer): Integer;
     function WithTargetTypeSym(ANode: Integer): Integer;
+    function InheritedNameSym(ANode: Integer): Integer;
     function PointeeTypeSym(ATypeSym: Integer): Integer;
     function ElemOfArrayNode(ANode: Integer): Integer;
     function ElementTypeOf(ABaseNode: Integer): Integer;
@@ -3518,6 +3519,16 @@ begin
         // off the token, not a lowered copy: this is the analyzer's most
         // frequent lookup (6.7M per client closure, a fifth of all its heap
         // allocations while it built a string).
+        // The name after `inherited` is the ANCESTOR's member (12.1.2), never
+        // the class's own redeclaration: bound here when this unit's own
+        // ancestry declares it; a member further up, in another unit, is the
+        // project pass's to bind (it re-points what this leaves).
+        var LInh := InheritedNameSym(ANode);
+        if LInh <> NIL_SYM then
+        begin
+          FModel.RefMap[ANode] := LInh;
+          Exit;
+        end;
         var LKey := NodeKey(ANode);
         // The node's scope and first token, read once like the key. LSym is
         // the binding: the rules below rebind it, and it goes to RefMap once,
@@ -4199,6 +4210,41 @@ begin
     end;
     ATypeSym := AncestorTypeSym(ATypeSym);
   end;
+end;
+
+{ The member the name ANode means when it is the name after `inherited`
+  (12.1.2: `inherited Foo`, `inherited Foo(X)`, `inherited Items[I]`):
+  looked up from the ANCESTOR of the struct whose method body this is, as
+  WithTargetTypeSym's nkInherited case does - this unit's own ancestry only
+  (FindMemberUpChain). NIL_SYM when ANode is no such name, the struct has no
+  ancestor here, or the ancestry here does not declare it. }
+function TPasSemaResolver.InheritedNameSym(ANode: Integer): Integer;
+var
+  LUp, LParent, LScope, LAnc: Integer;
+begin
+  Result := NIL_SYM;
+  // The name is the leftmost leaf under the nkInherited.
+  LUp := ANode;
+  LParent := FTree.Nodes[LUp].Parent;
+  while (LParent <> NIL_NODE) and
+        (KindOf(LParent) in [nkCall, nkMember, nkIndex, nkTypeArgs]) and
+        (FirstChild(LParent) = LUp) do
+  begin
+    LUp := LParent;
+    LParent := FTree.Nodes[LUp].Parent;
+  end;
+  if (LParent = NIL_NODE) or (KindOf(LParent) <> nkInherited) or
+     (FirstChild(LParent) <> LUp) then
+    Exit;
+  LScope := FNodeScope[ANode];
+  while (LScope <> NIL_SCOPE) and
+        (FModel.Scopes[LScope].StructSym = NIL_SYM) do
+    LScope := FModel.Scopes[LScope].Parent;
+  if LScope = NIL_SCOPE then
+    Exit;
+  LAnc := AncestorTypeSym(FModel.Scopes[LScope].StructSym);
+  if LAnc <> NIL_SYM then
+    Result := FindMemberUpChain(LAnc, NodeNameLower(ANode));
 end;
 
 function TPasSemaResolver.WithTargetTypeSym(ANode: Integer): Integer;
