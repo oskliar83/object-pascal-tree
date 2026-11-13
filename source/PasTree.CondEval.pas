@@ -1257,6 +1257,60 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
     Result.Guessed := True;
   end;
 
+  // A type expression's text the oracle reads back (OracleInstanceSize): a
+  // name, dotted or not, or an instantiation `Head<A1,A2>` whose head and
+  // actuals are such texts again; '' for any other shape, or past 8 levels.
+  function InstanceText(ANode, ADepth: Integer): string;
+  var
+    LPart: Integer;
+    LOne, LArgs: string;
+  begin
+    Result := '';
+    if (ANode = NIL_NODE) or (ADepth > 8) then
+      Exit;
+    Result := ATree.DottedText(ANode);
+    if Result <> '' then
+      Exit;
+    case ATree.Nodes[ANode].Kind of
+      nkTypeArgs:
+        begin
+          LPart := ATree.Nodes[ANode].FirstChild;
+          if LPart = NIL_NODE then
+            Exit;
+          Result := InstanceText(LPart, ADepth + 1);
+          LArgs := '';
+          LPart := ATree.Nodes[LPart].NextSibling;
+          while (Result <> '') and (LPart <> NIL_NODE) do
+          begin
+            LOne := InstanceText(LPart, ADepth + 1);
+            if LOne = '' then
+              Exit('');
+            if LArgs = '' then
+              LArgs := LOne
+            else
+              LArgs := LArgs + ',' + LOne;
+            LPart := ATree.Nodes[LPart].NextSibling;
+          end;
+          if (Result = '') or (LArgs = '') then
+            Exit('');
+          Result := Result + '<' + LArgs + '>';
+        end;
+      nkMember:
+        begin
+          // `UC.TPair<...>`: a qualifier over an instantiation.
+          LPart := ATree.Nodes[ANode].FirstChild;
+          if (LPart = NIL_NODE) or
+             (ATree.Nodes[LPart].NextSibling = NIL_NODE) then
+            Exit;
+          Result := InstanceText(LPart, ADepth + 1);
+          LOne := InstanceText(ATree.Nodes[LPart].NextSibling, ADepth + 1);
+          if (Result = '') or (LOne = '') then
+            Exit('');
+          Result := Result + '.' + LOne;
+        end;
+    end;
+  end;
+
   function EvalCall(ACallNode: Integer): TPasCondValue;
   var
     LCallee, LArg: Integer;
@@ -1312,32 +1366,12 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
         // A user type's size: the oracle's question; guessed 0 (like the
         // old evaluator) when nobody answers.
         LArgName := ATree.DottedText(LArg);
-        // An instantiation, `TPair<Byte, Int64>`, goes to the oracle as its
-        // text: the head and each actual a name (audit E2-25).
-        if (LArgName = '') and (ATree.Nodes[LArg].Kind = nkTypeArgs) then
-        begin
-          var LPart := ATree.Nodes[LArg].FirstChild;
-          if LPart <> NIL_NODE then
-            LArgName := ATree.DottedText(LPart);
-          var LArgs := '';
-          if LArgName <> '' then
-            LPart := ATree.Nodes[LPart].NextSibling;
-          while (LArgName <> '') and (LPart <> NIL_NODE) do
-          begin
-            var LOne := ATree.DottedText(LPart);
-            if LOne = '' then
-              LArgName := ''
-            else if LArgs = '' then
-              LArgs := LOne
-            else
-              LArgs := LArgs + ',' + LOne;
-            LPart := ATree.Nodes[LPart].NextSibling;
-          end;
-          if (LArgName <> '') and (LArgs <> '') then
-            LArgName := LArgName + '<' + LArgs + '>'
-          else
-            LArgName := '';
-        end;
+        // An instantiation goes to the oracle as its text - its head and
+        // each actual a name, qualified or not, or an instantiation again:
+        // `TPair<Byte, Int64>`, `UC.TPair<Byte, TPair<Byte, Int64>>` (audit
+        // E2-25; 9.1.2).
+        if LArgName = '' then
+          LArgName := InstanceText(LArg, 0);
         if LArgName <> '' then
           Result := AskSymbol(sqSizeOfType, LArgName, MkNum(0))
         else

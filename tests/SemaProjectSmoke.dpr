@@ -4737,6 +4737,35 @@ begin
     '{$IF SizeOf(R3) = 5} type TY13 = class end; {$IFEND}'#10 +
     '{$IF SizeOf(R15) = 8} type TY14 = class end; {$IFEND}'#10 +
     'implementation'#10'end.'#10);
+  // 9.1.2 (dcc64 37.0, local/probe-cov-preproc L1, L2): a used unit's type
+  // named like a builtin beats the builtin, an ancestor's nested type and a
+  // routine's local type resolve in the record's own scope, and SizeOf takes
+  // a qualified and a nested instantiation.
+  TFile.WriteAllText(TPath.Combine(LDir, 'LayB.pas'),
+    'unit LayB;'#10'interface'#10'type'#10'  Single = Word;'#10 +
+    '  Text = Byte;'#10'  TPair2<K, V> = record Key: K; Value: V; end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'LayUse2.pas'),
+    'unit LayUse2;'#10'interface'#10'uses LayB;'#10 +
+    'type'#10 +
+    '  TLoc = Byte;'#10 +
+    '  TRS3 = record A: Byte; S: Single; end;'#10 +
+    '  TRT3 = record A: Byte; T: Text; end;'#10 +
+    '  TBase = class type TN = Int64; end;'#10 +
+    '  TDer = class(TBase) type TR = record A: Byte; N: TN; end; end;'#10 +
+    'var GV: Integer;'#10 +
+    '{$IF SizeOf(TRS3) = 4} type TZ1 = class end; {$IFEND}'#10 +
+    '{$IF SizeOf(TRT3) = 2} type TZ2 = class end; {$IFEND}'#10 +
+    '{$IF SizeOf(TDer.TR) = 16} type TZ3 = class end; {$IFEND}'#10 +
+    '{$IF SizeOf(LayB.TPair2<Byte, Byte>) = 2} type TZ4 = class end; {$IFEND}'#10 +
+    '{$IF SizeOf(TPair2<Byte, TPair2<Byte, Int64>>) = 24} type TZ5 = class end; {$IFEND}'#10 +
+    'implementation'#10 +
+    'procedure P;'#10'type'#10'  TLoc = Int64;'#10 +
+    '  TRL = record A: Byte; L: TLoc; end;'#10 +
+    'begin'#10 +
+    '  {$IF SizeOf(TRL) = 16} var SawLocal := 1; {$IFEND}'#10 +
+    'end;'#10 +
+    'end.'#10);
   GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
   try
     GProj.AnalyzeDirectory(LDir);
@@ -4756,6 +4785,15 @@ begin
     Ok('layout: an index of ShortInt', Has('ty12'));
     Ok('layout: the $A cap just after record, not later in the body',
       Has('ty13') and Has('ty14'));
+    LM := ModelByName('layuse2');
+    Ok('layout: a used unit''s Single / Text beat the builtins',
+      Has('tz1') and Has('tz2'));
+    Ok('layout: an ancestor''s nested type sizes a nested record',
+      Has('tz3'));
+    Ok('layout: SizeOf of a qualified and of a nested instantiation',
+      Has('tz4') and Has('tz5'));
+    Ok('layout: a routine''s local type beats the unit''s',
+      (LM <> nil) and (SymCountOf(LM, 'sawlocal', skVar) = 1));
   finally
     GProj.Free;
   end;
@@ -4994,7 +5032,7 @@ begin
     'unit System;'#10'interface'#10'type TObject = class end;'#10 +
     'implementation'#10'end.'#10);
   TFile.WriteAllText(TPath.Combine(LDir, 'IrP.dpr'),
-    'program IrP;'#10'uses IrMiss, IrExt, IrBuf, IrEnd, IrEnd2, IrEnd3, IrDir, IrLeg;'#10 +
+    'program IrP;'#10'uses IrMiss, IrExt, IrBuf, IrEnd, IrEnd2, IrEnd3, IrEnd4, IrDir, IrLeg;'#10 +
     'begin'#10'end.'#10);
   TFile.WriteAllText(TPath.Combine(LDir, 'IrMiss.pas'),
     'unit IrMiss;'#10'interface'#10'{$I IrNoSuch.inc}'#10 +
@@ -5017,6 +5055,10 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'IrEnd3.pas'),
     'unit IrEnd3;'#10'interface'#10'implementation'#10'end.'#10 +
     '// a note'#10'{ a comment'#10'  over two lines }'#10'x'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'IrEnd4.pas'),
+    'unit IrEnd4;'#10'interface'#10'implementation'#10'{$I IrTail.inc}'#10 +
+    #10'junk'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'IrTail.inc'), 'end.'#10);
   TFile.WriteAllText(TPath.Combine(LDir, 'IrDir.pas'),
     'unit IrDir;'#10'interface'#10'{$ENDIF}'#10'{$POPOPT}'#10 +
     'implementation'#10'{$IFDEF NEVERDEF}'#10'end.'#10);
@@ -5059,6 +5101,9 @@ begin
     Ok('include rows: spaces and // comments after end. are no W1011, a { } comment is, where it ends',
       (LM <> nil) and (DiagCount(LM, 'W1011') = 0) and
       (Unit_('irend3') <> nil) and (DiagLine(Unit_('irend3'), 'W1011') = 7));
+    Ok('include rows: an end. an include supplies warns on the includer''s text after the {$I}',
+      (Unit_('irend4') <> nil) and (DiagLine(Unit_('irend4'), 'W1011') = 6) and
+      (DiagCount(Unit_('irend4'), 'W1011') = 1));
     LM := Unit_('irdir');
     Ok('include rows: an $ENDIF with nothing open is E1030',
       (LM <> nil) and DiagHasText(LM, 'E1030', '''$ENDIF'''));

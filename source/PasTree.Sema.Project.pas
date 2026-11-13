@@ -49,7 +49,9 @@ type
   // becomes, any other is laid out as 0 bytes aligned 1, the minimum.
   // pskSymbol: Node is a type SYMBOL of model Mid, not a type node - an
   // actual named by text (OracleInstanceSize).
-  TPasSubstKind = (pskNode, pskOpenRef, pskOpenMin, pskSymbol);
+  // pskLayout: no node at all - an actual laid out already (an instantiation
+  // among a text's actuals, OracleInstanceLayout), its Bytes and Align.
+  TPasSubstKind = (pskNode, pskOpenRef, pskOpenMin, pskSymbol, pskLayout);
   TPasSubstEntry = record
     Name: string;     // lower-case parameter name
     Mid: Integer;     // model the argument node lives in
@@ -60,6 +62,8 @@ type
     // V>). Points at the binding caller's own subst, alive for the whole
     // depth-first walk below it; nil for an actual that names none.
     Outer: PPasSubst;
+    Bytes: Double;    // pskLayout's layout
+    Align: Integer;
   end;
   TPasSubst = TArray<TPasSubstEntry>;
 
@@ -1421,10 +1425,14 @@ type
       out AMid, ASym: Integer): Boolean;
     function DottedPrefixUnknown(AId: Integer;
       const ANameLower: string): Boolean;
+    procedure OracleImportOverSeed(AId: Integer; const ANameLower: string;
+      var ARMid, ARSym: Integer);
     function OracleResolveFrom(AMid, ANode: Integer; const ANameLower: string;
       out ARMid, ARSym: Integer): Boolean;
     function OracleInstanceSize(AId: Integer; const AName: string;
       out ABytes: Double): Boolean;
+    function OracleInstanceLayout(AId: Integer; const AName: string;
+      ADepth: Integer; out ABytes: Double; out AAlign: Integer): Boolean;
     function OracleGenericParamNames(AGMid, AGSym: Integer): TArray<string>;
     function OracleHighLow(AMid, ASym, ADepth: Integer; AHigh: Boolean;
       out AV: TPasSymbolValue): Boolean;
@@ -1478,7 +1486,8 @@ type
     function OracleBound(AMid, ANode, ADepth: Integer;
       out ANum: Double): Boolean;
     function OracleNestedTypeDef(AMid, ARefNode: Integer;
-      const ANameLower: string): Integer;
+      const ANameLower: string; out ADefMid: Integer;
+      ADepth: Integer = 0): Integer;
     function OracleGenericDecl(AMid: Integer; const AName: string;
       out AGMid, AGSym: Integer): Boolean;
     function OracleTypeDef(AMid, ARefNode, ADepth: Integer;
@@ -4779,6 +4788,29 @@ end;
   mixed field sizes, a dotted name - all answer "cannot", which leaves the
   first-pass guess standing, exactly today's behavior. }
 
+// A seeded name (a compiler-provided type, no declaration) the unit's own
+// scope chain met before its imports: a used unit's real declaration of that
+// name wins, as in dcc, where System - the seed's home - is searched after
+// every used unit (3.3.2; `type Single = Word; Text = Byte;` in a used unit
+// makes `record A: Byte; S: Single end` 4 and `record A: Byte; T: Text end`
+// 2, dcc64 37.0, local/probe-cov-preproc L1). ARMid / ARSym are replaced
+// only by such a declaration.
+procedure TPasSemaProject.OracleImportOverSeed(AId: Integer;
+  const ANameLower: string; var ARMid, ARSym: Integer);
+var
+  LRMid, LRSym: Integer;
+begin
+  if (ARSym = NIL_SYM) or
+     (FModels[ARMid].Symbols[ARSym].DeclNode <> NIL_NODE) then
+    Exit;
+  if ResolveRealDecl(AId, ANameLower, LRMid, LRSym) and
+     (LRMid <> EnsureSystemUnit) and OracleReadable(LRMid) then
+  begin
+    ARMid := LRMid;
+    ARSym := LRSym;
+  end;
+end;
+
 function TPasSemaProject.OracleResolve(AId: Integer; const ANameLower: string;
   out AMid, ASym: Integer): Boolean;
 var
@@ -4795,6 +4827,7 @@ begin
   if LScope <> NIL_SCOPE then
   begin
     ASym := LM.Resolve(LScope, ANameLower);
+    OracleImportOverSeed(AId, ANameLower, AMid, ASym);
     if ASym <> NIL_SYM then
       Exit(True);
   end;
@@ -4849,6 +4882,7 @@ begin
     Exit(OracleResolve(AMid, ANameLower, ARMid, ARSym));
   ARMid := AMid;
   ARSym := LM.Resolve(LM.InterfaceScope, ANameLower);
+  OracleImportOverSeed(AMid, ANameLower, ARMid, ARSym);
   if ARSym <> NIL_SYM then
     Exit(True);
   Result := ResolveRealDecl(AMid, ANameLower, ARMid, ARSym) and
@@ -5037,8 +5071,28 @@ begin
   Result := False;
   AGMid := NIL_SYM;
   AGSym := NIL_SYM;
-  if Pos('.', AName) > 0 then
+  LIdx := AName.LastIndexOf('.');
+  if LIdx >= 0 then
+  begin
+    // A unit's generic by arity, like the bare name below (`ULB.TPair<..>`
+    // in a unit whose ULB also has a non-generic TPair); any other dotted
+    // name is OracleQualified's.
+    LUid := UnitNamedBy(AMid, PasFoldName(Copy(AName, 1, LIdx)));
+    LKey := PasFoldName(Copy(AName, LIdx + 2, MaxInt));
+    if (LUid >= 0) and (LUid <> AMid) and
+       (FModels[LUid].InterfaceScope <> NIL_SCOPE) then
+    begin
+      AGSym := FModels[LUid].FindByArityDeep(FModels[LUid].InterfaceScope,
+        LKey, True);
+      if IsGenericType(LUid, AGSym) then
+      begin
+        AGMid := LUid;
+        Exit(OracleReadable(LUid));
+      end;
+      AGSym := NIL_SYM;
+    end;
     Exit(OracleQualified(AMid, AName, AGMid, AGSym));
+  end;
   LKey := PasFoldName(AName);
   LM := FModels[AMid];
   // The unit's own declarations: the implementation scope's parent chain
@@ -5285,51 +5339,103 @@ begin
   Result := ASubst <> nil;
 end;
 
-{ A type declared INSIDE a class, record or object enclosing ARefNode - its
-  definition node, NIL_NODE when there is none. dcc looks there before the
-  unit's scopes, and the oracle's unit-level lookups never see it:
-  TStringList's `FOverridden: TOverridden`, a type of its own private
-  section, refused TStringList and everything holding one. Read off the tree
-  (a nested generic is left alone), so a demoted model needs no scope. }
+{ A type declared in a scope ENCLOSING ARefNode - its definition node, and
+  in ADefMid the model holding it; NIL_NODE when there is none. dcc looks
+  there before the unit's scopes (9.1.2, 3.3.2), and the oracle's unit-level
+  lookups never see it: a type of the enclosing class, record or object
+  (TStringList's `FOverridden: TOverridden`, a type of its own private
+  section, refused TStringList and everything holding one), one an ANCESTOR
+  of an enclosing class or object declares (`TDer = class(TBase) type TR =
+  record N: TN end` with `TBase.TN`), and a routine's local type declared
+  above the reference (`procedure P; type TLoc = Int64; TRL = record L:
+  TLoc end;`), a nested routine seeing its outer routine's. dcc64 37.0,
+  local/probe-cov-preproc L1. Read off the tree (a nested generic is left
+  alone), so a demoted model needs no scope. }
 function TPasSemaProject.OracleNestedTypeDef(AMid, ARefNode: Integer;
-  const ANameLower: string): Integer;
+  const ANameLower: string; out ADefMid: Integer; ADepth: Integer): Integer;
+
+  // The definition of ANameLower among AOwner's own type sections - one
+  // starting before ABefore unless that is -1.
+  function InSections(AM: TPasSemaModel; AOwner, ABefore: Integer): Integer;
+  var
+    LSec, LDecl, LName: Integer;
+  begin
+    Result := NIL_NODE;
+    LSec := AM.Tree.Nodes[AOwner].FirstChild;
+    while LSec <> NIL_NODE do
+    begin
+      if AM.Tree.Nodes[LSec].Kind = nkTypeSec then
+      begin
+        LDecl := AM.Tree.Nodes[LSec].FirstChild;
+        while LDecl <> NIL_NODE do
+        begin
+          LName := AM.Tree.Nodes[LDecl].FirstChild;
+          if (AM.Tree.Nodes[LDecl].Kind = nkTypeDecl) and
+             (LName <> NIL_NODE) and
+             (AM.Tree.Nodes[LName].Kind = nkIdent) and
+             ((ABefore < 0) or (AM.Tree.Nodes[LDecl].FirstToken < ABefore)) and
+             (AM.Tree.NodeNameLower(LName) = ANameLower) then
+          begin
+            Result := AM.Tree.Nodes[LName].NextSibling;
+            if (Result <> NIL_NODE) and
+               (AM.Tree.Nodes[Result].Kind = nkGenericParams) then
+              Result := NIL_NODE;
+            Exit;
+          end;
+          LDecl := AM.Tree.Nodes[LDecl].NextSibling;
+        end;
+      end;
+      LSec := AM.Tree.Nodes[LSec].NextSibling;
+    end;
+  end;
+
 var
   LM: TPasSemaModel;
-  LOwner, LSec, LDecl, LName: Integer;
+  LOwner, LBaseMid, LBase, LRef, LHop: Integer;
 begin
   Result := NIL_NODE;
+  ADefMid := AMid;
+  if ADepth > 16 then
+    Exit;
   LM := FModels[AMid];
   LOwner := LM.Tree.Nodes[ARefNode].Parent;
   while LOwner <> NIL_NODE do
   begin
-    if LM.Tree.Nodes[LOwner].Kind in [nkClassType, nkRecordType,
-       nkObjectType] then
-    begin
-      LSec := LM.Tree.Nodes[LOwner].FirstChild;
-      while LSec <> NIL_NODE do
-      begin
-        if LM.Tree.Nodes[LSec].Kind = nkTypeSec then
+    case LM.Tree.Nodes[LOwner].Kind of
+      nkClassType, nkRecordType, nkObjectType:
         begin
-          LDecl := LM.Tree.Nodes[LSec].FirstChild;
-          while LDecl <> NIL_NODE do
+          Result := InSections(LM, LOwner, -1);
+          if Result <> NIL_NODE then
+            Exit;
+          // The ancestors' nested types, up the chain (a reference that IS
+          // the heritage entry looks no further than its own type).
+          LBaseMid := AMid;
+          LBase := LOwner;
+          LHop := 0;
+          while (LM.Tree.Nodes[LOwner].Kind <> nkRecordType) and (LHop < 16) do
           begin
-            LName := LM.Tree.Nodes[LDecl].FirstChild;
-            if (LM.Tree.Nodes[LDecl].Kind = nkTypeDecl) and
-               (LName <> NIL_NODE) and
-               (LM.Tree.Nodes[LName].Kind = nkIdent) and
-               (LM.Tree.NodeNameLower(LName) = ANameLower) then
+            LRef := PasHeritageRef(FModels[LBaseMid].Tree, LBase);
+            if (LRef = NIL_NODE) or (LRef = ARefNode) or
+               not OracleTypeDef(LBaseMid, LRef, ADepth + LHop + 1, LBaseMid,
+                 LBase) or
+               not (FModels[LBaseMid].Tree.Nodes[LBase].Kind in
+                    [nkClassType, nkObjectType]) then
+              Break;
+            Result := InSections(FModels[LBaseMid], LBase, -1);
+            if Result <> NIL_NODE then
             begin
-              Result := LM.Tree.Nodes[LName].NextSibling;
-              if (Result <> NIL_NODE) and
-                 (LM.Tree.Nodes[Result].Kind = nkGenericParams) then
-                Result := NIL_NODE;
+              ADefMid := LBaseMid;
               Exit;
             end;
-            LDecl := LM.Tree.Nodes[LDecl].NextSibling;
+            Inc(LHop);
           end;
         end;
-        LSec := LM.Tree.Nodes[LSec].NextSibling;
-      end;
+      nkRoutineBody:
+        begin
+          Result := InSections(LM, LOwner, LM.Tree.Nodes[ARefNode].FirstToken);
+          if Result <> NIL_NODE then
+            Exit;
+        end;
     end;
     LOwner := LM.Tree.Nodes[LOwner].Parent;
   end;
@@ -5338,7 +5444,11 @@ end;
 { The definition a heritage entry or an alias names: ARefNode (an nkIdent or
   a dotted nkMember) resolved from AMid, then through `TA = TB` aliases to
   the type-expression node that defines it. A generic (nkTypeArgs) or a
-  forward-only declaration refuses. }
+  forward-only declaration refuses. A bare name resolves where it is written
+  (9.1.2, 3.3.2): a type of an enclosing scope first (OracleNestedTypeDef -
+  an enclosing class's or its ancestors', a routine's local), then the
+  unit's scope there (OracleResolveFrom: the interface does not see the
+  implementation) and the imports. }
 function TPasSemaProject.OracleTypeDef(AMid, ARefNode, ADepth: Integer;
   out ADefMid, ADefNode: Integer): Boolean;
 var
@@ -5351,9 +5461,26 @@ begin
   if ADepth > 16 then
     Exit;
   LName := FModels[AMid].Tree.DottedText(ARefNode);
-  if (LName = '') or not OracleQualified(AMid, LName, LRMid, LRSym) then
+  if LName = '' then
     Exit;
-  ADefNode := TypeDefNodeOf(LRMid, LRSym);
+  if FModels[AMid].Tree.Nodes[ARefNode].Kind = nkIdent then
+  begin
+    ADefNode := OracleNestedTypeDef(AMid, ARefNode,
+      FModels[AMid].Tree.NodeNameLower(ARefNode), LRMid, ADepth + 1);
+    if ADefNode = NIL_NODE then
+    begin
+      if not OracleResolveFrom(AMid, ARefNode,
+           FModels[AMid].Tree.NodeNameLower(ARefNode), LRMid, LRSym) then
+        Exit;
+      ADefNode := TypeDefNodeOf(LRMid, LRSym);
+    end;
+  end
+  else
+  begin
+    if not OracleQualified(AMid, LName, LRMid, LRSym) then
+      Exit;
+    ADefNode := TypeDefNodeOf(LRMid, LRSym);
+  end;
   if ADefNode = NIL_NODE then
     Exit;
   if FModels[LRMid].Tree.Nodes[ADefNode].Kind in [nkIdent, nkMember] then
@@ -6305,7 +6432,8 @@ begin
     end;
     Exit;
   end;
-  ADefNode := OracleNestedTypeDef(AMid, ANode, LM.Tree.NodeNameLower(ANode));
+  ADefNode := OracleNestedTypeDef(AMid, ANode, LM.Tree.NodeNameLower(ANode),
+    ADefMid);
   if ADefNode <> NIL_NODE then
     Exit;
   if OracleResolveFrom(AMid, ANode, LM.Tree.NodeNameLower(ANode), ADefMid,
@@ -6592,6 +6720,12 @@ begin
             FOracleMinimum := True;
             Exit(True);
           end;
+        pskLayout:
+          begin
+            ABytes := ASubst[LSIdx].Bytes;
+            AAlign := ASubst[LSIdx].Align;
+            Exit(True);
+          end;
         pskSymbol:
           // An actual named by text (`$IF SizeOf(TPair<Byte, Int64>)`):
           // Node is the type SYMBOL it resolved to.
@@ -6607,9 +6741,10 @@ begin
   // A type nested in the enclosing class or record wins over the unit's.
   if LM.Tree.Nodes[ATypeNode].Kind = nkIdent then
   begin
-    LRSym := OracleNestedTypeDef(AMid, ATypeNode, PasFoldName(LName));
+    LRSym := OracleNestedTypeDef(AMid, ATypeNode, PasFoldName(LName), LRMid,
+      ADepth);
     if LRSym <> NIL_NODE then
-      Exit(OracleFieldLayout(AMid, LRSym, ADepth + 1, ASubst, ABytes, AAlign));
+      Exit(OracleFieldLayout(LRMid, LRSym, ADepth + 1, ASubst, ABytes, AAlign));
   end;
   // A declaration the name resolves to where it is written hides a builtin
   // of the same name - `Text = Byte`, `Single = Word` in the unit make
@@ -6658,7 +6793,7 @@ function TPasSemaProject.OracleObjectLayout(AMid, ADefNode, ADepth: Integer;
   out AAlign: Integer): Boolean;
 var
   LM: TPasSemaModel;
-  LChild, LStart, LStartAlign, LPtr, LRMid, LRSym, LBaseDef: Integer;
+  LChild, LStart, LStartAlign, LPtr, LRMid, LBaseDef: Integer;
   LBaseSize: Double;
   LBaseHasVmt: Boolean;
 begin
@@ -6688,13 +6823,11 @@ begin
       // and assuming "no VMT" counted a second VMT slot into the size. This
       // oracle proves or refuses; it does not guess.
       Exit(False);
-    if OracleQualified(AMid, LM.Tree.NodeText(LChild), LRMid, LRSym) then
-    begin
-      LBaseDef := TypeDefNodeOf(LRMid, LRSym);
-      LBaseHasVmt := (LBaseDef <> NIL_NODE) and
+    // The ancestor as its name resolves where it is written (OracleTypeDef).
+    if OracleTypeDef(AMid, LChild, ADepth + 1, LRMid, LBaseDef) then
+      LBaseHasVmt :=
         (FModels[LRMid].Tree.Nodes[LBaseDef].Kind = nkObjectType) and
         OracleObjectHasVmt(LRMid, LBaseDef, ADepth + 1);
-    end;
   end;
   if not OracleRecordLayout(AMid, ADefNode, ADepth, ASubst, LStart,
        LStartAlign, ABytes, AAlign) then
@@ -6719,7 +6852,7 @@ function TPasSemaProject.OracleObjectHasVmt(AMid, ADefNode,
   ADepth: Integer): Boolean;
 var
   LM: TPasSemaModel;
-  LChild, LDir, LRMid, LRSym, LBase: Integer;
+  LChild, LDir, LRMid, LBase: Integer;
 begin
   Result := False;
   if ADepth > 8 then
@@ -6745,13 +6878,9 @@ begin
   // Not here - ask the ancestor.
   LBase := LM.Tree.Nodes[ADefNode].FirstChild;
   if (LBase <> NIL_NODE) and (LM.Tree.Nodes[LBase].Kind = nkIdent) and
-     OracleQualified(AMid, LM.Tree.NodeText(LBase), LRMid, LRSym) then
-  begin
-    LBase := TypeDefNodeOf(LRMid, LRSym);
-    if (LBase <> NIL_NODE) and
-       (FModels[LRMid].Tree.Nodes[LBase].Kind = nkObjectType) then
-      Result := OracleObjectHasVmt(LRMid, LBase, ADepth + 1);
-  end;
+     OracleTypeDef(AMid, LBase, ADepth + 1, LRMid, LBase) and
+     (FModels[LRMid].Tree.Nodes[LBase].Kind = nkObjectType) then
+    Result := OracleObjectHasVmt(LRMid, LBase, ADepth + 1);
 end;
 
 { A generic INSTANTIATION used as a type - `TG<Integer>`, the nkTypeArgs node.
@@ -6830,47 +6959,86 @@ end;
 { SizeOf of an instantiation a `$IF` names by text - `TPair<Byte, Int64>`,
   the question CondEval sends for an nkTypeArgs argument (`SizeOf(TPair<Byte,
   Int64>) = 16`, and a constant `C4 = SizeOf(TPair<Byte, Byte>)` that a guard
-  reads; dcc64 37.0, local/probe-b60 P1, audit E2-25). The head is a bare
-  generic name, each actual a name resolved from unit AId; the generic is
-  laid out with its parameters bound to those symbols (pskSymbol). A nested
-  instantiation among the actuals refuses. }
+  reads; dcc64 37.0, local/probe-b60 P1, audit E2-25). The head is a generic
+  name, qualified or not (`ULB.TPair<Byte, Byte>`); each actual a name
+  resolved from unit AId, bound as that symbol (pskSymbol), or an
+  instantiation again, laid out first and bound as its layout (pskLayout:
+  `TPair<Byte, TPair<Byte, Int64>>` is 24; dcc64 37.0, local/probe-cov-preproc
+  L2). }
 function TPasSemaProject.OracleInstanceSize(AId: Integer; const AName: string;
   out ABytes: Double): Boolean;
 var
-  LLt, LGMid, LGSym, LAMid, LASym, LAlign: Integer;
-  LHead: string;
+  LAlign: Integer;
+begin
+  Result := OracleInstanceLayout(AId, AName, 0, ABytes, LAlign);
+end;
+
+function TPasSemaProject.OracleInstanceLayout(AId: Integer;
+  const AName: string; ADepth: Integer; out ABytes: Double;
+  out AAlign: Integer): Boolean;
+var
+  LLt, LGMid, LGSym, LAMid, LASym, LLevel, LStart, LIdx: Integer;
+  LHead, LBody, LOne: string;
   LArgs, LNames: TArray<string>;
   LSubst: TPasSubst;
   LEntry: TPasSubstEntry;
 begin
   Result := False;
   ABytes := 0;
+  AAlign := 1;
+  if ADepth > 8 then
+    Exit;
   LLt := AName.IndexOf('<');
   if (LLt <= 0) or not AName.EndsWith('>') then
     Exit;
-  LHead := Copy(AName, 1, LLt);
-  if LHead.Contains('.') then
-    Exit;
-  LArgs := Copy(AName, LLt + 2, Length(AName) - LLt - 2).Split([',']);
+  LHead := Copy(AName, 1, LLt).Trim;
+  // The actuals: the commas at the outermost level split them.
+  LBody := Copy(AName, LLt + 2, Length(AName) - LLt - 2);
+  LArgs := nil;
+  LLevel := 0;
+  LStart := 1;
+  for LIdx := 1 to Length(LBody) do
+    if LBody[LIdx] = '<' then
+      Inc(LLevel)
+    else if LBody[LIdx] = '>' then
+      Dec(LLevel)
+    else if (LBody[LIdx] = ',') and (LLevel = 0) then
+    begin
+      LArgs := LArgs + [Copy(LBody, LStart, LIdx - LStart).Trim];
+      LStart := LIdx + 1;
+    end;
+  LArgs := LArgs + [Copy(LBody, LStart, MaxInt).Trim];
   if not OracleGenericDecl(AId, LHead, LGMid, LGSym) then
     Exit;
   LNames := OracleGenericParamNames(LGMid, LGSym);
   if (LNames = nil) or (Length(LNames) <> Length(LArgs)) then
     Exit;
   LSubst := nil;
-  for var LI := 0 to High(LArgs) do
+  for LIdx := 0 to High(LArgs) do
   begin
-    if (LArgs[LI].Trim = '') or LArgs[LI].Contains('<') or
-       not OracleQualified(AId, LArgs[LI].Trim, LAMid, LASym) then
-      Exit;
+    LOne := LArgs[LIdx];
     LEntry := Default(TPasSubstEntry);
-    LEntry.Name := LNames[LI];
-    LEntry.Mid := LAMid;
-    LEntry.Node := LASym;
-    LEntry.Kind := pskSymbol;
+    LEntry.Name := LNames[LIdx];
+    if LOne = '' then
+      Exit;
+    if LOne.Contains('<') then
+    begin
+      if not OracleInstanceLayout(AId, LOne, ADepth + 1, LEntry.Bytes,
+           LEntry.Align) then
+        Exit;
+      LEntry.Kind := pskLayout;
+    end
+    else
+    begin
+      if not OracleQualified(AId, LOne, LAMid, LASym) then
+        Exit;
+      LEntry.Mid := LAMid;
+      LEntry.Node := LASym;
+      LEntry.Kind := pskSymbol;
+    end;
     LSubst := LSubst + [LEntry];
   end;
-  Result := OracleLayout(LGMid, LGSym, 1, LSubst, ABytes, LAlign);
+  Result := OracleLayout(LGMid, LGSym, ADepth + 1, LSubst, ABytes, AAlign);
 end;
 
 { The binding half of OracleGenericLayout, shared with a generic class

@@ -1042,7 +1042,7 @@ type
     procedure AddParseDiags(const ADiags: TArray<TPasParseDiag>);
     function DirectiveWord(const ADiag: TPasPPDiagnostic): string;
     function AfterFinalEnd: Integer;
-    function TextAfterFinalEnd(AAfterEnd: Integer): Integer;
+    function TextAfterFinalEnd(out AFile: Integer): Integer;
     { What a load path put on AFrom after its Phase 1, for a model built
       again over AFrom's own tree: the parser's and the lexer's rows (through
       AddParseDiags, from AFrom.ParseDiags) and the `$IF` oracle's verdict on
@@ -3685,13 +3685,13 @@ begin
         Tree.Source.Files[LFile], LLine, LCode, LMsg);
       AddDiag(MakeDiag(LCode, LMsg, NIL_NODE, LFile, LLine, LCol));
     end;
-  LTok := TextAfterFinalEnd(LAfterEnd);
+  LTok := TextAfterFinalEnd(LFile);
   if LTok >= 0 then
   begin
-    Tree.Source.Files[0].OffsetToLineCol(LTok, LLine, LCol);
+    Tree.Source.Files[LFile].OffsetToLineCol(LTok, LLine, LCol);
     AddDiag(MakeDiag('W1011',
-      'W1011 Text after final ''END.'' - ignored by compiler', NIL_NODE, 0,
-      LLine, LCol));
+      'W1011 Text after final ''END.'' - ignored by compiler', NIL_NODE,
+      LFile, LLine, LCol));
   end;
   // The PREPROCESSOR's rows a compiler reports, in dcc's words (dcc64 37.0,
   // local/probe-b63 misc): until now only the guessed-$IF pair reached a
@@ -3791,42 +3791,77 @@ begin
   Result := LTok.Start + LTok.Len;
 end;
 
-// Where dcc's W1011 for the main file's text after its final `end.` (from
-// AAfterEnd, AfterFinalEnd's offset) stands, or -1 when there is none to
-// report. dcc64 37.0 (1.3.3): spaces, control characters and `//` comments
-// are not text; anything else is - a `{...}` or `(*...*)` comment, a
-// directive, a word - and the warning sits on the line where that first
-// element ENDS: a comment's closer (the end of the file when it has none),
-// the start of anything else.
-function TPasSemaModel.TextAfterFinalEnd(AAfterEnd: Integer): Integer;
+// Where dcc's W1011 for the text after the final `end.` stands - an offset
+// in file AFile - or -1 when there is none to report. dcc64 37.0 (1.1.1):
+// spaces, control characters and `//` comments are not text; anything else
+// is - a `{...}` or `(*...*)` comment, a directive, a word - and the warning
+// sits on the line where that first element ENDS: a comment's closer (the
+// end of the file when it has none), the start of anything else. An `end.`
+// an include supplies is followed by the rest of that include, then by the
+// includer's text after the `{$I}` (dcc64 37.0: `{$I wend.inc}` holding
+// `begin end.`, then `foo` in the program, warns on the program's line).
+function TPasSemaModel.TextAfterFinalEnd(out AFile: Integer): Integer;
+
+  function TextFrom(const ASrc: string; AFrom: Integer): Integer;
+  var
+    LIdx, LLen: Integer;
+  begin
+    Result := -1;
+    LLen := Length(ASrc);
+    LIdx := AFrom + 1;   // 1-based
+    while LIdx <= LLen do
+      if ASrc[LIdx] <= ' ' then
+        Inc(LIdx)
+      else if (ASrc[LIdx] = '/') and (LIdx < LLen) and (ASrc[LIdx + 1] = '/') then
+        while (LIdx <= LLen) and not CharInSet(ASrc[LIdx], [#10, #13]) do
+          Inc(LIdx)
+      else
+        Break;
+    if LIdx > LLen then
+      Exit;
+    if ASrc[LIdx] = '{' then
+      LIdx := Pos('}', ASrc, LIdx)
+    else if (ASrc[LIdx] = '(') and (LIdx < LLen) and (ASrc[LIdx + 1] = '*') then
+      LIdx := Pos('*)', ASrc, LIdx + 2);
+    if LIdx = 0 then
+      Result := LLen   // unclosed: the end of the file
+    else
+      Result := LIdx - 1;
+  end;
+
 var
-  LSrc: string;
-  LIdx, LLen: Integer;
+  LLast, LOff, LIdx, LRef: Integer;
+  LVis: TPasVisibleToken;
+  LTok: TPasToken;
 begin
   Result := -1;
-  if AAfterEnd < 0 then
+  AFile := 0;
+  if (Length(Tree.Nodes) = 0) or (Length(Tree.Source.Visible) = 0) then
     Exit;
-  LSrc := Tree.Source.Files[0].Source;
-  LLen := Length(LSrc);
-  LIdx := AAfterEnd + 1;   // 1-based
-  while LIdx <= LLen do
-    if LSrc[LIdx] <= ' ' then
-      Inc(LIdx)
-    else if (LSrc[LIdx] = '/') and (LIdx < LLen) and (LSrc[LIdx + 1] = '/') then
-      while (LIdx <= LLen) and not CharInSet(LSrc[LIdx], [#10, #13]) do
-        Inc(LIdx)
-    else
-      Break;
-  if LIdx > LLen then
+  LLast := Tree.Nodes[0].LastToken - 1;   // the `.`
+  if (LLast < 1) or (LLast > High(Tree.Source.Visible)) or
+     not Tree.Source.VisibleTextEquals(LLast, '.') or
+     not Tree.Source.VisibleTextEquals(LLast - 1, 'end') then
     Exit;
-  if LSrc[LIdx] = '{' then
-    LIdx := Pos('}', LSrc, LIdx)
-  else if (LSrc[LIdx] = '(') and (LIdx < LLen) and (LSrc[LIdx + 1] = '*') then
-    LIdx := Pos('*)', LSrc, LIdx + 2);
-  if LIdx = 0 then
-    Result := LLen   // unclosed: the end of the file
-  else
-    Result := LIdx - 1;
+  LVis := Tree.Source.Visible[LLast];
+  AFile := LVis.FileId;
+  LTok := Tree.Source.Files[AFile].Tokens[LVis.TokenIndex];
+  LOff := LTok.Start + LTok.Len;
+  while True do
+  begin
+    Result := TextFrom(Tree.Source.Files[AFile].Source, LOff);
+    if (Result >= 0) or (AFile = 0) then
+      Exit;
+    LRef := -1;
+    for LIdx := 0 to High(Tree.Source.IncludeRefs) do
+      if Tree.Source.IncludeRefs[LIdx].IncludedFileId = AFile then
+        LRef := LIdx;
+    if LRef < 0 then
+      Exit;
+    AFile := Tree.Source.IncludeRefs[LRef].FileId;
+    LOff := Tree.Source.IncludeRefs[LRef].Start +
+      Tree.Source.IncludeRefs[LRef].Len;
+  end;
 end;
 
 procedure TPasSemaModel.TrimDiags;
