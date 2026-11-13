@@ -2633,19 +2633,30 @@ begin
       Inc(Result);
 end;
 
-// Every ACode diagnostic of AModel as `line:col` in report order, joined by
+// Every ACode diagnostic of AModel as `line:col` in source order, joined by
 // spaces - an assertion names the exact sites, so one too many fails too.
 function DiagSites(AModel: TPasSemaModel; const ACode: string): string;
+var
+  LKeys: TList<Int64>;
 begin
-  Result := '';
-  for var LIdx := 0 to High(AModel.Diags) do
-    if AModel.Diags[LIdx].Code = ACode then
+  // In source order, whichever pass reported each.
+  LKeys := TList<Int64>.Create;
+  try
+    for var LIdx := 0 to High(AModel.Diags) do
+      if AModel.Diags[LIdx].Code = ACode then
+        LKeys.Add(Int64(AModel.Diags[LIdx].Line) * 100000 +
+          AModel.Diags[LIdx].Col);
+    LKeys.Sort;
+    Result := '';
+    for var LKey in LKeys do
     begin
       if Result <> '' then
         Result := Result + ' ';
-      Result := Result + Format('%d:%d', [AModel.Diags[LIdx].Line,
-        AModel.Diags[LIdx].Col]);
+      Result := Result + Format('%d:%d', [LKey div 100000, LKey mod 100000]);
     end;
+  finally
+    LKeys.Free;
+  end;
 end;
 
 // Does any ACode diagnostic in AModel mention ASubstr?
@@ -9787,6 +9798,86 @@ begin
   end;
 end;
 
+{ Spec 19.3.2 (dcc64 37.0, 2026-11-13): an attribute dcc drops is W1074 -
+  naming what its name found when that is a declared non-type (`[C]`,
+  `[F(1)]`, `[C.X]`, `[C(Undeclared)]`, `[System.MaxInt]`, and
+  `QAttribute` for `[Q]` when the suffixed name is a constant), with no name
+  for an undeclared name or an expression (`[1 + 2]`, `['x']`, a target
+  other than Result). `Result` with no `:` is `E2029 ':' expected but ']'
+  found` - a `.` after it a second E2029 - and dropped. }
+procedure TestAttributeW1074;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_attrw1074');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10'  TObject = class end;'#10 +
+    '  TCustomAttribute = class(TObject) end;'#10 +
+    'const MaxInt = 2147483647;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'AW.dpr'),
+    'program AW;'#10 +                                   // 1
+    'type'#10 +                                          // 2
+    '  TA = class(TCustomAttribute) end;'#10 +           // 3
+    '  Q = class(TCustomAttribute) end;'#10 +            // 4
+    'const'#10 +                                         // 5
+    '  C = 1;'#10 +                                      // 6
+    '  QAttribute = 2;'#10 +                             // 7
+    'var V: Integer;'#10 +                               // 8
+    'function F(X: Integer): Integer; begin Result := X; end;'#10 + // 9
+    'type'#10 +                                          // 10
+    '  T1 = class'#10 +                                  // 11
+    '    [C] F1: Integer;'#10 +                          // 12 W 'C'
+    '    [V] F2: Integer;'#10 +                          // 13 W 'V'
+    '    [F(1)] F3: Integer;'#10 +                       // 14 W 'F'
+    '    [Undeclared] F4: Integer;'#10 +                 // 15 W
+    '    [Undeclared.X] F5: Integer;'#10 +               // 16 W
+    '    [1 + 2] F6: Integer;'#10 +                      // 17 W
+    '    [''abc''] F7: Integer;'#10 +                    // 18 W
+    '    [Foo: TA] F8: Integer;'#10 +                    // 19 W
+    '    [C + 1] F9: Integer;'#10 +                      // 20 W (dcc: 'C')
+    '    [TA, C, ''x''] F10: Integer;'#10 +              // 21 W 'C', W
+    '    [C.X] F11: Integer;'#10 +                       // 22 W 'C'
+    '    [System.MaxInt] F12: Integer;'#10 +             // 23 W 'MaxInt'
+    '    [Q] F13: Integer;'#10 +                         // 24 W 'QAttribute'
+    '    [C(Undeclared)] F14: Integer;'#10 +             // 25 W 'C'
+    '    [TA] [Result: TA] function G: Integer;'#10 +    // 26 valid
+    '    [Result] function H: Integer;'#10 +             // 27 E2029, W
+    '    [Result.X] function K: Integer;'#10 +           // 28 E2029 x2, W
+    '  end;'#10 +                                        // 29
+    'function T1.G: Integer; begin Result := 0; end;'#10 +
+    'function T1.H: Integer; begin Result := 0; end;'#10 +
+    'function T1.K: Integer; begin Result := 0; end;'#10 +
+    'begin'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'AW.dpr'));
+    LM := ModelByName('aw');
+    Ok('attrw1074: W1074 on every dropped attribute [' +
+      DiagSites(LM, 'W1074') + ']', DiagSites(LM, 'W1074') =
+      '12:6 13:6 14:6 15:6 16:6 17:6 18:6 19:6 20:6 21:10 21:13 22:6 23:6 ' +
+      '24:6 25:6 27:6 28:6');
+    Ok('attrw1074: each names what it found, or nothing',
+      DiagHasText(LM, 'W1074', ': ''C''') and
+      DiagHasText(LM, 'W1074', ': ''V''') and
+      DiagHasText(LM, 'W1074', ': ''F''') and
+      DiagHasText(LM, 'W1074', ': ''MaxInt''') and
+      DiagHasText(LM, 'W1074', ': ''QAttribute'''));
+    Ok('attrw1074: [Result] and [Result.X] are E2029 [' +
+      DiagSites(LM, 'E2029') + ']',
+      (DiagSites(LM, 'E2029') = '27:12 28:12 28:12') and
+      DiagHasText(LM, 'E2029', ''':'' expected but '']'' found') and
+      DiagHasText(LM, 'E2029', ''','' or '']'' expected but ''.'' found'));
+    Ok('attrw1074: no E2003, nothing else',
+      Length(LM.Diags) = 20);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // A3-14, E2-29: which helper applies is the referring unit's question - an
 // implementation-section helper is its unit's own, and of two helpers for
 // one type only the later is active, a name it lacks being the type's own
@@ -16701,6 +16792,10 @@ begin
       'the arguments of a constant or a function',
       Assigned(LF33) and (DiagCount(LF33, 'E2003') = 1) and
       DiagHasText(LF33, 'E2003', 'Undeclared7'));
+    Ok('19.3.2 (F33): W1074 for each name naming no type, undeclared or a '
+      + 'constant or function', Assigned(LF33) and
+      (DiagCount(LF33, 'W1074') = 6) and DiagHasText(LF33, 'W1074', ': ''C''')
+      and DiagHasText(LF33, 'W1074', ': ''F'''));
     var LAnc := ModelByName('unitattranc');
     Ok('19.3.1: a real TCustomAttribute descendant is NOT flagged',
       not DiagHasText(LAnc, 'E2010', 'TGoodAttr'));
@@ -16721,9 +16816,10 @@ begin
       Assigned(LF7) and (DiagCount(LF7, 'E2010') = 2));
     var LF32 := ModelByName('unitattrf32');
     Ok('19.3.2 (F32): an expression attribute is neither checked nor '
-      + 'resolved - no E2010, no E2003, no parse error',
+      + 'resolved - no E2010, no E2003, no parse error: W1074 each',
       Assigned(LF32) and (DiagCount(LF32, 'E2010') = 0) and
-      (DiagCount(LF32, 'E2003') = 0) and (Length(LF32.Diags) = 0));
+      (DiagCount(LF32, 'E2003') = 0) and (DiagCount(LF32, 'W1074') = 5) and
+      (Length(LF32.Diags) = 5));
     // 19.3.3: a COMPILER-RECOGNIZED attribute is exempt from the ancestry
     // check, and the fixture makes that non-vacuous the way the real world
     // did -- a class literally named `Unsafe` that is NOT a TCustomAttribute
@@ -20300,6 +20396,7 @@ begin
   TestAnonLiteralType;
   TestTypedAddress;
   TestAttributeSuffixFirst;
+  TestAttributeW1074;
   TestAttributeGuidAndPositions;
   TestHelperVisibility;
   TestBuiltinIdentity;

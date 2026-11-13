@@ -639,10 +639,15 @@ var
   LName: Integer;
 begin
   LName := ATree.Nodes[AAttr].FirstChild;
-  Result := (LName <> NIL_NODE) and
-    (ATree.Nodes[LName].Kind in [nkIdent, nkMember, nkTypeArgs]) and
-    (not (nfAttrTarget in ATree.Nodes[AAttr].Flags) or
-     ATree.NodeTextEquals(AAttr, 'result'));
+  if (LName = NIL_NODE) or
+     not (ATree.Nodes[LName].Kind in [nkIdent, nkMember, nkTypeArgs]) then
+    Exit(False);
+  if nfAttrTarget in ATree.Nodes[AAttr].Flags then
+    Exit(ATree.NodeTextEquals(AAttr, 'result'));
+  // `Result` with no `:` after it (`[Result]`, `[Result.X]`) is E2029 and
+  // dropped: the parser reads it as an expression.
+  Result := not (ATree.NodeTextEquals(AAttr, 'result') or
+    ATree.NodeTextEquals(AAttr, '&result'));
 end;
 
 function PasSkipAttrGroups(const ATree: TPasTree; ANode: Integer): Integer;

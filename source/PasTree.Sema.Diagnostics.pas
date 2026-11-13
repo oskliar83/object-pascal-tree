@@ -41,6 +41,10 @@ const
   // a property, a constant (3 sec. 3.2.2).
   SE2461_NotAnInstanceField =
     'E2461 Identifier ''%s'' is not an instance field';
+  // An attribute dcc drops (19 sec. 19.3.2): naming a declared non-type, the
+  // name it found; an expression or an undeclared name, none.
+  SW1074_UnknownCustomAttributeName = 'W1074 Unknown custom attribute: ''%s''';
+  SW1074_UnknownCustomAttribute = 'W1074 Unknown custom attribute';
   // An anonymous method naming what it cannot capture (17 sec. 17.3.1).
   SE2555_CannotCapture = 'E2555 Cannot capture symbol ''%s''';
   // Takes no argument: a bare `raise` has nothing to name (18 sec. 18.3.1).

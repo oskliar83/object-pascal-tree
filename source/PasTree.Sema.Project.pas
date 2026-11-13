@@ -1372,6 +1372,13 @@ type
     function IsAttributeTypeRef(AModel: TPasSemaModel; ANode: Integer): Boolean;
     function IsMagicAttributeRef(AModel: TPasSemaModel; ANode: Integer): Boolean;
     function SilentAttributeRef(AModel: TPasSemaModel; ANode: Integer): Boolean;
+    { The name-form nkAttribute whose name ANode is the first segment of
+      (`X` in `[X]`, `[X.Y]`, `[X(1)]`, `[X<T>]`), or NIL_NODE. }
+    function AttrOfNameHead(AModel: TPasSemaModel; ANode: Integer): Integer;
+    { The node of an attribute's name that decides what it is (19.3.2): the
+      first segment, or past a unit qualifier the segment it qualifies
+      (`[System.MaxInt]`); NIL_NODE when the name is no designator. }
+    function AttrDecidingName(AId, AAttr: Integer): Integer;
     function IgnoredResolutionTarget(AModel: TPasSemaModel; ANode: Integer;
       AId: Integer): Boolean;
     function UsesUnitOf(AId, ASym: Integer): Integer;
@@ -9805,6 +9812,60 @@ end;
   (`[TA(Undeclared)]` is E2003), and a qualifier that IS a unit is looked
   into (`[System.Undeclared]`, `[ThisUnit.Undeclared]` are E2003): neither is
   silent. True for ANode, an E2003 candidate, in a silent place. }
+function TPasSemaProject.AttrOfNameHead(AModel: TPasSemaModel;
+  ANode: Integer): Integer;
+var
+  LNode, LParent: Integer;
+begin
+  Result := NIL_NODE;
+  // Up through the left spine: a head is its nkMember's / nkTypeArgs' FIRST
+  // child at every level.
+  LNode := ANode;
+  LParent := AModel.Tree.Nodes[LNode].Parent;
+  while (LParent <> NIL_NODE) and
+        (AModel.Tree.Nodes[LParent].Kind in [nkMember, nkTypeArgs]) and
+        (AModel.Tree.Nodes[LParent].FirstChild = LNode) do
+  begin
+    LNode := LParent;
+    LParent := AModel.Tree.Nodes[LNode].Parent;
+  end;
+  if (LParent <> NIL_NODE) and
+     (AModel.Tree.Nodes[LParent].Kind = nkAttribute) and
+     (AModel.Tree.Nodes[LParent].FirstChild = LNode) and
+     PasAttrIsName(AModel.Tree, LParent) then
+    Result := LParent;
+end;
+
+function TPasSemaProject.AttrDecidingName(AId, AAttr: Integer): Integer;
+var
+  LM: TPasSemaModel;
+  LCur, LParent: Integer;
+begin
+  LM := FModels[AId];
+  LCur := LM.Tree.Nodes[AAttr].FirstChild;
+  if (LCur <> NIL_NODE) and (LM.Tree.Nodes[LCur].Kind = nkTypeArgs) then
+    LCur := LM.Tree.Nodes[LCur].FirstChild;
+  if LCur = NIL_NODE then
+    Exit(NIL_NODE);
+  while LM.Tree.Nodes[LCur].Kind = nkMember do
+    LCur := LM.Tree.Nodes[LCur].FirstChild;
+  if LM.Tree.Nodes[LCur].Kind <> nkIdent then
+    Exit(NIL_NODE);
+  Result := LCur;
+  // Past each unit qualifier, dotted or not: the segment it qualifies.
+  while UnitNameOf(AId, LCur) >= 0 do
+  begin
+    LParent := LM.Tree.Nodes[LCur].Parent;
+    if (LParent = NIL_NODE) or (LM.Tree.Nodes[LParent].Kind <> nkMember) or
+       (LM.Tree.Nodes[LParent].FirstChild <> LCur) then
+      Exit(NIL_NODE);
+    Result := LM.Tree.LastChild(LParent);
+    if (Result = NIL_NODE) or (LM.Tree.Nodes[Result].Kind <> nkIdent) then
+      Exit(NIL_NODE);
+    LCur := LParent;
+  end;
+end;
+
 function TPasSemaProject.SilentAttributeRef(AModel: TPasSemaModel;
   ANode: Integer): Boolean;
 var
@@ -10199,7 +10260,8 @@ end;
 procedure TPasSemaProject.EmitE2003(AModel: TPasSemaModel; ANode: Integer;
   AId: Integer = -1);
 var
-  LStruct: Integer;
+  LStruct, LAttr: Integer;
+  LSilent: Boolean;
 begin
   // A COMPILER-RECOGNIZED attribute name (19.3.3) - `[Ref]`, `[Align(8)]`,
   // `[weak]` and friends - is System's declaration, which an analysis without
@@ -10208,13 +10270,14 @@ begin
   // passes reach this verdict; CheckAttributes exempts the same set.
   if IsMagicAttributeRef(AModel, ANode) then
     Exit;
-  // Where dcc says W1074 instead - see SilentAttributeRef.
-  if SilentAttributeRef(AModel, ANode) then
-    Exit;
+  // Where dcc says W1074 instead - see SilentAttributeRef: an attribute whose
+  // name starts with an undeclared identifier, judged by the gates below.
+  LSilent := SilentAttributeRef(AModel, ANode);
   // The class-method name of a method resolution clause that dcc silently
   // IGNORES - see IgnoredResolutionTarget. Two rows in a third-party layout
   // unit, and that unit compiles.
-  if (AId >= 0) and IgnoredResolutionTarget(AModel, ANode, AId) then
+  if not LSilent and (AId >= 0) and
+     IgnoredResolutionTarget(AModel, ANode, AId) then
     Exit;
   // The enclosing struct's ancestry decides whether this verdict is knowable
   // at all - see UnknownAncestryX. AId is the model's own index, which this
@@ -10225,6 +10288,13 @@ begin
     LStruct := StructSymOfNode(AModel, ANode);
     if (LStruct <> NIL_SYM) and UnknownAncestryX(XPlain(AId, LStruct)) then
       Exit;
+  end;
+  if LSilent then
+  begin
+    LAttr := AttrOfNameHead(AModel, ANode);
+    if (LAttr <> NIL_NODE) and not AModel.HasDiagAt(LAttr) then
+      EmitAt(AModel, LAttr, 'W1074', SW1074_UnknownCustomAttribute);
+    Exit;
   end;
   EmitAt(AModel, ANode, 'E2003', Format(SE2003_UndeclaredIdentifier,
     [AModel.Tree.NodeText(ANode)]));
@@ -11874,7 +11944,8 @@ procedure TPasSemaProject.CheckAttributes(AId: Integer);
 var
   LM: TPasSemaModel;
   LCustomAttrX, LAttrX: TSemaXType;
-  LNode, LRef: Integer;
+  LNode, LRef, LHead, LSym, LKMid: Integer;
+  LExt: TPasExtRef;
 begin
   LCustomAttrX := ResolveCustomAttributeX(AId);
   if not XValid(LCustomAttrX) then
@@ -11896,13 +11967,44 @@ begin
     // binds; the exemption stays for the System-less analysis.
     if LM.Tree.Nodes[LNode].Aux <> amaNone then
       Continue;
-    // An expression attribute (`[(TObject)]`) is W1074 and dropped, never
-    // E2010 (F32).
+    // An expression attribute (`[(TObject)]`, `[1 + 2]`, a target other than
+    // Result, `[Result]`) is W1074 and dropped, never E2010 (F32).
     if not PasAttrIsName(LM.Tree, LNode) then
+    begin
+      if not LM.HasDiagAt(LNode) then
+        EmitAt(LM, LNode, 'W1074', SW1074_UnknownCustomAttribute);
       Continue;
+    end;
     LRef := LM.Tree.Nodes[LNode].FirstChild;
     if LRef = NIL_NODE then
       Continue;
+    // A name that finds a declaration but no type - a constant, a variable,
+    // a routine (the suffixed name first: a `const QAttribute` beside a
+    // class Q) - is W1074 naming what it found; an undeclared one is
+    // EmitE2003's (W1074 with no name). A missing unit may hold the
+    // attribute class the name would find first.
+    if LM.AllUsesResolved then
+    begin
+      LHead := AttrDecidingName(AId, LNode);
+      if LHead <> NIL_NODE then
+      begin
+        LSym := LM.RefMap[LHead];
+        LKMid := AId;
+        if (LSym = NIL_SYM) and LM.ExtRefMap.TryGetValue(LHead, LExt) then
+        begin
+          LKMid := LExt.UnitId;
+          LSym := LExt.Sym;
+        end;
+        if (LSym <> NIL_SYM) and not (FModels[LKMid].Symbols[LSym].Kind in
+           [skType, skBuiltinType, skGenericParam, skUnitRef]) then
+        begin
+          if not LM.HasDiagAt(LNode) then
+            EmitAt(LM, LNode, 'W1074', Format(SW1074_UnknownCustomAttributeName,
+              [FModels[LKMid].Symbols[LSym].Name]));
+          Continue;
+        end;
+      end;
+    end;
     LAttrX := ResolveTypeExpr(AId, LRef);
     if not XValid(LAttrX) then
       Continue;

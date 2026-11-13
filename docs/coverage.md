@@ -604,16 +604,13 @@ of less work, not a gap in following the language; its consequences are in
   that is no attribute class it skips tokens up to the `,` or `]` - `[C + + ]`
   and `[C (]` compile - and PasTree reads an expression there, so token runs
   that are no expression are parse errors. `[C < 1]` reads as type arguments.
-- a name attribute that names no attribute class is W1074 for dcc and
-  dropped; PasTree reports no warning. As dcc, it gives no E2003 for a name
-  that starts with an undeclared identifier nor in the arguments of one
-  naming no type (`[C(Undeclared)]`); a unit qualifier's missing member is
-  E2003 (`[System.Undeclared]`), within the limits of 1.2.3.
-- a target before an attribute is read for any word followed by `:`
-  (`[Result: Tag]`; dcc drops one with another word, and PasTree binds no
-  name in it); dcc's E2289 for `Result:` before anything but a function is
-  not reported, nor its `E2029 ':' expected` for `[Result]` alone, and an
-  expression before the colon (`[1: Tag]`, W1074 for dcc) is a parse error.
+  The same reading looks up no name in `[C + 1]`, so its W1074 names nothing
+  where dcc's names `'C'`, and `[TA + 1]` is W1074 where dcc reports E2029.
+- a `Result:` attribute before anything but a function is not reported: dcc
+  carries it to the next function of the member list and reports E2289 only
+  where the list ends without one (one E2289 per compile), and PasTree
+  reports no E2289 at all. An expression before the colon (`[1: Tag]`, W1074
+  for dcc) is a parse error.
 - `[X]` binds `XAttribute` first, in the unit, the used units and System,
   as dcc does - except on a parameter of a method's implementation header,
   where a name the unit does not declare goes to the inherited pass, which
