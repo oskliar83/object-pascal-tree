@@ -1254,7 +1254,13 @@ type
       T`), which has no type and must not be guessed. }
     function IndexResultX(AId, ABaseNode: Integer; const ABaseX: TSemaXType;
       ACount: Integer; out APropMid, APropSym: Integer;
-      out AInsideArray: Boolean): TSemaXType;
+      out AInsideArray: Boolean): TSemaXType; overload;
+    { AIntoStruct: the comma list ran from an array (a string, a pointer)
+      on into a struct's default property - dcc's E2016 (13.1.4); the type
+      is still answered through the property. }
+    function IndexResultX(AId, ABaseNode: Integer; const ABaseX: TSemaXType;
+      ACount: Integer; out APropMid, APropSym: Integer;
+      out AInsideArray, AIntoStruct: Boolean): TSemaXType; overload;
     { The one alias step every type chaser takes: the type alias definition
       ADef of ACur resolved (nested-aware) and closed over ACur's frame -
       `TItems = TArray<T>` nested in TBox<T>, reached from a TBox<TRec>, is
@@ -2015,8 +2021,15 @@ type
     // ancestor's - and the type declaring it (public for the form binder:
     // a collection's item class is its default property's type,
     // TActionClients.ActionClients[]: TActionClientItem).
+    // AFromMid: the referring unit, whose active helper's default property
+    // wins (13.1.4); -1 consults no helper.
     function DefaultArrayPropX(const AX: TSemaXType;
-      out AMid, ASym: Integer; out AOwner: TSemaXType): Boolean;
+      out AMid, ASym: Integer; out AOwner: TSemaXType;
+      AFromMid: Integer = -1): Boolean;
+    { The index-parameter types of the property AMid.ASym, closed over the
+      frame AInst - what an index expression is scored against. Nil when a
+      parameter is not typed. }
+    function PropertyParamXs(AMid, ASym, AInst: Integer): TArray<TSemaXType>;
     { Is (AMid, ASym) an ARRAY property - one declaring index parameters,
       itself or, for a bare redeclaration, the declaration it republishes
       (13.1.2)? Indexing it consumes those parameters: its declared type is
@@ -17126,6 +17139,9 @@ var
   // Calls bound in the calling unit's own unit-level overload set (pass
   // mode), four entries each like LNoFit's - CheckTies' E2251.
   LTieCand: TArray<Integer>;
+  // Index nodes whose comma list ran from an array into a default property
+  // (pass mode) - CheckAssigns' E2016 (13.1.4).
+  LCommaStruct: TArray<Integer>;
   // The candidates the last SelectCallTarget found best alike with a fit
   // above no evidence (ConsiderChain), the best first - CheckTies' note.
   LSelTie0, LSelTie1: TPasExtRef;
@@ -19592,12 +19608,93 @@ var
       ((LProbe = nil) or not LProbe.FX.ContainsKey(N));
   end;
 
+  { `L[X]` where L's default array property is overloaded by index type
+    (13.1.4: TGroupCollection's `Item[Integer]` and `Item[string]`, both
+    `default`): the index expressions of the nkIndex N choose among the
+    default properties of the name declared where AMid.ASym - the first
+    one, IndexResultX's answer - is, scored as a call's arguments are
+    (ArgFitX). A unique best that is another property re-types N and is
+    what the brackets bind; a tie, or an index the scorer refuses for every
+    candidate, keeps the first. }
+  procedure PickDefaultOverload(N: Integer; const ABaseX: TSemaXType;
+    var AMid, ASym: Integer);
+  var
+    LDm: TPasSemaModel;
+    LCand, LBest, LBestScore, LScore, LFit, LArg, LIdx, LDMid, LDSym: Integer;
+    LPars: TArray<TSemaXType>;
+    LOwner: TSemaXType;
+    LTie: Boolean;
+  begin
+    LDm := FModels[AMid];
+    if LDm.Symbols[ASym].Scope = NIL_SCOPE then
+      Exit;
+    // Any other default property of the name in that scope at all?
+    LBest := NIL_SYM;
+    for LIdx := 0 to LDm.Scopes[LDm.Symbols[ASym].Scope].Symbols.Count - 1 do
+    begin
+      LCand := LDm.Scopes[LDm.Symbols[ASym].Scope].Symbols[LIdx];
+      if (LCand <> ASym) and IsDefaultArrayProp(AMid, LCand) and
+         (LDm.Symbols[LCand].NameLower = LDm.Symbols[ASym].NameLower) then
+      begin
+        LBest := LCand;
+        Break;
+      end;
+    end;
+    if LBest = NIL_SYM then
+      Exit;
+    if not DefaultArrayPropX(ABaseX, LDMid, LDSym, LOwner, AId) then
+      Exit;
+    LBest := NIL_SYM;
+    LBestScore := -1;
+    LTie := False;
+    for LIdx := 0 to LDm.Scopes[LDm.Symbols[ASym].Scope].Symbols.Count - 1 do
+    begin
+      LCand := LDm.Scopes[LDm.Symbols[ASym].Scope].Symbols[LIdx];
+      if not IsDefaultArrayProp(AMid, LCand) or
+         (LDm.Symbols[LCand].NameLower <> LDm.Symbols[ASym].NameLower) then
+        Continue;
+      LPars := PropertyParamXs(AMid, LCand, LOwner.Inst);
+      if LPars = nil then
+        Exit;   // an untyped index parameter: nothing to choose by
+      LScore := 0;
+      LArg := LM.Tree.Nodes[LM.Tree.Nodes[N].FirstChild].NextSibling;
+      for var LP := 0 to High(LPars) do
+      begin
+        if (LArg = NIL_NODE) or not XValid(GetX(LArg)) then
+          Exit;   // an index not typed: no choice made
+        LFit := ArgFitX(GetX(LArg), LPars[LP], LM.Tree, LArg, False, False,
+          Default(TPasArrayArg), LM, nil, False, False, skKeyword);
+        if LFit < 0 then
+        begin
+          LScore := -1;
+          Break;
+        end;
+        Inc(LScore, LFit);
+        LArg := LM.Tree.Nodes[LArg].NextSibling;
+      end;
+      if (LScore >= 0) and (LArg <> NIL_NODE) then
+        LScore := -1;   // more indices than parameters
+      if LScore > LBestScore then
+      begin
+        LBest := LCand;
+        LBestScore := LScore;
+        LTie := False;
+      end
+      else if (LScore >= 0) and (LScore = LBestScore) then
+        LTie := True;
+    end;
+    if (LBest = NIL_SYM) or LTie or (LBest = ASym) then
+      Exit;
+    ASym := LBest;
+    SetXAt(N, SubstX(SymDeclTypeX(AMid, LBest), LOwner.Inst, 0));
+  end;
+
   procedure Walk(N: Integer);
   var
     LChild, LBase, LName, LSym, LMemMid, LMemSym, LCtx: Integer;
     LBestMid, LBestSym, LBestCtx, LMemCtx, LIdxMid, LIdxSym: Integer;
     LRoot, LTotal, LRootPropMid, LRootPropSym: Integer;
-    LInside: Boolean;
+    LInside, LIntoStruct: Boolean;
     LIMid, LISym, LICtx: Integer;
     LAmbiguous: Boolean;
     LExt: TPasExtRef;
@@ -20340,7 +20437,14 @@ var
                 LChild := LM.Tree.Nodes[LChild].NextSibling;
               end;
               SetXAt(N, IndexResultX(AId, LBase, LBX, LMemCtx, LIdxMid,
-                LIdxSym, LInside));
+                LIdxSym, LInside, LIntoStruct));
+              if LIntoStruct and (LProbe = nil) then
+                LCommaStruct := LCommaStruct + [N];
+              // Two default properties overloaded by index type (13.1.4):
+              // the index expressions choose, as a call's arguments do.
+              if (LIdxSym <> NIL_SYM) and
+                 (PropertyParamCount(LIdxMid, LIdxSym) = LMemCtx) then
+                PickDefaultOverload(N, LBX, LIdxMid, LIdxSym);
               // `J[1][2]` over `TJag = array of array of TRec`: the inner
               // `J[1]` is an anonymous row with no type, so this level read
               // nothing; `M[i][j]` IS `M[i, j]` (8.1.2), so the chain is
@@ -21469,6 +21573,11 @@ var
           if Length(LM.Tree.Source.SwitchEvents) > 0 then
             CheckCallStmt(N);
       end;
+    // `A[0, 1]` over `array of TCells`: the comma list ran from the array
+    // into a default property (13.1.4) - recorded by the walk.
+    for N in LCommaStruct do
+      if not InUntypedWith(N) then
+        EmitAt(LM, N, 'E2016', SE2016_ArrayTypeRequired);
   end;
 
 var
@@ -23825,6 +23934,16 @@ function TPasSemaProject.IndexResultX(AId, ABaseNode: Integer;
   const ABaseX: TSemaXType; ACount: Integer; out APropMid,
   APropSym: Integer; out AInsideArray: Boolean): TSemaXType;
 var
+  LIntoStruct: Boolean;
+begin
+  Result := IndexResultX(AId, ABaseNode, ABaseX, ACount, APropMid, APropSym,
+    AInsideArray, LIntoStruct);
+end;
+
+function TPasSemaProject.IndexResultX(AId, ABaseNode: Integer;
+  const ABaseX: TSemaXType; ACount: Integer; out APropMid,
+  APropSym: Integer; out AInsideArray, AIntoStruct: Boolean): TSemaXType;
+var
   LRemaining: Integer;
 
   // Dimensions of one nkArrayType node: its children minus the element.
@@ -23924,6 +24043,7 @@ begin
   APropMid := NIL_SYM;
   APropSym := NIL_SYM;
   AInsideArray := False;
+  AIntoStruct := False;
   if ACount <= 0 then
     Exit;
   LRemaining := ACount;
@@ -24016,8 +24136,13 @@ begin
           // expression peeled the next off the property's own type - to Char
           // off a string, to the element of a type with a default property of
           // its own.
-          if not DefaultArrayPropX(LCur, LMid, LSym, LOwner) then
+          if not DefaultArrayPropX(LCur, LMid, LSym, LOwner, AId) then
             Exit(XNil);
+          // A level of this bracket was an array's (a string's, a
+          // pointer's): the comma list does not cross into a default
+          // property - `A[0, 1]` over `array of TCells` (13.1.4).
+          if LRemaining < ACount then
+            AIntoStruct := True;
           if APropSym = NIL_SYM then
           begin
             APropMid := LMid;
@@ -24269,36 +24394,117 @@ end;
   `with L[I] do` opened over nothing and every member in the body was a false
   E2003 (~250 across one HTML component library). }
 function TPasSemaProject.DefaultArrayPropX(const AX: TSemaXType;
-  out AMid, ASym: Integer; out AOwner: TSemaXType): Boolean;
+  out AMid, ASym: Integer; out AOwner: TSemaXType; AFromMid: Integer): Boolean;
 var
-  LCur: TSemaXType;
+  LCur, LNext: TSemaXType;
   LM: TPasSemaModel;
-  LScope, LIdx, LSym, LDepth: Integer;
+  LExt: TPasExtRef;
+
+  // The first default array property of AMid's member scope AScope.
+  function InScope(AScopeMid, AScope: Integer): Integer;
+  var
+    LSm: TPasSemaModel;
+  begin
+    Result := NIL_SYM;
+    if AScope = NIL_SCOPE then
+      Exit;
+    LSm := FModels[AScopeMid];
+    for var LIdx := 0 to LSm.Scopes[AScope].Symbols.Count - 1 do
+      if IsDefaultArrayProp(AScopeMid, LSm.Scopes[AScope].Symbols[LIdx]) then
+        Exit(LSm.Scopes[AScope].Symbols[LIdx]);
+  end;
+
 begin
   Result := False;
   AMid := NIL_SYM;
   ASym := NIL_SYM;
   AOwner := XNil;
   LCur := AX;
-  for LDepth := 1 to 32 do
+  for var LDepth := 1 to 32 do
   begin
     if not XValid(LCur) then
       Exit;
     LM := FModels[LCur.UnitId];
-    LScope := LM.Symbols[LCur.Sym].MemberScope;
-    if (LScope <> NIL_SCOPE) and (LM.Scopes[LScope].Symbols.Count > 0) then
-      for LIdx := 0 to LM.Scopes[LScope].Symbols.Count - 1 do
+    // The hop's active helper first, as FindMemberX reads members: its
+    // default property is the type's and wins over the type's own (13.1.4,
+    // dcc64 37.0: a class helper's `V[I]: TB ... default` makes `B[0]` a TB
+    // past TBase's own default `Items[I]: TA`). A helper's ancestors too.
+    if (AFromMid >= 0) and ActiveHelperOf(AFromMid, LCur, LExt) then
+      for var LHop := 1 to 8 do
       begin
-        LSym := LM.Scopes[LScope].Symbols[LIdx];
-        if IsDefaultArrayProp(LCur.UnitId, LSym) then
+        ASym := InScope(LExt.UnitId,
+          FModels[LExt.UnitId].Symbols[LExt.Sym].MemberScope);
+        if ASym <> NIL_SYM then
         begin
-          AMid := LCur.UnitId;
-          ASym := LSym;
-          AOwner := LCur;
+          AMid := LExt.UnitId;
+          AOwner := XPlain(LExt.UnitId, LExt.Sym);
           Exit(True);
         end;
+        LNext := HelperAncestorX(LExt.UnitId, LExt.Sym);
+        if not XValid(LNext) or
+           ((LNext.UnitId = LExt.UnitId) and (LNext.Sym = LExt.Sym)) then
+          Break;
+        LExt.UnitId := LNext.UnitId;
+        LExt.Sym := LNext.Sym;
       end;
+    ASym := InScope(LCur.UnitId, LM.Symbols[LCur.Sym].MemberScope);
+    if ASym <> NIL_SYM then
+    begin
+      AMid := LCur.UnitId;
+      AOwner := LCur;
+      Exit(True);
+    end;
     LCur := AncestorOfX(LCur);
+  end;
+end;
+
+{ PropertyParamXs: the declaration's nkParams, each name's declared symbol
+  (Phase 1 declares the index names in a signature scope of their own and
+  binds each name node to its symbol), its type closed over AInst. Of the
+  declaration a bare redeclaration republishes. }
+function TPasSemaProject.PropertyParamXs(AMid, ASym,
+  AInst: Integer): TArray<TSemaXType>;
+var
+  LM: TPasSemaModel;
+  LDecl, LParams, LParam, LName, LPSym, LRootMid, LRootSym: Integer;
+  LX: TSemaXType;
+begin
+  Result := nil;
+  PropertyRedeclRoot(AMid, ASym, LRootMid, LRootSym);
+  LM := FModels[LRootMid];
+  LDecl := LM.Symbols[LRootSym].DeclNode;
+  if LDecl = NIL_NODE then
+    Exit;
+  LDecl := LM.Tree.Nodes[LDecl].Parent;
+  if (LDecl = NIL_NODE) or (LM.Tree.Nodes[LDecl].Kind <> nkPropertyDecl) then
+    Exit;
+  LParams := LM.Tree.Nodes[LDecl].FirstChild;
+  while (LParams <> NIL_NODE) and (LM.Tree.Nodes[LParams].Kind <> nkParams) do
+    LParams := LM.Tree.Nodes[LParams].NextSibling;
+  if LParams = NIL_NODE then
+    Exit;
+  LParam := LM.Tree.Nodes[LParams].FirstChild;
+  while LParam <> NIL_NODE do
+  begin
+    if LM.Tree.Nodes[LParam].Kind = nkParam then
+    begin
+      LName := LM.Tree.Nodes[LParam].FirstChild;
+      while LName <> NIL_NODE do
+      begin
+        if nfName in LM.Tree.Nodes[LName].Flags then
+        begin
+          LPSym := LM.RefMap[LName];
+          if LPSym = NIL_SYM then
+            Exit(nil);
+          LX := SubstX(SymDeclTypeX(LRootMid, LPSym), AInst, 0);
+          if not XValid(LX) then
+            Exit(nil);
+          Result := Result + [LX];
+        end;
+        LName := LM.Tree.Nodes[LName].NextSibling;
+      end;
+    end;
+    LParam := LM.Tree.Nodes[LParam].NextSibling;
   end;
 end;
 
@@ -24457,7 +24663,7 @@ begin
   // <TAttr>)` LCur has no frame at all and the element type would stay `T`.
   // SymDeclTypeX, not the raw TypeNode: a typeless `property Items;
   // default;` redeclaration is a default property with no type of its own.
-  if XValid(LCur) and DefaultArrayPropX(LCur, LMid, LSym, LOwner) then
+  if XValid(LCur) and DefaultArrayPropX(LCur, LMid, LSym, LOwner, AId) then
     Exit(SubstX(SymDeclTypeX(LMid, LSym), LOwner.Inst, 0));
   Result := XNil;
 end;

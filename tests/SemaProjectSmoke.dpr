@@ -4582,6 +4582,150 @@ begin
   end;
 end;
 
+{ 13.1.4: default array properties the brackets choose among - two of one
+  name overloaded by index type (the index expressions pick, as a call's
+  arguments do), a class or record helper's (it wins over the type's own,
+  ancestors' too) - and a comma list run from an array into one, dcc's
+  E2016. dcc64 37.0 reports exactly lines 15 (E2016), 17 and 18 (E2003 X:
+  `C['a']` is the TNamed one, `B[0]` the helper's TB); every other line
+  compiles. The types in another unit, as a project closure has them. }
+procedure TestDefaultPropChoice;
+const
+  DAS =
+    'unit DA;'#13#10 +                                      // 1
+    'interface'#13#10 +                                     // 2
+    'type'#13#10 +                                          // 3
+    '  TItem = class X: Integer; end;'#13#10 +              // 4
+    '  TNamed = class N: string; end;'#13#10 +              // 5
+    '  TB = class Y: Integer; end;'#13#10 +                 // 6
+    '  TColl = class'#13#10 +                               // 7
+    '    function GetI(I: Integer): TItem;'#13#10 +         // 8
+    '    function GetS(const S: string): TNamed;'#13#10 +   // 9
+    '    property Item[I: Integer]: TItem read GetI; default;'#13#10 +// 10
+    '    property Item[const S: string]: TNamed read GetS; default;'#13#10 +// 11
+    '  end;'#13#10 +                                        // 12
+    '  TPlain = class end;'#13#10 +                         // 13
+    '  TPlainH = class helper for TPlain'#13#10 +           // 14
+    '    function GetB(const S: string): TB;'#13#10 +       // 15
+    '    property V[const S: string]: TB read GetB; default;'#13#10 +// 16
+    '  end;'#13#10 +                                        // 17
+    '  TBase = class'#13#10 +                               // 18
+    '    function GetA(I: Integer): TItem;'#13#10 +         // 19
+    '    property Items[I: Integer]: TItem read GetA; default;'#13#10 +// 20
+    '  end;'#13#10 +                                        // 21
+    '  TDer = class(TBase) end;'#13#10 +                    // 22
+    '  TBaseH = class helper for TBase'#13#10 +             // 23
+    '    function GetB(I: Integer): TB;'#13#10 +            // 24
+    '    property V[I: Integer]: TB read GetB; default;'#13#10 +// 25
+    '  end;'#13#10 +                                        // 26
+    '  TRec = record X: Integer; end;'#13#10 +              // 27
+    '  TRecH = record helper for TRec'#13#10 +              // 28
+    '    function GetB(I: Integer): TB;'#13#10 +            // 29
+    '    property V[I: Integer]: TB read GetB; default;'#13#10 +// 30
+    '  end;'#13#10 +                                        // 31
+    '  TCells = class'#13#10 +                              // 32
+    '    function GetC(I: Integer): Char;'#13#10 +          // 33
+    '    property C[I: Integer]: Char read GetC; default;'#13#10 +// 34
+    '  end;'#13#10 +                                        // 35
+    'implementation'#13#10 +                                // 36
+    'function TColl.GetI(I: Integer): TItem; begin Result := nil; end;'#13#10 +// 37
+    'function TColl.GetS(const S: string): TNamed; begin Result := nil; end;'#13#10 +// 38
+    'function TPlainH.GetB(const S: string): TB; begin Result := nil; end;'#13#10 +// 39
+    'function TBase.GetA(I: Integer): TItem; begin Result := nil; end;'#13#10 +// 40
+    'function TBaseH.GetB(I: Integer): TB; begin Result := nil; end;'#13#10 +// 41
+    'function TRecH.GetB(I: Integer): TB; begin Result := nil; end;'#13#10 +// 42
+    'function TCells.GetC(I: Integer): Char; begin Result := ''a''; end;'#13#10 +// 43
+    // The same uses in the declaring unit: the unit's own analysis and the
+    // project's agree.
+    'procedure Q;'#13#10 +                                  // 44
+    'var C: TColl; B: TBase; I: Integer; S: string;'#13#10 + // 45
+    'begin'#13#10 +                                         // 46
+    '  S := C[''a''].N;'#13#10 +                            // 47
+    '  I := B[0].Y;'#13#10 +                                // 48
+    'end;'#13#10 +                                          // 49
+    'end.'#13#10;                                           // 50
+  DBS =
+    'unit DB;'#13#10 +                                      // 1
+    'interface'#13#10 +                                     // 2
+    'uses DA;'#13#10 +                                      // 3
+    'procedure P;'#13#10 +                                  // 4
+    'implementation'#13#10 +                                // 5
+    'procedure P;'#13#10 +                                  // 6
+    'var C: TColl; P: TPlain; B: TBase; D: TDer; A: array of TCells; R: TRec; Ch: Char; I: Integer; S: string;'#13#10 +// 7
+    'begin'#13#10 +                                         // 8
+    '  I := C[0].X;'#13#10 +                                // 9
+    '  S := C[''a''].N;'#13#10 +                            // 10
+    '  I := P[''a''].Y;'#13#10 +                            // 11
+    '  I := B[0].Y;'#13#10 +                                // 12
+    '  I := D[0].Y;'#13#10 +                                // 13
+    '  I := R[0].Y;'#13#10 +                                // 14
+    '  Ch := A[0, 1];'#13#10 +                              // 15
+    '  Ch := A[0][1];'#13#10 +                              // 16
+    '  I := C[''a''].X;'#13#10 +                            // 17
+    '  I := B[0].X;'#13#10 +                                // 18
+    'end;'#13#10 +                                          // 19
+    'end.'#13#10;                                           // 20
+var
+  LDir: string;
+  LSeen: TStringList;
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_default_prop_choice');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'DA.pas'), DAS);
+  TFile.WriteAllText(TPath.Combine(LDir, 'DB.pas'), DBS);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  LSeen := TStringList.Create;
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeDirectory(LDir);
+    var LB := ModelByName('db');
+    Ok('default-prop: DB loaded', Assigned(LB));
+    if not Assigned(LB) then
+      Exit;
+    for var LD in LB.Diags do
+      LSeen.Add(Format('%d:%s', [LD.Line, LD.Code]));
+    LSeen.Sort;
+    Ok('default-prop: dcc''s three diagnostics, the rest silent [' +
+      LSeen.CommaText + ']', LSeen.CommaText = '15:E2016,17:E2003,18:E2003');
+    var LA := ModelByName('da');
+    var LADiags := '';
+    if Assigned(LA) then
+      for var LD in LA.Diags do
+        LADiags := LADiags + IntToStr(LD.Line) + ':' + LD.Msg + ';';
+    Ok('default-prop: the declaring unit''s own uses are silent too [' +
+      LADiags + ']', Assigned(LA) and (LADiags = ''));
+    // The brackets bind the property they read (Find References' implicit
+    // use): `C['a']` the string one, `B[0]` the helper's V.
+    var LBMid := GProj.ModelIdOf(TPath.Combine(LDir, 'DB.pas'));
+    var LBound := '';
+    for var LN := 0 to High(LB.Tree.Nodes) do
+      if LB.Tree.Nodes[LN].Kind = nkIndex then
+      begin
+        var LFile: string;
+        var LLine, LCol: Integer;
+        var LExt: TPasExtRef;
+        if GProj.NodeSite(LBMid, LN, LFile, LLine, LCol) and
+           (LLine in [10, 12]) and LB.ExtRefMap.TryGetValue(LN, LExt) and
+           GProj.NodeSite(LExt.UnitId,
+             GProj.Model(LExt.UnitId).Symbols[LExt.Sym].DeclNode, LFile,
+             LLine, LCol) then
+          LBound := LBound + IntToStr(LLine) + ';';
+      end;
+    // DA line 11 is `Item[const S: string]`, line 25 the helper's V.
+    Ok('default-prop: the brackets bind the property they read - the ' +
+      'string-indexed Item, the helper''s V [' + LBound + ']',
+      (Pos('11;', LBound) > 0) and (Pos('25;', LBound) > 0));
+  finally
+    LSeen.Free;
+    GProj.Free;
+    GProj := nil;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 { In a method of a NESTED type the outer type's members - its own and its
   ancestors' - come after the unit's own declarations made so far, and
   before the used units and System (F52 of the parser-fidelity plan; spec
@@ -21447,6 +21591,7 @@ begin
   TestWithTargetPositions;
   TestCtorConstraintArgs;
   TestProtectedVisibility;
+  TestDefaultPropChoice;
   TestNestedOuterAfterUnit;
   TestDeclAfterUnit;
   TestDeclOrder;
