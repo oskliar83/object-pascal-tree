@@ -4218,34 +4218,14 @@ end;
   WithTargetTypeSym's nkInherited case does - this unit's own ancestry only
   (FindMemberUpChain). NIL_SYM when ANode is no such name, the struct has no
   ancestor here, or the ancestry here does not declare it.
-  An overload set's head is not the member a call means: the unit typer
-  types the name by its binding, and the project pass keeps that type.
-  Among the set's overloads, the ones taking as many parameters as the call
-  passes arguments (none for a bare `inherited Foo`) are the candidates;
-  one of them is bound when it is the only one, or when they all return one
-  type - `inherited Add(AKey, AValue)` in System.JSON.Builders'
-  TPairs.Add is TBaseCollection's `Add(const AKey: string; const AValue:
-  Single): TPairs`, not its first `Add(const AValue: Single): TElements`.
-  Otherwise the head stays, for the project pass to choose. }
+  An overload set is bound by its head, as any call's name is before its
+  arguments choose: which overload the call means is the call's to decide
+  (the unit typer's SelectOverload, the project pass's SelectCallTarget),
+  and the name is typed by that choice, not by the head (TPasSemaTyper.
+  TypeOfIdent leaves it untyped, CrossType types it from the winner). }
 function TPasSemaResolver.InheritedNameSym(ANode: Integer): Integer;
-
-  // The parameters a routine declares (its scope's skParam symbols).
-  function ParamCount(ASym: Integer): Integer;
-  var
-    LPs: Integer;
-  begin
-    Result := 0;
-    LPs := FModel.Symbols[ASym].MemberScope;
-    if LPs = NIL_SCOPE then
-      Exit;
-    for var LI := 0 to FModel.Scopes[LPs].Symbols.Count - 1 do
-      if FModel.Symbols[FModel.Scopes[LPs].Symbols[LI]].Kind = skParam then
-        Inc(Result);
-  end;
-
 var
-  LUp, LParent, LScope, LAnc, LArgs, LCand, LPick: Integer;
-  LSame: Boolean;
+  LUp, LParent, LScope, LAnc: Integer;
 begin
   Result := NIL_SYM;
   // The name is the leftmost leaf under the nkInherited.
@@ -4270,40 +4250,6 @@ begin
   LAnc := AncestorTypeSym(FModel.Scopes[LScope].StructSym);
   if LAnc <> NIL_SYM then
     Result := FindMemberUpChain(LAnc, NodeNameLower(ANode));
-  if (Result = NIL_SYM) or (FModel.Symbols[Result].Kind <> skRoutine) or
-     (FModel.Symbols[Result].NextOverload = NIL_SYM) then
-    Exit;
-  // An overload set: the call's argument count picks (see above).
-  LArgs := 0;
-  if (FTree.Nodes[ANode].Parent <> NIL_NODE) and
-     (KindOf(FTree.Nodes[ANode].Parent) = nkCall) and
-     (FirstChild(FTree.Nodes[ANode].Parent) = ANode) then
-  begin
-    LCand := NextSib(ANode);
-    while LCand <> NIL_NODE do
-    begin
-      Inc(LArgs);
-      LCand := NextSib(LCand);
-    end;
-  end;
-  LPick := NIL_SYM;
-  LSame := True;
-  LCand := Result;
-  while LCand <> NIL_SYM do
-  begin
-    if (FModel.Symbols[LCand].Kind = skRoutine) and
-       (ParamCount(LCand) = LArgs) then
-    begin
-      if LPick = NIL_SYM then
-        LPick := LCand
-      else if FModel.Symbols[LCand].TypeSym <> FModel.Symbols[LPick].TypeSym
-      then
-        LSame := False;
-    end;
-    LCand := FModel.Symbols[LCand].NextOverload;
-  end;
-  if (LPick <> NIL_SYM) and LSame then
-    Result := LPick;
 end;
 
 function TPasSemaResolver.WithTargetTypeSym(ANode: Integer): Integer;

@@ -20294,6 +20294,17 @@ var
                     // model's RefMap directly, another model's through the
                     // deferred dictionary.
                     Repoint(LBase, LBestMid, LBestSym);
+                    // `inherited Add(AKey, AValue)`: the name is typed by the
+                    // overload the call binds - the unit typer left it
+                    // untyped over the set's head (12.1.2). A constructor's
+                    // inherited call is a call on Self: no value.
+                    if (LM.Tree.Nodes[LBase].Kind = nkIdent) and
+                       IsInheritedHead(LBase) then
+                      if IsConstructorSym(LBestMid, LBestSym) then
+                        SetXAt(LBase, XNil)
+                      else
+                        SetXAt(LBase, MemberTypeX(LBestMid, LBestSym, LCtx,
+                          XNil));
                     if IsConstructorSym(LBestMid, LBestSym) and
                        (LM.Tree.Nodes[LBase].Kind = nkMember) then
                       // T.Create / TList<Integer>.Create -> the class itself

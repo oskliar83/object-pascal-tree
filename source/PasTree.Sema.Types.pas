@@ -646,6 +646,7 @@ type
     function OpSym(AAns: TSemaOpAnswer; ALeft, ARight: Integer;
       AKeepOwn: Boolean): Integer;
     function TypeOfIdent(N: Integer): Integer;
+    function InheritedOverloadHead(N, ASym: Integer): Boolean;
     function InlineIfResult(N: Integer): Integer;
     function BinaryResult(N: Integer): Integer;
     function UnaryResult(N: Integer): Integer;
@@ -8141,6 +8142,31 @@ begin
     False, FIs64), LT, LE, False);
 end;
 
+{ Is N the name an `inherited` designator starts with (the leftmost leaf
+  under an nkInherited), bound to ASym, a routine of an overload set - its
+  scope declaring the name more than once? }
+function TPasSemaTyper.InheritedOverloadHead(N, ASym: Integer): Boolean;
+var
+  LUp, LParent, LHead: Integer;
+begin
+  Result := False;
+  LUp := N;
+  LParent := T.Nodes[LUp].Parent;
+  while (LParent <> NIL_NODE) and
+        (Kind(LParent) in [nkCall, nkMember, nkIndex, nkTypeArgs]) and
+        (Child(LParent) = LUp) do
+  begin
+    LUp := LParent;
+    LParent := T.Nodes[LUp].Parent;
+  end;
+  if (LParent = NIL_NODE) or (Kind(LParent) <> nkInherited) or
+     (Child(LParent) <> LUp) or (M.Symbols[ASym].Scope = NIL_SCOPE) then
+    Exit;
+  LHead := M.FindLocalNoHelpers(M.Symbols[ASym].Scope,
+    SemaKey(M.Symbols[ASym].NameLower));
+  Result := (LHead <> NIL_SYM) and (M.Symbols[LHead].NextOverload <> NIL_SYM);
+end;
+
 function TPasSemaTyper.TypeOfIdent(N: Integer): Integer;
 var
   LSym: Integer;
@@ -8155,6 +8181,14 @@ begin
       Exit(FExtTypeOf(N));
     Exit(NIL_SYM);
   end;
+  // The name after `inherited` bound to an ancestor's overload set (12.1.2):
+  // bound by the set's head (TPasSemaResolver.InheritedNameSym), whose type
+  // is not the one the call's overload returns - `inherited Add(AKey,
+  // AValue)` in System.JSON.Builders' TPairs.Add is the TPairs overload,
+  // the head returns TElements. Left untyped: the project pass types it
+  // from the overload the call binds (CrossType, after SelectCallTarget).
+  if (M.Symbols[LSym].Kind = skRoutine) and InheritedOverloadHead(N, LSym) then
+    Exit(NIL_SYM);
   // A bare overloaded routine name where it is a VALUE means the overload
   // that needs no argument (6.6.1): `GetRec.R2` with GetRec(I): TR1 declared
   // before GetRec: TR2 (audit A3-18, local/probe-b34 P1).

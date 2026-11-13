@@ -2871,9 +2871,10 @@ begin
   finally
     GModel.Free;
   end;
-  // An ancestor's overload set: the call's argument count picks the member,
-  // and the name is typed by it, not by the set's head (System.JSON.Builders'
-  // TPairs.Add over TBaseCollection's two Adds).
+  // An ancestor's overload set: the call is typed by the overload its
+  // arguments pick, and the name never by the set's head (System.JSON.
+  // Builders' TPairs.Add over TBaseCollection's two Adds) - the unit alone
+  // leaves it untyped; the project pass types it from the call's winner.
   Analyze(
     'unit U; interface type'#10 +
     '  TE = class end; TP = class end;'#10 +
@@ -2890,17 +2891,23 @@ begin
     'end.');
   try
     var LName := '';
+    var LCall := '';
     for var LN := 0 to High(GTree.Nodes) do
       if GTree.Nodes[LN].Kind = nkInherited then
       begin
         var LLeaf := GTree.Nodes[LN].FirstChild;
+        if (LLeaf <> NIL_NODE) and (GTree.Nodes[LLeaf].Kind = nkCall) and
+           (GModel.ExprType[LLeaf] <> NIL_SYM) then
+          LCall := GModel.Symbols[GModel.ExprType[LLeaf]].Name;
         while (LLeaf <> NIL_NODE) and (GTree.Nodes[LLeaf].Kind <> nkIdent) do
           LLeaf := GTree.Nodes[LLeaf].FirstChild;
         if (LLeaf <> NIL_NODE) and (GModel.ExprType[LLeaf] <> NIL_SYM) then
           LName := GModel.Symbols[GModel.ExprType[LLeaf]].Name;
       end;
-    Ok('inherited: an overload set''s name is typed by the overload the ' +
-      'arguments pick [' + LName + ']', LName = 'TP');
+    Ok('inherited: an overload set''s call is typed by the overload the ' +
+      'arguments pick [' + LCall + ']', LCall = 'TP');
+    Ok('inherited: ...and its name not by the set''s head [' + LName + ']',
+      LName = '');
   finally
     GModel.Free;
   end;
