@@ -21391,6 +21391,128 @@ var
     end;
   end;
 
+  { 13.1.1 / 13.1.3 - a property's accessor METHODS against the property.
+    dcc's rules, those judged here (dcc64 37.0, 2026-11-13, spec 13.1.3):
+    a getter takes the array property's index parameters, then the `index`
+    specifier's ordinal when there is one, and returns the property's type;
+    a setter takes the same and then the value; a mismatch in the count, or
+    in the type (identical types required: a Byte getter for an Integer
+    property is refused), is E2008 Incompatible types. An overloaded
+    accessor is not judged (dcc refuses one beside `index`, E2271, and
+    picks among an array property's). Judged only where it is certain: the
+    types compared by
+    category, and within a category only builtin scalar types (XSameType's
+    identity, alias groups included); an open type parameter, a class or
+    record identity and an inherited redeclaration's accessors are not. }
+  procedure CheckAccessors(ADecl: Integer);
+  var
+    LChild, LName, LProp, LArr, LMid, LSym, LAlt, LCount, LAcc: Integer;
+    LHasIndex, LWrite: Boolean;
+    LPropX: TSemaXType;
+    LParams: TArray<Integer>;
+    LDm: TPasSemaModel;
+
+    // Two types dcc would not take for one another, as far as is certain.
+    function Differ(const A, B: TSemaXType): Boolean;
+    var
+      LCa, LCb: TSemaTypeCat;
+      LA, LB: TSemaXType;
+    begin
+      Result := False;
+      LA := CanonTypeX(A);
+      LB := CanonTypeX(B);
+      if not XValid(LA) or not XValid(LB) or OpenX(LA) or OpenX(LB) or
+         NestedInGenericX(LA) or NestedInGenericX(LB) then
+        Exit;
+      LCa := XCatOf(LA);
+      LCb := XCatOf(LB);
+      if (LCa = tcUnknown) or (LCb = tcUnknown) then
+        Exit;
+      if LCa <> LCb then
+        Exit(True);
+      Result := (LCa in [tcInteger, tcFloat, tcBoolean, tcChar, tcString]) and
+        (FModels[LA.UnitId].Symbols[LA.Sym].Kind = skBuiltinType) and
+        (FModels[LB.UnitId].Symbols[LB.Sym].Kind = skBuiltinType) and
+        not XSameType(LA, LB);
+    end;
+
+  begin
+    LName := LM.Tree.Nodes[ADecl].FirstChild;
+    while (LName <> NIL_NODE) and (LM.Tree.Nodes[LName].Kind <> nkIdent) do
+      LName := LM.Tree.Nodes[LName].NextSibling;
+    if LName = NIL_NODE then
+      Exit;
+    LProp := LM.RefMap[LName];
+    if (LProp = NIL_SYM) or (LM.Symbols[LProp].Kind <> skProperty) or
+       (LM.Symbols[LProp].TypeNode = NIL_NODE) then
+      Exit;   // a bare redeclaration: its accessors are its ancestor's
+    LPropX := SymDeclTypeX(AId, LProp);
+    LArr := PropertyParamCount(AId, LProp);
+    LHasIndex := False;
+    LChild := LM.Tree.Nodes[ADecl].FirstChild;
+    while LChild <> NIL_NODE do
+    begin
+      if (LM.Tree.Nodes[LChild].Kind = nkPropSpec) and
+         LM.Tree.NodeTextEquals(LChild, 'index') then
+        LHasIndex := True;
+      LChild := LM.Tree.Nodes[LChild].NextSibling;
+    end;
+    LChild := LM.Tree.Nodes[ADecl].FirstChild;
+    while LChild <> NIL_NODE do
+    begin
+      if LM.Tree.Nodes[LChild].Kind = nkPropSpec then
+      begin
+        LWrite := LM.Tree.NodeTextEquals(LChild, 'write');
+        LAcc := LM.Tree.Nodes[LChild].FirstChild;
+        if (LWrite or LM.Tree.NodeTextEquals(LChild, 'read')) and
+           (LAcc <> NIL_NODE) and
+           (LM.Tree.Nodes[LAcc].Kind in [nkIdent, nkMember]) and
+           TargetSym(LAcc, LMid, LSym) and
+           (FModels[LMid].Symbols[LSym].Kind = skRoutine) and
+           not LM.HasDiagAt(LAcc) then
+        begin
+          LDm := FModels[LMid];
+          // Overloaded: no signature picks among them (E2271).
+          LCount := 0;
+          if LDm.Symbols[LSym].Scope <> NIL_SCOPE then
+          begin
+            LAlt := LDm.FindLocalNoHelpers(LDm.Symbols[LSym].Scope,
+              SemaKey(LDm.Symbols[LSym].NameLower));
+            while LAlt <> NIL_SYM do
+            begin
+              if LDm.Symbols[LAlt].Kind = skRoutine then
+                Inc(LCount);
+              LAlt := LDm.Symbols[LAlt].NextOverload;
+            end;
+          end;
+          // Overloaded: dcc refuses one beside an `index` (E2271) yet picks
+          // among an array property's by signature - not judged here.
+          if LCount = 1 then
+          begin
+            LParams := nil;
+            if LDm.Symbols[LSym].MemberScope <> NIL_SCOPE then
+              for var LI := 0 to
+                LDm.Scopes[LDm.Symbols[LSym].MemberScope].Symbols.Count - 1 do
+              begin
+                LAlt := LDm.Scopes[LDm.Symbols[LSym].MemberScope].Symbols[LI];
+                if LDm.Symbols[LAlt].Kind = skParam then
+                  LParams := LParams + [LAlt];
+              end;
+            // A getter is a function, a setter a procedure.
+            if (not LWrite and (LDm.RoutineHead(LSym) = rhProcedure)) or
+               (LWrite and (LDm.RoutineHead(LSym) = rhFunction)) or
+               (Length(LParams) <> LArr + Ord(LHasIndex) + Ord(LWrite)) or
+               (not LWrite and Differ(SymDeclTypeX(LMid, LSym), LPropX)) or
+               (LWrite and Differ(SymDeclTypeX(LMid,
+                 LParams[High(LParams)]), LPropX)) then
+              EmitAt(LM, LAcc, 'E2008', SE2008_IncompatibleTypes);
+          end;
+        end;
+      end;
+      LChild := LM.Tree.Nodes[LChild].NextSibling;
+    end;
+  end;
+
   // E2018 at a with target of no struct type (5.7, WithOpensX). Judged on a
   // target this walk typed reliably, outside a with whose own target it
   // could not type.
@@ -21658,6 +21780,8 @@ var
             CheckWithTargets(N);
             CheckClassRefWith(N);
           end;
+        nkPropertyDecl:
+          CheckAccessors(N);
         nkMember:
           begin
             LDst := LM.Tree.Nodes[N].FirstChild;

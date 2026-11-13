@@ -476,8 +476,13 @@ of less work, not a gap in following the language; its consequences are in
 ## 13-properties-events.md
 
 ### 13.1.3 Indexed properties (`index` directive)
-- the `index` specifier's dispatch typing is not modeled;
-  accessors are resolved as names only. On the completion overlay a default
+- an accessor's signature is checked (E2008) by parameter count, function
+  or procedure, and type category - identity within a category only for
+  builtin scalars: a getter returning another class or record than the
+  property's, or an overloaded accessor (E2271 beside `index`; an array
+  property's overloads, which dcc picks among, are bound by name), is not
+  judged; nor is the `index` constant against the accessor's parameter
+  type (`index 300` over a Byte, E2008). On the completion overlay a default
   array property of a type declared in the edited unit is read off that
   type's last-good analysis, so one typed since then is not seen.
 
