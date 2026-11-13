@@ -518,9 +518,9 @@ of less work, not a gap in following the language; its consequences are in
   or not, followed by `]` or `+`, is an nkGuid; the resolver binds the name
   as an attribute's, suffix first, as dcc does - so `[Mark]` is a reference
   to MarkAttribute and `[Unit.SID]` to the constant - but the node stays an
-  nkGuid, not an attribute group of the first member. Not modelled: a typed
-  TGUID constant (`[GT]`) is dropped by dcc (W1074, no GUID), and a comma
-  list in that bracket (`[GT, S]`, S's GUID) is read as an attribute group.
+  nkGuid, not an attribute group of the first member, and a comma list there
+  (`[GT, S]`) is an attribute group whose true constant is the GUID. A comma
+  after the GUID (`[S, GT]`, dcc's E2029) is not reported.
 
 ### 14.2.1 Classes implementing interfaces
 - the list after a class's ancestor is read where dcc reads it - a
@@ -611,8 +611,8 @@ of less work, not a gap in following the language; its consequences are in
   where the list ends without one (one E2289 per compile), and PasTree
   reports no E2289 at all. An expression before the colon (`[1: Tag]`, W1074
   for dcc) is a parse error.
-- an attribute's arguments are not checked against its constructors (dcc's E2010 for `[Bar(1, 2)]` against
-  `Create(const S: string)`).
+- an attribute's arguments are not checked against its constructors (dcc's
+  E2010 for `[Bar(1, 2)]` against `Create(const S: string)`).
 
 ## B-lexical-grammar.md
 
