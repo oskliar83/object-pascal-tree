@@ -1521,6 +1521,23 @@ begin
   Ok('$T+ assignment: an `@X` is named Pointer',
     DiagHasText('E2010', '''PB'' and ''Pointer'''));
   GModel.Free;
+  // $X- after the value: a zero-based Char array goes to no PChar (spec
+  // 1.3.1; dcc64 37.0 - lines 5 and 7 are E2010, line 6 compiles).
+  Analyze(
+    'program P;'#10 +
+    'type TCA = array[0..3] of Char;'#10 +
+    'var A: TCA; PC: PChar;'#10 +
+    'begin'#10 +
+    '{$X-} PC := A;'#10 +
+    '  {$X+} PC := A;'#10 +
+    '  PC := A {$X-};'#10 +
+    'end.'#10);
+  LLines := '';
+  for var LD in GModel.Diags do
+    LLines := LLines + ' ' + LD.Code + '@' + IntToStr(LD.Line);
+  Ok('$X- assignment: an array for a PChar is E2010 [' + LLines + ' ]',
+    LLines = ' E2010@5 E2010@7');
+  GModel.Free;
 end;
 
 procedure TestScopeList;

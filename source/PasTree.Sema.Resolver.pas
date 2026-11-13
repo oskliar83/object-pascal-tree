@@ -1600,6 +1600,11 @@ begin
   // A parameter with a value after its type has a default (optional argument).
   var LHasDefault := (AKind = skParam) and (LType <> NIL_NODE) and
     (NextSib(LType) <> NIL_NODE);
+  // {$P-} at the token after a parameter's type: a `var` ShortString one is
+  // no open string (spec 1.3.1) - dcc reads the switch once the type ends.
+  var LFixed := (AKind = skParam) and (LType <> NIL_NODE) and
+    (Length(FTree.Source.SwitchEvents) > 0) and
+    not FTree.Source.SwitchAt(FTree.Nodes[LType].LastToken + 1, optP);
   for LIdx := 0 to LCount - 1 do
   begin
     if LSyms <> nil then
@@ -1610,6 +1615,9 @@ begin
     if LHasDefault then
       FModel.Symbols[LSym].Flags :=
         FModel.Symbols[LSym].Flags + [sfHasDefault];
+    if LFixed then
+      FModel.Symbols[LSym].Flags :=
+        FModel.Symbols[LSym].Flags + [sfFixedString];
   end;
   NotePendingAggregate(LType);
   // Collect the type expression and anything after it (init / default /
@@ -2598,8 +2606,10 @@ begin
         // DeclareSym reports only against a Result already in the scope. A
         // parameter named Result is E2004 as well - once, at a body's begin,
         // where dcc declares Result - so a bodiless declaration stays silent.
-        DeclareImplicitResult(LRoutine, LResultNode,
-          FindChildKind(ANode, nkRoutineBody) <> NIL_NODE);
+        // No Result under {$X-} at the body (PasResultWithheld).
+        if not PasResultWithheld(FTree, ANode, False) then
+          DeclareImplicitResult(LRoutine, LResultNode,
+            FindChildKind(ANode, nkRoutineBody) <> NIL_NODE);
       end;
     end;
     LChild := NextSib(LChild);
@@ -2732,6 +2742,11 @@ begin
           begin
             FModel.Symbols[LSym].TypeNode := LNext;
             NotePendingAggregate(LNext);
+            // {$J+} at the type's first token: a variable (spec 1.3.1).
+            if (Length(FTree.Source.SwitchEvents) > 0) and
+               FTree.Source.SwitchAt(FTree.Nodes[LNext].FirstToken, optJ) then
+              FModel.Symbols[LSym].Flags :=
+                FModel.Symbols[LSym].Flags + [sfWriteableConst];
           end;
           while LNext <> NIL_NODE do
           begin
@@ -2852,7 +2867,8 @@ begin
           // directive (`procedure stdcall begin`) nor the body. A parameter
           // named Result is E2004, as in a named function (17: dcc64 37.0
           // reports it at the literal's begin).
-          if not (KindOf(LChild) in [nkDirective, nkRoutineBody]) then
+          if not (KindOf(LChild) in [nkDirective, nkRoutineBody]) and
+             not PasResultWithheld(FTree, ANode, False) then
             DeclareImplicitResult(LAnon, LChild, True);
           Collect(LChild, LAnon);
           LChild := NextSib(LChild);
@@ -3117,7 +3133,7 @@ begin
          (FTree.Nodes[ANode].Aux >= 0) and
          (FTree.Nodes[ANode].Aux <= High(FTree.Source.Visible)) and
          (FTree.Source.VisibleKind(FTree.Nodes[ANode].Aux) = tkAt) and
-         FTree.Source.TypedAddressAt(FTree.Nodes[ANode].Aux) then
+         FTree.Source.SwitchAt(FTree.Nodes[ANode].Aux, optT) then
         FModel.AnonTypeSyms.AddOrSetValue(ANode,
           DeclareAnonStruct(AScope, ANode));
       LChild := FirstChild(ANode);

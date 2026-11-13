@@ -47,31 +47,13 @@ of less work, not a gap in following the language; its consequences are in
   given. dcc reports those too.
 
 ### 1.3.1 Switch & parameter directives
-- every switch is TRACKED - the letters `A`..`Z`, groups (`{$R+,Q-}`), the
-  long forms, `{$PUSHOPT}` / `{$POPOPT}` and the host's start state - but
-  only four change what the analysis computes, each by position:
-  `{$SCOPEDENUMS}` (enum value names), `{$Z}` / `{$MINENUMSIZE}` (enum size),
-  `{$A}` / `{$ALIGN}` (record field alignment) and `{$T}` /
-  `{$TYPEDADDRESS}` (`@X` is a typed pointer to X's type: an inline `var`
-  takes it, `P.Y` / `P^.Y` read X's members, an assignment and an overload
-  choice compare it). Every other switch is read by `{$IFOPT}` alone. Not modelled, and not yet probed on dcc for what
-  each changes:
-  - `{$H-}` / `{$LONGSTRINGS OFF}`: a bare `string` is `ShortString` - its
-    size, its element type, overload choice and the type an inline `var`
-    infers;
-  - `{$X-}` / `{$EXTENDEDSYNTAX OFF}`: a function called as a statement,
-    `Result` and the PChar extensions are not available;
-  - `{$J+}` / `{$WRITEABLECONST ON}`: a typed constant may be assigned;
-  - `{$P+}` / `{$OPENSTRINGS ON}`: a `var` string parameter is an open
-    string;
-  - `{$V-}` / `{$VARSTRINGCHECKS OFF}`: a `var` short-string parameter
-    takes any short-string length;
-  - `{$B+}` / `{$BOOLEVAL ON}` and the code-generation and checking
-    switches (`$O`, `$R`, `$Q`, `$I`, `$C`, `$D`, `$L`, `$Y`, `$W`, `$U`,
-    `$G`, `$M`, `$S`): no effect on names or types expected, only on the
-    code dcc emits (`$M` aside: RTTI, 19.1.1).
-  The order for each is the usual one: the spec's 1.3.1 first, a dcc probe
-  for what it leaves open, then the code.
+- `{$X-}`'s E2014 (a function called as a statement) is withheld for an
+  overloaded function and inside a `with` whose target was not typed, as
+  E2010 is: an overload choice may have bound a function where dcc took a
+  procedure. Every other effect of a switch on a name or a type is modelled
+  at the position dcc reads it (spec 1.3.1's table: `$SCOPEDENUMS`, `$Z`,
+  `$A`, `$T`, `$J`, `$P`, `$X`); `$H`, `$V`, `$B` and the code-generation
+  switches change no name or type PasTree computes.
 
 ### 1.3.2 Conditional compilation
 - strict IFEND-vs-ENDIF pairing is not implemented -
