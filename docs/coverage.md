@@ -108,10 +108,6 @@ of less work, not a gap in following the language; its consequences are in
   nothing open, E2280 for an unterminated conditional, W1078 for a lone
   `{$POPOPT}`. An include nested deeper than PasTree's limit gates the
   E2003s but has no row of its own.
-- the text after the final `end.` produces no lexer row, only dcc's
-  W1011 - and that only when the `end.` is in the unit's own file: one
-  an include supplies (`{$I tail.inc}` holding `begin end.`) leaves the
-  text after the `{$I}` without the warning dcc gives.
 - a conditional that crosses an include boundary - opened in an include
   and closed by its includer, or an include's `$ELSE`/`$ELSEIF`/`$ENDIF`
   on the includer's conditional - is refused by dcc 37.0 (E2280, or a
@@ -483,19 +479,6 @@ of less work, not a gap in following the language; its consequences are in
   of T`) untyped - no E2018 is reported on a member after one. A
   multi-dimensional row (`High(M[0])` of `array[a, b] of T`) has no bounds
   type.
-
-## 09-records.md
-
-### 9.1.2 Record layout (the `$IF SizeOf` oracle)
-- a field's type name resolves where the record is written only as far as
-  interface vs implementation: a type local to a routine, and a class's or
-  object's ancestor, resolve from the implementation scope.
-- a used unit's type named like a builtin (`Text`, `Single`) loses to the
-  builtin: the oracle's lookup meets System's seeded name before the
-  imports. The unit's own declaration wins, as in dcc.
-- `SizeOf` of an instantiation in a `$IF` takes a bare generic name and
-  plain names as its actuals; a qualified head or a nested instantiation
-  (`TPair<Byte, TList<Integer>>`) stays a guess.
 
 ## 11-classes.md
 
