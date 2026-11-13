@@ -2826,6 +2826,53 @@ begin
     'const G = 2; begin end; end.', 0);
 end;
 
+{ 12.1.2: the name after `inherited` is the ANCESTOR's member - bound so by
+  the unit's own analysis when its ancestry declares it. TB redeclares Foo
+  and Count; `inherited Foo` and `inherited Count` in TB's methods are TA's
+  (navigation and Find References read this binding before any project
+  pass). }
+procedure TestInheritedNameIntraUnit;
+var
+  LTa, LInh: Integer;
+begin
+  Analyze(
+    'unit U; interface type'#10 +
+    '  TA = class function Foo: string; virtual; function Count: Integer; end;'#10 +
+    '  TB = class(TA) function Foo: string; override;'#10 +
+    '    function Count: string; end;'#10 +
+    'implementation'#10 +
+    'function TA.Foo: string; begin Result := ''a''; end;'#10 +
+    'function TA.Count: Integer; begin Result := 1; end;'#10 +
+    'function TB.Foo: string; begin Result := inherited Foo; end;'#10 +
+    'function TB.Count: string; var I: Integer;'#10 +
+    'begin I := inherited Count + 1; Result := ''b''; end;'#10 +
+    'end.');
+  try
+    LTa := NIL_SYM;
+    for var LS := 0 to GModel.SymCount - 1 do
+      if (GModel.Symbols[LS].NameLower = 'ta') and
+         (GModel.Symbols[LS].Kind = skType) then
+        LTa := LS;
+    LInh := 0;
+    for var LN := 0 to High(GTree.Nodes) do
+      if GTree.Nodes[LN].Kind = nkInherited then
+      begin
+        var LLeaf := GTree.Nodes[LN].FirstChild;
+        while (LLeaf <> NIL_NODE) and (GTree.Nodes[LLeaf].Kind <> nkIdent) do
+          LLeaf := GTree.Nodes[LLeaf].FirstChild;
+        if (LLeaf <> NIL_NODE) and (GModel.RefMap[LLeaf] <> NIL_SYM) and
+           (GModel.Scopes[GModel.Symbols[GModel.RefMap[LLeaf]].Scope].StructSym
+             = LTa) then
+          Inc(LInh);
+
+      end;
+    Ok('inherited: both names bind TA''s members intra-unit', LInh = 2);
+    Ok('inherited: no diagnostics', Length(GModel.Diags) = 0);
+  finally
+    GModel.Free;
+  end;
+end;
+
 begin
   GSM := TPasSourceManager.Create([]);
   GDefines := TPasDefines.Create(['MSWINDOWS', 'WIN32']);
@@ -2902,6 +2949,7 @@ begin
   TestEnumValueNames;
   // 8f. ...and the implementation takes no interface name
   TestInterfaceNames;
+  TestInheritedNameIntraUnit;
   // 8g. directives are nodes: the initializer after them resolves
   TestProcDirectives;
   TestClassMemberFlag;
