@@ -67,6 +67,9 @@ type
     // Extended's record alignment: 16 where it is 16 bytes (`record A: Byte;
     // E: Extended end` is 32 on OSX64), 8 elsewhere (24 on Win32).
     ExtendedAlign: Integer;
+    // Extended80's alignment: 16 on OSXARM64 (10 bytes aligned to 16) and
+    // where Extended80 is the 16-byte Extended, 8 elsewhere (2.3.1).
+    Extended80Align: Integer;
     // LongInt / LongWord: 8 on every 64-bit POSIX target (LP64 - OSX64,
     // OSXARM64, iOS, Android64, Linux64), 4 on Windows and Android32. There
     // they are types of their own, not Integer / Cardinal.
@@ -224,6 +227,7 @@ begin
   Result.PointerBytes := 8;
   Result.ExtendedBytes := 8;
   Result.ExtendedAlign := 8;
+  Result.Extended80Align := 8;
   Result.LongBytes := 4;
   Result.HasVarArgIntrinsics := APlatform <> pfWin32;
   Result.IsWindows := False;
@@ -263,11 +267,13 @@ begin
           'POSIX64', 'CPUX64', 'CPU64BITS', 'EXTERNALLINKER', 'LLVM', 'PIC'];
         Result.ExtendedBytes := 16;
         Result.ExtendedAlign := 16;
+        Result.Extended80Align := 16;
         Result.IsPosix := True;
       end;
     pfMacOSArm64:
       begin
         Result.Name := 'OSXARM64';
+        Result.Extended80Align := 16;   // dccosxarm64 37.0: 10 bytes, aligned to 16
         Result.Defines := ['MACOS', 'MACOS64', 'OSX', 'OSX64', 'POSIX',
           'POSIX64', 'CPUARM', 'CPUARM64', 'CPU64BITS', 'EXTERNALLINKER',
           'LLVM', 'PIC'];
@@ -313,6 +319,7 @@ begin
           'CPU64BITS', 'EXTERNALLINKER', 'LLVM', 'PIC'];
         Result.ExtendedBytes := 16;
         Result.ExtendedAlign := 16;
+        Result.Extended80Align := 16;
         Result.IsPosix := True;
       end;
   end;

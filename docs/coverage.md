@@ -66,34 +66,27 @@ of less work, not a gap in following the language; its consequences are in
   own `.dcu` was built with. No corpus shows a difference: the one case that
   looked like it (`CPP_ABI_ADJUST`, 24 on Win64) is defined by System.pas
   itself, and PasTree's wrong value there was a stale read, fixed (F25).
-- `Declared(TE.e2)` over a type the asking unit declares itself reads False:
-  the unit's own declarations answer Declared() by position only for a bare
-  name and one its own unit name qualifies (`Declared(UQ.X)`); a type's
-  member is answered for an imported type. dcc answers it True when TE
-  stands above the guard.
-- `Length` in a `$IF` refuses an array whose index type is written
-  qualified (`array[UC.TE]`): the ordinal walk takes a bare type name, and
-  the first-pass guess (0) stands.
-- a `$IF` computes in Double: integers past 2^53 compare by their nearest
-  Double, so `$8000000000000000 > $7FFFFFFFFFFFFFFF` reads False where dcc
-  says True (both round to 2^63). No such guard is known in a corpus.
-- `High` / `Low` in a `$IF` fold for a builtin ordinal, an enum, a subrange
-  and an alias of one; of an array or a value they stay a guess, and a
-  character subrange answers its ordinals, which compare with nothing.
+- a `$IF` computes integers exactly in 64 bits, a real in Double - which is
+  every target's real but dcc32's, whose 80-bit Extended tells apart what a
+  Double rounds alike (`9007199254740993 * 1.0 = 9007199254740992` is False
+  on dcc32, True here and on dcc64). An overflow wraps in 64 bits, where
+  dcc wraps a narrower constant in its own type (`High(Integer) + 1 > 0` is
+  False for dcc, True here) - dcc refuses every such guard (E2099).
+- `High` / `Low` in a `$IF` of a true constant (its narrow type's bound,
+  3.2.1: `High(CI) = 127` with `const CI = 5`), of `ShortString` and of a
+  dynamic array stay a guess.
 - CONSOLE follows the MAIN program only: `AnalyzeDirectory` has none, so
   there every unit and program sees CONSOLE exactly when the host's
   `ConsoleTarget` (-CC) is set, whatever a `.dpr` in the directory says; a
-  library's or a package's `{$APPTYPE}` decides nothing.
+  library's or a package's `{$APPTYPE}` decides nothing. Which program a
+  unit is compiled with is the host's to say: a directory may hold several,
+  and dcc defines CONSOLE per compile, not per directory.
 - the switch start state is what the host sets (`SwitchStart`): a `.dproj`
   gives its DCC_* switch properties (`TPasDProj.Switches`), a bare `.dpr`
   dcc's no-config state. A `dcc64.cfg` beside the project, which plain dcc
-  reads and msbuild's `--no-config` does not, is not read.
-- a conditional symbol folds case as an identifier does (spec B.3,
-  PasFoldChar). dcc folds a symbol name more on 14 of 1925 probed letter
-  pairs (a title-case digraph, the final sigma, three Greek symbol
-  variants, the ohm, Angstrom and capital sharp s signs; spec 1.3.2):
-  `{$DEFINE <U+01C5>X}` then `{$IFDEF <U+01C6>X}` is true for dcc, false
-  here.
+  reads and msbuild's `--no-config` does not, is not read: whether a host
+  builds as plain dcc (the cfg beside the project and the compiler's own)
+  or as msbuild is its choice, made through SwitchStart.
 
 ### 1.3.3 Include files
 - dcc 37.0 has no insertion form: `{$I %DATE%}` names the file
@@ -144,8 +137,6 @@ of less work, not a gap in following the language; its consequences are in
   table; no dcclinux64 was installed to probe them.
 
 ### 2.2.4 Enumerated types
-- the layout oracle refuses enums containing negative
-  explicit ordinals, so a `$IF SizeOf(...)` over such an enum stays a guess.
 - an unscoped enum's value that takes a name already declared where it
   counts - or that a later declaration takes - is E2004, but not for an enum
   written after an include that did not load: that file may switch
@@ -160,11 +151,6 @@ of less work, not a gap in following the language; its consequences are in
   subrange argument scores against its base type as any other type of its
   category would (no exact match).
 
-### 2.3.1 Real types
-- `Extended80` is sized 10 aligned to 8, or as the 16-byte `Extended` where
-  that is the target's: on OSXARM64 dcc aligns its 10 bytes to 16, a fact
-  the target record does not carry, so a `SizeOf` of a record holding one
-  is short there.
 
 ### 2.6.1 Identity, compatibility, assignment-compatibility
 - assignment-compatibility is checked (E2010) at an assignment, an
@@ -666,12 +652,6 @@ of less work, not a gap in following the language; its consequences are in
   `Create(const S: string)`).
 
 ## B-lexical-grammar.md
-
-### B.3 Identifiers & case rules
-- identifier characters and the fold of a name are dcc's (every
-  non-surrogate unit from $80 up; PasFoldChar - two names are one when
-  Windows' CharLowerBuffW lowers them alike). A conditional symbol folds
-  further in dcc on a few letter pairs: 1.3.2.
 
 ### B.6.1 Quoted string & character literals
 - the lexer emits adjacent string elements as separate

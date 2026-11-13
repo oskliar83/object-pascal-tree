@@ -21,6 +21,7 @@ uses
   PasTree.Dcu.Source in '..\source\PasTree.Dcu.Source.pas',
   PasTree.Preprocessor in '..\source\PasTree.Preprocessor.pas',
   PasTree.Platforms in '..\source\PasTree.Platforms.pas',
+  PasTree.CondEval in '..\source\PasTree.CondEval.pas',
   PasTree.Ast in '..\source\PasTree.Ast.pas',
   PasTree.Parser in '..\source\PasTree.Parser.pas',
   PasTree.Project in '..\source\PasTree.Project.pas',
@@ -4441,6 +4442,15 @@ begin
     '{$IF Ns.QBase.QC = 5} type TC3 = class end; {$IFEND}'#10 +
     'const Later = 1;'#10'  OwnA = 2;'#10 +
     '{$IF QUse.OwnA = 2} type TC4 = class end; {$IFEND}'#10 +
+    '{$IF Declared(TOwnE.o2)} type TDH = class end; {$IFEND}'#10 +
+    'type TOwnE = (o1, o2); TOwnR = record F: Integer; end;'#10 +
+    '{$IF Declared(TOwnE.o2)} type TDA = class end; {$IFEND}'#10 +
+    '{$IF Declared(TOwnE.Nope)} type TDB = class end; {$IFEND}'#10 +
+    '{$IF Declared(TOwnR.F.X)} type TDC = class end; {$IFEND}'#10 +
+    '{$IF Declared(QUse.TOwnE.o1)} type TDD = class end; {$IFEND}'#10 +
+    '{$IF Declared(QUse.TOwnE.Nope)} type TDE = class end; {$IFEND}'#10 +
+    '{$IF Declared(TE.Nope)} type TDF = class end; {$IFEND}'#10 +
+    '{$IF Declared(Ns.QBase.TE.Nope)} type TDG = class end; {$IFEND}'#10 +
     'type TR = record F: Ns.QBase.TQW; end;'#10 +
     '{$IF SizeOf(TR) = 4} type TS1 = class end; {$IFEND}'#10 +
     '{$IF SizeOf(Ns.QBase.TQW) = 4} type TS2 = class end; {$IFEND}'#10 +
@@ -4502,6 +4512,14 @@ begin
       Has(LUse, 'tc5'));
     Ok('qualified $IF: Declared of the own implementation constant',
       Has(LUse, 'td9'));
+    Ok('qualified $IF: Declared(TE.e2) of the own type above is True, by position',
+      Has(LUse, 'tda') and not Has(LUse, 'tdh'));
+    Ok('qualified $IF: ...Head.Member is Declared(Head), the member unread',
+      Has(LUse, 'tdb') and Has(LUse, 'tdf'));
+    Ok('qualified $IF: ...a longer name with no unit in front is not',
+      not Has(LUse, 'tdc'));
+    Ok('qualified $IF: a unit-qualified chain resolves every member',
+      Has(LUse, 'tdd') and not Has(LUse, 'tde') and not Has(LUse, 'tdg'));
     Ok('qualified $IF: a field typed with a three-part name is sized',
       Has(LUse, 'ts1') and Has(LUse, 'ts2'));
     Ok('qualified $IF: the own unit''s name does not reach a local',
@@ -4557,6 +4575,8 @@ begin
     'unit IfBase;'#10'interface'#10 +
     'const UC = 7;'#10 +
     'type'#10'  TE = (e1, e2, e3);'#10'  TSub = 2..9;'#10 +
+    '  TCh = ''a''..''z''; TA = array[2..7] of Byte;'#10 +
+    '  TAE = array[TE] of Byte; TStr = string[10];'#10 +
     'implementation'#10'end.'#10);
   TFile.WriteAllText(TPath.Combine(LDir, 'IfSem.pas'),
     'unit IfSem;'#10'interface'#10'uses IfBase;'#10 +
@@ -4589,6 +4609,22 @@ begin
     '{$IF Foo.Bar + 1 = 1} type TD2 = class end; {$IFEND}'#10 +        // ELSE
     '{$IF not Foo.Bar} type TD3 = class end; {$IFEND}'#10 +            // ELSE
     '{$IF Foo.Bar in [1]} type TD4 = class end; {$IFEND}'#10 +         // ELSE
+    'var VA: array[10..20] of Byte; VB: Byte; VI64: Int64;'#10 +
+    '  VQ: array[IfBase.TE] of Byte; VQ2: array[IfBase.TSub] of Byte;'#10 +
+    'const CAr: TA = (1, 2, 3, 4, 5, 6);'#10 +
+    '{$IF High(TCh) = ''z''} type TH1 = class end; {$IFEND}'#10 +      // THEN
+    '{$IF Low(TCh) > ''Z''} type TH2 = class end; {$IFEND}'#10 +       // THEN
+    '{$IF High(TA) = 7} type TH3 = class end; {$IFEND}'#10 +           // THEN
+    '{$IF Low(TA) = 2} type TH4 = class end; {$IFEND}'#10 +            // THEN
+    '{$IF High(TAE) = e3} type TH5 = class end; {$IFEND}'#10 +         // THEN
+    '{$IF High(VA) = 20} type TH6 = class end; {$IFEND}'#10 +          // THEN
+    '{$IF High(VB) = 255} type TH7 = class end; {$IFEND}'#10 +         // THEN
+    '{$IF High(CAr) = 7} type TH8 = class end; {$IFEND}'#10 +          // THEN
+    '{$IF High(VI64) = 9223372036854775807} type TH9 = class end; {$IFEND}'#10 +
+    '{$IF High(VI64) = 9223372036854775806} type TH10 = class end; {$IFEND}'#10 +
+    '{$IF High(TStr) = 10} type TH11 = class end; {$IFEND}'#10 +       // THEN
+    '{$IF Length(VQ) = 3} type TL1 = class end; {$IFEND}'#10 +         // THEN
+    '{$IF Length(VQ2) = 8} type TL2 = class end; {$IFEND}'#10 +        // THEN
     'implementation'#10'end.'#10);
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
@@ -4615,6 +4651,18 @@ begin
     Ok('if semantics: an unknown dotted prefix is False in every shape',
       not Has('td1') and not Has('td2') and not Has('td3') and
       not Has('td4'));
+    Ok('if semantics: High / Low of a character subrange are characters',
+      Has('th1') and Has('th2'));
+    Ok('if semantics: High / Low of a static array type is its index''s',
+      Has('th3') and Has('th4') and Has('th5'));
+    Ok('if semantics: High of a variable or a typed constant is its type''s',
+      Has('th6') and Has('th7') and Has('th8'));
+    Ok('if semantics: ...exactly, High(Int64) included',
+      Has('th9') and not Has('th10'));
+    Ok('if semantics: High of a short string type is its length',
+      Has('th11'));
+    Ok('if semantics: Length of an array over a qualified index type',
+      Has('tl1') and Has('tl2'));
   finally
     GProj.Free;
   end;
@@ -5060,6 +5108,15 @@ begin
     'program NaP;'#10'uses ' + UL + 'beru;'#10 +
     '{$DEFINE ' + AU + 'DEF}'#10 +
     '{$IFDEF ' + AL + 'def} const DefOk = 1; {$ENDIF}'#10 +
+    // A conditional symbol folds 14 letter pairs more (1.3.2, probe-b65).
+    '{$DEFINE ' + #$01C5 + 'Z}'#10 +
+    '{$IFDEF ' + #$01C6 + 'z} const DzOk = 1; {$ENDIF}'#10 +
+    '{$DEFINE ' + #$2126 + 'M}'#10 +
+    '{$IFDEF ' + #$03C9 + 'm} const OhmOk = 1; {$ENDIF}'#10 +
+    '{$DEFINE ' + FS + 'S}'#10 +
+    '{$IFDEF ' + SG + 's} const SigmaOk = 1; {$ENDIF}'#10 +
+    '{$DEFINE ' + KV + 'K}'#10 +
+    '{$IFDEF kK} const KelvinOk = 1; {$ENDIF}'#10 +
     'var ' + AU + 'PFEL, ' + DU + 'OM, ' + SG + 'X, ' + KV + 'X: Integer;'#10 +
     'begin'#10 +
     '  ' + AL + 'pfel := DefOk;'#10 +
@@ -5078,6 +5135,12 @@ begin
       'stay E2003',
       (LM <> nil) and (DiagCount(LM, 'E2003') = 2) and
       DiagHasText(LM, 'E2003', FS + 'x') and DiagHasText(LM, 'E2003', 'kx'));
+    Ok('non-ASCII fold: a define folds a title digraph, the ohm sign and ' +
+      'the final sigma more than an identifier, the Kelvin sign not',
+      (LM <> nil) and (SymCountOf(LM, 'dzok', skConst) = 1) and
+      (SymCountOf(LM, 'ohmok', skConst) = 1) and
+      (SymCountOf(LM, 'sigmaok', skConst) = 1) and
+      (SymCountOf(LM, 'kelvinok', skConst) = 0));
   finally
     GProj.Free;
   end;
@@ -13461,6 +13524,27 @@ begin
   end;
   if TDirectory.Exists(LDir) then
     TDirectory.Delete(LDir, True);
+
+  // Extended80 (2.3.1, dcc 37.0): 10 bytes aligned to 8, the 16-byte
+  // Extended on OSX64, 10 bytes aligned to 16 on OSXARM64.
+  var LSize: Double;
+  var LAlign: Integer;
+  var LOk := True;
+  for LPlat in [pfWin64, pfMacOS64, pfMacOSArm64] do
+  begin
+    var LInfo := PlatformInfo(LPlat);
+    LOk := LOk and PasBuiltinLayout('Extended80',
+      PasBuiltinTargetOf(LInfo.PointerBytes, LInfo.ExtendedBytes,
+        LInfo.ExtendedAlign, LInfo.LongBytes, LInfo.Extended80Align),
+      LSize, LAlign);
+    case LPlat of
+      pfWin64: LOk := LOk and (LSize = 10) and (LAlign = 8);
+      pfMacOS64: LOk := LOk and (LSize = 16) and (LAlign = 16);
+    else
+      LOk := LOk and (LSize = 10) and (LAlign = 16);
+    end;
+  end;
+  Ok('2.3.1: Extended80 is 10/8, 16/16 on OSX64, 10/16 on OSXARM64', LOk);
 end;
 
 { A unit-level and a routine's declaration exists from its position on (spec
@@ -16949,6 +17033,8 @@ begin
     '  KStr = ''nope'';'#10 +
     'type'#10 +
     '  TSmallEnum = (seA, seB, seC);'#10 +
+    '  TNeg1 = (z1 = -1, z2); TNeg2 = (v1 = -1, v2 = 200);'#10 +
+    '  TNeg4 = (t1 = -32769, t2);'#10 +
     '{$MINENUMSIZE 4}'#10 +
     '  TBigEnum = (beA, beB);'#10 +   // same unit, forced to 4 by the state
     '{$MINENUMSIZE 1}'#10 +
@@ -16971,6 +17057,12 @@ begin
     '{$ENDIF}'#10 +
     '{$IF SizeOf(TBigEnum) = 4}'#10 +
     'type TTookEnumZ = class end;'#10 +
+    '{$ENDIF}'#10 +
+    '{$IF (SizeOf(TNeg1) = 1) and (SizeOf(TNeg2) = 2) and (SizeOf(TNeg4) = 4)}'#10 +
+    'type TTookNeg = class end;'#10 +
+    '{$ENDIF}'#10 +
+    '{$IF (Low(TNeg1) = -1) and (High(TNeg1) = 0)}'#10 +
+    'type TTookNegBounds = class end;'#10 +
     '{$ENDIF}'#10 +
     '{$IF SizeOf(TPair) = 8}'#10 +    // 2 x Pointer = 8 on Win32
     'type TTookRec = class end;'#10 +
@@ -17011,6 +17103,10 @@ begin
       SymCountOf(LOr, 'ttookenum', skType) = 1);
     Ok('1.3.2 oracle: ...and respects the POSITIONAL {$MINENUMSIZE} state',
       SymCountOf(LOr, 'ttookenumz', skType) = 1);
+    Ok('1.3.2 oracle: an enum with a negative value is sized by its signed range',
+      SymCountOf(LOr, 'ttookneg', skType) = 1);
+    Ok('1.3.2 oracle: ...and its High / Low answer',
+      SymCountOf(LOr, 'ttooknegbounds', skType) = 1);
     Ok('1.3.2 oracle: SizeOf of a same-size-fields record answers',
       SymCountOf(LOr, 'ttookrec', skType) = 1);
     Ok('1.3.2 oracle: SizeOf reaches a record in a USED unit too',
