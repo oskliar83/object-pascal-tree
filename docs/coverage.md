@@ -453,15 +453,15 @@ of less work, not a gap in following the language; its consequences are in
 ## 11-classes.md
 
 ### 11.2.1 `private` / `protected` / `public` / `published` (+ `strict`)
-- visibility enforcement is opt-in (ReportVisibility) and
-  covers only private/strict-private on QUALIFIED access; protected (E2362)
-  and the descendant bare-name case are not enforced, and ordinary name
-  lookup never filters by visibility.
-- E2361 names a nested type's member with every type around it
-  (`TOuter.TInner.FIn`), as dcc does, but a member of a generic instance by
-  its generic's bare name: `TG.FG` where dcc writes the instance with its
-  unit and qualified arguments (`{P}TG<System.Integer>.FG`). The check has
-  the member, not the receiver's instance.
+- E2361 / E2362 (ReportVisibility, opt-in by design) are judged at a
+  qualified access in a method body or in unit-level code; a protected
+  member named in a type declaration (a property's accessor, a field's
+  type) is not judged, and neither is one reached from a type nested in
+  another - their rules are not probed.
+- the intra-unit resolver's lookup does not filter by visibility: a member
+  of a same-unit with target or ancestor that dcc passes over (strict
+  private, strict protected) is bound there; the project's with and
+  inherited passes filter all four kinds.
 
 ## 12-inheritance-polymorphism.md
 

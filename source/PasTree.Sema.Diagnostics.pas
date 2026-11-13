@@ -70,6 +70,7 @@ const
   // 11 sec. 11.2.1. The single %s is the QUALIFIED member name, `TType.Member`,
   // which is how dcc spells it.
   SE2361_CannotAccessPrivate = 'E2361 Cannot access private symbol %s';
+  SE2362_CannotAccessProtected = 'E2362 Cannot access protected symbol %s';
   SE2032_ForCounterNotOrdinal =
     'E2032 For loop control variable must have ordinal type';
   SE2005_NotATypeIdentifier   = 'E2005 ''%s'' is not a type identifier';

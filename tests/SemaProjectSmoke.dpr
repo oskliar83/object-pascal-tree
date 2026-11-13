@@ -4357,6 +4357,231 @@ begin
   end;
 end;
 
+{ 11.2.1 under ReportVisibility, protected and the receiver's instance: the
+  E2362 rules (the friend rule on the base expression's class, the class-side
+  rule, strict protected through exactly the accessing class, a generic's
+  leniency in method bodies) and E2361 / E2362 naming a generic's member in
+  the receiver's instance, unit in braces and arguments qualified. dcc64
+  37.0 reports exactly the expected list over these three units (probe
+  2026-11-13); every other access compiles. A with target's protected member
+  the code cannot reach is passed over as a private one is: `with X2 do Q`
+  in TB's method is the local Q, not TA2.Q. }
+procedure TestProtectedVisibility;
+const
+  UAS =
+    'unit UA;'#13#10 +                                      // 1
+    'interface'#13#10 +                                     // 2
+    'type'#13#10 +                                          // 3
+    '  TA = class'#13#10 +                                  // 4
+    '  private'#13#10 +                                     // 5
+    '    FPriv: Integer;'#13#10 +                           // 6
+    '  protected'#13#10 +                                   // 7
+    '    P: Integer;'#13#10 +                               // 8
+    '    class procedure CP;'#13#10 +                       // 9
+    '    property PP: Integer read P;'#13#10 +              // 10
+    '  strict protected'#13#10 +                            // 11
+    '    SP: Integer;'#13#10 +                              // 12
+    '    class procedure SCP;'#13#10 +                      // 13
+    '  end;'#13#10 +                                        // 14
+    '  TAClass = class of TA;'#13#10 +                      // 15
+    '  TA2 = class'#13#10 +                                 // 16
+    '  protected'#13#10 +                                   // 17
+    '    Q: Integer;'#13#10 +                               // 18
+    '    class procedure CQ;'#13#10 +                       // 19
+    '  end;'#13#10 +                                        // 20
+    '  TG<T> = class'#13#10 +                               // 21
+    '  protected'#13#10 +                                   // 22
+    '    GP: Integer;'#13#10 +                              // 23
+    '  private'#13#10 +                                     // 24
+    '    GF: Integer;'#13#10 +                              // 25
+    '  public type'#13#10 +                                 // 26
+    '    TN = class'#13#10 +                                // 27
+    '    private'#13#10 +                                   // 28
+    '      FN: Integer;'#13#10 +                            // 29
+    '    end;'#13#10 +                                      // 30
+    '  end;'#13#10 +                                        // 31
+    '  TSP = class'#13#10 +                                 // 32
+    '  strict protected'#13#10 +                            // 33
+    '    SX: Integer;'#13#10 +                              // 34
+    '  end;'#13#10 +                                        // 35
+    '  TSU = class'#13#10 +                                 // 36
+    '    procedure M(X: TSP);'#13#10 +                      // 37
+    '  end;'#13#10 +                                        // 38
+    'implementation'#13#10 +                                // 39
+    'class procedure TA.CP; begin end;'#13#10 +             // 40
+    'class procedure TA.SCP; begin end;'#13#10 +            // 41
+    'class procedure TA2.CQ; begin end;'#13#10 +            // 42
+    'procedure TSU.M(X: TSP); begin X.SX := 1; end;'#13#10 + // 43
+    'end.'#13#10;                                           // 44
+  UBS =
+    'unit UB;'#13#10 +                                      // 1
+    'interface'#13#10 +                                     // 2
+    'uses UA;'#13#10 +                                      // 3
+    'type'#13#10 +                                          // 4
+    '  TB = class(TA)'#13#10 +                              // 5
+    '    Owner: TA;'#13#10 +                                // 6
+    '    procedure M(X: TA; C: TAClass; X2: TA2);'#13#10 +  // 7
+    '  end;'#13#10 +                                        // 8
+    '  TB2 = class(TB) end;'#13#10 +                        // 9
+    '  TC3 = class(TA) end;'#13#10 +                        // 10
+    '  TOther = class'#13#10 +                              // 11
+    '    procedure N;'#13#10 +                              // 12
+    '  end;'#13#10 +                                        // 13
+    'implementation'#13#10 +                                // 14
+    'uses UC;'#13#10 +                                      // 15
+    'procedure TB.M(X: TA; C: TAClass; X2: TA2);'#13#10 +   // 16
+    'var E: TE; G: TG<Integer>; Y2: TB2; Y3: TC3; Q: Integer; GN: TG<Integer>.TN;'#13#10 +// 17
+    'begin'#13#10 +                                         // 18
+    '  TA.CP;'#13#10 +                                      // 19
+    '  C.CP;'#13#10 +                                       // 20
+    '  E.SP := 1;'#13#10 +                                  // 21
+    '  E.P := 1;'#13#10 +                                   // 22
+    '  Owner.P := 1;'#13#10 +                               // 23
+    '  with X do P := 2;'#13#10 +                           // 24
+    '  Self.SP := 1;'#13#10 +                               // 25
+    '  Q := X.PP;'#13#10 +                                  // 26
+    '  G.GF := 1;'#13#10 +                                  // 27
+    '  Self.FPriv := 1;'#13#10 +                            // 28
+    '  with X2 do Q := 1;'#13#10 +                          // 29
+    '  TA2.CQ;'#13#10 +                                     // 30
+    '  Y2.SP := 1;'#13#10 +                                 // 31
+    '  Y3.SP := 1;'#13#10 +                                 // 32
+    '  Y3.P := 1;'#13#10 +                                  // 33
+    '  TA.SCP;'#13#10 +                                     // 34
+    '  TB2.SCP;'#13#10 +                                    // 35
+    '  GN.FN := 1;'#13#10 +                                 // 36
+    '  G.GP := 1;'#13#10 +                                  // 37
+    'end;'#13#10 +                                          // 38
+    'procedure TOther.N;'#13#10 +                           // 39
+    'var Y3: TC3;'#13#10 +                                  // 40
+    'begin'#13#10 +                                         // 41
+    '  TA.CP;'#13#10 +                                      // 42
+    '  TB.CP;'#13#10 +                                      // 43
+    '  Y3.P := 1;'#13#10 +                                  // 44
+    '  Y3.SP := 1;'#13#10 +                                 // 45
+    'end;'#13#10 +                                          // 46
+    'procedure U;'#13#10 +                                  // 47
+    'var G: TG<Integer>;'#13#10 +                           // 48
+    'begin'#13#10 +                                         // 49
+    '  G.GP := 1;'#13#10 +                                  // 50
+    '  TB.CP;'#13#10 +                                      // 51
+    'end;'#13#10 +                                          // 52
+    'end.'#13#10;                                           // 53
+  UCS =
+    'unit UC;'#13#10 +                                      // 1
+    'interface'#13#10 +                                     // 2
+    'uses UB;'#13#10 +                                      // 3
+    'type'#13#10 +                                          // 4
+    '  TE = class(TB)'#13#10 +                              // 5
+    '    procedure Z;'#13#10 +                              // 6
+    '  end;'#13#10 +                                        // 7
+    'implementation'#13#10 +                                // 8
+    'procedure TE.Z;'#13#10 +                               // 9
+    'begin'#13#10 +                                         // 10
+    '  FPriv := 1;'#13#10 +                                 // 11 E2003
+    '  P := 2;'#13#10 +                                     // 12
+    '  SP := 3;'#13#10 +                                    // 13
+    '  CP;'#13#10 +                                         // 14
+    'end;'#13#10 +                                          // 15
+    'end.'#13#10;                                           // 16
+var
+  LDir: string;
+  LSeen: TStringList;
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_protected_vis');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UA.pas'), UAS);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UB.pas'), UBS);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UC.pas'), UCS);
+  // A root for the descent walks: without it every "does TSU descend from
+  // TSP" ends at a link it cannot follow, and the answer is no answer.
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#13#10'interface'#13#10'type'#13#10 +
+    '  TObject = class end;'#13#10 +
+    '  Integer = -2147483648..2147483647;'#13#10 +
+    'implementation'#13#10'end.'#13#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  LSeen := TStringList.Create;
+  try
+    GProj.ReportVisibility := True;
+    GProj.AnalyzeDirectory(LDir);
+    var LA := ModelByName('ua');
+    var LB := ModelByName('ub');
+    Ok('protected-vis: UA and UB loaded', Assigned(LA) and Assigned(LB));
+    if not (Assigned(LA) and Assigned(LB)) then
+      Exit;
+    for var LD in LB.Diags do
+      LSeen.Add(Format('%d:%s', [LD.Line, LD.Msg]));
+    LSeen.Sort;
+    var LADiags := '';
+    for var LD in LA.Diags do
+      LADiags := LADiags + IntToStr(LD.Line) + ':' + LD.Msg + ';';
+    Ok('protected-vis: strict protected refused in its own unit too [' +
+      LADiags + ']',
+      (Length(LA.Diags) = 1) and DiagHasText(LA, 'E2362', 'TSP.SX'));
+    Ok('protected-vis: dcc''s list in UB, word for word [' +
+      LSeen.DelimitedText + ']', LSeen.Count = 14);
+    Ok('protected-vis: through a class reference, a descendant elsewhere, ' +
+      'a field of the ancestor''s type, a property',
+      (LSeen.IndexOf('20:E2362 Cannot access protected symbol TA.CP') >= 0) and
+      (LSeen.IndexOf('22:E2362 Cannot access protected symbol TA.P') >= 0) and
+      (LSeen.IndexOf('23:E2362 Cannot access protected symbol TA.P') >= 0) and
+      (LSeen.IndexOf('26:E2362 Cannot access protected symbol TA.PP') >= 0));
+    Ok('protected-vis: strict protected through a descendant or a sibling',
+      (LSeen.IndexOf('21:E2362 Cannot access protected symbol TA.SP') >= 0) and
+      (LSeen.IndexOf('31:E2362 Cannot access protected symbol TA.SP') >= 0) and
+      (LSeen.IndexOf('32:E2362 Cannot access protected symbol TA.SP') >= 0) and
+      (LSeen.IndexOf('45:E2362 Cannot access protected symbol TA.SP') >= 0));
+    Ok('protected-vis: a class-side base the accessor does not descend to',
+      (LSeen.IndexOf('30:E2362 Cannot access protected symbol TA2.CQ') >= 0) and
+      (LSeen.IndexOf('42:E2362 Cannot access protected symbol TA.CP') >= 0));
+    Ok('protected-vis: a generic''s member in the receiver''s instance',
+      (LSeen.IndexOf('27:E2361 Cannot access private symbol ' +
+        '{UA}TG<System.Integer>.GF') >= 0) and
+      (LSeen.IndexOf('36:E2361 Cannot access private symbol ' +
+        '{UA}TG<System.Integer>.TN.FN') >= 0) and
+      (LSeen.IndexOf('50:E2362 Cannot access protected symbol ' +
+        '{UA}TG<System.Integer>.GP') >= 0));
+    Ok('protected-vis: Self.FPriv across units',
+      LSeen.IndexOf('28:E2361 Cannot access private symbol TA.FPriv') >= 0);
+    // The bare name in a descendant (UC, TE.Z): an ancestor's private member
+    // of another unit is not in scope - dcc's E2003, not E2361; the
+    // protected and strict protected ones are, through Self.
+    var LC := ModelByName('uc');
+    var LCDiags := '';
+    if Assigned(LC) then
+      for var LD in LC.Diags do
+        LCDiags := LCDiags + IntToStr(LD.Line) + ':' + LD.Msg + ';';
+    Ok('protected-vis: a bare ancestor''s private is E2003, its protected ' +
+      'members are reachable [' + LCDiags + ']',
+      LCDiags = '11:E2003 Undeclared identifier: ''FPriv'';');
+    // `with X2 do Q := 1` (line 29): TA2's protected Q is passed over.
+    var LQLocal := False;
+    for var LN := 0 to High(LB.Tree.Nodes) do
+      if (LB.Tree.Nodes[LN].Kind = nkIdent) and
+         (LB.Tree.NodeText(LN) = 'Q') then
+      begin
+        var LFile: string;
+        var LLine, LCol: Integer;
+        if GProj.NodeSite(GProj.ModelIdOf(TPath.Combine(LDir, 'UB.pas')), LN,
+             LFile, LLine, LCol) and (LLine = 29) then
+          LQLocal := (LB.RefMap[LN] <> NIL_SYM) and
+            (LB.Symbols[LB.RefMap[LN]].Kind = skVar) and
+            not LB.ExtRefMap.ContainsKey(LN);
+      end;
+    Ok('protected-vis: a with target''s unreachable protected member is ' +
+      'passed over - Q is the local', LQLocal);
+  finally
+    LSeen.Free;
+    GProj.Free;
+    GProj := nil;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 { In a method of a NESTED type the outer type's members - its own and its
   ancestors' - come after the unit's own declarations made so far, and
   before the used units and System (F52 of the parser-fidelity plan; spec
@@ -21221,6 +21446,7 @@ begin
   TestWithBodySelfMember;
   TestWithTargetPositions;
   TestCtorConstraintArgs;
+  TestProtectedVisibility;
   TestNestedOuterAfterUnit;
   TestDeclAfterUnit;
   TestDeclOrder;
