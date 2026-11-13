@@ -12654,6 +12654,59 @@ begin
         Inc(Result);
 end;
 
+// 2.2.5 / 6.3.1: a subrange whose bound is an expression (`N + 1..20`,
+// `Chr(65)..Chr(90)`, `SizeOf(Integer)..10`, `Length('abc')..10`) is
+// categorized by the bound's shape and ranked by its folded range as any
+// subrange: F(ShortInt) over F(Integer), H(Char) over H(string) - in the
+// unit's own body and from the program (dcc64 37.0, 2026-11-13,
+// local/cov-exprs-2026-11 m7).
+procedure TestExprBoundSubrange;
+const
+  DECLS: array[0..3] of string = ('F(X: Integer): TRA', 'F(X: ShortInt): TRW',
+    'H(const X: string): TRA', 'H(X: Char): TRW');
+  BODY =
+    'var K: Integer; V1: T1; V9: T9; V11: T11; V13: T13;'#10 + 'begin'#10 +
+    '  K := F(V1).W;'#10'  K := H(V9).W;'#10'  K := F(V11).W;'#10 +
+    '  K := F(V13).W;'#10;
+var
+  LDir, LDecl, LImpl: string;
+begin
+  LDecl := '';
+  LImpl := '';
+  for var LD in DECLS do
+  begin
+    LDecl := LDecl + 'function ' + LD + '; overload;'#10;
+    LImpl := LImpl + 'function ' + LD + '; begin end;'#10;
+  end;
+  LDir := FreshDir('pastree_sema_exprbound');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'EbA.pas'),
+    'unit EbA;'#10'interface'#10'const N = 5;'#10'type'#10 +
+    '  TRA = record A: Integer; end;'#10 +
+    '  TRW = record W: Integer; end;'#10 +
+    '  T1 = N + 1..20; T9 = Chr(65)..Chr(90); T11 = SizeOf(Integer)..10;'#10 +
+    '  T13 = Length(''abc'')..10;'#10 + LDecl +
+    'procedure UnitCalls;'#10'implementation'#10 + LImpl +
+    'procedure UnitCalls;'#10 + BODY + 'end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'EbP.dpr'),
+    'program EbP;'#10'uses EbA;'#10 + BODY + 'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'EbP.dpr'));
+    var LU := TrwCallCount(ModelByName('eba'), False);
+    var LP := TrwCallCount(ModelByName('ebp'), True);
+    Ok('expression-bounded subranges rank by their range [unit ' +
+      IntToStr(LU) + ', project ' + IntToStr(LP) + ' of 4]',
+      (LU = 4) and (LP = 4));
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // 2.2.1 / 6.3.1: on an LP64 target (OSX64 here) LongInt and LongWord are
 // 8-byte types of their own, ranked by their width: `F(Lg)` beside
 // F(Integer) and F(Int64) takes the Int64 one, `F(Lw)` too, `G(Lw)` beside
@@ -20892,6 +20945,7 @@ begin
   TestPtrConvRanking;
   TestOpRangeRanking;
   TestLp64Ranking;
+  TestExprBoundSubrange;
   TestModeConvRanking;
   TestLeftoverRanking;
   TestOverloadTies;

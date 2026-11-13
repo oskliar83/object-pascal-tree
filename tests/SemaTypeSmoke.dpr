@@ -575,6 +575,15 @@ begin
       ['C + Ord(High(Integer) - 1)', 'Cardinal'],
       ['C + Succ(High(ShortInt))', 'Cardinal'],
       ['C + (Low(Integer) + 1)', 'Int64'], ['C + (High(Word) * 2)', 'Cardinal'],
+      // SizeOf and Sqr fold by value and adapt, Length and Abs are Integer
+      // values; two constants under `and` are typed by the result; an
+      // operator that cannot be negative meets a Cardinal as unsigned
+      // (dcc64 37.0, 2026-11-13, local/cov-exprs-2026-11 fo, so, sh2).
+      ['C + SizeOf(Integer)', 'Cardinal'], ['C + SizeOf(B)', 'Cardinal'],
+      ['C + Sqr(3)', 'Cardinal'], ['C + Length(''abc'')', 'Int64'],
+      ['C + Abs(-5)', 'Int64'], ['4 and $7F', 'Integer'],
+      ['SizeOf(Cardinal) and $7F', 'Integer'], ['C + (B + B)', 'Cardinal'],
+      ['C + (B - B)', 'Int64'], ['C or (I shl 2)', 'Int64'],
       // Beside another constant a folded operator keeps its own type.
       ['KM', 'UInt64'], ['(UInt64(1) shl 48) - 1', 'UInt64'], ['KO', 'Integer'],
       ['KS1 or KS4', 'Integer'], ['C + (KS1 or KS4)', 'Cardinal'],

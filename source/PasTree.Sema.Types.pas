@@ -853,6 +853,9 @@ type
   `F(const A: IFoo)` with `F(A: TId)` (`TId = type Integer`): the first
   declared won, and its sibling's calls were listed as its references. A
   record parameter is not in the rule: a string constant converts to TGUID. }
+// The UTF-16 code units of string literal ANode, all of them past ACap 0
+// (Length('abc'), 4.11.4); -1 when it cannot be read.
+function StrLitUnitsUpTo(const ATree: TPasTree; ANode, ACap: Integer): Integer;
 function StrLitUnits(const ATree: TPasTree; ANode: Integer): Integer;
 function IsOneCharLiteralNode(const ATree: TPasTree; ANode: Integer): Boolean;
 function IsCharLiteralExpr(const ATree: TPasTree; ANode: Integer): Boolean;
@@ -3608,7 +3611,7 @@ begin
     Result := 0;
 end;
 
-function StrLitUnits(const ATree: TPasTree; ANode: Integer): Integer;
+function StrLitUnitsUpTo(const ATree: TPasTree; ANode, ACap: Integer): Integer;
 var
   LTxt: string;
   LTok, LIdx: Integer;
@@ -3668,9 +3671,14 @@ begin
     end
     else
       Exit(-1);   // a multiline string or anything unexpected
-    if Result > 1 then
-      Exit(2);
+    if (ACap > 0) and (Result >= ACap) then
+      Exit(ACap);
   end;
+end;
+
+function StrLitUnits(const ATree: TPasTree; ANode: Integer): Integer;
+begin
+  Result := StrLitUnitsUpTo(ATree, ANode, 2);
 end;
 
 function IsOneCharLiteralNode(const ATree: TPasTree; ANode: Integer): Boolean;
@@ -5557,6 +5565,27 @@ function OperatorAnswer(AOp: TPasTokenKind; AUnary: Boolean;
     end;
 
   begin
+    // Two constants by value fold, typed by the result as a constant
+    // expression is (3.2.1): Integer, then Cardinal, then Int64 (`4 and
+    // $7F`, `Cardinal($FFFFFFFF) and 1` Integer, `$FF000000 or 0`, `-1 and
+    // $FFFFFFFF` Cardinal, `-1 xor KC` Int64; dcc64 37.0, 2026-11-13). A
+    // folded 64-bit operator keeps its type.
+    if AL.IntConst and AR.IntConst and
+       not (AL.IntFolded and (AL.Rank = 4)) and
+       not (AR.IntFolded and (AR.Rank = 4)) then
+    begin
+      case AOp of
+        tkAnd: LLo := AL.IntValue and AR.IntValue;
+        tkOr: LLo := AL.IntValue or AR.IntValue;
+      else
+        LLo := AL.IntValue xor AR.IntValue;
+      end;
+      if (LLo >= Low(Integer)) and (LLo <= High(Integer)) then
+        Exit(oaInteger);
+      if (LLo >= 0) and (LLo <= High(Cardinal)) then
+        Exit(oaCardinal);
+      Exit(oaInt64);
+    end;
     OpShape(AL, AR, LRL, LLU);
     OpShape(AR, AL, LRR, LRU);
     if (LRL = 4) or (LRR = 4) then
@@ -6490,6 +6519,35 @@ var
       AF.IntValue := LV;
       Exit(True);
     end;
+    // SizeOf of an integer type or value: its width - by value, as the
+    // anonymous subrange SizeOf is (3.2.1: `C + SizeOf(Integer)` Cardinal).
+    // Another type's size is the layout's, not read here.
+    if (LF.Role = scrIntrinsic) and (LF.Intrinsic = 'sizeof') then
+    begin
+      var LT := AFacts(LArg, ADepth + 1);
+      if not (LT.Role in [scrType, scrValue]) or (LT.Cat <> tcInteger) or
+         not (LT.Rank in [1..4]) then
+        Exit;
+      AF := ByValueFacts(Int64(1) shl (LT.Rank - 1));
+      Exit(True);
+    end;
+    // Length of a string literal: an Integer value (it does not adapt,
+    // `C + Length('abc')` is Int64 - 4.2.1).
+    if (LF.Role = scrIntrinsic) and (LF.Intrinsic = 'length') then
+    begin
+      var LS := PeelParens(ATree, LArg);
+      if (LS = NIL_NODE) or
+         not (ATree.Nodes[LS].Kind in [nkStrLit, nkCaretChar]) then
+        Exit;
+      LV := StrLitUnitsUpTo(ATree, LS, 0);
+      if LV < 0 then
+        Exit;
+      AF := Default(TSemaOpFacts);
+      AF.Cat := tcInteger;
+      AF.Rank := 3;
+      AF.IntValue := LV;
+      Exit(True);
+    end;
     // The argument of a typecast or of Ord may be any ordinal (`Integer('A')`,
     // `Ord(True)`); Succ / Pred of a character or an enumeration is one again,
     // no integer.
@@ -6537,6 +6595,36 @@ var
       if LV = Low(Int64) then
         Exit;
       Dec(LV);
+    end
+    else if LF.Intrinsic = 'sqr' then
+    begin
+      // By value, adapting (`C + Sqr(3)` Cardinal; dcc64 37.0, 2026-11-13).
+      if (LV <> 0) and (Abs(LV) > 3037000499) then
+        Exit;
+      LV := LV * LV;
+    end
+    else if LF.Intrinsic = 'abs' then
+    begin
+      // A value of the argument's type, at least Integer - it does not
+      // adapt (`C + Abs(-5)` Int64, 4.2.1); one past it is E2099.
+      if LV = Low(Int64) then
+        Exit;
+      LV := Abs(LV);
+      AF := Default(TSemaOpFacts);
+      AF.Cat := tcInteger;
+      AF.Rank := 3;
+      if LA.Rank = 4 then
+        AF.Rank := 4;
+      if not OpFits(LV, AF.Rank, False) then
+        Exit;
+      AF.IntValue := LV;
+      Exit(True);
+    end
+    // Chr's ordinal, for a bound (`Chr(65)..Chr(90)`); no integer operand.
+    else if LF.Intrinsic = 'chr' then
+    begin
+      if AOperand or (LV < 0) or (LV > $FFFF) then
+        Exit;
     end
     else if LF.Intrinsic <> 'ord' then
       Exit;
@@ -6666,7 +6754,8 @@ begin
   LName := LF.Intrinsic;
   if (LName <> 'hi') and (LName <> 'lo') and (LName <> 'swap') and
      (LName <> 'succ') and (LName <> 'pred') and (LName <> 'ord') and
-     (LName <> 'high') and (LName <> 'low') then
+     (LName <> 'high') and (LName <> 'low') and (LName <> 'sizeof') and
+     (LName <> 'sqr') then
     Exit;
   if ConstExprKind(ATree, LCall, 0, AFacts) = sckNone then
     Exit;
@@ -7081,6 +7170,7 @@ end;
 function TPasSemaTyper.CatOfSubrangeBound(ALo: Integer): TSemaTypeCat;
 var
   LDepth, LSym, LVal: Integer;
+  LName: string;
 begin
   Result := tcUnknown;
   for LDepth := 1 to 8 do
@@ -7128,7 +7218,76 @@ begin
           end;
         end;
     else
-      Exit;
+      begin
+        // An expression (`N + 1..`, `Ord('a')..`, `Chr(65)..`, `Succ(N)..`;
+        // 2.2.5): the category of its type when typed, else read off its
+        // shape - an operator its left operand's, a typecast its type's, an
+        // intrinsic its result's - as the unit categorizes its types before
+        // it types expressions.
+        if M.ExprType[ALo] <> NIL_SYM then
+        begin
+          Result := CatOf(M.ExprType[ALo]);
+          if not (Result in [tcInteger, tcChar, tcEnum, tcBoolean]) then
+            Result := tcUnknown;
+          Exit;
+        end;
+        case Kind(ALo) of
+          nkParen, nkBinaryOp:
+            begin
+              ALo := Child(ALo);
+              Continue;
+            end;
+          nkCall:
+            begin
+              LSym := Head(Child(ALo));
+              if LSym = NIL_SYM then
+                Exit;
+              case M.Symbols[LSym].Kind of
+                skType, skBuiltinType:
+                  begin
+                    Result := CatOf(LSym);
+                    if not (Result in [tcInteger, tcChar, tcEnum,
+                       tcBoolean]) then
+                      Result := tcUnknown;
+                    Exit;
+                  end;
+                skRoutine:
+                  if sfBuiltin in M.Symbols[LSym].Flags then
+                  begin
+                    LName := M.Symbols[LSym].NameLower;
+                    if (LName = 'ord') or (LName = 'sizeof') or
+                       (LName = 'length') or (LName = 'abs') or
+                       (LName = 'sqr') or (LName = 'round') or
+                       (LName = 'trunc') or (LName = 'hi') or
+                       (LName = 'lo') or (LName = 'swap') then
+                      Exit(tcInteger);
+                    if LName = 'chr' then
+                      Exit(tcChar);
+                    // Succ / Pred of a value, Low / High of a type or value:
+                    // the argument's category.
+                    if (LName = 'succ') or (LName = 'pred') or
+                       (LName = 'low') or (LName = 'high') then
+                    begin
+                      ALo := Sib(Child(ALo));
+                      if (ALo <> NIL_NODE) and (Kind(ALo) in [nkIdent,
+                         nkMember]) and (Head(ALo) <> NIL_SYM) and
+                         (M.Symbols[Head(ALo)].Kind in [skType,
+                          skBuiltinType]) then
+                      begin
+                        Result := CatOf(Head(ALo));
+                        if not (Result in [tcInteger, tcChar, tcEnum,
+                           tcBoolean]) then
+                          Result := tcUnknown;
+                        Exit;
+                      end;
+                      Continue;
+                    end;
+                  end;
+              end;
+            end;
+        end;
+        Exit;
+      end;
     end;
   end;
 end;

@@ -130,12 +130,10 @@ of less work, not a gap in following the language; its consequences are in
   stop at the missing include anyway.
 
 ### 2.2.5 Subrange types
-- a subrange's category comes from its LOW bound: a literal, True / False,
-  an enumeration value or a constant (followed to its value), in this unit
-  or another. A bound that is an expression (`Ord(X)..`, `N + 1..`) leaves
-  the type uncategorized, which every check reads as "say nothing", and a
-  subrange argument scores against its base type as any other type of its
-  category would (no exact match).
+- a bound that folds through `SizeOf` of a type other than an integer one
+  (a record, a class, a string - its size is the layout's) has no value
+  here: the subrange is categorized by the bound's shape but has no range,
+  so an argument of it gives no evidence in overload choice.
 
 
 ### 2.6.1 Identity, compatibility, assignment-compatibility
@@ -222,11 +220,12 @@ of less work, not a gap in following the language; its consequences are in
   integer operator over constants folded as dcc folds it (FoldedIntValue:
   `C + (N + 1)`, `C + (K shl 2)`, `not`, the shifts wrapping), `Hi` / `Lo`
   / `Swap` / `Succ` / `Pred` of one, or a true constant naming any of
-  them. Not folded: `SizeOf`, `Length`, `Abs`, `Sqr`, `Chr` and a value
-  past High(Int64) - `C + SizeOf(X)` over a Cardinal is Cardinal in dcc,
-  Int64 here - nor a chain of more than 8 constants or 64 nested
-  operators. A typecast or a typed intrinsic (`C + Integer(5)`, `C +
-  High(Integer)`) adapts in neither. `AnsiChar + AnsiChar` (dcc's
+  them. Not folded: `SizeOf` of a type other than an integer one, a value
+  past High(Int64), a chain of more than 8 constants or 64 nested
+  operators. A constant expression over a TYPECAST constant is typed by
+  the cast here, by its folded value in dcc (`KC + 0` of `KC =
+  Cardinal($200)`, `(Cardinal(1) shl 31) - 1` Integer; spec 4.2.1, local/
+  cov-exprs-2026-11 tc, tc2) - beside a variable both keep the cast's type. `AnsiChar + AnsiChar` (dcc's
   anonymous short string) is typed ShortString; pointer minus pointer is
   left untyped. The intra-unit typer cannot tell a code-page string declared
   in another unit (UTF8String, RawByteString) from a plain AnsiString-kind
@@ -248,8 +247,8 @@ of less work, not a gap in following the language; its consequences are in
 - the result rules are implemented in both typers from the spec's probe
   table, with these edges left out: `Ord` of an enumeration or subrange
   reads its range from bounds and values the integer folder reads (`0..N *
-  8000` is Word) - one it cannot (`SizeOf(T)`, `Length('abc')`) leaves the
-  range unknown and `Ord` Integer;
+  8000` is Word) - one it cannot (`SizeOf(T)` of a record or another
+  non-integer type) leaves the range unknown and `Ord` Integer;
   `Abs` of a subrange past 32 bits reads Integer where dcc says Int64;
   `GetTypeKind` is typed at the
   project level only (System.TTypeKind is a real declaration the intra-unit
