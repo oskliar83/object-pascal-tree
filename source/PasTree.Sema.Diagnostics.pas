@@ -45,6 +45,10 @@ const
   // name it found; an expression or an undeclared name, none.
   SW1074_UnknownCustomAttributeName = 'W1074 Unknown custom attribute: ''%s''';
   SW1074_UnknownCustomAttribute = 'W1074 Unknown custom attribute';
+  // A method's implementation heading whose parameter types are not its
+  // declaration's (3 sec. 3.3.2): the routine's name.
+  SE2037_DeclarationDiffers =
+    'E2037 Declaration of ''%s'' differs from previous declaration';
   // An anonymous method naming what it cannot capture (17 sec. 17.3.1).
   SE2555_CannotCapture = 'E2555 Cannot capture symbol ''%s''';
   // Takes no argument: a bare `raise` has nothing to name (18 sec. 18.3.1).
