@@ -4251,6 +4251,112 @@ begin
   end;
 end;
 
+{ 16.4.1: the arguments a `constructor` constraint refuses at an
+  instantiation site - E2513 for a record, an `object`, an interface and an
+  anonymous-method type (an interface itself); every other type passes, a
+  simple type and Variant included. And a generic method's overloads: one
+  whose constraints the arguments fail is no candidate, so a constraint is
+  reported only when every overload of the arity refuses alike. dcc64 37.0
+  reports exactly the Bad lines and line 29, plus E2250 on line 31 (the
+  same declarations in one program). The generics live in another unit, as
+  in UNIT_CON. }
+procedure TestCtorConstraintArgs;
+const
+  UA =
+    'unit CcA;'#13#10 +
+    'interface'#13#10 +
+    'type'#13#10 +
+    '  TG<T: constructor> = class end;'#13#10 +
+    '  TGC<T: class, constructor> = class end;'#13#10 +
+    '  TF = class'#13#10 +
+    '    function Pick<T: class>(A: Integer): T; overload;'#13#10 +
+    '    function Pick<T: class>(A: string): T; overload;'#13#10 +
+    '    function Two<T: class>(A: Integer): T; overload;'#13#10 +
+    '    function Two<T: record>(A: string): T; overload;'#13#10 +
+    '  end;'#13#10 +
+    'implementation'#13#10 +
+    'function TF.Pick<T>(A: Integer): T; begin Result := nil; end;'#13#10 +
+    'function TF.Pick<T>(A: string): T; begin Result := nil; end;'#13#10 +
+    'function TF.Two<T>(A: Integer): T; begin Result := nil; end;'#13#10 +
+    'function TF.Two<T>(A: string): T; begin Result := Default(T); end;'#13#10 +
+    'end.'#13#10;
+  UB =
+    'unit CcB;'#13#10 +                                   // 1
+    'interface'#13#10 +                                   // 2
+    'uses CcA;'#13#10 +                                   // 3
+    'type'#13#10 +                                        // 4
+    '  TRec = record X: Integer; end;'#13#10 +            // 5
+    '  TOld = object X: Integer; end;'#13#10 +            // 6
+    '  IFoo = interface end;'#13#10 +                     // 7
+    '  TRefP = reference to procedure;'#13#10 +           // 8
+    '  TPlainP = procedure;'#13#10 +                      // 9
+    '  TObj = class end;'#13#10 +                         // 10
+    '  TCls = class of TObj;'#13#10 +                     // 11
+    '  TArr = array of Integer;'#13#10 +                  // 12
+    'var'#13#10 +                                         // 13
+    '  Bad1: TG<TRec>;'#13#10 +                           // 14
+    '  Bad2: TG<TOld>;'#13#10 +                           // 15
+    '  Bad3: TG<IFoo>;'#13#10 +                           // 16
+    '  Bad4: TG<TRefP>;'#13#10 +                          // 17
+    '  Bad5: TGC<TObj>;'#13#10 +                          // 18 (fine)
+    '  Ok1: TG<TObj>;'#13#10 +                            // 19
+    '  Ok2: TG<Integer>;'#13#10 +                         // 20
+    '  Ok3: TG<string>;'#13#10 +                          // 21
+    '  Ok4: TG<Variant>;'#13#10 +                         // 22
+    '  Ok5: TG<TPlainP>;'#13#10 +                         // 23
+    '  Ok6: TG<TCls>;'#13#10 +                            // 24
+    '  Ok7: TG<TArr>;'#13#10 +                            // 25
+    'implementation'#13#10 +                              // 26
+    'procedure Use(F: TF);'#13#10 +                       // 27
+    'begin'#13#10 +                                       // 28
+    '  F.Pick<Integer>(1);'#13#10 +                       // 29 E2511
+    '  F.Two<Integer>(''a'');'#13#10 +                    // 30 valid
+    '  F.Two<TObject>(''a'');'#13#10 +                    // 31 dcc: E2250
+    'end;'#13#10 +
+    'end.'#13#10;
+var
+  LDir: string;
+  LSeen: TStringList;
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_ctor_constraint');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'CcA.pas'), UA);
+  TFile.WriteAllText(TPath.Combine(LDir, 'CcB.pas'), UB);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  LSeen := TStringList.Create;
+  try
+    GProj.AnalyzeDirectory(LDir);
+    var LB := ModelByName('ccb');
+    Ok('ctor-constraint: CcB loaded', Assigned(LB));
+    if not Assigned(LB) then
+      Exit;
+    // Line 31's call binds no overload, and the member walk's E2003 stands
+    // where dcc says E2250 - overload resolution's, not this check's.
+    for var LD in LB.Diags do
+      if not ((LD.Line = 31) and (LD.Code = 'E2003')) then
+        LSeen.Add(Format('%d:%s', [LD.Line, LD.Code]));
+    LSeen.Sort;
+    // Line 29: every Pick<T: class> overload refuses Integer - dcc's E2511.
+    // Line 30: the `record` overload meets Integer, the call is overload
+    // resolution's and valid. Line 31: the `class` overload meets TObject
+    // but takes no string - dcc's E2250, no constraint report.
+    Ok('ctor-constraint: E2513 on dcc''s four lines, E2511 where every ' +
+      'overload refuses [' + LSeen.CommaText + ']',
+      LSeen.CommaText = '14:E2513,15:E2513,16:E2513,17:E2513,29:E2511');
+    Ok('ctor-constraint: ...naming the parameter as dcc does',
+      DiagHasText(LB, 'E2513', 'Type parameter ''T'' must have one public ' +
+        'parameterless constructor named Create'));
+  finally
+    LSeen.Free;
+    GProj.Free;
+    GProj := nil;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 { In a method of a NESTED type the outer type's members - its own and its
   ancestors' - come after the unit's own declarations made so far, and
   before the used units and System (F52 of the parser-fidelity plan; spec
@@ -16178,6 +16284,7 @@ begin
     '  X := T.Create;'#10 +              // the one thing it allows
     '  V.Free;'#10 +                     // dcc: E2003
     '  T.Create.Free;'#10 +              // dcc: E2003 - the result is a T
+    '  V.Create;'#10 +                   // dcc: E2003 - the TYPE's only
     'end;'#10 +
     'procedure TClassCtor<T>.Use(const V: T);'#10 +
     'begin'#10 +
@@ -16211,10 +16318,10 @@ begin
     GProj.AnalyzeDirectory(LDir);
     var LCF := ModelByName('cfuse');
     Ok('ctorfree: CFUse loaded', Assigned(LCF));
-    // Five left: the record-constrained Free, the two illegal Creates and
-    // the two Frees under a lone `constructor`.
+    // Six left: the record-constrained Free, the two illegal Creates, the
+    // two Frees under a lone `constructor` and its `V.Create`.
     Ok('ctorfree: `class` answers TObject and the other kinds do not',
-      DiagCount(LCF, 'E2003') = 5);
+      DiagCount(LCF, 'E2003') = 6);
     Ok('ctorfree: the surviving report is the record-constrained Free',
       DiagHasText(LCF, 'E2003', 'Free'));
     var LCreates := 0;
@@ -16223,7 +16330,8 @@ begin
          LCF.Diags[LDi].Msg.Contains('''Create''') then
         Inc(LCreates);
     Ok('ctorfree: a lone `constructor` resolves T.Create - the only Create ' +
-      'reports are the two illegal ones', LCreates = 2);
+      'reports are the three illegal ones, V.Create among them',
+      LCreates = 3);
   finally
     GProj.Free;
     if TDirectory.Exists(LDir) then
@@ -21112,6 +21220,7 @@ begin
   TestInheritedBeatsUnitLevel;
   TestWithBodySelfMember;
   TestWithTargetPositions;
+  TestCtorConstraintArgs;
   TestNestedOuterAfterUnit;
   TestDeclAfterUnit;
   TestDeclOrder;

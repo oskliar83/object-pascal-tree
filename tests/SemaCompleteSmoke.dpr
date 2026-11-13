@@ -3375,10 +3375,10 @@ begin
   GCounter.Ok('16.4.1: T. under a lone constructor lists Create, not Free',
     GHit and Has('Create') and not Has('Free'));
   ProjCase(StringReplace(LCtorMain, '//G', 'V.|', []));
-  // Create is listed here too: the member walk cannot tell `T.` from `V.`
-  // (docs/coverage.md 16.4.1 - dcc's `V.Create` is E2003).
-  GCounter.Ok('16.4.1: V. under a lone constructor lists no TObject member ' +
-    'but Create', not Has('Free'));
+  // Not Create either: dcc's `V.Create` is E2003 - the constraint unlocks
+  // the TYPE's Create only (dcc64 37.0, 2026-11-13).
+  GCounter.Ok('16.4.1: V. under a lone constructor lists no TObject member, ' +
+    'not even Create', GHit and not Has('Free') and not Has('Create'));
   ProjCase(StringReplace(LCtorMain, '//C', 'V.|', []));
   GCounter.Ok('16.4.1: V. under class, constructor lists Free',
     GHit and Has('Free'));

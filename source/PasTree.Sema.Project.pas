@@ -2296,16 +2296,21 @@ type
       ABare: Boolean = True): TSemaXType;
     { ADepth guards the CONSTRAINT hop, which is the one place this function
       re-enters itself: a type parameter may carry several constraints and the
-      member may be on ANY of them (16 sec. 16.4.1), so each is walked in turn. }
+      member may be on ANY of them (16 sec. 16.4.1), so each is walked in turn.
+      AValueBase: the member is asked of a VALUE of the type (`V.Create`
+      with `V: T`), not of the type itself - a lone `constructor` constraint
+      unlocks `T.Create` only (16.4.1; dcc: E2003 on `V.Create`). }
     function FindMemberX(AFromMid: Integer; const ABase: TSemaXType;
       const ANameLower: string;
       out AMemMid, AMemSym: Integer; out ACtx: Integer;
-      ADepth: Integer = 0; ANoHelpers: Boolean = False): Boolean; overload;
+      ADepth: Integer = 0; ANoHelpers: Boolean = False;
+      AValueBase: Boolean = False): Boolean; overload;
     // The same by key - PasNodeKey over the member-name node costs no string.
     function FindMemberX(AFromMid: Integer; const ABase: TSemaXType;
       const AKey: TSemaKey;
       out AMemMid, AMemSym: Integer; out ACtx: Integer;
-      ADepth: Integer = 0; ANoHelpers: Boolean = False): Boolean; overload;
+      ADepth: Integer = 0; ANoHelpers: Boolean = False;
+      AValueBase: Boolean = False): Boolean; overload;
     { A helper's extended type (`class helper for TFoo` names TFoo), as
       ASym of unit AMid declares it; XNil for a type that is no helper. }
     function HelperTargetX(AMid, ASym: Integer): TSemaXType;
@@ -2480,7 +2485,8 @@ type
       reproduces FindMemberX's precedence, exactly like EnumScopeDeep's
       contract mirrors FindLocalDeep's. }
     procedure EnumMembersX(AFromMid: Integer; const ABase: TSemaXType;
-      const AOnMember: TPasMemberEnumProc; ADepth: Integer = 0);
+      const AOnMember: TPasMemberEnumProc; ADepth: Integer = 0;
+      AValueBase: Boolean = False);
     { Width of the default thread pool for every parallel pass, pinned once per
       process. 0 = logical-core width (CPUCount), which is where measurement
       puts the optimum; letting the pool grow costs ~30% of total analysis
@@ -11782,20 +11788,17 @@ end;
                    string, pointers, Variant, ARRAYS (static and dynamic) and
                    procedural types.
     T: SomeClass   accepts that class and its descendants.
-
-  A generic METHOD's explicit instantiation (`F.Pick<TObject>(O)`) is checked
-  the same way, against the overload the call bound (16.4.1).
-
     T: SomeIntf    a class whose own or an ancestor class's list NAMES it
                    (XImplementsX - a listed descendant interface does not
                    count), the interface itself or a descendant interface
                    (XDescent); E2514 for those that do not and for every
                    value category (InterfaceConstraintFails, dcc64 37.0).
+    constructor    rejects a record, an `object`, an interface and an
+                   anonymous-method type; accepts every other type
+                   (dcc64 37.0, 2026-11-13).
 
-  Not checked, and each for a stated reason:
-    constructor       satisfied by essentially every class, since TObject
-                      declares a parameterless constructor. Checking it would
-                      cost a member walk to find approximately no bugs. }
+  A generic METHOD's explicit instantiation (`F.Pick<TObject>(O)`) is checked
+  the same way, over the overloads of its arity (JudgeRoutine, 16.4.1). }
 procedure TPasSemaProject.CheckConstraints(AId: Integer);
 const
   // dcc-verified accepted categories for `T: record`.
@@ -11803,13 +11806,195 @@ const
     tcSet];
 var
   LM: TPasSemaModel;
-  LNode, LHead, LArgNode, LIdx, LParamSym: Integer;
-  LBase, LArgX, LConX: TSemaXType;
-  LIdents: TArray<Integer>;
-  LCons: TArray<TArray<Integer>>;
-  LParamName: string;
-  LCat: TSemaTypeCat;
-  LWord: Byte;
+
+  // An anonymous-method type: its declaration says `reference to`.
+  function IsMethodRefTypeX(const AX: TSemaXType): Boolean;
+  var
+    LCx: TSemaXType;
+    LDef: Integer;
+  begin
+    LCx := CanonTypeX(AX);
+    Result := False;
+    if not XValid(LCx) then
+      Exit;
+    LDef := TypeDefNodeOf(LCx.UnitId, LCx.Sym);
+    Result := (LDef <> NIL_NODE) and
+      (FModels[LCx.UnitId].Tree.Nodes[LDef].Kind = nkProcType) and
+      (FModels[LCx.UnitId].Tree.Nodes[LDef].Aux = 2);
+  end;
+
+  { The constraints of ABase's parameters against the arguments written
+    after AHead: each violation emitted (AEmit) and added to ASig as
+    `node:text|`, so the verdicts of two overloads compare. }
+  procedure Judge(const ABase: TSemaXType; AHead: Integer; AEmit: Boolean;
+    var ASig: string);
+
+    procedure Flag(AArg: Integer; const ACode, AText: string);
+    begin
+      ASig := ASig + IntToStr(AArg) + ':' + AText + '|';
+      if AEmit then
+        EmitAt(LM, AArg, ACode, AText);
+    end;
+
+  var
+    LIdents: TArray<Integer>;
+    LCons: TArray<TArray<Integer>>;
+    LArgNode, LIdx, LParamSym: Integer;
+    LArgX, LConX: TSemaXType;
+    LParamName: string;
+    LCat: TSemaTypeCat;
+    LWord: Byte;
+    LAnyCons: Boolean;
+  begin
+    LIdents := GenericParamIdents(ABase.UnitId, ABase.Sym);
+    LCons := GenericParamConstraints(ABase.UnitId, ABase.Sym);
+    if (Length(LIdents) = 0) or (Length(LCons) <> Length(LIdents)) then
+      Exit;
+    // TList<T>, TDictionary<K, V>: nothing to check, so no argument is
+    // resolved for it (audit C1-22 - one resolution per argument per use,
+    // a nested instantiation under the instance lock).
+    LAnyCons := False;
+    for var LGroup in LCons do
+      LAnyCons := LAnyCons or (Length(LGroup) > 0);
+    if not LAnyCons then
+      Exit;
+    LArgNode := LM.Tree.Nodes[AHead].NextSibling;
+    LIdx := 0;
+    while (LArgNode <> NIL_NODE) and (LIdx <= High(LIdents)) do
+    begin
+      if Length(LCons[LIdx]) > 0 then
+        LArgX := ResolveTypeExpr(AId, LArgNode)
+      else
+        LArgX := XNil;
+      // An argument that is itself an open parameter (an instantiation inside
+      // another generic's body) constrains nothing until it is closed.
+      if XValid(LArgX) and (FModels[LArgX.UnitId].Symbols[LArgX.Sym].Kind <>
+         skGenericParam) then
+      begin
+        // The declaring model may be text-demoted: its name node's DECLARED
+        // symbol carries the same spelling (Phase 1 declared it from that
+        // node's text), NodeText is only the fallback.
+        LParamSym := FModels[ABase.UnitId].RefMap[LIdents[LIdx]];
+        if LParamSym <> NIL_SYM then
+          LParamName := FModels[ABase.UnitId].Symbols[LParamSym].Name
+        else
+          LParamName := FModels[ABase.UnitId].Tree.NodeText(LIdents[LIdx]);
+        LCat := XCatOf(LArgX);
+        for var LC in LCons[LIdx] do
+        begin
+          // Every LC index belongs to the DECLARING model, never to LM.
+          if FModels[ABase.UnitId].Tree.Nodes[LC].FirstChild <> NIL_NODE then
+          begin
+            // A TYPE constraint: a class or an interface one (see header).
+            // The constraint node lives in the DECLARING model, so it must be
+            // resolved there - not in AId, where that node index means
+            // something else entirely.
+            LConX := ResolveTypeExpr(ABase.UnitId,
+              FModels[ABase.UnitId].Tree.Nodes[LC].FirstChild);
+            if XValid(LConX) and (XCatOf(LConX) = tcClass) and
+               (LCat = tcClass) and (XDescent(LArgX, LConX) = xdNo) then
+              // dcc names the real class, not an alias (16.4.1).
+              Flag(LArgNode, 'E2515', Format(SE2515_NotCompatibleWith,
+                [LParamName, XTypeText(CanonTypeX(LConX))]))
+            else if XValid(LConX) and (XCatOf(LConX) = tcInterface) and
+                    InterfaceConstraintFails(LArgX, LCat,
+                      CanonTypeX(LConX)) then
+              Flag(LArgNode, 'E2514', Format(SE2514_MustSupportInterface,
+                [LParamName, XTypeText(CanonTypeX(LConX))]));
+            Continue;
+          end;
+          // A keyword constraint: class / record / constructor - reserved
+          // words, so the token KIND is the test, recorded by Phase 1 (the
+          // declaring model may be text-demoted by now).
+          if not FModels[ABase.UnitId].KeywordConstraints.TryGetValue(LC,
+               LWord) then
+            Continue;
+          if LCat = tcUnknown then
+            Continue;   // category not modeled - say nothing
+          // NB: qualified kinds - System.TypInfo's TTypeKind also names
+          // tkClass/tkRecord and shadows ours in this unit.
+          case PasTree.Types.TPasTokenKind(LWord) of
+            PasTree.Types.tkClass:
+              if LCat <> tcClass then
+                Flag(LArgNode, 'E2511',
+                  Format(SE2511_MustBeClass, [LParamName]));
+            PasTree.Types.tkRecord:
+              if not (LCat in VALUE_CATS) then
+                Flag(LArgNode, 'E2512',
+                  Format(SE2512_MustBeValueType, [LParamName]));
+            // `constructor`: dcc refuses exactly a record or `object`, an
+            // interface (a dispinterface too) and an anonymous-method type,
+            // itself an interface; every other type passes, a simple type
+            // and Variant included (dcc64 37.0, 2026-11-13; spec 16.4.1).
+            PasTree.Types.tkConstructor:
+              if (LCat in [tcRecord, tcInterface]) or
+                 ((LCat = tcProc) and IsMethodRefTypeX(LArgX)) then
+                Flag(LArgNode, 'E2513',
+                  Format(SE2513_MustHaveParamlessCtor, [LParamName]));
+          end;
+        end;
+      end;
+      Inc(LIdx);
+      LArgNode := LM.Tree.Nodes[LArgNode].NextSibling;
+    end;
+  end;
+
+  { An explicitly instantiated generic ROUTINE is judged the way dcc picks
+    among its overloads (16.4.1): one whose constraints the arguments fail
+    is no candidate. When an overload of the name with as many type
+    parameters meets them, the call is overload resolution's (dcc: E2250
+    when that one does not take the arguments) and nothing is said here;
+    when none does, dcc reports the constraint - said when every overload
+    fails alike, whichever one the call bound (or none). A set an ancestor
+    adds to is not judged: its other half is not in this chain. }
+  procedure JudgeRoutine(AMid, ASym, AHead: Integer);
+  var
+    LDm: TPasSemaModel;
+    LFirst, LCand, LArity, LOwner, LAMid, LASym, LACtx: Integer;
+    LSig, LCandSig: string;
+    LFirstSig: Boolean;
+  begin
+    LDm := FModels[AMid];
+    if LDm.Symbols[ASym].Scope = NIL_SCOPE then
+      Exit;
+    LOwner := LDm.Scopes[LDm.Symbols[ASym].Scope].StructSym;
+    if (LOwner <> NIL_SYM) and FindMemberX(AId,
+         AncestorOfX(XPlain(AMid, LOwner)), LDm.Symbols[ASym].NameLower,
+         LAMid, LASym, LACtx) then
+      Exit;
+    LFirst := LDm.FindLocalNoHelpers(LDm.Symbols[ASym].Scope,
+      SemaKey(LDm.Symbols[ASym].NameLower));
+    if LFirst = NIL_SYM then
+      LFirst := ASym;
+    LArity := GenericParamCount(AMid, ASym);
+    LSig := '';
+    LFirstSig := True;
+    LCand := LFirst;
+    while LCand <> NIL_SYM do
+    begin
+      if (LDm.Symbols[LCand].Kind = skRoutine) and
+         (GenericParamCount(AMid, LCand) = LArity) then
+      begin
+        LCandSig := '';
+        Judge(XPlain(AMid, LCand), AHead, False, LCandSig);
+        if LCandSig = '' then
+          Exit;   // a candidate meets them: overload resolution's call
+        if LFirstSig then
+          LSig := LCandSig
+        else if LCandSig <> LSig then
+          Exit;   // they fail differently: which report is dcc's is unknown
+        LFirstSig := False;
+      end;
+      LCand := LDm.Symbols[LCand].NextOverload;
+    end;
+    if LSig <> '' then
+      Judge(XPlain(AMid, ASym), AHead, True, LSig);
+  end;
+
+var
+  LNode, LHead: Integer;
+  LBase: TSemaXType;
+  LSig: string;
 begin
   LM := FModels[AId];
   for LNode := 0 to High(LM.Tree.Nodes) do
@@ -11827,103 +12012,20 @@ begin
     // declaration, whose GenericParamIdents is nil - silently skipping every
     // E2511/E2512/E2515 check for that use.
     LBase := RealGenericBase(ResolveTypeExpr(AId, LHead, {ABare} False));
+    if XValid(LBase) then
+    begin
+      LSig := '';
+      Judge(LBase, LHead, True, LSig);
+      Continue;
+    end;
     // A generic METHOD instantiated explicitly - `F.Pick<TObject>(O)`,
     // `TCaster.Cast<Integer>(O)` - names a routine, which ResolveTypeExpr
-    // does not answer: its constraints are the bound overload's own, checked
-    // the same way (audit E2-34; dcc64 37.0 reports E2515 / E2511 there).
-    if not XValid(LBase) then
-    begin
-      var LRMid, LRSym: Integer;
-      if DesignatorSymX(AId, LHead, LRMid, LRSym) and
-         (FModels[LRMid].Symbols[LRSym].Kind = skRoutine) then
-        LBase := XPlain(LRMid, LRSym);
-    end;
-    if not XValid(LBase) then
-      Continue;
-    LIdents := GenericParamIdents(LBase.UnitId, LBase.Sym);
-    LCons := GenericParamConstraints(LBase.UnitId, LBase.Sym);
-    if (Length(LIdents) = 0) or (Length(LCons) <> Length(LIdents)) then
-      Continue;
-    // TList<T>, TDictionary<K, V>: nothing to check, so no argument is
-    // resolved for it (audit C1-22 - one resolution per argument per use,
-    // a nested instantiation under the instance lock).
-    var LAnyCons := False;
-    for var LGroup in LCons do
-      LAnyCons := LAnyCons or (Length(LGroup) > 0);
-    if not LAnyCons then
-      Continue;
-    LArgNode := LM.Tree.Nodes[LHead].NextSibling;
-    LIdx := 0;
-    while (LArgNode <> NIL_NODE) and (LIdx <= High(LIdents)) do
-    begin
-      if Length(LCons[LIdx]) > 0 then
-        LArgX := ResolveTypeExpr(AId, LArgNode)
-      else
-        LArgX := XNil;
-      // An argument that is itself an open parameter (an instantiation inside
-      // another generic's body) constrains nothing until it is closed.
-      if XValid(LArgX) and (FModels[LArgX.UnitId].Symbols[LArgX.Sym].Kind <>
-         skGenericParam) then
-      begin
-        // The declaring model may be text-demoted: its name node's DECLARED
-        // symbol carries the same spelling (Phase 1 declared it from that
-        // node's text), NodeText is only the fallback.
-        LParamSym := FModels[LBase.UnitId].RefMap[LIdents[LIdx]];
-        if LParamSym <> NIL_SYM then
-          LParamName := FModels[LBase.UnitId].Symbols[LParamSym].Name
-        else
-          LParamName := FModels[LBase.UnitId].Tree.NodeText(LIdents[LIdx]);
-        LCat := XCatOf(LArgX);
-        for var LC in LCons[LIdx] do
-        begin
-          // Every LC index belongs to the DECLARING model, never to LM.
-          if FModels[LBase.UnitId].Tree.Nodes[LC].FirstChild <> NIL_NODE then
-          begin
-            // A TYPE constraint. Only a class one is checked (see header).
-            // The constraint node lives in the DECLARING model, so it must be
-            // resolved there - not in AId, where that node index means
-            // something else entirely.
-            LConX := ResolveTypeExpr(LBase.UnitId,
-              FModels[LBase.UnitId].Tree.Nodes[LC].FirstChild);
-            if XValid(LConX) and (XCatOf(LConX) = tcClass) and
-               (LCat = tcClass) and (XDescent(LArgX, LConX) = xdNo) then
-              // dcc names the real class, not an alias (16.4.1).
-              EmitAt(LM, LArgNode, 'E2515',
-                Format(SE2515_NotCompatibleWith,
-                  [LParamName, XTypeText(CanonTypeX(LConX))]))
-            else if XValid(LConX) and (XCatOf(LConX) = tcInterface) and
-                    InterfaceConstraintFails(LArgX, LCat,
-                      CanonTypeX(LConX)) then
-              EmitAt(LM, LArgNode, 'E2514',
-                Format(SE2514_MustSupportInterface,
-                  [LParamName, XTypeText(CanonTypeX(LConX))]));
-            Continue;
-          end;
-          // A keyword constraint: class / record / constructor - reserved
-          // words, so the token KIND is the test, recorded by Phase 1 (the
-          // declaring model may be text-demoted by now).
-          if not FModels[LBase.UnitId].KeywordConstraints.TryGetValue(LC,
-               LWord) then
-            Continue;
-          if LCat = tcUnknown then
-            Continue;   // category not modeled - say nothing
-          // NB: qualified kinds - System.TypInfo's TTypeKind also names
-          // tkClass/tkRecord and shadows ours in this unit.
-          case PasTree.Types.TPasTokenKind(LWord) of
-            PasTree.Types.tkClass:
-              if LCat <> tcClass then
-                EmitAt(LM, LArgNode, 'E2511',
-                  Format(SE2511_MustBeClass, [LParamName]));
-            PasTree.Types.tkRecord:
-              if not (LCat in VALUE_CATS) then
-                EmitAt(LM, LArgNode, 'E2512',
-                  Format(SE2512_MustBeValueType, [LParamName]));
-          end;
-        end;
-      end;
-      Inc(LIdx);
-      LArgNode := LM.Tree.Nodes[LArgNode].NextSibling;
-    end;
+    // does not answer: its constraints are its overloads' (JudgeRoutine;
+    // audit E2-34; dcc64 37.0 reports E2515 / E2511 there).
+    var LRMid, LRSym: Integer;
+    if DesignatorSymX(AId, LHead, LRMid, LRSym) and
+       (FModels[LRMid].Symbols[LRSym].Kind = skRoutine) then
+      JudgeRoutine(LRMid, LRSym, LHead);
   end;
 end;
 
@@ -14043,16 +14145,18 @@ end;
 function TPasSemaProject.FindMemberX(AFromMid: Integer;
   const ABase: TSemaXType;
   const ANameLower: string; out AMemMid, AMemSym: Integer;
-  out ACtx: Integer; ADepth: Integer; ANoHelpers: Boolean): Boolean;
+  out ACtx: Integer; ADepth: Integer; ANoHelpers: Boolean;
+  AValueBase: Boolean): Boolean;
 begin
   Result := FindMemberX(AFromMid, ABase, SemaKey(ANameLower), AMemMid,
-    AMemSym, ACtx, ADepth, ANoHelpers);
+    AMemSym, ACtx, ADepth, ANoHelpers, AValueBase);
 end;
 
 function TPasSemaProject.FindMemberX(AFromMid: Integer;
   const ABase: TSemaXType;
   const AKey: TSemaKey; out AMemMid, AMemSym: Integer;
-  out ACtx: Integer; ADepth: Integer; ANoHelpers: Boolean): Boolean;
+  out ACtx: Integer; ADepth: Integer; ANoHelpers: Boolean;
+  AValueBase: Boolean): Boolean;
 var
   LCur, LNext: TSemaXType;
   LM: TPasSemaModel;
@@ -14104,11 +14208,12 @@ begin
         if XValid(LNext) and
            not ((LNext.UnitId = LCur.UnitId) and (LNext.Sym = LCur.Sym)) and
            FindMemberX(AFromMid, LNext, AKey, AMemMid, AMemSym, ACtx,
-             ADepth + 1, ANoHelpers) then
+             ADepth + 1, ANoHelpers, AValueBase) then
           Exit(True);
       // A lone `constructor` unlocks `T.Create` and nothing else (16.4.1):
-      // TObject's Create, no other member of it.
-      if SemaKeyEquals('create', AKey) then
+      // TObject's Create, no other member of it - and only on the TYPE: a
+      // value `V: T` has no Create (dcc: E2003).
+      if not AValueBase and SemaKeyEquals('create', AKey) then
         for LNext in ConstraintsOfParamX(LCur, {ACtorOnly} True) do
           if FindMemberX(AFromMid, LNext, AKey, AMemMid, AMemSym, ACtx,
                ADepth + 1, ANoHelpers) then
@@ -14313,7 +14418,7 @@ end;
   appear in the enumeration). }
 procedure TPasSemaProject.EnumMembersX(AFromMid: Integer;
   const ABase: TSemaXType; const AOnMember: TPasMemberEnumProc;
-  ADepth: Integer);
+  ADepth: Integer; AValueBase: Boolean);
 var
   LCur, LNext: TSemaXType;
   LM: TPasSemaModel;
@@ -14338,8 +14443,10 @@ begin
       for LNext in ConstraintsOfParamX(LCur) do
         if XValid(LNext) and
            not ((LNext.UnitId = LCur.UnitId) and (LNext.Sym = LCur.Sym)) then
-          EnumMembersX(AFromMid, LNext, AOnMember, ADepth + 1);
-      // A lone `constructor`: TObject's Create only, as FindMemberX.
+          EnumMembersX(AFromMid, LNext, AOnMember, ADepth + 1, AValueBase);
+      // A lone `constructor`: TObject's Create only, on the type only, as
+      // FindMemberX.
+      if not AValueBase then
       for LNext in ConstraintsOfParamX(LCur, {ACtorOnly} True) do
         EnumMembersX(AFromMid, LNext,
           procedure(AMid, ASym, ACtx: Integer)
@@ -17163,18 +17270,28 @@ var
       Result := LE.UnitId;
   end;
 
+  function TargetSym(N: Integer; out AMid, ASym: Integer): Boolean; forward;
+
   // FindMemberX for the member ANameN of base ABase typed ABX, the base's
   // carrier set for the helper lookup.
   function CarriedMember(ABase: Integer; const ABX: TSemaXType;
     ANameN: Integer; out AMemMid, AMemSym, ACtx: Integer): Boolean;
   var
-    LSaved: Integer;
+    LSaved, LVMid, LVSym: Integer;
+    LValue: Boolean;
   begin
+    // A base of a type parameter's type that is a value, not the parameter
+    // itself: a lone `constructor` constraint gives it no Create (16.4.1).
+    LValue := XValid(ABX) and
+      (FModels[ABX.UnitId].Symbols[ABX.Sym].Kind = skGenericParam) and
+      TargetSym(ABase, LVMid, LVSym) and
+      (FModels[LVMid].Symbols[LVSym].Kind in [skVar, skField, skParam,
+        skProperty, skConst]);
     LSaved := GHelperCarrier;
     GHelperCarrier := CarrierOf(ABase) + 1;
     try
       Result := FindMemberX(AId, ABX, PasNodeKey(LM.Tree, ANameN), AMemMid,
-        AMemSym, ACtx);
+        AMemSym, ACtx, 0, False, LValue);
     finally
       GHelperCarrier := LSaved;
     end;
