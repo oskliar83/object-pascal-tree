@@ -333,7 +333,8 @@ function BuildPreprocessorCases(APP: TPasPreprocessor): TPasCustomCases;
           'unbalanced-endif', 'unterminated-conditional',
           'include-not-found', 'include-cycle', 'include-too-deep',
           'if-unreadable', 'if-guessed', 'unsupported-insertion',
-          'popopt-without-pushopt', 'cross-include-conditional');
+          'popopt-without-pushopt', 'cross-include-conditional',
+          'wrong-conditional-end');
       var
         LDir: string;
         LSM: TPasSourceManager;

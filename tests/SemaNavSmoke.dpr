@@ -4886,13 +4886,13 @@ begin
       var LMidOpt := GNav.ModelIdOf(TPath.Combine(LDir, 'NavOpt.pas'));
       var LOpts := GNav.OptionsAt(LMidOpt, 1, 1);
       Ok('OptionsAt line 1: one row per option, dcc''s defaults',
-        (Length(LOpts) = 25) and
+        (Length(LOpts) = 26) and
         HasOpt(LOpts, 'RANGECHECKS', 'OFF', ooDefault) and
         HasOpt(LOpts, 'ALIGN', '8', ooDefault) and
         HasOpt(LOpts, 'LONGSTRINGS', 'ON', ooDefault) and
         HasOpt(LOpts, 'RTTI', 'INHERIT', ooDefault) and
         (LOpts[0].Name = 'ALIGN') and (LOpts[0].Letter = 'A') and
-        (LOpts[High(LOpts)].Name = 'VARPROPSETTER') and
+        (LOpts[High(LOpts)].Name = 'LEGACYIFEND') and
         (LOpts[High(LOpts)].Letter = #0));
       LOpts := GNav.OptionsAt(LMidOpt, 5, 1);
       Ok('OptionsAt line 5: $R+ of the unit, the include''s switches',
@@ -4925,7 +4925,7 @@ begin
       GProj.SwitchStart := PasStartOptState(['-$R+', '-$A4']);
       LOpts := GNav.OptionsAt(-1, 0, 0);
       Ok('OptionsAt: no model (-1) -> the project''s start, said so',
-        (Length(LOpts) = 25) and
+        (Length(LOpts) = 26) and
         HasOpt(LOpts, 'RANGECHECKS', 'ON', ooProject) and
         HasOpt(LOpts, 'ALIGN', '4', ooProject) and
         HasOpt(LOpts, 'OVERFLOWCHECKS', 'OFF', ooDefault));
