@@ -9798,6 +9798,55 @@ begin
   end;
 end;
 
+{ Spec 19.3.2 (dcc64 37.0, 2026-11-13): on a parameter of a method's
+  implementation header the suffixed name comes first as everywhere -
+  `procedure TD.M([Foo(1)] A: Integer)` is a used unit's FooAttribute, not
+  the inherited method Foo (dcc: E2010 against its Create(const S: string)).
+  Outside a body - the header, the class's declaration - no ancestor's
+  member is seen at all (`[Bar]` naming an inherited nested BarAttribute is
+  W1074, in the class too); in the body it is (`var [Bar] L`). }
+procedure TestAttributeImplHeaderParam;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_attrihp');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10'  TObject = class end;'#10 +
+    '  TCustomAttribute = class(TObject) end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UB.pas'),
+    'unit UB;'#10'interface'#10'type'#10 +
+    '  TBase = class'#10'    procedure Foo;'#10 +
+    '    type BarAttribute = class(TCustomAttribute) end;'#10'  end;'#10 +
+    '  FooAttribute = class(TCustomAttribute) end;'#10 +
+    'implementation'#10'procedure TBase.Foo; begin end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'IH.dpr'),
+    'program IH;'#10'uses UB;'#10'type'#10 +
+    '  TD = class(TBase)'#10 +
+    '    procedure M(A, B: Integer);'#10'    [Bar] procedure N;'#10'  end;'#10 +
+    'procedure TD.M([Foo] A: Integer; [Bar] B: Integer);'#10 +
+    'var [Bar] L: Integer;'#10'begin'#10'  L := 0;'#10'end;'#10 +
+    'procedure TD.N; begin end;'#10'begin'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'IH.dpr'));
+    LM := ModelByName('ih');
+    Ok('attrihp: [Foo] on an implementation header''s parameter is the used ' +
+      'unit''s FooAttribute, not the inherited method',
+      CrossRefCountInUnit(LM, 'Foo', 'FooAttribute', 'ub') = 1);
+    Ok('attrihp: [Bar] sees no ancestor''s nested BarAttribute: W1074',
+      (DiagSites(LM, 'W1074') = '6:6 8:35'));
+    Ok('attrihp: ...and the body''s [Bar] is it',
+      CrossRefCountInUnit(LM, 'Bar', 'BarAttribute', 'ub') = 1);
+    Ok('attrihp: nothing else', Length(LM.Diags) = 2);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 { Spec 19.3.2 (dcc64 37.0, 2026-11-13): an attribute dcc drops is W1074 -
   naming what its name found when that is a declared non-type (`[C]`,
   `[F(1)]`, `[C.X]`, `[C(Undeclared)]`, `[System.MaxInt]`, and
@@ -20397,6 +20446,7 @@ begin
   TestTypedAddress;
   TestAttributeSuffixFirst;
   TestAttributeW1074;
+  TestAttributeImplHeaderParam;
   TestAttributeGuidAndPositions;
   TestHelperVisibility;
   TestBuiltinIdentity;

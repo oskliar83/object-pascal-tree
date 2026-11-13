@@ -611,11 +611,7 @@ of less work, not a gap in following the language; its consequences are in
   where the list ends without one (one E2289 per compile), and PasTree
   reports no E2289 at all. An expression before the colon (`[1: Tag]`, W1074
   for dcc) is a parse error.
-- `[X]` binds `XAttribute` first, in the unit, the used units and System,
-  as dcc does - except on a parameter of a method's implementation header,
-  where a name the unit does not declare goes to the inherited pass, which
-  looks the bare name up first. An attribute's arguments are not checked
-  against its constructors (dcc's E2010 for `[Bar(1, 2)]` against
+- an attribute's arguments are not checked against its constructors (dcc's E2010 for `[Bar(1, 2)]` against
   `Create(const S: string)`).
 
 ## B-lexical-grammar.md
