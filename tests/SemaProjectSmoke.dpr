@@ -4132,6 +4132,125 @@ begin
   end;
 end;
 
+{ The two position rules of a `with` target and the write rule behind one
+  of them (spec 5.7, 5.1.1). A target of no struct type is E2018 and opens
+  nothing - a pointer written without `^` among them, so its pointee's
+  members do not bind; a write into a part of a value that is no variable
+  is E2064 - through a parenthesised target, a call's result, a property's
+  value, and the same shapes written with a qualifier. dcc64 37.0 reports
+  exactly the Invalid lines below (the same text as one program); the
+  Valid ones compile. The types come from another unit, so the project's
+  with pass opens the targets, and one record is the program's own. }
+procedure TestWithTargetPositions;
+const
+  UA =
+    'unit WTA;'#13#10 +
+    'interface'#13#10 +
+    'type'#13#10 +
+    '  TSub = record Y: Integer; end;'#13#10 +
+    '  TRec = record'#13#10 +
+    '    X: Integer; Sub: TSub; DA: TArray<Integer>;'#13#10 +
+    '    class var CV: Integer;'#13#10 +
+    '    procedure SetZ(V: Integer);'#13#10 +
+    '    function Me: TRec;'#13#10 +
+    '    property Z: Integer write SetZ;'#13#10 +
+    '    property PX: Integer read X write X;'#13#10 +
+    '  end;'#13#10 +
+    '  PRec = ^TRec;'#13#10 +
+    '  TObj = class'#13#10 +
+    '    F: Integer; R: TRec;'#13#10 +
+    '    property PR: TRec read R write R;'#13#10 +
+    '  end;'#13#10 +
+    'function GetR: TRec;'#13#10 +
+    'implementation'#13#10 +
+    'procedure TRec.SetZ(V: Integer); begin end;'#13#10 +
+    'function TRec.Me: TRec; begin Result := Self; end;'#13#10 +
+    'function GetR: TRec; begin Result := Default(TRec); end;'#13#10 +
+    'end.'#13#10;
+  PB =
+    'program WTP;'#13#10 +                                // 1
+    'uses WTA;'#13#10 +                                   // 2
+    'type'#13#10 +                                        // 3
+    '  TLoc = record L: Integer; end;'#13#10 +            // 4
+    '  TArr = array of TRec;'#13#10 +                     // 5
+    'var'#13#10 +                                         // 6
+    '  R: TRec; P: PRec; O: TObj; I: Integer; S: string;'#13#10 + // 7
+    '  A: TArr; Loc: TLoc; SA: array[0..1] of TRec;'#13#10 +      // 8
+    'procedure Valid;'#13#10 +                            // 9
+    'begin'#13#10 +                                       // 10
+    '  with R do X := 1;'#13#10 +                         // 11
+    '  with (R) do I := X;'#13#10 +                       // 12
+    '  with (R) do Z := 1;'#13#10 +                       // 13
+    '  with (R) do DA[0] := 1;'#13#10 +                   // 14
+    '  with (O) do F := 1;'#13#10 +                       // 15
+    '  with (O).R do X := 1;'#13#10 +                     // 16
+    '  with P^ do X := 1;'#13#10 +                        // 17
+    '  with GetR do CV := 1;'#13#10 +                     // 18
+    '  (O).R.X := 1;'#13#10 +                             // 19
+    '  TRec(R).X := 1;'#13#10 +                           // 20
+    '  with SA[0] do X := 1;'#13#10 +                     // 21
+    '  with Loc do L := 1;'#13#10 +                       // 22
+    'end;'#13#10 +                                        // 23
+    'procedure Invalid;'#13#10 +                          // 24
+    'begin'#13#10 +                                       // 25
+    '  with (R) do X := 1;'#13#10 +                       // 26 E2064
+    '  with (R) do PX := 1;'#13#10 +                      // 27 E2064
+    '  with GetR do X := 1;'#13#10 +                      // 28 E2064
+    '  with O.PR do X := 1;'#13#10 +                      // 29 E2064
+    '  with (R), Sub do Y := 1;'#13#10 +                  // 30 E2064
+    '  with (Loc) do L := 1;'#13#10 +                     // 31 E2064
+    '  GetR.X := 1;'#13#10 +                              // 32 E2064
+    '  (R).Sub.Y := 1;'#13#10 +                           // 33 E2064
+    '  O.PR.X := 1;'#13#10 +                              // 34 E2064
+    '  R.Me.X := 1;'#13#10 +                              // 35 E2064
+    '  (SA)[0].X := 1;'#13#10 +                           // 36 E2064
+    '  with P do I := 0;'#13#10 +                         // 37 E2018
+    '  with I do ;'#13#10 +                               // 38 E2018
+    '  with S do ;'#13#10 +                               // 39 E2018
+    '  with A do ;'#13#10 +                               // 40 E2018
+    '  with P do X := 0;'#13#10 +                         // 41 E2018 E2003
+    'end;'#13#10 +                                        // 42
+    'begin'#13#10 +                                       // 43
+    'end.'#13#10;                                         // 44
+var
+  LDir: string;
+  LProj: TPasSemaProject;
+  LM: TPasSemaModel;
+  LMid: Integer;
+  LSeen: TStringList;
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_with_target_pos');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'WTA.pas'), UA);
+  TFile.WriteAllText(TPath.Combine(LDir, 'WTP.dpr'), PB);
+  LProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  LSeen := TStringList.Create;
+  try
+    Ok('with-target-pos: WTP analyzed',
+      LProj.AnalyzeProject(TPath.Combine(LDir, 'WTP.dpr')) >= 0);
+    LMid := LProj.ModelIdOf(TPath.Combine(LDir, 'WTP.dpr'));
+    Ok('with-target-pos: WTP loaded', LMid >= 0);
+    if LMid < 0 then
+      Exit;
+    LM := LProj.Model(LMid);
+    for var LD in LM.Diags do
+      LSeen.Add(Format('%d:%s', [LD.Line, LD.Code]));
+    LSeen.Sort;
+    Ok('with-target-pos: dcc''s diagnostics, the Valid lines silent [' +
+      LSeen.CommaText + ']', LSeen.CommaText =
+      '26:E2064,27:E2064,28:E2064,29:E2064,30:E2064,31:E2064,32:E2064,' +
+      '33:E2064,34:E2064,35:E2064,36:E2064,37:E2018,38:E2018,39:E2018,' +
+      '40:E2018,41:E2003,41:E2018');
+  finally
+    LSeen.Free;
+    LProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 { In a method of a NESTED type the outer type's members - its own and its
   ancestors' - come after the unit's own declarations made so far, and
   before the used units and System (F52 of the parser-fidelity plan; spec
@@ -20992,6 +21111,7 @@ begin
   TestInheritedVisibility;
   TestInheritedBeatsUnitLevel;
   TestWithBodySelfMember;
+  TestWithTargetPositions;
   TestNestedOuterAfterUnit;
   TestDeclAfterUnit;
   TestDeclOrder;
