@@ -67,6 +67,13 @@ const
   SE2018_RecordObjectClassRequired =
     'E2018 Record, object or class type required';
   SE2064_LeftSideCannotBeAssigned = 'E2064 Left side cannot be assigned to';
+  // An instance member through a class-reference value (15.2.1): a field and
+  // a property by name, a method by nothing.
+  SE2124_InstanceMemberInaccessible =
+    'E2124 Instance member ''%s'' inaccessible here';
+  SE2233_PropertyInaccessible = 'E2233 Property ''%s'' inaccessible here';
+  SE2076_ClassMethodFormOnly = 'E2076 This form of method call only ' +
+    'allowed for class methods or constructor';
   // An index list run past what indexes (13.1.4). Names nothing.
   SE2016_ArrayTypeRequired = 'E2016 Array type required';
   // 11 sec. 11.2.1. The single %s is the QUALIFIED member name, `TType.Member`,

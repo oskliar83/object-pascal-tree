@@ -942,6 +942,13 @@ type
       marks the run - a plain field written after `class var` stays one).
       Read off the tree, so a demoted model answers too. }
     function IsClassVar(ASym: Integer): Boolean;
+    { Can the member ASym be named on the TYPE itself, or on a class
+      reference (TFoo.X, C.X with C: class of TFoo - 15.2.1)? Constructors,
+      class methods (nkRoutine.Aux = 1), class properties (nkPropertyDecl.Aux
+      = 1), class vars (IsClassVar), nested types, consts,
+      enum values. Node kinds and the routine head only: a demoted model
+      answers. }
+    function ClassSideMember(ASym: Integer): Boolean;
     { ASym, a routine, carries `overload` on its declaration or on the header
       its parameters live under (an implementation may leave it off). Read
       from sfOverloadDirective, so a demoted model answers too. }
@@ -3284,6 +3291,41 @@ begin
     LNode := Tree.Nodes[LNode].Parent;
   Result := (LNode <> NIL_NODE) and (Tree.Nodes[LNode].Kind = nkVarSec) and
     (Tree.Nodes[LNode].Aux = 1);
+end;
+
+function TPasSemaModel.ClassSideMember(ASym: Integer): Boolean;
+var
+  LNode: Integer;
+begin
+  case Symbols[ASym].Kind of
+    skType, skConst, skEnumValue:
+      Result := True;
+    skVar, skField:
+      Result := IsClassVar(ASym);
+    skRoutine:
+      begin
+        // RoutineHead, not a raw token read: a foreign model may be
+        // text-demoted - the head word is what DemoteText snapshots.
+        LNode := Symbols[ASym].DeclNode;
+        while (LNode <> NIL_NODE) and (Tree.Nodes[LNode].Kind <> nkRoutine) do
+          LNode := Tree.Nodes[LNode].Parent;
+        Result := (LNode <> NIL_NODE) and
+          ((Tree.Nodes[LNode].Aux = 1) and
+             (RoutineHead(ASym) <> rhDestructor) or
+           (RoutineHead(ASym) = rhConstructor));
+      end;
+    skProperty:
+      begin
+        LNode := Symbols[ASym].DeclNode;
+        if LNode <> NIL_NODE then
+          LNode := Tree.Nodes[LNode].Parent;
+        Result := (LNode <> NIL_NODE) and
+          (Tree.Nodes[LNode].Kind = nkPropertyDecl) and
+          (Tree.Nodes[LNode].Aux = 1);
+      end;
+  else
+    Result := False;
+  end;
 end;
 
 function TPasSemaModel.RoutineHead(ASym: Integer): TPasRoutineHead;

@@ -21293,6 +21293,104 @@ var
       EmitAt(LM, ADst, 'E2064', SE2064_LeftSideCannotBeAssigned);
   end;
 
+  { 15.2.1: an instance member reached through a class-reference VALUE
+    (`C: class of TBase`) is bound - dcc finds it - and refused: a field
+    `E2124 Instance member 'F' inaccessible here`, a property `E2233
+    Property 'P' inaccessible here`, a method `E2076 This form of method
+    call only allowed for class methods or constructor` (`C.Free` too).
+    Through `C.X` and through a with target C alike. A type NAME is not
+    judged (`TAncestor.Method` in a descendant's method is a legal call),
+    nor a member with a class-side overload. dcc64 37.0, 2026-11-13. }
+  procedure CheckClassRefMember(ANameNode, ABase: Integer);
+  var
+    LMid, LSym, LAlt: Integer;
+    LDm: TPasSemaModel;
+    LBx: TSemaXType;
+  begin
+    if IsTypeDesignator(ABase) then
+      Exit;
+    LBx := CanonTypeX(GetX(ABase));
+    if not XValid(LBx) or (XCatOf(LBx) <> tcClassOf) then
+      Exit;
+    if not TargetSym(ANameNode, LMid, LSym) then
+      Exit;
+    LDm := FModels[LMid];
+    if LDm.ClassSideMember(LSym) then
+      Exit;
+    if LDm.Symbols[LSym].Kind = skRoutine then
+    begin
+      LAlt := NIL_SYM;
+      if LDm.Symbols[LSym].Scope <> NIL_SCOPE then
+        LAlt := LDm.FindLocalNoHelpers(LDm.Symbols[LSym].Scope,
+          SemaKey(LDm.Symbols[LSym].NameLower));
+      while LAlt <> NIL_SYM do
+      begin
+        if LDm.ClassSideMember(LAlt) then
+          Exit;   // the call may well be the class-side overload's
+        LAlt := LDm.Symbols[LAlt].NextOverload;
+      end;
+    end;
+    if LM.HasDiagAt(ANameNode) then
+      Exit;
+    case LDm.Symbols[LSym].Kind of
+      skVar, skField:
+        EmitAt(LM, ANameNode, 'E2124', Format(SE2124_InstanceMemberInaccessible,
+          [LDm.Symbols[LSym].Name]));
+      skProperty:
+        EmitAt(LM, ANameNode, 'E2233', Format(SE2233_PropertyInaccessible,
+          [LDm.Symbols[LSym].Name]));
+      skRoutine:
+        EmitAt(LM, ANameNode, 'E2076', SE2076_ClassMethodFormOnly);
+    end;
+  end;
+
+  // CheckClassRefMember over a with statement's body names, when one of
+  // its targets is a class-reference value: each name bound to a member
+  // of that target (WithTargetOf).
+  procedure CheckClassRefWith(AWith: Integer);
+  var
+    LBody, LTarget, LMid, LSym, LEnd, LN: Integer;
+    LAny: Boolean;
+    LTx: TSemaXType;
+  begin
+    LAny := False;
+    LBody := LM.Tree.WithBody(AWith);
+    LTarget := LM.Tree.Nodes[AWith].FirstChild;
+    while (LTarget <> NIL_NODE) and (LTarget <> LBody) do
+    begin
+      LTx := CanonTypeX(GetX(LTarget));
+      if XValid(LTx) and (XCatOf(LTx) = tcClassOf) and
+         not IsTypeDesignator(LTarget) then
+        LAny := True;
+      LTarget := LM.Tree.Nodes[LTarget].NextSibling;
+    end;
+    if not LAny or (LBody = NIL_NODE) then
+      Exit;
+    // The body's subtree, by an explicit stack.
+    var LStack: TArray<Integer> := [LBody];
+    while Length(LStack) > 0 do
+    begin
+      LN := LStack[High(LStack)];
+      SetLength(LStack, Length(LStack) - 1);
+      LEnd := LM.Tree.Nodes[LN].FirstChild;
+      while LEnd <> NIL_NODE do
+      begin
+        LStack := LStack + [LEnd];
+        LEnd := LM.Tree.Nodes[LEnd].NextSibling;
+      end;
+      if (LM.Tree.Nodes[LN].Kind <> nkIdent) or
+         ((LM.Tree.Nodes[LN].Parent <> NIL_NODE) and
+          (LM.Tree.Nodes[LM.Tree.Nodes[LN].Parent].Kind = nkMember) and
+          (LM.Tree.Nodes[LM.Tree.Nodes[LN].Parent].FirstChild <> LN)) then
+        Continue;
+      if not TargetSym(LN, LMid, LSym) then
+        Continue;
+      LTarget := WithTargetOf(LN, LMid, LSym);
+      if LTarget <> NIL_NODE then
+        CheckClassRefMember(LN, LTarget);
+    end;
+  end;
+
   // E2018 at a with target of no struct type (5.7, WithOpensX). Judged on a
   // target this walk typed reliably, outside a with whose own target it
   // could not type.
@@ -21556,7 +21654,21 @@ var
             CheckWriteTarget(N, LDst);
           end;
         nkWithStmt:
-          CheckWithTargets(N);
+          begin
+            CheckWithTargets(N);
+            CheckClassRefWith(N);
+          end;
+        nkMember:
+          begin
+            LDst := LM.Tree.Nodes[N].FirstChild;
+            if LDst <> NIL_NODE then
+            begin
+              LSrc := LM.Tree.Nodes[LDst].NextSibling;
+              if (LSrc <> NIL_NODE) and (LM.Tree.Nodes[LSrc].Kind = nkIdent)
+              then
+                CheckClassRefMember(LSrc, LDst);
+            end;
+          end;
         nkVarDecl:
           if LM.Tree.Nodes[N].Aux <> 1 then   // not `absolute`
             CheckDecl(N);

@@ -4726,6 +4726,162 @@ begin
   end;
 end;
 
+{ 15.2.1: members through a class-reference value. Class-side members - a
+  class var, method or property, a constructor, a constant, TObject's
+  ClassName - are reached and typed (`C.Create.M` is a TBase's M); an
+  instance member is bound and refused: E2124 for a field, E2233 for a
+  property, E2076 for a method (`C.Free` too), through `C.X` and a with
+  target alike. dcc64 37.0 reports exactly these lines over CB (the types
+  in another unit) and CS (all in one unit). }
+procedure TestClassRefMembers;
+const
+  CAS =
+    'unit CA;'#13#10 +                                      // 1
+    'interface'#13#10 +                                     // 2
+    'type'#13#10 +                                          // 3
+    '  TBase = class'#13#10 +                               // 4
+    '    F: Integer;'#13#10 +                               // 5
+    '    class var CV: Integer;'#13#10 +                    // 6
+    '    procedure M;'#13#10 +                              // 7
+    '    class procedure CM;'#13#10 +                       // 8
+    '    property P: Integer read F;'#13#10 +               // 9
+    '    class property CP: Integer read CV;'#13#10 +       // 10
+    '    constructor Create;'#13#10 +                       // 11
+    '    const K = 1;'#13#10 +                              // 12
+    '  end;'#13#10 +                                        // 13
+    '  TBaseClass = class of TBase;'#13#10 +                // 14
+    'implementation'#13#10 +                                // 15
+    'procedure TBase.M; begin end;'#13#10 +                 // 16
+    'class procedure TBase.CM; begin end;'#13#10 +          // 17
+    'constructor TBase.Create; begin end;'#13#10 +          // 18
+    'end.'#13#10;                                           // 19
+  CBS =
+    'unit CB;'#13#10 +                                      // 1
+    'interface'#13#10 +                                     // 2
+    'uses CA;'#13#10 +                                      // 3
+    'procedure Use(C: TBaseClass);'#13#10 +                 // 4
+    'implementation'#13#10 +                                // 5
+    'procedure Use(C: TBaseClass);'#13#10 +                 // 6
+    'var I: Integer; S: string;'#13#10 +                    // 7
+    'begin'#13#10 +                                         // 8
+    '  I := C.F;'#13#10 +                                   // 9
+    '  C.M;'#13#10 +                                        // 10
+    '  I := C.P;'#13#10 +                                   // 11
+    '  I := C.CV;'#13#10 +                                  // 12
+    '  C.CM;'#13#10 +                                       // 13
+    '  I := C.CP;'#13#10 +                                  // 14
+    '  C.Create.M;'#13#10 +                                 // 15
+    '  I := C.K;'#13#10 +                                   // 16
+    '  S := C.ClassName;'#13#10 +                           // 17
+    '  C.Free;'#13#10 +                                     // 18
+    '  with C do M;'#13#10 +                                // 19
+    '  with C do I := F;'#13#10 +                           // 20
+    '  with C do CM;'#13#10 +                               // 21
+    'end;'#13#10 +                                          // 22
+    'end.'#13#10;                                           // 23
+  CSS =
+    'unit CS;'#13#10 +                                      // 1
+    'interface'#13#10 +                                     // 2
+    'type'#13#10 +                                          // 3
+    '  TBase = class'#13#10 +                               // 4
+    '    F: Integer;'#13#10 +                               // 5
+    '    class var CV: Integer;'#13#10 +                    // 6
+    '    procedure M;'#13#10 +                              // 7
+    '    class procedure CM;'#13#10 +                       // 8
+    '    property P: Integer read F;'#13#10 +               // 9
+    '    class property CP: Integer read CV;'#13#10 +       // 10
+    '    constructor Create;'#13#10 +                       // 11
+    '    const K = 1;'#13#10 +                              // 12
+    '  end;'#13#10 +                                        // 13
+    '  TBaseClass = class of TBase;'#13#10 +                // 14
+    'procedure Use(C: TBaseClass);'#13#10 +                 // 15
+    'implementation'#13#10 +                                // 16
+    'procedure TBase.M; begin end;'#13#10 +                 // 17
+    'class procedure TBase.CM; begin end;'#13#10 +          // 18
+    'constructor TBase.Create; begin end;'#13#10 +          // 19
+    'procedure Use(C: TBaseClass);'#13#10 +                 // 20
+    'var I: Integer; S: string;'#13#10 +                    // 21
+    'begin'#13#10 +                                         // 22
+    '  I := C.F;'#13#10 +                                   // 23
+    '  C.M;'#13#10 +                                        // 24
+    '  I := C.P;'#13#10 +                                   // 25
+    '  I := C.CV;'#13#10 +                                  // 26
+    '  C.CM;'#13#10 +                                       // 27
+    '  I := C.CP;'#13#10 +                                  // 28
+    '  C.Create.M;'#13#10 +                                 // 29
+    '  I := C.K;'#13#10 +                                   // 30
+    '  S := C.ClassName;'#13#10 +                           // 31
+    '  C.Free;'#13#10 +                                     // 32
+    '  with C do M;'#13#10 +                                // 33
+    '  with C do I := F;'#13#10 +                           // 34
+    '  with C do CM;'#13#10 +                               // 35
+    'end;'#13#10 +                                          // 36
+    'end.'#13#10;                                           // 37
+var
+  LDir: string;
+
+  function Sig(AModel: TPasSemaModel): string;
+  var
+    LSeen: TStringList;
+  begin
+    LSeen := TStringList.Create;
+    try
+      for var LD in AModel.Diags do
+        LSeen.Add(Format('%d:%s', [LD.Line, LD.Code]));
+      LSeen.Sort;
+      Result := LSeen.CommaText;
+    finally
+      LSeen.Free;
+    end;
+  end;
+
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_classref_members');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'CA.pas'), CAS);
+  TFile.WriteAllText(TPath.Combine(LDir, 'CB.pas'), CBS);
+  TFile.WriteAllText(TPath.Combine(LDir, 'CS.pas'), CSS);
+  // TObject's ClassName (a class function) and Free (an instance method).
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#13#10'interface'#13#10'type'#13#10 +
+    '  TObject = class'#13#10 +
+    '    class function ClassName: string;'#13#10 +
+    '    procedure Free;'#13#10 +
+    '  end;'#13#10 +
+    '  Integer = -2147483648..2147483647;'#13#10 +
+    'implementation'#13#10 +
+    'class function TObject.ClassName: string; begin end;'#13#10 +
+    'procedure TObject.Free; begin end;'#13#10 +
+    'end.'#13#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeDirectory(LDir);
+    var LB := ModelByName('cb');
+    var LS := ModelByName('cs');
+    Ok('classref: CB and CS loaded', Assigned(LB) and Assigned(LS));
+    if not (Assigned(LB) and Assigned(LS)) then
+      Exit;
+    Ok('classref: across units, dcc''s six [' + Sig(LB) + ']',
+      Sig(LB) = '10:E2076,11:E2233,18:E2076,19:E2076,20:E2124,9:E2124');
+    Ok('classref: in one unit, the same six [' + Sig(LS) + ']',
+      Sig(LS) = '23:E2124,24:E2076,25:E2233,32:E2076,33:E2076,34:E2124');
+    Ok('classref: ...worded as dcc words them',
+      DiagHasText(LB, 'E2124', 'Instance member ''F'' inaccessible here') and
+      DiagHasText(LB, 'E2233', 'Property ''P'' inaccessible here') and
+      DiagHasText(LB, 'E2076',
+        'This form of method call only allowed for class methods or ' +
+        'constructor'));
+  finally
+    GProj.Free;
+    GProj := nil;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 { In a method of a NESTED type the outer type's members - its own and its
   ancestors' - come after the unit's own declarations made so far, and
   before the used units and System (F52 of the parser-fidelity plan; spec
@@ -21592,6 +21748,7 @@ begin
   TestCtorConstraintArgs;
   TestProtectedVisibility;
   TestDefaultPropChoice;
+  TestClassRefMembers;
   TestNestedOuterAfterUnit;
   TestDeclAfterUnit;
   TestDeclOrder;
