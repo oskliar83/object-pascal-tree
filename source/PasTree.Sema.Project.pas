@@ -1203,8 +1203,14 @@ type
     procedure ReportMissingUnitMember(AId: Integer; AModel: TPasSemaModel;
       AMember, AName, AUid: Integer; ALate: Boolean = False);
     procedure CheckLateUnitMembers(AId: Integer);
-    procedure CheckVisibility(AId, ANameNode, AMemMid, AMemSym: Integer);
-    function MemberHiddenAt(AId, AHere, AMemMid, AMemSym: Integer): Boolean;
+    procedure CheckVisibility(AId, ANameNode, ABaseNode, AMemMid,
+      AMemSym: Integer);
+    function MemberHiddenAt(AId, AHere, AMemMid, AMemSym: Integer;
+      const ABase: TSemaXType): Boolean;
+    function ProtectedHiddenAt(AId, AHere: Integer; AInBody: Boolean;
+      AMemMid, AMemSym: Integer; const ABase: TSemaXType;
+      AClassSide: Boolean): Boolean;
+    function DccTypeName(const AX: TSemaXType; AOwner: Boolean): string;
     function FindVisibleMemberX(AId, AHere: Integer; const ABase: TSemaXType;
       const ANameLower: string; out AMemMid, AMemSym, ACtx: Integer): Boolean;
     function FindSelfMemberX(AId, ANode, AStruct: Integer;
@@ -20948,8 +20954,16 @@ var
     LX: TSemaXType;
   begin
     LX := CanonTypeX(GetX(N));
-    Result := (XValid(LX) and not OpenX(LX) and (XCatOf(LX) = tcRecord)) or
-      StaticArrayAt(N);
+    if XValid(LX) then
+      case XCatOf(LX) of
+        tcRecord:
+          Exit(not OpenX(LX));
+        tcArray, tcUnknown:
+          ;   // a static array, or an inline one the type does not show
+      else
+        Exit(False);   // a class, a pointer, an interface: a variable
+      end;
+    Result := StaticArrayAt(N);
   end;
 
   // A `class var` field (its nkVarSec's Aux = 1): never a part of a value.
@@ -21024,7 +21038,7 @@ var
     LName: string;
   begin
     Result := NIL_NODE;
-    LName := LowerCase(LM.Tree.NodeText(N));
+    LName := '';   // built at the first with met: most names are in none
     LCur := N;
     LParent := LM.Tree.Nodes[LCur].Parent;
     while LParent <> NIL_NODE do
@@ -21049,6 +21063,8 @@ var
               LFrom := LIdx - 1;
               Break;
             end;
+        if (LFrom >= 0) and (LName = '') then
+          LName := LowerCase(LM.Tree.NodeText(N));
         for LIdx := LFrom downto 0 do
         begin
           LTX := GetX(LTargets[LIdx]);
@@ -21078,8 +21094,6 @@ var
     LBase: Integer;
   begin
     Result := False;
-    if IsClassVarField(AMid, ASym) then
-      Exit;
     case LM.Tree.Nodes[N].Kind of
       nkMember:
         LBase := LM.Tree.Nodes[N].FirstChild;
@@ -21089,7 +21103,7 @@ var
       Exit;
     end;
     Result := (LBase <> NIL_NODE) and ValueTyped(LBase) and
-      IsValueOnly(AAssign, LBase);
+      not IsClassVarField(AMid, ASym) and IsValueOnly(AAssign, LBase);
   end;
 
   // Is the designator B, of a type ValueTyped accepts, a value rather than
@@ -21152,8 +21166,6 @@ var
     LMid, LSym, LBase: Integer;
     LHit: Boolean;
   begin
-    if InUntypedWith(AAssign) then
-      Exit;
     LHit := False;
     case LM.Tree.Nodes[ADst].Kind of
       nkIdent, nkMember:
@@ -21162,8 +21174,8 @@ var
             skField:
               LHit := FieldOfValue(AAssign, ADst, LMid, LSym);
             skProperty:
-              LHit := PropertyWritesField(LMid, LSym) and
-                FieldOfValue(AAssign, ADst, LMid, LSym);
+              LHit := FieldOfValue(AAssign, ADst, LMid, LSym) and
+                PropertyWritesField(LMid, LSym);
           end;
       nkIndex:
         begin
@@ -21173,7 +21185,7 @@ var
             IsValueOnly(AAssign, LBase);
         end;
     end;
-    if LHit then
+    if LHit and not InUntypedWith(AAssign) then
       EmitAt(LM, ADst, 'E2064', SE2064_LeftSideCannotBeAssigned);
   end;
 
@@ -22306,18 +22318,180 @@ begin
       Continue;
     LSym := LM.RefMap[LName];
     if LSym <> NIL_SYM then
-      CheckVisibility(AId, LName, AId, LSym)
+      CheckVisibility(AId, LName, LBase, AId, LSym)
     else if LM.ExtRefMap.TryGetValue(LName, LExt) then
-      CheckVisibility(AId, LName, LExt.UnitId, LExt.Sym);
+      CheckVisibility(AId, LName, LBase, LExt.UnitId, LExt.Sym);
   end;
+end;
+
+{ 11 sec. 11.2.1, the protected half: True when the protected or strict
+  protected member AMemMid.AMemSym, reached through a base of type ABase,
+  is refused at a site of unit AId inside the type AHere (NIL_SYM outside
+  one; AInBody: lexically in a method body). AClassSide: the base names the
+  type itself (`TA.CP`). dcc64 37.0's rules (spec 11.2.1):
+  - plain protected is legal in the declaring unit (the friend rule),
+    through a base whose class is declared in AId (`Self.P`, `X.P` for X
+    of a class of this unit - the protected hack), on a generic's member
+    from inside any method body, and through a class-side base when AHere
+    descends from the member's class (`TA.CP` in TB's method); refused
+    through a value of an ancestor, a sibling or a descendant declared
+    elsewhere, through a class reference and through a value of a type
+    parameter.
+  - strict protected is legal only inside a class descending from the
+    member's (that class itself included), and there through a class-side
+    base or a value of exactly the accessing class; refused through any
+    other value - of a descendant of the accessing class too - and in the
+    declaring unit alike.
+  False wherever a fact is unknown: the base's type, an ancestry that does
+  not resolve, a site in a nested type. }
+function TPasSemaProject.ProtectedHiddenAt(AId, AHere: Integer;
+  AInBody: Boolean; AMemMid, AMemSym: Integer; const ABase: TSemaXType;
+  AClassSide: Boolean): Boolean;
+var
+  LMemM, LHm: TPasSemaModel;
+  LVis: TSemaVisibility;
+  LOwner, LDef: Integer;
+  LOwnerX, LE: TSemaXType;
+  LHereDesc: TPasDescent;
+begin
+  Result := False;
+  LMemM := FModels[AMemMid];
+  LVis := LMemM.Symbols[AMemSym].Visibility;
+  if not (LVis in [svProtected, svStrictProtected]) or
+     (LMemM.Symbols[AMemSym].Scope = NIL_SCOPE) then
+    Exit;
+  LOwner := LMemM.Scopes[LMemM.Symbols[AMemSym].Scope].StructSym;
+  if LOwner = NIL_SYM then
+    Exit;
+  if (LVis = svProtected) and (AMemMid = AId) then
+    Exit;   // the friend rule
+  LOwnerX := XPlain(AMemMid, LOwner);
+  LHereDesc := xdNo;
+  if AHere <> NIL_SYM then
+  begin
+    // A type nested in another: how its outer type's descent counts is
+    // not probed - nothing is refused there.
+    LHm := FModels[AId];
+    if (LHm.Symbols[AHere].Scope <> NIL_SCOPE) and
+       (LHm.Scopes[LHm.Symbols[AHere].Scope].StructSym <> NIL_SYM) then
+      Exit;
+    LHereDesc := XDescent(XPlain(AId, AHere), LOwnerX);
+    if LHereDesc = xdUnknown then
+      Exit;
+  end;
+  if (LVis = svProtected) and AInBody and
+     ((sfGeneric in LMemM.Symbols[LOwner].Flags) or
+      NestedInGenericX(LOwnerX)) then
+    Exit;   // a generic's protected member, from a method body
+  if AClassSide and (LHereDesc = xdYes) then
+    Exit;
+  if (LVis = svStrictProtected) and (LHereDesc <> xdYes) then
+    Exit(True);
+  // The class the base's value is of: a class reference's class.
+  LE := CanonTypeX(ABase);
+  if not XValid(LE) then
+    Exit;
+  if XCatOf(LE) = tcClassOf then
+  begin
+    LDef := TypeDefNodeOf(LE.UnitId, LE.Sym);
+    if (LDef = NIL_NODE) or
+       (FModels[LE.UnitId].Tree.Nodes[LDef].Kind <> nkClassOf) then
+      Exit;
+    LE := CanonTypeX(ResolveTypeExpr(LE.UnitId,
+      FModels[LE.UnitId].Tree.Nodes[LDef].FirstChild));
+    if not XValid(LE) then
+      Exit;
+    AClassSide := True;
+  end
+  else if FModels[LE.UnitId].Symbols[LE.Sym].Kind = skGenericParam then
+    Exit(True)   // a type parameter's value is no class of this unit
+  else if XCatOf(LE) <> tcClass then
+    Exit;
+  if LVis = svStrictProtected then
+    // Through a value: of exactly the accessing class. A class reference
+    // is a class-side base, which the descent above admitted.
+    Exit(not AClassSide and not ((LE.UnitId = AId) and (LE.Sym = AHere) and
+      (LE.Inst = NIL_INST)));
+  Result := LE.UnitId <> AId;
+end;
+
+// A type as dcc spells it in E2361 / E2362. In the owner position a plain
+// type is its name with the types it is nested in (`TOuter.TInner`), an
+// instance of a generic has its unit in braces and its arguments
+// (`{UA}TG<System.Integer>`), a type nested in an instance follows it
+// (`{UA}TG<System.Integer>.TN`); an argument is unit-qualified, an instance
+// among them without braces (`{UA}TG<UA.TG<System.Integer>>`,
+// `{UA}TH<System.Byte,UB.TLoc>`). dcc64 37.0, 2026-11-13 (spec 11.2.1).
+function TPasSemaProject.DccTypeName(const AX: TSemaXType;
+  AOwner: Boolean): string;
+var
+  LM: TPasSemaModel;
+  LInst: TSemaInstance;
+  LOuterX: TSemaXType;
+  LCur, LScope, LIdx: Integer;
+  LUnit: string;
+begin
+  if not XValid(AX) then
+    Exit('?');
+  LM := FModels[AX.UnitId];
+  if AX.Inst <> NIL_INST then
+  begin
+    LInst := InstanceRead(AX.Inst);
+    if (LInst.UnitId <> AX.UnitId) or (LInst.Sym <> AX.Sym) then
+    begin
+      // Nested in an instance: the instance carries the frame.
+      LOuterX := XPlain(LInst.UnitId, LInst.Sym);
+      LOuterX.Inst := AX.Inst;
+      Exit(DccTypeName(LOuterX, AOwner) + '.' + LM.Symbols[AX.Sym].Name);
+    end;
+  end;
+  Result := LM.Symbols[AX.Sym].Name;
+  LCur := AX.Sym;
+  for var LDepth := 1 to 16 do
+  begin
+    LScope := LM.Symbols[LCur].Scope;
+    if LScope = NIL_SCOPE then
+      Break;
+    LCur := LM.Scopes[LScope].StructSym;
+    if LCur = NIL_SYM then
+      Break;
+    Result := LM.Symbols[LCur].Name + '.' + Result;
+  end;
+  if (sfBuiltin in LM.Symbols[AX.Sym].Flags) or
+     (LM.Symbols[AX.Sym].Kind = skBuiltinType) then
+    LUnit := 'System'
+  else
+    LUnit := TPath.GetFileNameWithoutExtension(ModelFile(AX.UnitId));
+  if AX.Inst = NIL_INST then
+  begin
+    if not AOwner then
+      Result := LUnit + '.' + Result;
+    Exit;
+  end;
+  if AOwner then
+    Result := '{' + LUnit + '}' + Result
+  else
+    Result := LUnit + '.' + Result;
+  Result := Result + '<';
+  for LIdx := 0 to High(LInst.Args) do
+  begin
+    if LIdx > 0 then
+      Result := Result + ',';
+    Result := Result + DccTypeName(LInst.Args[LIdx], False);
+  end;
+  Result := Result + '>';
 end;
 
 { True when the member AMemSym (of model AMemMid) cannot be seen from code
   inside the type AHere of model AId - CheckVisibility's rule, as a question:
   a private member outside its own unit, a strict private one outside the
-  type declaring it and the types nested in it. }
+  type declaring it and the types nested in it, and a protected one through
+  a base of type ABase that ProtectedHiddenAt refuses (XNil: not judged).
+  A lookup cannot tell `with TA do` from `with X do`: the class-side
+  reading is taken, which in a descendant finds the same member Self
+  would (dcc passes over the target's and reaches it through Self). }
 function TPasSemaProject.MemberHiddenAt(AId, AHere, AMemMid,
-  AMemSym: Integer): Boolean;
+  AMemSym: Integer; const ABase: TSemaXType): Boolean;
 var
   LMemM: TPasSemaModel;
   LVis: TSemaVisibility;
@@ -22326,6 +22500,9 @@ begin
   Result := False;
   LMemM := FModels[AMemMid];
   LVis := LMemM.Symbols[AMemSym].Visibility;
+  if LVis in [svProtected, svStrictProtected] then
+    Exit(XValid(ABase) and ProtectedHiddenAt(AId, AHere, AHere <> NIL_SYM,
+      AMemMid, AMemSym, ABase, {AClassSide} True));
   if not (LVis in [svPrivate, svStrictPrivate]) or
      (LMemM.Symbols[AMemSym].Scope = NIL_SCOPE) then
     Exit;
@@ -22357,7 +22534,7 @@ begin
   begin
     if not FindMemberX(AId, LBase, ANameLower, AMemMid, AMemSym, ACtx) then
       Exit(False);
-    if not MemberHiddenAt(AId, AHere, AMemMid, AMemSym) then
+    if not MemberHiddenAt(AId, AHere, AMemMid, AMemSym, ABase) then
       Exit(True);
     // An overload set is passed over only when none of it can be seen:
     // TThread's `Synchronize` leads with a private overload, and a thread's
@@ -22366,7 +22543,7 @@ begin
     var LAlt := FModels[AMemMid].Symbols[AMemSym].NextOverload;
     while LAlt <> NIL_SYM do
     begin
-      if not MemberHiddenAt(AId, AHere, AMemMid, LAlt) then
+      if not MemberHiddenAt(AId, AHere, AMemMid, LAlt, ABase) then
         Exit(True);
       LAlt := FModels[AMemMid].Symbols[LAlt].NextOverload;
     end;
@@ -22526,11 +22703,13 @@ begin
   end;
 end;
 
-{ 11 sec. 11.2.1, enforcement half: a QUALIFIED access to a private member, reported
-  as dcc does - `E2361 Cannot access private symbol TType.Member`, a nested
-  type named with every type around it (`TOuter.TInner.FIn`). A generic's
-  instance is the one spelling that differs: dcc writes the unit in braces
-  and qualified arguments, `TG<System.Integer>.FG`, and this `TG.FG`.
+{ 11 sec. 11.2.1, enforcement half: a QUALIFIED access to a private member,
+  reported as dcc does - `E2361 Cannot access private symbol TType.Member` -
+  and to a protected one - `E2362 Cannot access protected symbol TType.Member`.
+  The type is named as dcc names it (DccTypeName): with every type around it
+  (`TOuter.TInner.FIn`), a generic's instance - the receiver's, read off the
+  base expression's type - with its unit in braces and qualified arguments
+  (`TG<System.Integer>.FG` after the braced unit name).
 
   OFF unless ReportVisibility says otherwise. This is the only check here that
   can reject code the corpora ACCEPT, so it ships as a switch.
@@ -22542,11 +22721,13 @@ end;
     a unit-id comparison and not a struct one.
   - `strict private` is visible only inside the declaring type, in its own unit
     too: `A.FStrict` from a sibling class one line below is already an error.
-  - `protected` gets its own code (`E2362`) and needs an ancestry walk to answer,
-    so it is deliberately NOT enforced here; the README names it.
+  - `protected` and `strict protected`: ProtectedHiddenAt - the friend rule on
+    the base expression's class, a generic's leniency in method bodies, the
+    class-side and strict rules.
   - A BARE name in a descendant is a different diagnostic entirely - dcc says
     `E2003 Undeclared identifier`, because an inaccessible member is not in scope
-    rather than in scope and refused. Also named, also not done here: this
+    rather than in scope and refused: the inherited pass passes such a member
+    over (FindVisibleMemberX) and the name's E2003 is the unbound name's. This
     routine sees qualified accesses only.
 
   Two things must keep working and are the reason the walk is written this way
@@ -22554,42 +22735,91 @@ end;
   enum's VALUES are reachable from outside a private type (2 sec. 2.2.4), and a
   strict private nested helper still activates (15 sec. 15.4). Neither is a member
   ACCESS, so neither reaches here. }
-procedure TPasSemaProject.CheckVisibility(AId, ANameNode, AMemMid,
+procedure TPasSemaProject.CheckVisibility(AId, ANameNode, ABaseNode, AMemMid,
   AMemSym: Integer);
-
-  // The declaring type as dcc names it in E2361: every enclosing type too,
-  // `TOuter.TInner.TDeep` (dcc64 37.0, local/probe-m-b/e346). Symbol -> its
-  // scope -> that scope's StructSym, outward, as StructEncloses walks.
-  // A generic's instance is not spelled: dcc writes `{U}TG<System.Integer>`,
-  // this `TG`.
-  function OwnerPath(AMem: TPasSemaModel; AOwner: Integer): string;
-  var
-    LCur, LScope: Integer;
-  begin
-    Result := AMem.Symbols[AOwner].Name;
-    LCur := AOwner;
-    for var LDepth := 1 to 16 do
-    begin
-      LScope := AMem.Symbols[LCur].Scope;
-      if LScope = NIL_SCOPE then
-        Exit;
-      LCur := AMem.Scopes[LScope].StructSym;
-      if LCur = NIL_SYM then
-        Exit;
-      Result := AMem.Symbols[LCur].Name + '.' + Result;
-    end;
-  end;
-
 var
   LMemM, LM: TPasSemaModel;
   LVis: TSemaVisibility;
-  LOwner, LHere: Integer;
+  LOwner, LHere, LInBodyHere, LBMid, LBSym, LFMid, LFSym, LFCtx: Integer;
+  LBaseX, LOwnerX: TSemaXType;
+  LExt: TPasExtRef;
+  LClassSide: Boolean;
+  LCode, LText: string;
+
+  // The member AMid.ASym refused at this site - CheckVisibility's own rules.
+  function Refused(AMid, ASym: Integer): Boolean;
+  var
+    LOw: Integer;
+    LDm: TPasSemaModel;
+  begin
+    LDm := FModels[AMid];
+    case LDm.Symbols[ASym].Visibility of
+      svPrivate:
+        Result := AMid <> AId;
+      svStrictPrivate:
+        begin
+          LOw := NIL_SYM;
+          if LDm.Symbols[ASym].Scope <> NIL_SCOPE then
+            LOw := LDm.Scopes[LDm.Symbols[ASym].Scope].StructSym;
+          Result := not ((AMid = AId) and (LOw <> NIL_SYM) and
+            StructEncloses(AId, LOw, LHere));
+        end;
+      svProtected, svStrictProtected:
+        Result := ProtectedHiddenAt(AId, LHere, LInBodyHere <> NIL_SYM, AMid,
+          ASym, LBaseX, LClassSide);
+    else
+      Result := False;
+    end;
+  end;
+
+  // A member of the name, of AMemSym's overload set or an ancestor's, that
+  // this site may use.
+  function VisibleNamesake: Boolean;
+  var
+    LAlt, LFMid, LFSym, LFCtx, LOw: Integer;
+    LCur: TSemaXType;
+    LName: string;
+  begin
+    Result := False;
+    LName := LMemM.Symbols[AMemSym].NameLower;
+    LAlt := LMemM.FindLocalNoHelpers(LMemM.Symbols[AMemSym].Scope,
+      SemaKey(LName));
+    while LAlt <> NIL_SYM do
+    begin
+      if (LAlt <> AMemSym) and not Refused(AMemMid, LAlt) then
+        Exit(True);
+      LAlt := LMemM.Symbols[LAlt].NextOverload;
+    end;
+    LCur := AncestorOfX(XPlain(AMemMid, LOwner));
+    for var LDepth := 1 to 32 do
+    begin
+      if not XValid(LCur) or
+         not FindMemberX(AId, LCur, LName, LFMid, LFSym, LFCtx) then
+        Exit;
+      LAlt := LFSym;
+      while LAlt <> NIL_SYM do
+      begin
+        if not Refused(LFMid, LAlt) then
+          Exit(True);
+        LAlt := FModels[LFMid].Symbols[LAlt].NextOverload;
+      end;
+      if FModels[LFMid].Symbols[LFSym].Scope = NIL_SCOPE then
+        Exit;
+      LOw := FModels[LFMid].Scopes[FModels[LFMid].Symbols[LFSym].Scope].
+        StructSym;
+      if LOw = NIL_SYM then
+        Exit;
+      LCur := AncestorOfX(XPlain(LFMid, LOw));
+    end;
+  end;
+
 begin
   if not FReportVisibility or (AMemSym = NIL_SYM) then
     Exit;
   LMemM := FModels[AMemMid];
   LVis := LMemM.Symbols[AMemSym].Visibility;
-  if not (LVis in [svPrivate, svStrictPrivate]) then
+  if not (LVis in [svPrivate, svStrictPrivate, svProtected,
+     svStrictProtected]) then
     Exit;
   // The declaring struct: the member's own scope, which for a class member is
   // that class's member scope.
@@ -22600,6 +22830,7 @@ begin
     Exit;   // not a struct member after all: nothing to enforce
   LM := FModels[AId];
   LHere := StructSymOfNode(LM, ANameNode);
+  LInBodyHere := LHere;
   if LHere = NIL_SYM then
   begin
     // The site may be in a type DECLARATION rather than a method body, and
@@ -22616,28 +22847,95 @@ begin
       Break;
     end;
   end;
-  if LVis = svPrivate then
+  // The base expression's type, as the passes committed it, and whether it
+  // names a type (`TA.CP`) rather than a value.
+  LBaseX := XNil;
+  LClassSide := False;
+  if ABaseNode <> NIL_NODE then
   begin
-    if AMemMid = AId then
-      Exit;   // the friend rule: same unit, always legal
-  end
+    if not LM.ExprTypeX.TryGetValue(ABaseNode, LBaseX) and
+       (LM.IntraType(ABaseNode) <> NIL_SYM) then
+      LBaseX := XPlain(AId, LM.IntraType(ABaseNode));
+    if LM.Tree.Nodes[ABaseNode].Kind = nkTypeArgs then
+      LClassSide := True
+    else if LM.Tree.Nodes[ABaseNode].Kind in [nkIdent, nkMember] then
+    begin
+      LBMid := AId;
+      LBSym := NIL_SYM;
+      var LBName := ABaseNode;
+      if LM.Tree.Nodes[LBName].Kind = nkMember then
+        LBName := LM.Tree.LastChild(LBName);
+      if LBName <> NIL_NODE then
+      begin
+        LBSym := LM.RefMap[LBName];
+        if (LBSym = NIL_SYM) and LM.ExtRefMap.TryGetValue(LBName, LExt) then
+        begin
+          LBMid := LExt.UnitId;
+          LBSym := LExt.Sym;
+        end;
+      end;
+      LClassSide := (LBSym <> NIL_SYM) and
+        (FModels[LBMid].Symbols[LBSym].Kind in [skType, skBuiltinType]);
+    end;
+  end;
+  case LVis of
+    svPrivate:
+      if AMemMid = AId then
+        Exit;   // the friend rule: same unit, always legal
+    svStrictPrivate:
+      // strict private: only from inside the declaring type itself - or from a
+      // type NESTED in it, which is dcc's rule and an asymmetric one. Probed both
+      // ways: a nested class reaching the OUTER class's strict private field
+      // compiles, and the outer class reaching a NESTED class's strict private
+      // field is `E2361` - the same code we emit, so the enclosing type is not
+      // "inside" its own nested one. System.JSON.Builders is the shape:
+      // `TJSONCollectionBuilder.TBaseCollection.WriteBuilder` reads the outer
+      // class's strict private `FJSONWriter`.
+      //
+      // Same-unit is still required, because nesting cannot cross a unit.
+      if (AMemMid = AId) and StructEncloses(AId, LOwner, LHere) then
+        Exit;
   else
-    // strict private: only from inside the declaring type itself - or from a
-    // type NESTED in it, which is dcc's rule and an asymmetric one. Probed both
-    // ways: a nested class reaching the OUTER class's strict private field
-    // compiles, and the outer class reaching a NESTED class's strict private
-    // field is `E2361` - the same code we emit, so the enclosing type is not
-    // "inside" its own nested one. System.JSON.Builders is the shape:
-    // `TJSONCollectionBuilder.TBaseCollection.WriteBuilder` reads the outer
-    // class's strict private `FJSONWriter`.
-    //
-    // Same-unit is still required, because nesting cannot cross a unit.
-    if (AMemMid = AId) and StructEncloses(AId, LOwner, LHere) then
+    // A declaration site (a property's accessor, a field's type) is not
+    // judged: its rules are not probed.
+    if (LInBodyHere = NIL_SYM) and (LHere <> NIL_SYM) then
       Exit;
+    if not ProtectedHiddenAt(AId, LHere, LInBodyHere <> NIL_SYM, AMemMid,
+         AMemSym, LBaseX, LClassSide) then
+      Exit;
+  end;
+  // dcc passes a member it refuses over to a visible one of the name, and
+  // the access binds that one and compiles: another overload of the set
+  // (GDI+'s protected `TGPGraphicsPath.Create(nativePath: ...)` beside the
+  // public ones), an ancestor's (TObject's public Equals past TGraphic's
+  // protected one, TControl's public ClientWidth past TCustomForm's
+  // protected redeclaration). The binding may name the refused one - the
+  // overload chain's head - so only a name with no visible namesake is
+  // refused (spec 11.2.1).
+  if VisibleNamesake then
+    Exit;
   if LM.HasDiagAt(ANameNode) then
     Exit;   // one report per site, like every other pass here
-  EmitAt(LM, ANameNode, 'E2361', Format(SE2361_CannotAccessPrivate,
-    [OwnerPath(LMemM, LOwner) + '.' + LMemM.Symbols[AMemSym].Name]));
+  // The owner as dcc spells it: a generic's in the receiver's instance -
+  // the frame the member walk reaches the member in from the base's type.
+  LOwnerX := XPlain(AMemMid, LOwner);
+  if XValid(LBaseX) and FindMemberX(AId, LBaseX,
+       LMemM.Symbols[AMemSym].NameLower, LFMid, LFSym, LFCtx) and
+     (LFMid = AMemMid) and (LFCtx <> NIL_INST) then
+    LOwnerX.Inst := LFCtx;
+  LText := DccTypeName(LOwnerX, {AOwner} True) + '.' +
+    LMemM.Symbols[AMemSym].Name;
+  if LVis in [svPrivate, svStrictPrivate] then
+  begin
+    LCode := 'E2361';
+    LText := Format(SE2361_CannotAccessPrivate, [LText]);
+  end
+  else
+  begin
+    LCode := 'E2362';
+    LText := Format(SE2362_CannotAccessProtected, [LText]);
+  end;
+  EmitAt(LM, ANameNode, LCode, LText);
 end;
 
 // The struct type symbol of the METHOD implementation enclosing ANode, via
