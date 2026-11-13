@@ -172,6 +172,20 @@ begin
       Inc(Result);
 end;
 
+// Every ACode diagnostic as `line:col` in report order, space-joined.
+function DiagSites(const ACode: string): string;
+begin
+  Result := '';
+  for var LIdx := 0 to High(GModel.Diags) do
+    if GModel.Diags[LIdx].Code = ACode then
+    begin
+      if Result <> '' then
+        Result := Result + ' ';
+      Result := Result + Format('%d:%d', [GModel.Diags[LIdx].Line,
+        GModel.Diags[LIdx].Col]);
+    end;
+end;
+
 // Are the ACode diagnostics in source order (line, then column)?
 function DiagsInSourceOrder(const ACode: string): Boolean;
 var
@@ -2281,6 +2295,52 @@ begin
     'unit U; interface implementation uses System.SysUtils; procedure P; ' +
     'var F: TFunc<Integer, Integer>; begin ' +
     'F := function(Result: Integer): Integer begin end; end; end.', 1);
+  // A parameter named Self or like the method's own type parameter is E2004
+  // the same way, once per body: the type parameter first, then Self, then
+  // Result (spec 3.1.3, dcc64 37.0, 2026-11-13). Self is a non-static class
+  // method's too, paired with its declaration among overloads.
+  Expect('a method''s parameter named Self',
+    'unit U; interface type TC = class procedure M(Self: Integer); end; ' +
+    'implementation procedure TC.M(Self: Integer); begin end; end.', 1);
+  Expect('a declared parameter named Self the header omits',
+    'unit U; interface type TC = class procedure M(Self: Integer); end; ' +
+    'implementation procedure TC.M; begin end; end.', 1);
+  Expect('Self in a record method, a helper''s, a class method''s',
+    'unit U; interface type TR = record procedure M(Self: Integer); end; ' +
+    'TH = record helper for Integer procedure M(Self: Integer); end; ' +
+    'TC = class class procedure C(Self: Integer); end; implementation ' +
+    'procedure TR.M(Self: Integer); begin end; ' +
+    'procedure TH.M(Self: Integer); begin end; ' +
+    'class procedure TC.C(Self: Integer); begin end; end.', 3);
+  Expect('a parameter named like the method''s own type parameter',
+    'unit U; interface type TC = class procedure M<T>(T: Integer); end; ' +
+    'implementation procedure TC.M<T>(T: Integer); begin end; end.', 1);
+  Expect('Self, T and Result held at once: one',
+    'unit U; interface type TC = class function M<T>(Result, Self, ' +
+    'T: Integer): Integer; end; implementation function TC.M<T>(Result, ' +
+    'Self, T: Integer): Integer; begin end; end.', 1);
+  Expect('a local Self in a non-static class method, not its static overload',
+    'unit U; interface type TC = class class procedure C; overload; ' +
+    'class procedure C(X: Integer); overload; static; end; implementation ' +
+    'class procedure TC.C; var Self: Integer; begin end; ' +
+    'class procedure TC.C(X: Integer); var Self: Integer; begin end; end.', 1);
+  Expect('silent: Self where no Self is - static, class constructor, ' +
+    'destructor and operator, a plain routine, a declaration',
+    'unit U; interface type TC = class class procedure S(Self: Integer); ' +
+    'static; class constructor Create; class destructor Destroy; ' +
+    'procedure A(Self: Integer); virtual; abstract; end; ' +
+    'TR = record class procedure S(Self: Integer); static; ' +
+    'class operator Negative(Self: TR): TR; class operator Positive(A: TR): ' +
+    'TR; end; implementation class procedure TC.S(Self: Integer); begin end; ' +
+    'class constructor TC.Create; var Self: Integer; begin end; ' +
+    'class destructor TC.Destroy; var Self: Integer; begin end; ' +
+    'class procedure TR.S(Self: Integer); begin end; ' +
+    'class operator TR.Negative(Self: TR): TR; begin end; ' +
+    'class operator TR.Positive(A: TR): TR; var Self: Integer; begin end; ' +
+    'procedure P(Self: Integer); begin end; end.', 0);
+  Expect('silent: a parameter named like the class''s type parameter',
+    'unit U; interface type TG<T> = class procedure M(T: Integer); end; ' +
+    'implementation procedure TG<T>.M(T: Integer); begin end; end.', 0);
   Expect('silent: a procedure literal''s and a procedural type''s Result',
     'unit U; interface type TF = reference to function(Result: Integer): ' +
     'Integer; implementation uses System.SysUtils; procedure P; ' +
@@ -2339,18 +2399,32 @@ begin
     'var G := 2; var H := G; if H = 0 then ; end; ' +
     'procedure Q; var G: Integer; begin G := 0; if G = 0 then ; end; end.', 0);
 
-  // Where: a Result parameter at the implementation, not the declaration.
+  // Where: a Result parameter at the implementation's body, not the
+  // declaration - its first token after the heading, a local declaration
+  // when there is one, a literal's alike (dcc64 37.0).
   Analyze('unit U;'#10'interface'#10'function F(Result: Integer): Integer;'#10 +
     'implementation'#10'function F(Result: Integer): Integer;'#10'begin'#10 +
-    'end;'#10'end.'#10);
-  var LAt5 := 0;
-  for var LIdx := 0 to High(GModel.Diags) do
-    if (GModel.Diags[LIdx].Code = 'E2004') and
-       (GModel.Diags[LIdx].Line = 5) then
-      Inc(LAt5);
-  Ok('routinename: a Result parameter reports at the implementation',
-    (DiagCount('E2004') = 1) and (LAt5 = 1) and
-    DiagHasText('E2004', '''Result'''));
+    'end;'#10'type TC = class procedure M(Self: Integer); end;'#10 +
+    'procedure TC.M(Self: Integer);'#10'  var X: Integer;'#10'begin'#10 +
+    'end;'#10'type TF = reference to function(A: Integer): Integer;'#10 +
+    'procedure P;'#10'var F: TF;'#10'begin'#10'  F := function(Result: Integer): Integer'#10 +
+    '    var X: Integer;'#10'    begin'#10'    end;'#10'end;'#10'end.'#10);
+  Ok('routinename: a Result, a Self parameter report where the body starts, ' +
+    'a literal''s alike [' + DiagSites('E2004') + ']',
+    DiagSites('E2004') = '6:1 10:3 18:5');
+  Ok('routinename: each names its parameter',
+    DiagHasText('E2004', '''Result''') and DiagHasText('E2004', '''Self'''));
+  GModel.Free;
+  // Which one: the first Self or type parameter in parameter order, else
+  // Result (dcc64 37.0).
+  Analyze('unit U; interface type TC = class function G<T>(T, Self: ' +
+    'Integer): Integer; function M<T>(Result, Self, T: Integer): Integer; ' +
+    'end; implementation function TC.G<T>(T, Self: Integer): Integer; ' +
+    'begin end; function TC.M<T>(Result, Self, T: Integer): Integer; ' +
+    'begin end; end.');
+  Ok('routinename: G<T>(T, Self) names T, M<T>(Result, Self, T) Self',
+    (DiagCount('E2004') = 2) and (Pos('''T''', GModel.Diags[0].Msg) > 0) and
+    (Pos('''Self''', GModel.Diags[1].Msg) > 0));
   GModel.Free;
 
   // Result is in the scope before the body now: a body's reference still
