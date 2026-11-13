@@ -163,6 +163,17 @@ MEMBERS masked out (`SpanTokensEqualMasked`, each member's span plus its
 terminating `;`): each member is a symbol with its own verdict, so a method
 added to a hub class, or a field typed into a hub record, is an added name,
 not a changed type, and only the models mentioning that name are redone.
+Two widenings follow (0.182.0): a changed parameter changes its routine, and
+a changed or removed routine changes every overload of its set in that
+scope. A consumer holds the pair to the routine its call bound, never to a
+parameter or to the sibling it did not choose - yet a sibling's change can
+move the choice. The case that needed both is a switch: the switches that
+change a declaration's meaning (`{$J}` at a typed constant, `{$P}` after a
+parameter's type - spec 1.3.1) are read by Phase 1 into symbol flags
+(`sfWriteableConst`, `sfFixedString`), so a `{$P-}` typed before a
+parameter's `)` changes no token of the declaration, only the parameter's
+flag - and the call that bound `O1(const S: string)` must be redone to take
+`O1(var S: ShortString)`.
 Enums keep the whole-declaration comparison - a value added in the middle
 moves the ordinals after it. The one consumer that can depend on a record's
 LAYOUT without naming a field is a `$IF` that asks the oracle for `SizeOf`;

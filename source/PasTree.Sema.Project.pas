@@ -17152,7 +17152,7 @@ var
         if (LCoreKind in [nkIdent, nkMember]) and
            TargetSym(LCore, LHMid, LHSym) then
         begin
-          LHeadKind := FModels[LHMid].Symbols[LHSym].Kind;
+          LHeadKind := ArgHeadKind(FModels[LHMid].Symbols[LHSym]);
           LTrueConst := (LHeadKind = skConst) and
             (FModels[LHMid].Symbols[LHSym].TypeNode = NIL_NODE);
         end
@@ -17160,7 +17160,7 @@ var
                 (LM.Tree.Nodes[LCore].FirstChild <> NIL_NODE) and
                 TargetSym(PeelParens(LM.Tree, LM.Tree.Nodes[LCore].FirstChild),
                   LHMid, LHSym) then
-          LHeadKind := FModels[LHMid].Symbols[LHSym].Kind;
+          LHeadKind := ArgHeadKind(FModels[LHMid].Symbols[LHSym]);
         if AByRef then
         begin
           if ByRefShapeRejects(LCoreKind, LHeadKind, AOpenArr and
@@ -17348,6 +17348,11 @@ var
             LArrArg^)));
         end;
       end;
+      // No array for a pointer under {$X-} (ExtSyntaxArrayRejects).
+      if not AByRef and XValid(LCanonParX) and XValid(LCanonArgX) and
+         ExtSyntaxArrayRejects(LM.Tree, LCore, XCatOf(LCanonParX),
+           XCatOf(LCanonArgX)) then
+        Exit(-1);
       // `@X` under {$T+} is a typed pointer to X's type (4.8) - typed Pointer
       // by the unit's typer, so read here (AddrArgFitX): `@I` goes to PI,
       // PInteger and Pointer, `@G1` to Pointer alone (n7 Set T).
@@ -17423,6 +17428,7 @@ var
       // A `var` ShortString is an open string (OpenStringFit).
       if AByRef and (ParamModeOf(LPM, LPList[LPos]) <> 3) and
          FConv.OpenStringFit(LCanonParX, LCanonArgX,
+         sfFixedString in LPM.Symbols[LPList[LPos]].Flags,
          LFit, LRank) then
         Exit(ScaledFit(2 * LFit, LRank));
       // A `var` / `out` parameter takes its own type alone (ByRefFitRejects;
@@ -19595,7 +19601,7 @@ var
     // rule (AddrArgFitX), as an assignment converts as a lone value
     // parameter does (`PB := @I`, `PI := @F` are E2010). Under {$T-} it is
     // Pointer, which the type test takes.
-    if Length(LM.Tree.Source.TypedAddressEvents) > 0 then
+    if Length(LM.Tree.Source.SwitchEvents) > 0 then
     begin
       LCore := PeelParens(LM.Tree, ASrc);
       LDst := CanonTypeX(ADstX);
@@ -19613,7 +19619,14 @@ var
     end;
     Result := XConvX(ADstX, ASrcX);
     if Result <> TSemaConv.scNone then
+    begin
+      // An array for a pointer under {$X-} (ExtSyntaxArrayRejects).
+      if (Length(LM.Tree.Source.SwitchEvents) > 0) and
+         ExtSyntaxArrayRejects(LM.Tree, ASrc, XCatOf(CanonTypeX(ADstX)),
+           XCatOf(CanonTypeX(ASrcX))) then
+        Result := TSemaConv.scNone;
       Exit;
+    end;
     Result := scMaybe;
     LCore := PeelParens(LM.Tree, ASrc);
     if LCore = NIL_NODE then
@@ -19679,8 +19692,8 @@ var
     // Two pointers under {$T+} at the statement: typed ones of one base
     // meet, of two bases do not (`PB := PI` is E2010 either way; 10.1.2).
     if (D = tcPointer) and (S = tcPointer) and
-       (Length(LM.Tree.Source.TypedAddressEvents) > 0) and
-       LM.Tree.Source.TypedAddressAt(LM.Tree.Nodes[AAssign].FirstToken) and
+       (Length(LM.Tree.Source.SwitchEvents) > 0) and
+       LM.Tree.Source.SwitchAt(LM.Tree.Nodes[AAssign].FirstToken, optT) and
        (TypedPointersMeetX(LDst, LSrc, True) <> -1) then
       Exit;
     Result := TSemaConv.scNone;
@@ -20076,6 +20089,56 @@ var
         CheckConv(N, LVar, LTo, LTo, LVarX, GetX(LTo));
     end;
 
+    // A function called as a statement under {$X-} at the token after the
+    // call (spec 1.3.1): E2014, naming the result's type - a function bound
+    // by name (`inherited F` too), called with or without parentheses, that
+    // is no constructor, or a variable, field or parameter of a function
+    // type called. Withheld as E2010 is (InUntypedWith, Unreliable: an
+    // overload choice may have bound a function where a procedure was meant).
+    procedure CheckCallStmt(N: Integer);
+    var
+      LCore, LHead, LMid, LSym: Integer;
+      LX: TSemaXType;
+      LSig: TPasProcSig;
+    begin
+      if LM.Tree.Source.SwitchAt(LM.Tree.Nodes[N].LastToken + 1, optX) then
+        Exit;
+      LCore := PeelParens(LM.Tree, LM.Tree.Nodes[N].FirstChild);
+      if (LCore <> NIL_NODE) and (LM.Tree.Nodes[LCore].Kind = nkInherited) then
+        LCore := LM.Tree.Nodes[LCore].FirstChild;
+      if LCore = NIL_NODE then
+        Exit;
+      LHead := LCore;
+      if LM.Tree.Nodes[LHead].Kind = nkCall then
+        LHead := PeelParens(LM.Tree, LM.Tree.Nodes[LHead].FirstChild);
+      if (LHead = NIL_NODE) or
+         not (LM.Tree.Nodes[LHead].Kind in [nkIdent, nkMember]) or
+         not TargetSym(LHead, LMid, LSym) then
+        Exit;
+      case FModels[LMid].Symbols[LSym].Kind of
+        skRoutine:
+          begin
+            if (FModels[LMid].Symbols[LSym].TypeNode = NIL_NODE) or
+               IsConstructorSym(LMid, LSym) then
+              Exit;
+            LX := GetX(LCore);
+          end;
+        skVar, skField, skParam:
+          begin
+            if not ProcTypeSigX(DeclTypeX(LMid, LSym), LSig) or
+               not LSig.IsFunc then
+              Exit;
+            LX := LSig.ResultX;
+          end;
+      else
+        Exit;
+      end;
+      if not XValid(LX) or InUntypedWith(N) or Unreliable(N, LCore, LX) then
+        Exit;
+      EmitAt(LM, LCore, 'E2014', Format(SE2014_StatementExpected,
+        [XTypeText(LX)]));
+    end;
+
     procedure CheckForIn(N: Integer);
     var
       LVar, LColl: Integer;
@@ -20130,6 +20193,9 @@ var
           CheckFor(N);
         nkForInStmt:
           CheckForIn(N);
+        nkExprStmt:
+          if Length(LM.Tree.Source.SwitchEvents) > 0 then
+            CheckCallStmt(N);
       end;
   end;
 
@@ -20764,8 +20830,11 @@ begin
           // The key first, the string only for a node that gets past the two
           // cheap exits below.
           LKey := PasNodeKey(LModel.Tree, LNode);
-          if SemaKeyEquals('result', LKey) or SemaKeyEquals('self', LKey) then
-            Continue;   // implicit routine/method names
+          // Implicit routine / method names - but a function's body begun
+          // under {$X-} has no Result, and dcc reports it (1.3.1).
+          if SemaKeyEquals('self', LKey) or SemaKeyEquals('result', LKey) and
+             not PasResultWithheld(LModel.Tree, LNode, True) then
+            Continue;
           // A qualifier segment of a dotted expression that names a real
           // unit (`System` in `System.sLineBreak`; `System`/`SysUtils` in
           // `System.SysUtils.TBytes`) is a namespace token, not an
@@ -25388,8 +25457,11 @@ begin
       // So does a binding Phase 1 found PAST the method's type - a unit-level
       // declaration of this unit, an outer type's member (BoundPastStruct):
       // the type's ancestors come first and Phase 1 never walked them (F40).
+      // Result too, unless the body began under {$X-}: no implicit Result
+      // there, and an inherited member of that name is what it binds (1.3.1).
       LKey := PasNodeKey(LM.Tree, LNode);
-      if SemaKeyEquals('result', LKey) or SemaKeyEquals('self', LKey) then
+      if SemaKeyEquals('self', LKey) or SemaKeyEquals('result', LKey) and
+         not PasResultWithheld(LM.Tree, LNode, True) then
         Continue;
       LName := LPool.InternKey(LKey);
       if LInhN = Length(LInh) then
@@ -27659,7 +27731,9 @@ var
   // type again - O(N^2) per enum.
   LMemoOld, LMemoNew: Integer;
   LMemoEq: Boolean;
+  LParamChanged: Boolean;
 begin
+  LParamChanged := False;
   LMemoOld := NIL_NODE;
   LMemoNew := NIL_NODE;
   LMemoEq := False;
@@ -27729,8 +27803,50 @@ begin
       Note(LChangedNames, LA.NameLower);
       AHelpers := AHelpers or IsHelper(AOld, LOldIdx) or
         ReachedByRule(AOld, LOldIdx);
+      LParamChanged := LParamChanged or (LA.Kind = skParam);
     end;
   end;
+  // A changed parameter changes its routine: a consumer holds the pair to
+  // the routine it calls, never to the parameter. A parameter's text is the
+  // routine's too, so only a flag shows it alone - sfFixedString, which a
+  // `{$P-}` typed before the parameter's `)` sets with no token of the
+  // declaration changed (spec 1.3.1).
+  if LParamChanged then
+    for LOldIdx := 0 to AOldSymN - 1 do
+      if not AChanged[LOldIdx] and (AOld.Symbols[LOldIdx].Kind = skRoutine) and
+         (AOld.Symbols[LOldIdx].MemberScope <> NIL_SCOPE) then
+        for var LPar in AOld.Scopes[AOld.Symbols[LOldIdx].MemberScope].Symbols do
+          if (LPar < AOldSymN) and AChanged[LPar] and
+             (AOld.Symbols[LPar].Kind = skParam) then
+          begin
+            AChanged[LOldIdx] := True;
+            Inc(LNChanged);
+            Note(LChangedNames, AOld.Symbols[LOldIdx].NameLower);
+            Break;
+          end;
+  // A changed routine changes every overload of its set: a call bound to a
+  // sibling chose it over this one, and may not now (6.3.1) - `O1(S10)`
+  // bound to `O1(const S: string)` takes `O1(var S: ShortString)` once that
+  // parameter is an open string again, while the consumer holds no pair to
+  // the changed one.
+  for LOldIdx := 0 to AOldSymN - 1 do
+    if AChanged[LOldIdx] and (AOld.Symbols[LOldIdx].Kind = skRoutine) and
+       (AOld.Symbols[LOldIdx].Scope <> NIL_SCOPE) then
+    begin
+      var LSib := AOld.FindLocal(AOld.Symbols[LOldIdx].Scope,
+        AOld.Symbols[LOldIdx].NameLower);
+      while LSib <> NIL_SYM do
+      begin
+        if (LSib < AOldSymN) and not AChanged[LSib] and
+           (AOld.Symbols[LSib].Kind = skRoutine) then
+        begin
+          AChanged[LSib] := True;
+          Inc(LNChanged);
+          Note(LChangedNames, AOld.Symbols[LSib].NameLower);
+        end;
+        LSib := AOld.Symbols[LSib].NextOverload;
+      end;
+    end;
   for LNewIdx := 0 to ANewSymN - 1 do
     if not LHasPredecessor[LNewIdx] then
     begin

@@ -518,9 +518,11 @@ type
     // and `out` ShortString candidates, which take it exactly (lane-d Set S:
     // `var X: ShortString` beside `X: ShortString` compiles). True with
     // the fit (1) and its rank in AFit / ARank when the rule applies; an
-    // `out` one is no open string (a string[10] does not reach it).
+    // `out` one is no open string (a string[10] does not reach it), nor one
+    // declared under {$P-} (AFixed: the parameter's sfFixedString - a
+    // `string[10]` then takes `const S: string` over it; spec 1.3.1).
     function OpenStringFit(const ACanonPar, ACanonArg: TSemaXType;
-      var AFit, ARank: Integer): Boolean;
+      AFixed: Boolean; var AFit, ARank: Integer): Boolean;
 
     // ---- the rules ----
     { The one conversion test (XConvX delegates) - see XConvX's header in
@@ -1335,6 +1337,22 @@ function UntypedParamRank(AConv: PSemaArgConv; AArgCat: TSemaTypeCat;
 function ByRefShapeRejects(ACoreKind: TPasNodeKind;
   AHeadKind: TSemaSymbolKind; AOpenArray: Boolean): Boolean;
 
+{ The kind an argument naming ASym has for the shape rules (ByRefShapeRejects'
+  AHeadKind): its own, but skVar for a typed constant declared under $J+
+  (sfWriteableConst), which is a variable - `F(TC)` takes `F(var A:
+  Integer)` over `F(A: Int64)` then, and the Int64 one under $J- (spec
+  1.3.1, 3.2.2). }
+function ArgHeadKind(const ASym: TSemaSymbol): TSemaSymbolKind; inline;
+
+{ Does the value ANode of ATree, an array (ASrcCat tcArray), refuse to go to
+  a pointer (ADstCat tcPointer) because $X- is in effect at the token after
+  it? A zero-based character array reaches PChar only by the extended syntax
+  (spec 1.3.1: `PC := A`, `G(A)` for `G(P: PChar)` are E2010 under $X-, read
+  after the value - `PC := A` with $X+ between `:=` and A compiles). An assignment and
+  an argument (both typers) ask it. }
+function ExtSyntaxArrayRejects(const ATree: TPasTree; ANode: Integer;
+  ADstCat, ASrcCat: TSemaTypeCat): Boolean;
+
 { Is ANode of ATree (through parentheses) `@X`, with X in AOperand (through
   parentheses)? `@P` of a procedural variable P is the variable itself
   (4.8, 6.3.1's pointers bullet): an untyped and a `var Pointer` parameter
@@ -1788,9 +1806,11 @@ begin
 end;
 
 function TSemaConvView.OpenStringFit(const ACanonPar, ACanonArg: TSemaXType;
+  AFixed: Boolean;
   var AFit, ARank: Integer): Boolean;
 begin
-  Result := XValid(ACanonPar) and XValid(ACanonArg) and (AFit > 0) and
+  Result := not AFixed and XValid(ACanonPar) and XValid(ACanonArg) and
+    (AFit > 0) and
     (Model(ACanonPar).Symbols[ACanonPar.Sym].Kind = skBuiltinType) and
     (Model(ACanonPar).Symbols[ACanonPar.Sym].NameLower = 'shortstring') and
     (Cat(ACanonArg) = tcString) and (ParConvKind(ACanonArg) = cnkShortString);
@@ -3056,8 +3076,8 @@ begin
     case RefConv(ACanonParX, ACanonArgX, LParCat, LArgCat, LRank,
            LUserRank, (LArgCat = tcPointer) and (LParCat = tcPointer) and
            (ACore <> NIL_NODE) and
-           (Length(ATree.Source.TypedAddressEvents) > 0) and
-           ATree.Source.TypedAddressAt(ATree.Nodes[ACore].FirstToken)) of
+           (Length(ATree.Source.SwitchEvents) > 0) and
+           ATree.Source.SwitchAt(ATree.Nodes[ACore].FirstToken, optT)) of
       -1:
         Exit(-1);
       1:
@@ -4629,6 +4649,21 @@ begin
   else
     Result := 0;
   end;
+end;
+
+function ExtSyntaxArrayRejects(const ATree: TPasTree; ANode: Integer;
+  ADstCat, ASrcCat: TSemaTypeCat): Boolean;
+begin
+  Result := (ADstCat = tcPointer) and (ASrcCat = tcArray) and
+    (ANode <> NIL_NODE) and (Length(ATree.Source.SwitchEvents) > 0) and
+    not ATree.Source.SwitchAt(ATree.Nodes[ANode].LastToken + 1, optX);
+end;
+
+function ArgHeadKind(const ASym: TSemaSymbol): TSemaSymbolKind;
+begin
+  Result := ASym.Kind;
+  if (Result = skConst) and (sfWriteableConst in ASym.Flags) then
+    Result := skVar;
 end;
 
 function ByRefShapeRejects(ACoreKind: TPasNodeKind;
@@ -7848,7 +7883,7 @@ begin
       LElem := HeadOrMember(LCore);
     if LElem <> NIL_SYM then
     begin
-      LHeadKind := M.Symbols[LElem].Kind;
+      LHeadKind := ArgHeadKind(M.Symbols[LElem]);
       LTrueConst := (LHeadKind = skConst) and
         (M.Symbols[LElem].TypeNode = NIL_NODE);
     end
@@ -7859,7 +7894,7 @@ begin
       begin
         LElem := HeadOrMember(LElem);
         if LElem <> NIL_SYM then
-          LHeadKind := M.Symbols[LElem].Kind;
+          LHeadKind := ArgHeadKind(M.Symbols[LElem]);
       end;
     end;
     if LByRef then
@@ -7959,7 +7994,8 @@ begin
   // A `var` ShortString is an open string (OpenStringFit).
   if LByRef and (AAt <> NIL_SYM) and (LPt <> NIL_SYM) and
      (ParamModeOf(M, AParam) <> 3) and
-     FConv.OpenStringFit(FConv.Canon(UX(LPt)), FConv.Canon(UX(AAt)), Result,
+     FConv.OpenStringFit(FConv.Canon(UX(LPt)), FConv.Canon(UX(AAt)),
+       sfFixedString in M.Symbols[AParam].Flags, Result,
        LRank) then
     Exit(ScaledFit(2 * Result, LRank));
   // A `var` / `out` parameter takes its own type alone (ByRefFitRejects).
@@ -8326,6 +8362,10 @@ begin
           ARank := LRank;
         Exit;
       end;
+      // No array for a pointer under $X- (ExtSyntaxArrayRejects).
+      if ARanked and (AAt <> NIL_SYM) and
+         ExtSyntaxArrayRejects(T, LCore, CatOf(APt), CatOf(AAt)) then
+        Exit(-1);
       // `@X` under $T+: a typed pointer to X's type, typed Pointer here
       // (AddrArgFit - CrossType's AddrArgFitX).
       if ARanked and (Kind(LCore) = nkUnaryOp) and
@@ -10071,8 +10111,8 @@ var
         Exit;
       end;
     if (D = tcPointer) and (S = tcPointer) and
-       (Length(T.Source.TypedAddressEvents) > 0) and
-       T.Source.TypedAddressAt(T.Nodes[N].FirstToken) and
+       (Length(T.Source.SwitchEvents) > 0) and
+       T.Source.SwitchAt(T.Nodes[N].FirstToken, optT) and
        (FConv.TypedPointersMeet(UX(LDstT), UX(LSrcT), True) <> -1) then
       Exit;
     Result := False;
@@ -10146,7 +10186,10 @@ begin
   // named `Word`.
   if IsTypeNameOperand(LDst) or IsTypeNameOperand(LSrc) then
     Exit;
-  LAddrRejected := AddrRejected;
+  // A value the switches refuse though its type converts: `@X` under $T+,
+  // an array for a pointer under $X- (spec 1.3.1).
+  LAddrRejected := AddrRejected or
+    ExtSyntaxArrayRejects(T, LSrc, CatOf(LDstT), CatOf(LSrcT));
   if (LAddrRejected or not Assignable(LDstT, LSrcT) and not ValueWithheld) and
      not Unreliable(LDst, LDstT) and not Unreliable(LSrc, LSrcT) then
   begin

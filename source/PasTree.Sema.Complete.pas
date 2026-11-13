@@ -2441,7 +2441,7 @@ var
       Exit;
     LSym := FModel.RefMap[LName];
     if LSym <> NIL_SYM then
-      Result := FModel.Symbols[LSym].Kind;
+      Result := PasTree.Sema.Types.ArgHeadKind(FModel.Symbols[LSym]);
   end;
 
 begin

@@ -1654,6 +1654,37 @@ const
     '  N := nil;'#10 +
     'end;'#10'end.'#10;
 
+  // $J at a typed constant's type (spec 1.3.1): TC / TG are variables,
+  // which the `var` F takes, TD is not (dcc64 37.0: each call binds the TRW
+  // overload). O1 / O2 ($P) are checked in SemaProjectSmoke's
+  // TestSwitchDecls alone: this typer does not reach the open-string rule
+  // for a `string[10]` argument whatever the switch (O2 binds TRA here on
+  // 0.181.2 too).
+  SRC_SWITCH =
+    'program P;'#10 +
+    'type TRA = record A: Integer; end; TRW = record W: Integer; end;'#10 +
+    '  TS10 = string[10];'#10 +
+    'function F(var A: Integer): TRW; overload; begin end;'#10 +
+    'function F(A: Int64): TRA; overload; begin end;'#10 +
+    'function G(var A: Integer): TRA; overload; begin end;'#10 +
+    'function G(A: Int64): TRW; overload; begin end;'#10 +
+    '{$P-}'#10 +
+    'function O1(var S: ShortString): TRA; overload; begin end;'#10 +
+    '{$P+}'#10 +
+    'function O1(const S: string): TRW; overload; begin end;'#10 +
+    'function O2(var S: ShortString): TRW; overload; begin end;'#10 +
+    'function O2(const S: string): TRA; overload; begin end;'#10 +
+    '{$J+}'#10 +
+    'const TC: Integer = 5;'#10 +
+    '{$J-}'#10 +
+    'const TD: Integer = 5;'#10 +
+    'const TG: {$J+} Integer {$J-} = 5;'#10 +
+    'var K: Integer; S10: TS10;'#10 +
+    'begin'#10 +
+    '  K := F(TC).W; K := F(TG).W; K := G(TD).W;'#10 +
+    '  K := O1(S10).W; K := O2(S10).W;'#10 +
+    'end.'#10;
+
 begin
   GSM := TPasSourceManager.Create([]);
   GDefines := TPasDefines.Create(['MSWINDOWS', 'WIN32']);
@@ -1698,6 +1729,12 @@ begin
   Ok('trailing comma: P(1, 2,) without a default and Q(1, 2, 3,) are E2034 x2',
     DiagCount('E2034') = 2);
   Ok('trailing comma: no E2035 anywhere', DiagCount('E2035') = 0);
+  GModel.Free;
+
+  Analyze(SRC_SWITCH);
+  for var LName in ['F', 'G'] do
+    Ok('switches $J: ' + LName + ' binds the TRW overload',
+      HasCallTyped(LName, 'TRW') and not HasCallTyped(LName, 'TRA'));
   GModel.Free;
 
   Analyze(SRC_IDENT);

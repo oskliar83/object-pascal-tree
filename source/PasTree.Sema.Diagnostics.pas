@@ -64,6 +64,10 @@ const
   // note (TSemaDiag.Note) lists the candidates.
   SE2250_NoOverload = 'E2250 There is no overloaded version of ''%s'' ' +
     'that can be called with these arguments';
+  // E2014 names the call's result type: a function called as a statement
+  // under {$X-} (spec 1.3.1).
+  SE2014_StatementExpected =
+    'E2014 Statement expected, but expression of type ''%s'' found';
   // E2251 names the routine as declared; its note lists the tied candidates.
   SE2251_AmbiguousOverload = 'E2251 Ambiguous overloaded call to ''%s''';
   SE2015_OperatorNotApplicable =

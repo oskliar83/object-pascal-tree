@@ -288,6 +288,18 @@ type
     optScopedEnums, optRtti, optVarPropSetter);
   TPasOptions = set of TPasOption;
 
+const
+  { The single-letter switches the analysis reads by position (spec 1.3.1's
+    table): $J (a typed constant declared under it is a variable), $P (a
+    `var` ShortString parameter declared under it is an open string), $T
+    (`@X` is a typed pointer) and $X (a function's implicit Result). Their
+    state is journaled as one mask (TPasPreprocessed.SwitchEvents); every
+    other letter changes no name or type and is read by $IFOPT alone. }
+  PAS_SEMA_SWITCHES = [optJ, optP, optT, optX];
+  // dcc's no-config state of them as a SwitchEvents mask: $J-, $P+, $T-, $X+.
+  PAS_SEMA_SWITCH_DEFAULT = (1 shl Ord(optP)) or (1 shl Ord(optX));
+
+type
   // One LIVE directive that changed the option state - a switch group, a
   // tracked long form, `$PUSHOPT` or `$POPOPT` - in processing order, an
   // include's where its `{$I}` was hit, exactly as TPasDefineRef. Options are
@@ -350,10 +362,12 @@ type
     // {$A}/{$ALIGN} state changes, ascending by VisIndex; empty for the
     // overwhelming majority of units (the default is 8).
     AlignEvents: TArray<TPasStateEvent>;
-    // {$T}/{$TYPEDADDRESS} state changes, Value 1 / 0, ascending by
-    // VisIndex: what @X types as (4.8 - a typed `^T` when on). Empty for
-    // nearly every unit (the default is off).
-    TypedAddressEvents: TArray<TPasStateEvent>;
+    // The PAS_SEMA_SWITCHES state, Value a mask (bit Ord(optX) set when the
+    // letter is on), ascending by VisIndex: an event wherever one of them
+    // changes, and one at the first token when the start state is not dcc's
+    // default (PAS_SEMA_SWITCH_DEFAULT). Empty for nearly every unit. Read
+    // through SwitchAt.
+    SwitchEvents: TArray<TPasStateEvent>;
     // {$APPTYPE} directives taken, ascending by VisIndex - see
     // TPasAppTypeEvent. Retained across DemoteText (it is not text).
     AppTypeEvents: TArray<TPasAppTypeEvent>;
@@ -394,8 +408,10 @@ type
     function MinEnumSizeAt(AVisIndex: Integer): Integer;
     // The record field-alignment CAP in effect at AVisIndex (8 = the default).
     function AlignAt(AVisIndex: Integer): Integer;
-    // Is {$T+} / {$TYPEDADDRESS ON} in effect at visible token AVisIndex?
-    function TypedAddressAt(AVisIndex: Integer): Boolean;
+    // Is the switch AOption (one of PAS_SEMA_SWITCHES) on at visible token
+    // AVisIndex? `@X` reads $T at the `@`, a typed constant $J at its name,
+    // a parameter $P at its name, a routine's Result $X at its block.
+    function SwitchAt(AVisIndex: Integer; AOption: TPasOption): Boolean;
     // The last {$APPTYPE} taken before visible position AVisIndex: False
     // when there is none, else AConsole says which.
     function AppTypeBefore(AVisIndex: Integer; out AConsole: Boolean): Boolean;
@@ -507,9 +523,10 @@ type
     FScopedEnumsEvents: TList<TPasStateEvent>;
     FMinEnumEvents: TList<TPasStateEvent>;
     FAlignEvents: TList<TPasStateEvent>;
-    // {$T} - journaled by AddOptionRef, which sees every option change.
-    FTypedAddressEvents: TList<TPasStateEvent>;
-    FTypedAddress: Boolean;
+    // PAS_SEMA_SWITCHES - journaled by AddOptionRef, which sees every option
+    // change; FSemaSwitches is the mask last journaled.
+    FSwitchEvents: TList<TPasStateEvent>;
+    FSemaSwitches: Integer;
     FDefineRefs: TList<TPasDefineRef>;
     FDefineNames: TPasSpellingPool;   // DefineRefs' Name, across runs
     FIncludeRefs: TList<TPasIncludeRef>;
@@ -693,6 +710,9 @@ type
   Y+, `-$A4` A+, `-$A1` A-, `-$Z2` Z+. An argument the rules do not read
   changes nothing. }
 function PasStartOptState(const ASwitches: array of string): TPasOptState;
+
+{ The PAS_SEMA_SWITCHES of ASwitches as a SwitchEvents mask. }
+function PasSemaSwitchMask(const ASwitches: TPasSwitchState): Integer;
 
 { AOption's value in AState as its long form takes it: ON / OFF, the byte
   count of ALIGN and MINENUMSIZE, the RTTI clause (its mode word and each
@@ -948,9 +968,21 @@ begin
   Result := StateAt(AlignEvents, AVisIndex, 8);   // {$A8}
 end;
 
-function TPasPreprocessed.TypedAddressAt(AVisIndex: Integer): Boolean;
+function TPasPreprocessed.SwitchAt(AVisIndex: Integer;
+  AOption: TPasOption): Boolean;
 begin
-  Result := StateAt(TypedAddressEvents, AVisIndex, 0) <> 0;   // {$T-}
+  Result := StateAt(SwitchEvents, AVisIndex, PAS_SEMA_SWITCH_DEFAULT) and
+    (1 shl Ord(AOption)) <> 0;
+end;
+
+function PasSemaSwitchMask(const ASwitches: TPasSwitchState): Integer;
+var
+  LOpt: TPasOption;
+begin
+  Result := 0;
+  for LOpt in PAS_SEMA_SWITCHES do
+    if ASwitches[Chr(Ord('A') + Ord(LOpt))] then
+      Result := Result or (1 shl Ord(LOpt));
 end;
 
 { TPasSpellingPool ----------------------------------------------------------- }
@@ -1099,7 +1131,7 @@ begin
   FScopedEnumsEvents := TList<TPasStateEvent>.Create;
   FMinEnumEvents := TList<TPasStateEvent>.Create;
   FAlignEvents := TList<TPasStateEvent>.Create;
-  FTypedAddressEvents := TList<TPasStateEvent>.Create;
+  FSwitchEvents := TList<TPasStateEvent>.Create;
   FDefineRefs := TList<TPasDefineRef>.Create;
   FIncludeRefs := TList<TPasIncludeRef>.Create;
   FIfNameRefs := TList<TPasIfNameRef>.Create;
@@ -1373,7 +1405,7 @@ begin
   FScopedEnumsEvents.Free;
   FMinEnumEvents.Free;
   FAlignEvents.Free;
-  FTypedAddressEvents.Free;
+  FSwitchEvents.Free;
   FAppTypeEvents.Free;
   FDefineRefs.Free;
   FIncludeRefs.Free;
@@ -1478,7 +1510,7 @@ begin
   FScopedEnumsEvents.Clear;
   FMinEnumEvents.Clear;
   FAlignEvents.Clear;
-  FTypedAddressEvents.Clear;
+  FSwitchEvents.Clear;
   FDefineRefs.Clear;
   FIncludeRefs.Clear;
   FIfNameRefs.Clear;
@@ -1489,9 +1521,9 @@ begin
   // answer it - the setters record only a change.
   SetMinEnumSize(FStartState.MinEnumSize);
   SetAlign(FStartState.Align);
-  FTypedAddress := FOpt.Switches['T'];
-  if FTypedAddress then
-    Journal(FTypedAddressEvents, 1);
+  FSemaSwitches := PasSemaSwitchMask(FOpt.Switches);
+  if FSemaSwitches <> PAS_SEMA_SWITCH_DEFAULT then
+    Journal(FSwitchEvents, FSemaSwitches);
   FLiveAsm := False;
   FLastVisKind := tkEndOfFile;
   FStopped := False;
@@ -1540,7 +1572,7 @@ begin
   Result.UnresolvedSymbols := FUnresolvedSymbols.ToArray;
   Result.MinEnumEvents := FMinEnumEvents.ToArray;
   Result.AlignEvents := FAlignEvents.ToArray;
-  Result.TypedAddressEvents := FTypedAddressEvents.ToArray;
+  Result.SwitchEvents := FSwitchEvents.ToArray;
   Result.AppTypeEvents := FAppTypeEvents.ToArray;
   Result.DefineRefs := FDefineRefs.ToArray;
   Result.IncludeRefs := FIncludeRefs.ToArray;
@@ -2028,10 +2060,11 @@ begin
     LRef.Touched := [];
   LRef.State := FOpt;
   FOptionRefs.Add(LRef);
-  if FOpt.Switches['T'] <> FTypedAddress then
+  var LMask := PasSemaSwitchMask(FOpt.Switches);
+  if LMask <> FSemaSwitches then
   begin
-    FTypedAddress := FOpt.Switches['T'];
-    Journal(FTypedAddressEvents, Ord(FTypedAddress));
+    FSemaSwitches := LMask;
+    Journal(FSwitchEvents, LMask);
   end;
 end;
 

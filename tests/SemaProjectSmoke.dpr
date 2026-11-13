@@ -12829,6 +12829,170 @@ begin
   end;
 end;
 
+// The switches that change a name or a type at a declaration (spec 1.3.1's
+// table), across a unit boundary: $J at a typed constant's type - TC and TG
+// are variables, which `F(var A: Integer)` takes over `F(A: Int64)`, TD is
+// not; $P after a parameter's type - O1's `var S: ShortString` is no open
+// string, so a `string[10]` takes `const S: string`, O2's is; $X at a
+// function's body - XA declares a local Result (no E2004), XB's body begins
+// under $X+ and has one, TK.M's Result is its field, XC's `Result` is
+// E2003 and its calls of the function XA as statements E2014 ('Integer').
+// Each overload returns a record whose field names it (`.W` / `.A`), so a
+// wrong binding is an E2003 for the member; XD's `PC := A` of a zero-based
+// Char array is E2010 where $X- is in effect after the value. The program
+// compiles with dcc64 37.0 but for XC's three lines and XD's two.
+procedure TestSwitchDecls;
+const
+  SRC_UNIT =
+    'unit SwU;'#10 +
+    'interface'#10 +
+    'type TRA = record A: Integer; end; TRW = record W: Integer; end;'#10 +
+    '  TS10 = string[10];'#10 +
+    '  TK = class Result: Integer; function M: Integer; end;'#10 +
+    'function F(var A: Integer): TRW; overload;'#10 +
+    'function F(A: Int64): TRA; overload;'#10 +
+    '{$P-}'#10 +
+    'function O1(var S: ShortString): TRA; overload;'#10 +
+    '{$P+}'#10 +
+    'function O1(const S: string): TRW; overload;'#10 +
+    'function O2(var S: ShortString): TRW; overload;'#10 +
+    'function O2(const S: string): TRA; overload;'#10 +
+    '{$J+}'#10 +
+    'const TC: Integer = 5;'#10 +
+    '{$J-}'#10 +
+    'const TD: Integer = 5;'#10 +
+    'const TG: {$J+} Integer {$J-} = 5;'#10 +
+    'implementation'#10 +
+    'function F(var A: Integer): TRW; begin end;'#10 +
+    'function F(A: Int64): TRA; begin end;'#10 +
+    '{$P-}'#10 +
+    'function O1(var S: ShortString): TRA; begin end;'#10 +
+    '{$P+}'#10 +
+    'function O1(const S: string): TRW; begin end;'#10 +
+    'function O2(var S: ShortString): TRW; begin end;'#10 +
+    'function O2(const S: string): TRA; begin end;'#10 +
+    '{$X-}'#10 +
+    'function XA: Integer;'#10 +
+    'var Result: Integer;'#10 +
+    'begin XA := 1; Result := 2; end;'#10 +
+    'function XB: Integer;'#10 +
+    '{$X+}'#10 +
+    'begin Result := 1; end;'#10 +
+    'function TK.M: Integer;'#10 +
+    '{$X-}'#10 +
+    'begin Result := 1; M := 2; end;'#10 +
+    'function XC: Integer;'#10 +
+    'begin'#10 +
+    '  XC := 0;'#10 +
+    '  Result := 1;'#10 +       // 41: E2003
+    '  XA;'#10 +                // 42: E2014
+    '  XA();'#10 +              // 43: E2014
+    'end;'#10 +
+    'procedure XD;'#10 +
+    'type TCA = array[0..3] of Char; var A: TCA; PC: PChar;'#10 +
+    'begin'#10 +
+    '  PC := A;'#10 +           // 48: E2010
+    '  {$X+} PC := A;'#10 +
+    '  PC := A {$X-};'#10 +     // 50: E2010
+    'end;'#10 +
+    'type TK2 = class(TK) function N: Integer; end; TF = function: Integer;'#10 +
+    'function TK2.N: Integer;'#10 +
+    'begin N := 0; inherited M; end;'#10 +   // 54: E2014
+    'procedure XE(R: TF);'#10 +
+    'begin R; end;'#10 +                      // 56: E2014
+    'end.'#10;
+  SRC_PROG =
+    'program SwP;'#10 +
+    'uses SwU;'#10 +
+    'var K: Integer; S10: TS10;'#10 +
+    'begin'#10 +
+    '  K := F(TC).W;'#10 +
+    '  K := F(TD).A;'#10 +
+    '  K := F(TG).W;'#10 +
+    '  K := O1(S10).W;'#10 +
+    '  K := O2(S10).W;'#10 +
+    'end.'#10;
+var
+  LDir, LLines: string;
+begin
+  LDir := FreshDir('pastree_sema_switchdecls');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    '  TArray<T> = array of T;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'SwU.pas'), SRC_UNIT);
+  TFile.WriteAllText(TPath.Combine(LDir, 'SwP.dpr'), SRC_PROG);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'SwP.dpr'));
+    LLines := '';
+    for var LD in ModelByName('swp').Diags do
+      LLines := LLines + ' ' + LD.Code + '@' + IntToStr(LD.Line);
+    Ok('switch decls: $J / $P bind dcc''s overloads [' + LLines + ' ]',
+      Length(ModelByName('swp').Diags) = 0);
+    LLines := '';
+    for var LD in ModelByName('swu').Diags do
+      LLines := LLines + ' ' + LD.Code + '@' + IntToStr(LD.Line);
+    Ok('switch decls: $X - XC''s Result is E2003, its XA statements ' +
+      'E2014, XD''s array for a PChar E2010 where $X- follows it, ' +
+      '`inherited M;` and a function variable''s call E2014 [' +
+      LLines + ' ]', (Length(ModelByName('swu').Diags) = 7) and
+      (Pos(' E2003@41', LLines) > 0) and (Pos(' E2014@42', LLines) > 0) and
+      (Pos(' E2014@43', LLines) > 0) and (Pos(' E2010@48', LLines) > 0) and
+      (Pos(' E2014@54', LLines) > 0) and (Pos(' E2014@56', LLines) > 0) and
+      (Pos(' E2010@50', LLines) > 0));
+    Ok('switch decls: E2014 names the result type',
+      DiagHasText(ModelByName('swu'), 'E2014', 'expression of type ''Integer'''));
+  finally
+    GProj.Free;
+  end;
+  // A switch edit is an edit of what the unit computes, with no declaration
+  // reading other tokens: incremental reanalysis must see it. Each step
+  // edits SwU alone, runs AnalyzeModuleOnly and must equal a fresh build -
+  // and differ from the step before, so the step is a real change.
+  var LUnit := TPath.Combine(LDir, 'SwU.pas');
+  var LApp := TPath.Combine(LDir, 'SwP.dpr');
+  var LTexts: TArray<string> := [
+    // $J: TC is a constant now - F(TC) binds the Int64 overload.
+    SRC_UNIT.Replace('{$J+}'#10'const TC', '{$J-}'#10'const TC'),
+    // $P: O1's `var S: ShortString` is an open string now.
+    SRC_UNIT.Replace('{$J+}'#10'const TC', '{$J-}'#10'const TC')
+      .Replace('{$P-}'#10'function O1(var S: ShortString): TRA; overload;',
+        '{$P+}'#10'function O1(var S: ShortString): TRA; overload;'),
+    // $X: XC's body begins under $X+ - its Result is declared.
+    SRC_UNIT.Replace('{$J+}'#10'const TC', '{$J-}'#10'const TC')
+      .Replace('{$P-}'#10'function O1(var S: ShortString): TRA; overload;',
+        '{$P+}'#10'function O1(var S: ShortString): TRA; overload;')
+      .Replace('function XC: Integer;'#10'begin',
+        'function XC: Integer;'#10'{$X+}'#10'begin')];
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeProject(LApp);
+    var LPrev := ProjSig(GProj);
+    for var LStep := 0 to High(LTexts) do
+    begin
+      Ok('switch decls: step ' + IntToStr(LStep) + ' edits the unit',
+        LTexts[LStep] <> SRC_UNIT);
+      GProj.SetBuffer(LUnit, LTexts[LStep], LStep + 1);
+      var LRan := GProj.AnalyzeModuleOnly(LUnit);
+      var LSig := ProjSig(GProj);
+      Ok('switch decls: step ' + IntToStr(LStep) + ' is a module run [' +
+        GProj.StageTimings + ']', LRan);
+      Ok('switch decls: step ' + IntToStr(LStep) + ' equals a fresh build',
+        LSig = FreshSig(LApp, [LDir], [LUnit], [LTexts[LStep]]));
+      Ok('switch decls: step ' + IntToStr(LStep) + ' changed the analysis',
+        LSig <> LPrev);
+      LPrev := LSig;
+    end;
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // E2010 beyond the assignment statement, and the note a record conversion's
 // E2010 carries (2.6.1, 9.3.1; local/type-conv-2026-11/diag): an
 // initialized global, a typed constant, an inline variable with a type, a
@@ -19899,6 +20063,7 @@ begin
   TestOverloadTies;
   TestAssignConv;
   TestTypedAddrAssignX;
+  TestSwitchDecls;
   TestConvDiags;
   TestHelperOverloadSet;
   TestOperatorTable;

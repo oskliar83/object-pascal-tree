@@ -86,10 +86,16 @@ type
   // (`override`) with it: an override set never hides the ancestor's
   // overloads (local/probe-b33 O1: TDer's lone `Foo(X: Integer); override;`
   // leaves TBase's `Foo(const S: string)` callable through a TDer).
+  // sfWriteableConst: a typed constant whose type begins under {$J+} - a
+  // variable, which a `var` / `out` parameter takes (spec 1.3.1, 3.2.2).
+  // sfFixedString: a parameter whose type is followed by {$P-} - a `var`
+  // ShortString one is no open string (spec 1.3.1, 6.2.2). Both are set in
+  // Phase 1 from the switch journal, so an edit of the switch changes the
+  // symbol and the interface comparison sees it.
   TSemaSymbolFlag = (sfBuiltin, sfExternalUnresolved, sfStrict, sfOverload,
     sfClassMember, sfForward, sfHasBody, sfHasDefault, sfGeneric, sfVarArgs,
     sfDefaultArrayProp, sfInline, sfOverloadDirective, sfOverrideDirective,
-    sfCompletesForward);
+    sfCompletesForward, sfWriteableConst, sfFixedString);
   TSemaSymbolFlags = set of TSemaSymbolFlag;
 
   // A reference resolved to a symbol in another unit's model.
@@ -1072,6 +1078,15 @@ function SemaSliceKey(AText: PChar; ALen: Integer): TSemaKey;
   TPasTree.NodeNameLower's key, not built. Empty (Len 0) where NodeNameLower
   answers '' (no such node, no token layer). }
 function PasNodeKey(const ATree: TPasTree; ANode: Integer): TSemaKey;
+{ Has the function ANode of ATree (a routine or a literal, the node holding
+  its nkRoutineBody) no implicit Result - $X- at its body's first token, its
+  first declaration or its `begin` (spec 1.3.1)? A routine without a body:
+  False. With AInside, ANode is any node and the innermost routine body
+  around it is asked (False outside every body). The resolver declares no
+  Result then, and the project reports a `Result` nothing binds there as
+  E2003, as dcc does. }
+function PasResultWithheld(const ATree: TPasTree; ANode: Integer;
+  AInside: Boolean): Boolean;
 { TPasTree.NodeNameLower(ANode) = ANameLower (a key string), with no string
   built and no hash taken: the length decides most nodes alone - for a scan
   that tests node after node against one name. }
@@ -1191,6 +1206,29 @@ var
 begin
   ATree.NodeSlice(ANode, LText, LLen);
   Result := SemaSliceKey(LText, LLen);
+end;
+
+function PasResultWithheld(const ATree: TPasTree; ANode: Integer;
+  AInside: Boolean): Boolean;
+var
+  LBody: Integer;
+begin
+  if (Length(ATree.Source.SwitchEvents) = 0) or (ANode = NIL_NODE) then
+    Exit(False);
+  if AInside then
+  begin
+    LBody := ANode;
+    while (LBody <> NIL_NODE) and (ATree.Nodes[LBody].Kind <> nkRoutineBody) do
+      LBody := ATree.Nodes[LBody].Parent;
+  end
+  else
+  begin
+    LBody := ATree.Nodes[ANode].FirstChild;
+    while (LBody <> NIL_NODE) and (ATree.Nodes[LBody].Kind <> nkRoutineBody) do
+      LBody := ATree.Nodes[LBody].NextSibling;
+  end;
+  Result := (LBody <> NIL_NODE) and
+    not ATree.Source.SwitchAt(ATree.Nodes[LBody].FirstToken, optX);
 end;
 
 function PasNodeNameIs(const ATree: TPasTree; ANode: Integer;
