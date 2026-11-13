@@ -19588,6 +19588,29 @@ var
     if (ADstX.UnitId = ASrcX.UnitId) and (ADstX.Sym = ASrcX.Sym) and
        (ADstX.Inst = ASrcX.Inst) then
       Exit(scIdentical);
+    // `@X` under {$T+} at the `@` is a typed pointer to X's type (4.8), an
+    // unnamed type the type test cannot compare: for a pointer target it
+    // goes to the typed pointers of X's type and to Pointer, `@` of a
+    // routine or a procedural variable to Pointer alone - the argument's
+    // rule (AddrArgFitX), as an assignment converts as a lone value
+    // parameter does (`PB := @I`, `PI := @F` are E2010). Under {$T-} it is
+    // Pointer, which the type test takes.
+    if Length(LM.Tree.Source.TypedAddressEvents) > 0 then
+    begin
+      LCore := PeelParens(LM.Tree, ASrc);
+      LDst := CanonTypeX(ADstX);
+      if (LCore <> NIL_NODE) and IsAddrOfExpr(LM.Tree, LCore, LOpd) and
+         (LOpd <> NIL_NODE) and LM.AnonTypeSyms.ContainsKey(LCore) and
+         XValid(LDst) and (XCatOf(LDst) = tcPointer) then
+      begin
+        var LRank: Integer;
+        LRoutine := TargetSym(LOpd, LMid, LSym) and
+          (FModels[LMid].Symbols[LSym].Kind = skRoutine);
+        if AddrArgFitX(LDst, GetX(LOpd), LRoutine, LRank) = -1 then
+          Exit(TSemaConv.scNone);
+        Exit(scMaybe);
+      end;
+    end;
     Result := XConvX(ADstX, ASrcX);
     if Result <> TSemaConv.scNone then
       Exit;
@@ -19653,9 +19676,12 @@ var
       else
         Exit;
       end;
+    // Two pointers under {$T+} at the statement: typed ones of one base
+    // meet, of two bases do not (`PB := PI` is E2010 either way; 10.1.2).
     if (D = tcPointer) and (S = tcPointer) and
        (Length(LM.Tree.Source.TypedAddressEvents) > 0) and
-       LM.Tree.Source.TypedAddressAt(LM.Tree.Nodes[AAssign].FirstToken) then
+       LM.Tree.Source.TypedAddressAt(LM.Tree.Nodes[AAssign].FirstToken) and
+       (TypedPointersMeetX(LDst, LSrc, True) <> -1) then
       Exit;
     Result := TSemaConv.scNone;
   end;
@@ -19933,8 +19959,10 @@ var
          (LDc.Sym = LSc.Sym) then
         Exit;
       Result := True;
-      // dcc names the nil literal's type `Pointer`.
-      if XCatOf(ASrcX) = tcNil then
+      // dcc names the nil literal's type `Pointer`, and `@X`'s under {$T+}
+      // (4.8: `'PB' and 'Pointer'` for `PB := @I`).
+      if (XCatOf(ASrcX) = tcNil) or
+         LM.AnonTypeSyms.ContainsKey(PeelParens(LM.Tree, ASrc)) then
         LSrcName := 'Pointer'
       else
         LSrcName := XTypeText(ASrcX);

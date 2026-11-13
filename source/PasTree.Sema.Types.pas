@@ -9989,6 +9989,26 @@ end;
 procedure TPasSemaTyper.CheckAssign(N: Integer);
 var
   LDst, LSrc, LDstT, LSrcT: Integer;
+  LAddrRejected: Boolean;
+
+  { `@X` under $T+ at the `@` (an AnonTypeSyms entry) for a pointer
+    target that refuses it - the argument's rule (AddrArgFit), as the
+    project's AssignConvX: typed Pointer here, it goes to the typed pointers
+    of X's type and to Pointer, `@` of a routine to Pointer alone (4.8). }
+  function AddrRejected: Boolean;
+  var
+    LCore, LOpd, LRank: Integer;
+  begin
+    Result := False;
+    LCore := PeelParens(T, LSrc);
+    if (LCore = NIL_NODE) or not IsAddrOfExpr(T, LCore, LOpd) or
+       (LOpd = NIL_NODE) or not M.AnonTypeSyms.ContainsKey(LCore) or
+       (CatOf(WeakAliasEnd(LDstT)) <> tcPointer) then
+      Exit;
+    Result := FConv.AddrArgFit(FConv.Canon(UX(LDstT)), UX(M.IntraType(LOpd)),
+      (Kind(LOpd) in [nkIdent, nkMember]) and (Head(LOpd) <> NIL_SYM) and
+      (M.Symbols[Head(LOpd)].Kind = skRoutine), LRank) = -1;
+  end;
 
   { The rules a VALUE has and its type does not - the project's AssignConvX
     over this unit's bindings: no verdict for a type name, `@X`, a `[...]`,
@@ -10052,7 +10072,8 @@ var
       end;
     if (D = tcPointer) and (S = tcPointer) and
        (Length(T.Source.TypedAddressEvents) > 0) and
-       T.Source.TypedAddressAt(T.Nodes[N].FirstToken) then
+       T.Source.TypedAddressAt(T.Nodes[N].FirstToken) and
+       (FConv.TypedPointersMeet(UX(LDstT), UX(LSrcT), True) <> -1) then
       Exit;
     Result := False;
   end;
@@ -10125,12 +10146,13 @@ begin
   // named `Word`.
   if IsTypeNameOperand(LDst) or IsTypeNameOperand(LSrc) then
     Exit;
-  if not Assignable(LDstT, LSrcT) and not ValueWithheld and
+  LAddrRejected := AddrRejected;
+  if (LAddrRejected or not Assignable(LDstT, LSrcT) and not ValueWithheld) and
      not Unreliable(LDst, LDstT) and not Unreliable(LSrc, LSrcT) then
   begin
     // dcc names the nil literal's type `Pointer`; the seed is `_nil`.
     var LSrcName := M.Symbols[LSrcT].Name;
-    if CatOf(LSrcT) = tcNil then
+    if (CatOf(LSrcT) = tcNil) or LAddrRejected then
       LSrcName := 'Pointer';
     Diag('E2010', Format(SE2010_IncompatibleTypes,
       [M.Symbols[LDstT].Name, LSrcName]), LSrc);
