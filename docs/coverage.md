@@ -316,9 +316,9 @@ of less work, not a gap in following the language; its consequences are in
   completes the one declaration all of whose other slots match, and
   stays a routine of its own when two are as likely (the resolver's
   CompletionOf).
-- overload resolution is a conservative
-  arity-plus-assignability score, not formal betterness ranking; ties go to
-  the first candidate. A tie between candidates with DIFFERENT result types
+- overload resolution ranks each argument's conversion by the
+  type-conversion rules (ConvRank, TSemaConvView - spec 6.3.1's tables);
+  a tie goes to the first candidate. A tie between candidates with DIFFERENT result types
   is recorded (CrossType's LAmbig) and refuses inline-var inference from the
   call, but the call node itself still carries the first candidate's type.
   A few corners are decided rather than scored: a scalar argument (integer,
@@ -337,9 +337,7 @@ of less work, not a gap in following the language; its consequences are in
   candidate is rejected stays untyped in the unit pass. Both scorers share
   these rules (Sema.Types: ArgShapeRejects, ArgCatRejects, ArgStructRejects,
   IsCharLiteralExpr, CallArgCount). Other non-assignable scalar pairs (a Boolean argument for a
-  Cardinal parameter) are scored 0, not rejected, and a helper's overloads
-  are not merged with the extended type's own (`TGUID.Create` from
-  TGUIDHelper binds a helper overload, not System's). A
+  Cardinal parameter) are scored 0, not rejected. A
   distinct alias (`TId = type Integer`) is still only "assignable" from its
   base, so it wins over an overload the argument fits no better, not over
   an exact one. A `[...]` argument (set, open array or dynamic array
