@@ -25078,6 +25078,17 @@ begin
       Exit(AE);
     if XDescendsFrom(LE, LT) then
       Exit(AT);
+    // Siblings meet in their nearest common ancestor (`C1 else C2` of two
+    // TB descendants TB, unrelated classes TObject; dcc64 37.0, 2026-11-13).
+    var LA := AncestorOfX(LT);
+    for var LStep := 1 to 32 do
+    begin
+      if not XValid(LA) or (XCatOf(CanonTypeX(LA)) <> tcClass) then
+        Exit;
+      if XDescendsFrom(LE, LA) then
+        Exit(LA);
+      LA := AncestorOfX(LA);
+    end;
     Exit;
   end;
   Result := OpAnswerX(AMid, InlineIfAnswer(OpFactsX(AMid, AThen, LT),
