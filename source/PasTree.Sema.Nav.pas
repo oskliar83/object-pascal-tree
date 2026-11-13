@@ -4140,6 +4140,7 @@ begin
   LStart.ScopedEnums := LDefault.ScopedEnums;
   LStart.Rtti := LDefault.Rtti;
   LStart.VarPropSetter := LDefault.VarPropSetter;
+  LStart.LegacyIfEnd := LDefault.LegacyIfEnd;
   LState := LStart;
   for LOpt := Low(TPasOption) to High(TPasOption) do
     LOrigins[LOpt] := -1;

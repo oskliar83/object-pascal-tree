@@ -56,8 +56,12 @@ type
     ppUnsupportedInsertion,   // no longer reported: dcc reads {$I %VAR%}
                               // as a file name (audit B63)
     ppPopWithoutPush,
-    ppCrossIncludeConditional // an include's $ELSE/$ELSEIF/$ENDIF/$IFEND
+    ppCrossIncludeConditional, // an include's $ELSE/$ELSEIF/$ENDIF/$IFEND
                               // on a conditional its includer opened
+    ppWrongConditionalEnd     // under {$LEGACYIFEND ON}: an $IF closed by
+                              // $ENDIF or an $IFDEF by $IFEND - dcc's E2029;
+                              // Detail is the closer expected ('$IFEND' or
+                              // '$ENDIF'). It closes all the same (1.3.2)
   );
 
   TPasSymbolQuery = (sqConstValue, sqSizeOfType, sqLengthOf, sqDeclared,
@@ -276,6 +280,7 @@ type
     ScopedEnums: Boolean;
     Rtti: TPasRttiState;
     VarPropSetter: Boolean;
+    LegacyIfEnd: Boolean;   // {$LEGACYIFEND ON}: each opener takes its own closer
     MinEnumSize: Integer;
     Align: Integer;
   end;
@@ -285,7 +290,7 @@ type
   // too) or a long-form-only one.
   TPasOption = (optA, optB, optC, optD, optE, optF, optG, optH, optI, optJ, optK, optL,
     optM, optN, optO, optP, optQ, optR, optS, optT, optU, optV, optW, optX, optY, optZ,
-    optScopedEnums, optRtti, optVarPropSetter);
+    optScopedEnums, optRtti, optVarPropSetter, optLegacyIfEnd);
   TPasOptions = set of TPasOption;
 
 const
@@ -430,7 +435,7 @@ const
     'TYPEINFO', '', 'OPTIMIZATION', 'OPENSTRINGS', 'OVERFLOWCHECKS',
     'RANGECHECKS', 'STACKCHECKS', 'TYPEDADDRESS', 'SAFEDIVIDE',
     'VARSTRINGCHECKS', 'STACKFRAMES', 'EXTENDEDSYNTAX', 'REFERENCEINFO',
-    'MINENUMSIZE', 'SCOPEDENUMS', 'RTTI', 'VARPROPSETTER');
+    'MINENUMSIZE', 'SCOPEDENUMS', 'RTTI', 'VARPROPSETTER', 'LEGACYIFEND');
 
 type
   TPasDefines = class
@@ -497,18 +502,22 @@ type
       lsOpenStrings, lsAssertions, lsDebugInfo, lsLocalSymbols,
       lsReferenceInfo, lsTypeInfo, lsDefinitionInfo, lsStackChecks, lsYD,
       lsAppType, lsImportedData, lsVarStringChecks, lsScopedEnums, lsRtti,
-      lsMinEnumSize, lsAlign, lsVarPropSetter);
+      lsMinEnumSize, lsAlign, lsVarPropSetter, lsLegacyIfEnd);
   private type
     // One open conditional: whether the code around it is live
     // (ParentActive), whether a branch has been taken (AnyTaken), whether the
     // current branch is live (ThisActive) and whether an $ELSE was met; and
     // its opening directive (OpenFile, OpenStart, OpenLen) for the
-    // unterminated-conditional diagnostics.
+    // unterminated-conditional diagnostics. WantsIfEnd: the closer
+    // {$LEGACYIFEND ON} requires is $IFEND - an $IF opened it, or an
+    // $ELSEIF continued it (dcc64 37.0: `{$IFDEF X}{$ELSEIF Y}{$ENDIF}` is
+    // E2029 there, 1.3.2).
     TCondFrame = record
       ParentActive: Boolean;
       AnyTaken: Boolean;
       ThisActive: Boolean;
       SeenElse: Boolean;
+      WantsIfEnd: Boolean;
       OpenFile: Integer;
       OpenStart: Integer;
       OpenLen: Integer;
@@ -588,7 +597,7 @@ type
     { Opens a conditional at AToken: the code around it live or not
       (AParent), its first branch taken or not. }
     procedure PushCond(AFileId: Integer; const AToken: TPasToken;
-      AParent, ATaken: Boolean);
+      AParent, ATaken, AWantsIfEnd: Boolean);
     procedure CheckCrossInclude(AFileId: Integer; const AToken: TPasToken;
       ATop: Integer);
     procedure ResetOptions;
@@ -733,7 +742,8 @@ const
     'Insertion form {$I %...%} is not supported',
     '$POPOPT without $PUSHOPT',
     'Conditional directive acts on a conditional opened outside this ' +
-      'include file'
+      'include file',
+    '$IF closed by $ENDIF, or $IFDEF by $IFEND, under {$LEGACYIFEND ON}'
   );
 
 implementation
@@ -835,7 +845,8 @@ const
     'STACKFRAMES', 'SAFEDIVIDE', 'OPENSTRINGS', 'ASSERTIONS', 'DEBUGINFO',
     'LOCALSYMBOLS', 'REFERENCEINFO', 'TYPEINFO', 'DEFINITIONINFO',
     'STACKCHECKS', 'YD', 'APPTYPE', 'IMPORTEDDATA', 'VARSTRINGCHECKS',
-    'SCOPEDENUMS', 'RTTI', 'MINENUMSIZE', 'ALIGN', 'VARPROPSETTER');
+    'SCOPEDENUMS', 'RTTI', 'MINENUMSIZE', 'ALIGN', 'VARPROPSETTER',
+    'LEGACYIFEND');
 
 // The long switch the word AText/ALen names (any case), lsNone for any other
 // - a length test first, so a passthrough word builds no string and compares
@@ -1371,6 +1382,7 @@ begin
     optZ: Result := IntToStr(AState.MinEnumSize);
     optScopedEnums: Result := OnOff(AState.ScopedEnums);
     optVarPropSetter: Result := OnOff(AState.VarPropSetter);
+    optLegacyIfEnd: Result := OnOff(AState.LegacyIfEnd);
     optRtti:
       begin
         if AState.Rtti.Mode = rmInherit then
@@ -1869,14 +1881,14 @@ begin
     LArg := SymbolArg;
     AddSymbolRef(LArg, drIfdef, LParent);
     LTaken := LParent and FDefines.IsDefined(LArg);
-    PushCond(AFileId, AToken, LParent, LTaken);
+    PushCond(AFileId, AToken, LParent, LTaken, False);
   end
   else if LKind = pdIfndef then
   begin
     LArg := SymbolArg;
     AddSymbolRef(LArg, drIfndef, LParent);
     LTaken := LParent and not FDefines.IsDefined(LArg);
-    PushCond(AFileId, AToken, LParent, LTaken);
+    PushCond(AFileId, AToken, LParent, LTaken, False);
   end
   else if LKind = pdIf then
   begin
@@ -1888,7 +1900,7 @@ begin
       LTaken := False;
       RecordUnevaluatedIf(LArg, AFileId, LArgStart, LParent);
     end;
-    PushCond(AFileId, AToken, LParent, LTaken);
+    PushCond(AFileId, AToken, LParent, LTaken, True);
   end
   else if LKind = pdIfopt then
   begin
@@ -1901,7 +1913,7 @@ begin
       LWant := LArg[2] = '+';
       LTaken := LParent and (FOpt.Switches[LSwitch] = LWant);
     end;
-    PushCond(AFileId, AToken, LParent, LTaken);
+    PushCond(AFileId, AToken, LParent, LTaken, False);
   end
   else if LKind = pdElseif then
   begin
@@ -1925,6 +1937,7 @@ begin
       // The list again, not a pointer kept across the evaluation: a
       // `Declared` query may recurse into another file's processing.
       FCond.List[LTop].ThisActive := LTaken;
+      FCond.List[LTop].WantsIfEnd := True;
       if LTaken then
         FCond.List[LTop].AnyTaken := True;
     end;
@@ -1956,6 +1969,18 @@ begin
       Diag(ppUnbalancedEndif, AFileId, AToken.Start, AToken.Len)
     else
     begin
+      // {$LEGACYIFEND ON} at the closer: an $IF (or $ELSEIF) chain takes
+      // $IFEND, the others $ENDIF; the wrong one is E2029 and still closes
+      // - in a dead branch too (1.3.2, dcc64 37.0). LNameLen 5 is either
+      // word; an `I` starts $IFEND.
+      if FOpt.LegacyIfEnd and
+         (FCond.List[LTop].WantsIfEnd <> CharInSet(LText^, ['I', 'i'])) then
+        if FCond.List[LTop].WantsIfEnd then
+          Diag(ppWrongConditionalEnd, AFileId, AToken.Start, AToken.Len,
+            '$IFEND')
+        else
+          Diag(ppWrongConditionalEnd, AFileId, AToken.Start, AToken.Len,
+            '$ENDIF');
       FCond.Delete(LTop);
       if LTop < FCondBase then
         FCondBase := LTop;
@@ -2170,7 +2195,7 @@ begin
 end;
 
 procedure TPasPreprocessor.PushCond(AFileId: Integer; const AToken: TPasToken;
-  AParent, ATaken: Boolean);
+  AParent, ATaken, AWantsIfEnd: Boolean);
 var
   LFrame: TCondFrame;
 begin
@@ -2178,6 +2203,7 @@ begin
   LFrame.AnyTaken := ATaken;
   LFrame.ThisActive := ATaken;
   LFrame.SeenElse := False;
+  LFrame.WantsIfEnd := AWantsIfEnd;
   LFrame.OpenFile := AFileId;
   LFrame.OpenStart := AToken.Start;
   LFrame.OpenLen := AToken.Len;
@@ -2324,6 +2350,16 @@ begin
       Exit;
     FOpt.VarPropSetter := LOn;
     Include(FTouched, optVarPropSetter);
+  end
+  else if AKind = lsLegacyIfEnd then
+  begin
+    // 1.3.2. Read at each closer, not at its opener: `{$IF X}{$LEGACYIFEND
+    // ON}{$ENDIF}` is E2029. {$PUSHOPT} saves it and an include's setting
+    // outlives the include, like any switch (dcc64 37.0).
+    if not TryOnOff(AArg, LOn) then
+      Exit;
+    FOpt.LegacyIfEnd := LOn;
+    Include(FTouched, optLegacyIfEnd);
   end;
 end;
 

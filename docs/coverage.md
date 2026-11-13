@@ -56,10 +56,6 @@ of less work, not a gap in following the language; its consequences are in
   switches change no name or type PasTree computes.
 
 ### 1.3.2 Conditional compilation
-- strict IFEND-vs-ENDIF pairing is not implemented -
-  `$IFEND` and `$ENDIF` are treated as the same terminator unconditionally,
-  and `{$LEGACYIFEND}` is passthrough trivia; the strict pairing check is not
-  available even as an opt-in.
 - the predefined sets (`PasTree.Platforms`) are the installed dcc 37.0
   compilers' answers for eight targets; Linux64's and WinArm64's are not
   probed (no compiler installed): Linux64 follows the other LLVM targets,
@@ -119,8 +115,10 @@ of less work, not a gap in following the language; its consequences are in
   nothing open, E2280 for an unterminated conditional, W1078 for a lone
   `{$POPOPT}`. An include nested deeper than PasTree's limit gates the
   E2003s but has no row of its own.
-- the text after the final `end.` produces no lexer row; dcc's W1011
-  for it is not reported.
+- the text after the final `end.` produces no lexer row, only dcc's
+  W1011 - and that only when the `end.` is in the unit's own file: one
+  an include supplies (`{$I tail.inc}` holding `begin end.`) leaves the
+  text after the `{$I}` without the warning dcc gives.
 - a conditional that crosses an include boundary - opened in an include
   and closed by its includer, or an include's `$ELSE`/`$ELSEIF`/`$ENDIF`
   on the includer's conditional - is refused by dcc 37.0 (E2280, or a

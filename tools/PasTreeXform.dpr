@@ -4528,7 +4528,7 @@ const
     'unbalanced-endif', 'unterminated-conditional', 'include-not-found',
     'include-cycle', 'include-too-deep', 'if-unreadable', 'if-guessed',
     'unsupported-insertion', 'popopt-without-pushopt',
-    'cross-include-conditional');
+    'cross-include-conditional', 'wrong-conditional-end');
 
 { -oracle: does the project's analysis preprocess this unit differently from
   a bare preprocessor? Only where a $IF asked what a bare one cannot answer -

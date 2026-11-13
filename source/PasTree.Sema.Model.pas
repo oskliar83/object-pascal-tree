@@ -1042,6 +1042,7 @@ type
     procedure AddParseDiags(const ADiags: TArray<TPasParseDiag>);
     function DirectiveWord(const ADiag: TPasPPDiagnostic): string;
     function AfterFinalEnd: Integer;
+    function TextAfterFinalEnd(AAfterEnd: Integer): Integer;
     { What a load path put on AFrom after its Phase 1, for a model built
       again over AFrom's own tree: the parser's and the lexer's rows (through
       AddParseDiags, from AFrom.ParseDiags) and the `$IF` oracle's verdict on
@@ -3684,6 +3685,14 @@ begin
         Tree.Source.Files[LFile], LLine, LCode, LMsg);
       AddDiag(MakeDiag(LCode, LMsg, NIL_NODE, LFile, LLine, LCol));
     end;
+  LTok := TextAfterFinalEnd(LAfterEnd);
+  if LTok >= 0 then
+  begin
+    Tree.Source.Files[0].OffsetToLineCol(LTok, LLine, LCol);
+    AddDiag(MakeDiag('W1011',
+      'W1011 Text after final ''END.'' - ignored by compiler', NIL_NODE, 0,
+      LLine, LCol));
+  end;
   // The PREPROCESSOR's rows a compiler reports, in dcc's words (dcc64 37.0,
   // local/probe-b63 misc): until now only the guessed-$IF pair reached a
   // model (InjectGuessedIfDiags, opt-in), so a missing include was silent
@@ -3718,6 +3727,12 @@ begin
         begin
           LCode := 'E2280';
           LMsg := 'E2280 Unterminated conditional directive';
+        end;
+      ppWrongConditionalEnd:
+        begin
+          LCode := 'E2029';
+          LMsg := Format('E2029 %s expected but %s found',
+            [LDiag.Detail, DirectiveWord(LDiag)]);
         end;
       ppPopWithoutPush:
         begin
@@ -3774,6 +3789,44 @@ begin
     Exit;
   LTok := Tree.Source.Files[0].Tokens[LVis.TokenIndex];
   Result := LTok.Start + LTok.Len;
+end;
+
+// Where dcc's W1011 for the main file's text after its final `end.` (from
+// AAfterEnd, AfterFinalEnd's offset) stands, or -1 when there is none to
+// report. dcc64 37.0 (1.3.3): spaces, control characters and `//` comments
+// are not text; anything else is - a `{...}` or `(*...*)` comment, a
+// directive, a word - and the warning sits on the line where that first
+// element ENDS: a comment's closer (the end of the file when it has none),
+// the start of anything else.
+function TPasSemaModel.TextAfterFinalEnd(AAfterEnd: Integer): Integer;
+var
+  LSrc: string;
+  LIdx, LLen: Integer;
+begin
+  Result := -1;
+  if AAfterEnd < 0 then
+    Exit;
+  LSrc := Tree.Source.Files[0].Source;
+  LLen := Length(LSrc);
+  LIdx := AAfterEnd + 1;   // 1-based
+  while LIdx <= LLen do
+    if LSrc[LIdx] <= ' ' then
+      Inc(LIdx)
+    else if (LSrc[LIdx] = '/') and (LIdx < LLen) and (LSrc[LIdx + 1] = '/') then
+      while (LIdx <= LLen) and not CharInSet(LSrc[LIdx], [#10, #13]) do
+        Inc(LIdx)
+    else
+      Break;
+  if LIdx > LLen then
+    Exit;
+  if LSrc[LIdx] = '{' then
+    LIdx := Pos('}', LSrc, LIdx)
+  else if (LSrc[LIdx] = '(') and (LIdx < LLen) and (LSrc[LIdx + 1] = '*') then
+    LIdx := Pos('*)', LSrc, LIdx + 2);
+  if LIdx = 0 then
+    Result := LLen   // unclosed: the end of the file
+  else
+    Result := LIdx - 1;
 end;
 
 procedure TPasSemaModel.TrimDiags;

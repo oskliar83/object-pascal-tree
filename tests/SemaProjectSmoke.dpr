@@ -2643,6 +2643,15 @@ begin
       Exit(True);
 end;
 
+// The line of AModel's first ACode diagnostic; -1 when it has none.
+function DiagLine(AModel: TPasSemaModel; const ACode: string): Integer;
+begin
+  Result := -1;
+  for var LIdx := 0 to High(AModel.Diags) do
+    if AModel.Diags[LIdx].Code = ACode then
+      Exit(AModel.Diags[LIdx].Line);
+end;
+
 // A project's analysis outcome WITHOUT reading any text (so a text-demoted
 // project can be fingerprinted too): per unit, sorted - every diagnostic with
 // its position, and every cross-unit binding as node > target unit : symbol.
@@ -4937,7 +4946,7 @@ begin
     'unit System;'#10'interface'#10'type TObject = class end;'#10 +
     'implementation'#10'end.'#10);
   TFile.WriteAllText(TPath.Combine(LDir, 'IrP.dpr'),
-    'program IrP;'#10'uses IrMiss, IrExt, IrBuf, IrEnd, IrDir;'#10 +
+    'program IrP;'#10'uses IrMiss, IrExt, IrBuf, IrEnd, IrEnd2, IrEnd3, IrDir, IrLeg;'#10 +
     'begin'#10'end.'#10);
   TFile.WriteAllText(TPath.Combine(LDir, 'IrMiss.pas'),
     'unit IrMiss;'#10'interface'#10'{$I IrNoSuch.inc}'#10 +
@@ -4954,9 +4963,24 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'IrEnd.pas'),
     'unit IrEnd;'#10'interface'#10'implementation'#10'end.'#10 +
     'Change note: don''t touch'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'IrEnd2.pas'),
+    'unit IrEnd2;'#10'interface'#10'implementation'#10'end. // done'#10 +
+    '  '#9#10'// a note'#10#26);
+  TFile.WriteAllText(TPath.Combine(LDir, 'IrEnd3.pas'),
+    'unit IrEnd3;'#10'interface'#10'implementation'#10'end.'#10 +
+    '// a note'#10'{ a comment'#10'  over two lines }'#10'x'#10);
   TFile.WriteAllText(TPath.Combine(LDir, 'IrDir.pas'),
     'unit IrDir;'#10'interface'#10'{$ENDIF}'#10'{$POPOPT}'#10 +
     'implementation'#10'{$IFDEF NEVERDEF}'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'IrLeg.pas'),
+    'unit IrLeg;'#10'interface'#10'{$LEGACYIFEND ON}'#10 +
+    '{$IF True}'#10'{$ENDIF}'#10 +                          // E2029
+    '{$IFDEF X}'#10'{$ELSEIF True}'#10'{$IFEND}'#10 +       // an $IF now
+    '{$IFDEF Y}'#10'{$IFEND}'#10 +                          // E2029
+    '{$IFDEF NOPE}{$IF True}{$ENDIF}{$ENDIF}'#10 +          // E2029, dead
+    '{$PUSHOPT}{$LEGACYIFEND OFF}{$IF True}{$ENDIF}{$POPOPT}'#10 +
+    '{$IFOPT R-}{$ENDIF}'#10 +
+    'implementation'#10'end.'#10);
   GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
   try
     GProj.SetBuffer(TPath.Combine(LDir, 'IrNew.inc'), 'const FromBuf = 1;');
@@ -4979,6 +5003,14 @@ begin
     LM := Unit_('irend');
     Ok('include rows: the text after the final end. is not lexed for rows',
       (LM <> nil) and (DiagCount(LM, 'E2052') = 0));
+    Ok('include rows: ...but it is dcc''s W1011, on its line',
+      (LM <> nil) and (DiagCount(LM, 'W1011') = 1) and
+      DiagHasText(LM, 'W1011', 'Text after final ''END.''') and
+      (DiagLine(LM, 'W1011') = 5));
+    LM := Unit_('irend2');
+    Ok('include rows: spaces and // comments after end. are no W1011, a { } comment is, where it ends',
+      (LM <> nil) and (DiagCount(LM, 'W1011') = 0) and
+      (Unit_('irend3') <> nil) and (DiagLine(Unit_('irend3'), 'W1011') = 7));
     LM := Unit_('irdir');
     Ok('include rows: an $ENDIF with nothing open is E1030',
       (LM <> nil) and DiagHasText(LM, 'E1030', '''$ENDIF'''));
@@ -4986,6 +5018,12 @@ begin
       (LM <> nil) and (DiagCount(LM, 'W1078') = 1));
     Ok('include rows: an unterminated conditional is E2280',
       (LM <> nil) and (DiagCount(LM, 'E2280') = 1));
+    LM := Unit_('irleg');
+    Ok('include rows: {$LEGACYIFEND ON} pairs each opener with its own closer (E2029)',
+      (LM <> nil) and (DiagCount(LM, 'E2029') = 3) and
+      DiagHasText(LM, 'E2029', '$IFEND expected but $ENDIF found') and
+      DiagHasText(LM, 'E2029', '$ENDIF expected but $IFEND found') and
+      (DiagCount(LM, 'E1030') = 0) and (DiagCount(LM, 'E2280') = 0));
   finally
     GProj.Free;
   end;
