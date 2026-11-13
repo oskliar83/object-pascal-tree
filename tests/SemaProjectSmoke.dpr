@@ -12755,6 +12755,47 @@ begin
   end;
 end;
 
+// 5.4.1: two classes neither descending from the other meet in their
+// nearest common ancestor (`if B then C1 else C2` of two TB descendants is
+// TB, either order, a grandchild too; unrelated ones TObject) - dcc64 37.0,
+// 2026-11-13, local/cov-exprs-2026-11 ii3.
+procedure TestInlineIfSiblings;
+var
+  LDir, LTypes: string;
+  LX: TSemaXType;
+begin
+  LDir := FreshDir('pastree_sema_iifsib');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'IfP.dpr'),
+    'program IfP;'#10 +
+    'type TB = class end; TC1 = class(TB) end; TC2 = class(TB) end;'#10 +
+    '  TD = class end; TE1 = class(TC1) end;'#10 +
+    'var B: Boolean; C1: TC1; C2: TC2; D: TD; E1: TE1; O: TObject;'#10 +
+    'begin'#10'  O := if B then C1 else C2;'#10 +
+    '  O := if B then C2 else C1;'#10'  O := if B then C1 else D;'#10 +
+    '  O := if B then E1 else C2;'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'IfP.dpr'));
+    LTypes := '';
+    var LM := ModelByName('ifp');
+    for var N := 0 to High(LM.Tree.Nodes) do
+      if LM.Tree.Nodes[N].Kind = nkInlineIf then
+        if LM.ExprTypeX.TryGetValue(N, LX) then
+          LTypes := LTypes + GProj.XTypeText(LX) + ' '
+        else
+          LTypes := LTypes + '? ';
+    Ok('inline if over sibling classes is their common ancestor [' +
+      LTypes + ']', LTypes = 'TB TB TObject TB ');
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // 2.2.1 / 6.3.1: on an LP64 target (OSX64 here) LongInt and LongWord are
 // 8-byte types of their own, ranked by their width: `F(Lg)` beside
 // F(Integer) and F(Int64) takes the Int64 one, `F(Lw)` too, `G(Lw)` beside
@@ -20995,6 +21036,7 @@ begin
   TestLp64Ranking;
   TestExprBoundSubrange;
   TestAnsiElemRanking;
+  TestInlineIfSiblings;
   TestModeConvRanking;
   TestLeftoverRanking;
   TestOverloadTies;

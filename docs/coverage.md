@@ -279,11 +279,12 @@ of less work, not a gap in following the language; its consequences are in
 ## 05-statements.md
 
 ### 5.4.1 Inline `if` expression
-- the branches are unified by the spec's rule in both typers; a pair the
-  rule leaves open - an integer with a real (dcc rejects one order and
-  accepts the other), two classes neither descending from the other, two
-  unrelated string kinds - is untyped, and the intra-unit typer leaves any
-  two different classes to the project, which sees the whole ancestry.
+- the branches are unified by the spec's rule in both typers, two classes
+  in their nearest common ancestor at the project level (the intra-unit
+  typer leaves two different classes to it); a pair the rule leaves open -
+  a real THEN branch with an integer ELSE literal, two unrelated string
+  kinds - is untyped (an Integer and a Double variable are E2010 in dcc
+  either way).
 
 ### 5.5.2 `for … in` (for-in loop)
 - an untyped `for var E in C` element is typed from the collection at the
@@ -582,7 +583,10 @@ of less work, not a gap in following the language; its consequences are in
 ### 17.2.1 Inline `procedure`/`function` literals
 - a literal fits a `reference to` parameter by its parameter count,
   procedure / function kind and parameter types (overload scoring,
-  ParamTypesFit); its result type is not compared.
+  ParamTypesFit) and rejects any other parameter; dcc compares no result
+  type either (spec 17.2.1: two reference types differing only in it are
+  E2250), but beside an Integer overload dcc takes `F9(X: Integer)` for a
+  literal where PasTree takes the `reference to` one - not modelled.
 
 ## 19-rtti-attributes.md
 
