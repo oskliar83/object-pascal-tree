@@ -9798,6 +9798,64 @@ begin
   end;
 end;
 
+{ Spec 14.1.1 (dcc64 37.0, 2026-11-13): in an interface's first bracket a
+  typed TGUID constant or a variable is dropped with W1074 naming it, no
+  GUID; a true constant there is the GUID, after a dropped item of a comma
+  list too (`[GT, S]`), while in a later bracket it is W1074 like any
+  attribute (`[GT] [S]`); a class that is no attribute is E2010. }
+procedure TestGuidClauseDrops;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_guiddrop');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10'  TObject = class end;'#10 +
+    '  TCustomAttribute = class(TObject) end;'#10 +
+    '  TGUID = record D1: Cardinal; end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'G2.dpr'),
+    'program G2;'#10 +                                                // 1
+    'type'#10 +                                                       // 2
+    '  MarkAttribute = class(TCustomAttribute) end;'#10 +            // 3
+    '  TNotAttr = class end;'#10 +                                   // 4
+    'const'#10 +                                                      // 5
+    '  S = ''{11111111-2222-3333-4444-555555555555}'';'#10 +          // 6
+    '  GT: TGUID = ''{31111111-2222-3333-4444-555555555555}'';'#10 + // 7
+    'var'#10 +                                                        // 8
+    '  GV: TGUID;'#10 +                                               // 9
+    'type'#10 +                                                       // 10
+    '  I1 = interface [GT] procedure A; end;'#10 +                   // 11 W 'GT'
+    '  I2 = interface [GT, S] procedure A; end;'#10 +                // 12 W 'GT'
+    '  I3 = interface [Mark, S] procedure A; end;'#10 +              // 13
+    '  I4 = interface [GV] procedure A; end;'#10 +                   // 14 W 'GV'
+    '  I5 = interface [GT, Mark] [''{4}''] procedure A; end;'#10 +   // 15 W 'GT', W
+    '  I6 = interface [GT] [S] procedure A; end;'#10 +               // 16 W 'GT', W 'S'
+    '  I7 = interface [S] procedure A; end;'#10 +                    // 17
+    '  I8 = interface(I7) [GT, S] procedure B; end;'#10 +            // 18 W 'GT'
+    '  I9 = interface [TNotAttr] procedure A; end;'#10 +             // 19 E2010
+    'begin'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'G2.dpr'));
+    LM := ModelByName('g2');
+    Ok('guiddrop: W1074 for each dropped item, none for a GUID [' +
+      DiagSites(LM, 'W1074') + ']', DiagSites(LM, 'W1074') =
+      '11:19 12:19 14:19 15:19 15:30 16:19 16:24 18:23');
+    Ok('guiddrop: naming GT, GV and the later bracket''s S',
+      DiagHasText(LM, 'W1074', ': ''GT''') and
+      DiagHasText(LM, 'W1074', ': ''GV''') and
+      DiagHasText(LM, 'W1074', ': ''S'''));
+    Ok('guiddrop: a class that is no attribute is E2010 [' +
+      DiagSites(LM, 'E2010') + ']', DiagSites(LM, 'E2010') = '19:19');
+    Ok('guiddrop: nothing else', Length(LM.Diags) = 9);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 { Spec 19.3.2 (dcc64 37.0, 2026-11-13): on a parameter of a method's
   implementation header the suffixed name comes first as everywhere -
   `procedure TD.M([Foo(1)] A: Integer)` is a used unit's FooAttribute, not
@@ -20447,6 +20505,7 @@ begin
   TestAttributeSuffixFirst;
   TestAttributeW1074;
   TestAttributeImplHeaderParam;
+  TestGuidClauseDrops;
   TestAttributeGuidAndPositions;
   TestHelperVisibility;
   TestBuiltinIdentity;

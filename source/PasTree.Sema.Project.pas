@@ -1421,6 +1421,8 @@ type
     procedure CheckConstraints(AId: Integer);
     function ResolveCustomAttributeX(AId: Integer): TSemaXType;
     procedure CheckAttributes(AId: Integer);
+    function InterfaceGuidBracket(AModel: TPasSemaModel;
+      AAttr: Integer): Boolean;
     function RecordHasLifecycleOp(AMid, ADefNode: Integer): Boolean;
     function OracleResolve(AId: Integer; const ANameLower: string;
       out AMid, ASym: Integer): Boolean;
@@ -11944,8 +11946,9 @@ procedure TPasSemaProject.CheckAttributes(AId: Integer);
 var
   LM: TPasSemaModel;
   LCustomAttrX, LAttrX: TSemaXType;
-  LNode, LRef, LHead, LSym, LKMid: Integer;
+  LNode, LRef, LHead, LSym, LKMid, LAnchor: Integer;
   LExt: TPasExtRef;
+  LKind: TPasNodeKind;
 begin
   LCustomAttrX := ResolveCustomAttributeX(AId);
   if not XValid(LCustomAttrX) then
@@ -11953,36 +11956,48 @@ begin
   LM := FModels[AId];
   for LNode := 0 to High(LM.Tree.Nodes) do
   begin
-    if LM.Tree.Nodes[LNode].Kind <> nkAttribute then
+    LKind := LM.Tree.Nodes[LNode].Kind;
+    if not (LKind in [nkAttribute, nkGuid]) then
       Continue;
-    // A COMPILER-RECOGNIZED attribute (19.3.3) is exempt: dcc reads
-    // `[weak]`/`[unsafe]`/`[Ref]`/`[Volatile]` by System's class identity,
-    // and an analysis without System has nothing to check them against. The
-    // parser already tagged them (nkAttribute.Aux, PasAttrMagicAux).
-    //
-    // It was 3 false E2010 on a real project: a component suite declares
-    // `Unsafe = class // for internal use`, and the bare-name-first lookup
-    // bound `[unsafe] FField: IPalette;` to THAT class. The lookup is
-    // suffix-first now (19.3.2), so System's UnsafeAttribute is what it
-    // binds; the exemption stays for the System-less analysis.
-    if LM.Tree.Nodes[LNode].Aux <> amaNone then
-      Continue;
-    // An expression attribute (`[(TObject)]`, `[1 + 2]`, a target other than
-    // Result, `[Result]`) is W1074 and dropped, never E2010 (F32).
-    if not PasAttrIsName(LM.Tree, LNode) then
+    if LKind = nkAttribute then
     begin
-      if not LM.HasDiagAt(LNode) then
-        EmitAt(LM, LNode, 'W1074', SW1074_UnknownCustomAttribute);
+      // A COMPILER-RECOGNIZED attribute (19.3.3) is exempt: dcc reads
+      // `[weak]`/`[unsafe]`/`[Ref]`/`[Volatile]` by System's class identity,
+      // and an analysis without System has nothing to check them against.
+      // The parser already tagged them (nkAttribute.Aux, PasAttrMagicAux).
+      //
+      // It was 3 false E2010 on a real project: a component suite declares
+      // `Unsafe = class // for internal use`, and the bare-name-first lookup
+      // bound `[unsafe] FField: IPalette;` to THAT class. The lookup is
+      // suffix-first now (19.3.2), so System's UnsafeAttribute is what it
+      // binds; the exemption stays for the System-less analysis.
+      if LM.Tree.Nodes[LNode].Aux <> amaNone then
+        Continue;
+      // An expression attribute (`[(TObject)]`, `[1 + 2]`, a target other
+      // than Result, `[Result]`) is W1074 and dropped, never E2010 (F32).
+      if not PasAttrIsName(LM.Tree, LNode) then
+      begin
+        if not LM.HasDiagAt(LNode) then
+          EmitAt(LM, LNode, 'W1074', SW1074_UnknownCustomAttribute);
+        Continue;
+      end;
+    end
+    // An interface's GUID clause, as the name its first bracket holds alone
+    // (`[S]`, `[U.SID]`); a longer expression is the GUID's own.
+    else if (LM.Tree.Nodes[LNode].FirstChild = NIL_NODE) or
+      not (LM.Tree.Nodes[LM.Tree.Nodes[LNode].FirstChild].Kind in
+      [nkIdent, nkMember]) then
       Continue;
-    end;
     LRef := LM.Tree.Nodes[LNode].FirstChild;
     if LRef = NIL_NODE then
       Continue;
-    // A name that finds a declaration but no type - a constant, a variable,
-    // a routine (the suffixed name first: a `const QAttribute` beside a
-    // class Q) - is W1074 naming what it found; an undeclared one is
-    // EmitE2003's (W1074 with no name). A missing unit may hold the
-    // attribute class the name would find first.
+    // What the name finds decides (19.3.2, 14.1.1); a missing unit may hold
+    // the attribute class the name would find first. A declaration but no
+    // type - a constant, a variable, a routine (the suffixed name first: a
+    // `const QAttribute` beside a class Q) - is W1074 naming what it found,
+    // except a TRUE constant in an interface's first bracket, which is the
+    // GUID: `[S]`, and `[GT, S]` after a dropped typed TGUID constant GT
+    // (InterfaceGuidBracket). An undeclared one is EmitE2003's W1074.
     if LM.AllUsesResolved then
     begin
       LHead := AttrDecidingName(AId, LNode);
@@ -11998,8 +12013,16 @@ begin
         if (LSym <> NIL_SYM) and not (FModels[LKMid].Symbols[LSym].Kind in
            [skType, skBuiltinType, skGenericParam, skUnitRef]) then
         begin
-          if not LM.HasDiagAt(LNode) then
-            EmitAt(LM, LNode, 'W1074', Format(SW1074_UnknownCustomAttributeName,
+          // At the attribute; an nkGuid starts at its bracket, so at the name.
+          if LKind = nkGuid then
+            LAnchor := LHead
+          else
+            LAnchor := LNode;
+          if not ((FModels[LKMid].Symbols[LSym].Kind = skConst) and
+                  (FModels[LKMid].Symbols[LSym].TypeNode = NIL_NODE) and
+                  ((LKind = nkGuid) or InterfaceGuidBracket(LM, LNode))) and
+             not LM.HasDiagAt(LAnchor) then
+            EmitAt(LM, LAnchor, 'W1074', Format(SW1074_UnknownCustomAttributeName,
               [FModels[LKMid].Symbols[LSym].Name]));
           Continue;
         end;
@@ -12014,6 +12037,38 @@ begin
       EmitAt(LM, LRef, 'E2010', Format(SE2010_IncompatibleTypes,
         [XTypeText(LAttrX), 'TCustomAttribute']));
   end;
+end;
+
+{ 14.1.1 (dcc64 37.0, 2026-11-13): AAttr stands in an interface's first
+  bracket - its attribute group follows the head and the ancestor only, and
+  no `]` closes a bracket before AAttr - where an item that is a true
+  constant is the GUID (`[GT, S]`: GT dropped with W1074, S the GUID). }
+function TPasSemaProject.InterfaceGuidBracket(AModel: TPasSemaModel;
+  AAttr: Integer): Boolean;
+var
+  LGroup, LPrev, LTok: Integer;
+begin
+  Result := False;
+  LGroup := AModel.Tree.Nodes[AAttr].Parent;
+  if (LGroup = NIL_NODE) or (AModel.Tree.Nodes[LGroup].Kind <> nkAttrGroup) or
+     (AModel.Tree.Nodes[LGroup].Parent = NIL_NODE) or
+     (AModel.Tree.Nodes[AModel.Tree.Nodes[LGroup].Parent].Kind <>
+      nkInterfaceType) then
+    Exit;
+  // Before it only the ancestor's reference may stand.
+  LPrev := AModel.Tree.Nodes[AModel.Tree.Nodes[LGroup].Parent].FirstChild;
+  while (LPrev <> NIL_NODE) and (LPrev <> LGroup) do
+  begin
+    if not (AModel.Tree.Nodes[LPrev].Kind in [nkIdent, nkMember,
+       nkTypeArgs]) then
+      Exit;
+    LPrev := AModel.Tree.Nodes[LPrev].NextSibling;
+  end;
+  for LTok := AModel.Tree.Nodes[LGroup].FirstToken to
+      AModel.Tree.Nodes[AAttr].FirstToken - 1 do
+    if AModel.Tree.Source.VisibleKind(LTok) = tkRBracket then
+      Exit;
+  Result := True;
 end;
 
 threadvar
