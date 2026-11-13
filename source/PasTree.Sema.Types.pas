@@ -285,6 +285,11 @@ type
     // `@S[I]` of a string under {$T+} (4.8, 6.3.1): a PChar / PAnsiChar
     // value that takes its string kind over its own pointer type.
     StrElemAddr: Boolean;
+    // An element of a PAnsiChar (`PA[0]`), of a `string[N]` (`S20[1]`) or of
+    // a code-page AnsiString other than UTF8String (`Cy[1]`) - an AnsiChar
+    // that dcc ranks below the Ansi strings for an AnsiChar parameter, above
+    // ShortString (7.2.1; not `A[1]`, `SS[1]`, `U8[1]`, `PA^`).
+    AnsiElem: Boolean;
   end;
   PSemaArgConv = ^TSemaArgConv;
 
@@ -1621,6 +1626,11 @@ function OperatorAnswer(AOp: TPasTokenKind; AUnary: Boolean;
   where the operand's type is no builtin. }
 procedure SubrangeOpFacts(ALo, AHi: Int64; var AF: TSemaOpFacts);
 
+// The width of a character type by its operator facts: 1 for AnsiChar, 2
+// for Char / WideChar, 0 otherwise - TSemaConstFacts.Rank of a character
+// (`High(Char)` folds to 65535 for Ord, 4.11.4).
+function CharFactsWidth(const AF: TSemaOpFacts): Byte;
+
 { `+` over two text operands (4.2.1, dcc32 / dcc64 37.0, local/probe-b36 M2
   N1; audit A3-34): a literal takes the other operand's string type when
   that is one (`A + 'x'` AnsiString, `WS + 'x'` WideString, `U8 + 'x'`
@@ -2951,10 +2961,13 @@ begin
   if (AConv <> nil) and (AConv.Kind <> cnkNone) then
   begin
     if not (AConv.Facts.IntConst and not AConv.TypedConst or
-            AConv.Facts.RealLit or AConv.OpRange) and
+            AConv.Facts.RealLit or AConv.OpRange or AConv.AnsiElem) and
        (Same(AParX, AArgX) or Same(ACanonParX, ACanonArgX)) then
       Exit(2);
     LRank := ConvRank(AConv^, ParConvKind(ACanonParX), FWideExt);
+    if AConv.AnsiElem and (ParConvKind(ACanonParX) = cnkAnsiChar) then
+      LRank := (ConvRank(AConv^, cnkAnsiString, FWideExt) +
+        ConvRank(AConv^, cnkShortString, FWideExt)) div 2;
     // A parameter of a SUBRANGE type has no conversion kind of its own: an
     // integer one ranks with the integers of its size (SubrangeParRawRank),
     // a character one as a Char - `F(C)` for a Char takes F(TSubC) for
@@ -5348,6 +5361,16 @@ begin
   end;
 end;
 
+function CharFactsWidth(const AF: TSemaOpFacts): Byte;
+begin
+  case AF.Text of
+    stkAnsiChar: Result := 1;
+    stkChar: Result := 2;
+  else
+    Result := 0;
+  end;
+end;
+
 procedure SubrangeOpFacts(ALo, AHi: Int64; var AF: TSemaOpFacts);
 begin
   if (ALo > AHi) or (AF.Cat <> tcInteger) then
@@ -6488,6 +6511,22 @@ var
        ((LF.Intrinsic = 'high') or (LF.Intrinsic = 'low')) then
     begin
       var LT := AFacts(LArg, ADepth + 1);
+      // Of a character type: its ordinal, for Ord and a bound - no integer
+      // operand (`Ord(High(Char))` 65535, 4.11.4).
+      if (LT.Role in [scrType, scrValue]) and (LT.Cat = tcChar) and
+         (LT.Rank in [1, 2]) then
+      begin
+        if AOperand then
+          Exit;
+        LV := 0;
+        if LF.Intrinsic = 'high' then
+          if LT.Rank = 1 then
+            LV := 255
+          else
+            LV := 65535;
+        AF := ByValueFacts(LV);
+        Exit(True);
+      end;
       if not (LT.Role in [scrType, scrValue]) or (LT.Cat <> tcInteger) then
         Exit;
       case LT.Rank of
@@ -10023,7 +10062,9 @@ begin
         var LOp := OpFacts(LType, NIL_NODE);
         Result.Rank := LOp.Rank;
         Result.Unsigned := LOp.Unsigned;
-      end;
+      end
+      else if Result.Cat = tcChar then
+        Result.Rank := CharFactsWidth(OpFacts(LType, NIL_NODE));
       case Result.Cat of
         tcArray:
           begin

@@ -261,13 +261,11 @@ of less work, not a gap in following the language; its consequences are in
   as nothing rather than as that type.
 - `Ord`, `Hi`, `Lo` and `Swap` of a constant are Integer for every argument
   dcc folds (one rule, ConstExprKind: `Ord(High(Char))`, `Swap(Byte(5))`,
-  `Hi(N * 300)`) - the answer `var X :=` infers. As an overload argument
-  dcc reads such a constant by its value instead - `F(Ord(High(Char)))`
-  takes `F(X: Word)` beside `F(X: Integer)` - where the scorers read
-  Integer, as they read an integer literal (6.3.1). The unit pass sees
-  only its own unit's constants; another unit's are the project level's.
-  An argument the rule cannot type (`High` of an expression it has no
-  type for) is no constant.
+  `Hi(N * 300)`) - the answer `var X :=` infers; as an overload argument it
+  is read by its value (`F(Ord(High(Char)))` takes `F(X: Word)`). The unit
+  pass sees only its own unit's constants; another unit's are the project
+  level's. An argument the rule cannot type (`High` of an expression it
+  has no type for) is no constant.
 
 ## 4.12 Operator overloading (cross-reference)
 - an operator on a record operand is typed by the `class operator` it
@@ -441,11 +439,13 @@ of less work, not a gap in following the language; its consequences are in
   dedicated AST shape for the codepage clause.
 
 ### 7.2.1 String indexing
-- an element of a 1-byte string or a PAnsiChar is AnsiChar everywhere; dcc
-  types it so too but, beside an `AnsiString` overload, calls that overload
-  for `F(PA[0])`, `F(S20[1])` of a `string[N]` and `F(Cy[1])` of a code-page
-  string (not for `F(A[1])` or `F(PA^)`) - PasTree binds the AnsiChar one
-  there.
+- an element of a PAnsiChar, of a `string[N]` or of a code-page AnsiString
+  (`PA[0]`, `S20[1]`, `Cy[1]`) is ranked as dcc ranks it at the project
+  level (TSemaArgConv.AnsiElem) - but between AnsiChar and ShortString the
+  two tie here (the raw ranks have no step between AnsiString and
+  ShortString), so the first declared wins where dcc takes AnsiChar; the
+  unit pass leaves the element untyped (8.1.2), so a call of the unit's own
+  overloads is not ranked by it.
 
 ## 08-arrays.md
 

@@ -12707,6 +12707,54 @@ begin
   end;
 end;
 
+// 7.2.1 / 4.11.4: an element of a PAnsiChar, of a `string[N]` and of a
+// code-page AnsiString is an AnsiChar that dcc ranks below AnsiString
+// (`F(PA[0])`, `F(S20[1])`, `F(Cy[1])` take F(AnsiString) over F(AnsiChar);
+// `F(A[1])` of an AnsiString the AnsiChar one), and `Ord(High(Char))` is read
+// by its value 65535 (G(Word) over G(Integer)) - dcc64 37.0, 2026-11-13,
+// local/cov-exprs-2026-11 m8, sv. The project pass (overloads of a unit).
+procedure TestAnsiElemRanking;
+var
+  LDir: string;
+begin
+  LDir := FreshDir('pastree_sema_ansielem');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'AeA.pas'),
+    'unit AeA;'#10'interface'#10'type'#10 +
+    '  TRA = record A: Integer; end;'#10 +
+    '  TRW = record W: Integer; end;'#10 +
+    'function F(X: AnsiChar): TRA; overload;'#10 +
+    'function F(const X: AnsiString): TRW; overload;'#10 +
+    'function G(X: Integer): TRA; overload;'#10 +
+    'function G(X: Word): TRW; overload;'#10 +
+    'implementation'#10 +
+    'function F(X: AnsiChar): TRA; begin end;'#10 +
+    'function F(const X: AnsiString): TRW; begin end;'#10 +
+    'function G(X: Integer): TRA; begin end;'#10 +
+    'function G(X: Word): TRW; begin end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'AeP.dpr'),
+    'program AeP;'#10'uses AeA;'#10 +
+    'type TCy = type AnsiString(1251);'#10 +
+    'var K: Integer; PA: PAnsiChar; S20: string[20]; Cy: TCy;'#10 +
+    '  A: AnsiString;'#10 +
+    'begin'#10'  K := F(PA[0]).W;'#10'  K := F(S20[1]).W;'#10 +
+    '  K := F(Cy[1]).W;'#10'  K := G(Ord(High(Char))).W;'#10 +
+    '  K := F(A[1]).A;'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'AeP.dpr'));
+    var LP := TrwCallCount(ModelByName('aep'), True);
+    Ok('Ansi elements and Ord(High(Char)) rank as dcc [' + IntToStr(LP) +
+      ' of 4]', LP = 4);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // 2.2.1 / 6.3.1: on an LP64 target (OSX64 here) LongInt and LongWord are
 // 8-byte types of their own, ranked by their width: `F(Lg)` beside
 // F(Integer) and F(Int64) takes the Int64 one, `F(Lw)` too, `G(Lw)` beside
@@ -20946,6 +20994,7 @@ begin
   TestOpRangeRanking;
   TestLp64Ranking;
   TestExprBoundSubrange;
+  TestAnsiElemRanking;
   TestModeConvRanking;
   TestLeftoverRanking;
   TestOverloadTies;
