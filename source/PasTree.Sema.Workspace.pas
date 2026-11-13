@@ -263,6 +263,14 @@ type
       methods: asked one by one, each search's cost is paid for an answer
       thrown away, and each promotion restarts the host's walk. }
     procedure EnsureDispatch(const AOverrides, AImpls: TArray<TPasSymbolKey>);
+    { Every file of AFiles fully analyzed - InFile's demand (DemandFile, or
+      DemandFilePath for a file only a full closure has) of them all met in
+      one query, nothing asked: for a host whose own walk reads the bodies of
+      many units it found it needs. Made full one InFile at a time, each is a
+      round of its own and none reaches the escalation bound; together they
+      are one round, or the escalation when they are most of the library (a
+      lint over a large group: 327 rounds and 25 s, against 2 s full). }
+    procedure EnsureFiles(const AFiles: TArray<string>);
     { ---- renames ---- }
     function PlanRename(const AKey: TPasSymbolKey; const ANewName: string;
       out AEdits: TArray<TPasRenameEdit>;
@@ -1014,6 +1022,29 @@ begin
     begin
       Result := ANav.DemandClosure;
     end);
+end;
+
+procedure TPasWorkspace.EnsureFiles(const AFiles: TArray<string>);
+var
+  LFiles: TArray<string>;
+begin
+  LFiles := AFiles;
+  Prepare(
+    function(ANav: TPasNavigator): TPasDemand
+    var
+      LM: Integer;
+    begin
+      Result := Default(TPasDemand);
+      for var LFile in LFiles do
+      begin
+        LM := ANav.ModelIdOf(LFile);
+        if LM < 0 then
+          Result := PasMergeDemand(Result, ANav.DemandFilePath(LFile))
+        else
+          Result := PasMergeDemand(Result, ANav.DemandFile(LM));
+      end;
+    end);
+  Finish;
 end;
 
 procedure TPasWorkspace.EnsureDispatch(const AOverrides,
