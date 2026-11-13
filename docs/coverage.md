@@ -53,15 +53,12 @@ of less work, not a gap in following the language; its consequences are in
   `{$SCOPEDENUMS}` (enum value names), `{$Z}` / `{$MINENUMSIZE}` (enum size),
   `{$A}` / `{$ALIGN}` (record field alignment) and `{$T}` /
   `{$TYPEDADDRESS}` (`@X` is a typed pointer to X's type: an inline `var`
-  takes it, and `P.Y` / `P^.Y` read X's members). Every other switch is
-  read by `{$IFOPT}` alone. Not modelled, and not yet probed on dcc for what
+  takes it, `P.Y` / `P^.Y` read X's members, an assignment and an overload
+  choice compare it). Every other switch is read by `{$IFOPT}` alone. Not modelled, and not yet probed on dcc for what
   each changes:
   - `{$H-}` / `{$LONGSTRINGS OFF}`: a bare `string` is `ShortString` - its
     size, its element type, overload choice and the type an inline `var`
     infers;
-  - `{$T+}` / `{$TYPEDADDRESS ON}`: the typed `@X` is not compared - its
-    assignment compatibility (`PB := @I` is E2010 for dcc) and overload
-    choice treat it as an untyped value;
   - `{$X-}` / `{$EXTENDEDSYNTAX OFF}`: a function called as a statement,
     `Result` and the PChar extensions are not available;
   - `{$J+}` / `{$WRITEABLECONST ON}`: a typed constant may be assigned;

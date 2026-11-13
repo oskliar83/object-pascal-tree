@@ -12761,6 +12761,74 @@ begin
   end;
 end;
 
+// {$T+} / {$TYPEDADDRESS ON} at an assignment, the cross pass's AssignConvX
+// (4.8, 10.1.2; SemaSmoke's TestTypedAddrAssign is the unit typer's): `@X`
+// goes to the typed pointers of X's type and to Pointer, `@` of a routine
+// or a procedural variable to Pointer alone, two typed pointers meet over
+// one base. Lines 10..16 are each E2010 to dcc64 37.0; the rest compiles.
+procedure TestTypedAddrAssignX;
+const
+  SRC =
+    'program TAddr;'#10 +
+    'type PB = ^Byte; PI = ^Integer; PI2 = ^Integer; TProc = procedure;'#10 +
+    '  TRec = record Y: Integer; end; PRec = ^TRec;'#10 +
+    '  TA = array[0..3] of Integer; TC = class end;'#10 +
+    'function F: Integer; begin Result := 0; end;'#10 +
+    'procedure Pr; begin end;'#10 +
+    'var I: Integer; B: PB; Q: PI; Q2: PI2; R: TRec; PRc: PRec; A: TA;'#10 +
+    '  DA: array of Integer; Pt: Pointer; PP: TProc; O: TC;'#10 +
+    'begin'#10 +
+    '{$T+} B := @I;'#10 +        // 10
+    '  Q := @F;'#10 +
+    '  B := @Pr;'#10 +
+    '  B := @PP;'#10 +
+    '  B := Q;'#10 +
+    '  Q := @O;'#10 +
+    '  B := (@I);'#10 +          // 16
+    '  Q := @I; Q2 := @I; Q := Q2; Q := @A[0]; Q := @DA[0]; PRc := @R;'#10 +
+    '  Q := @R.Y; Q := @Q^; Pt := @I; Q := Pt; Pt := @F; Pt := @PP;'#10 +
+    '{$T-} B := @I; B := @F; Q := Pt;'#10 +
+    'end.'#10;
+var
+  LDir, LLines: string;
+  LM: TPasSemaModel;
+  LAll: Boolean;
+begin
+  LDir := FreshDir('pastree_sema_typedaddr');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    '  TArray<T> = array of T;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'TAddr.dpr'), SRC);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'TAddr.dpr'));
+    LM := ModelByName('taddr');
+    LLines := '';
+    if LM <> nil then
+      for var LD in LM.Diags do
+        LLines := LLines + ' ' + LD.Code + '@' + IntToStr(LD.Line);
+    LAll := (LM <> nil) and (Length(LM.Diags) = 7) and
+      (DiagCount(LM, 'E2010') = 7);
+    for var LLine := 10 to 16 do
+      if Pos(' E2010@' + IntToStr(LLine) + ' ', LLines + ' ') = 0 then
+        LAll := False;
+    Ok('$T+ assignment (project): the seven refused are E2010, the rest ' +
+      'clean [' + LLines + ' ]', LAll);
+    var LNamed := False;
+    if LM <> nil then
+      for var LD in LM.Diags do
+        if Pos('''PB'' and ''Pointer''', LD.Msg) > 0 then
+          LNamed := True;
+    Ok('$T+ assignment (project): an `@X` is named Pointer', LNamed);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // E2010 beyond the assignment statement, and the note a record conversion's
 // E2010 carries (2.6.1, 9.3.1; local/type-conv-2026-11/diag): an
 // initialized global, a typed constant, an inline variable with a type, a
@@ -19830,6 +19898,7 @@ begin
   TestLeftoverRanking;
   TestOverloadTies;
   TestAssignConv;
+  TestTypedAddrAssignX;
   TestConvDiags;
   TestHelperOverloadSet;
   TestOperatorTable;

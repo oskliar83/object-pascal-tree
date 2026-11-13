@@ -1481,6 +1481,48 @@ begin
   Ok('opcodes: two E2015 under - and div', DiagCount('E2015') = 2);
 end;
 
+// {$T+} / {$TYPEDADDRESS ON} at an assignment (4.8, 10.1.2): `@X` is a
+// pointer to X's type - it goes to the typed pointers of that type and to
+// Pointer; `@` of a routine or a procedural variable to Pointer alone; two
+// typed pointers meet when their bases are one type. Lines 10..16 are each
+// E2010 to dcc64 37.0 ('PB' and 'Pointer' for an `@X`); the rest compiles.
+procedure TestTypedAddrAssign;
+begin
+  Analyze(
+    'program P;'#10 +
+    'type PB = ^Byte; PI = ^Integer; PI2 = ^Integer; TProc = procedure;'#10 +
+    '  TRec = record Y: Integer; end; PRec = ^TRec;'#10 +
+    '  TA = array[0..3] of Integer; TC = class end;'#10 +
+    'function F: Integer; begin Result := 0; end;'#10 +
+    'procedure Pr; begin end;'#10 +
+    'var I: Integer; B: PB; Q: PI; Q2: PI2; R: TRec; PRc: PRec; A: TA;'#10 +
+    '  DA: array of Integer; Pt: Pointer; PP: TProc; O: TC;'#10 +
+    'begin'#10 +
+    '{$T+} B := @I;'#10 +        // 10
+    '  Q := @F;'#10 +
+    '  B := @Pr;'#10 +
+    '  B := @PP;'#10 +
+    '  B := Q;'#10 +
+    '  Q := @O;'#10 +
+    '  B := (@I);'#10 +          // 16
+    '  Q := @I; Q2 := @I; Q := Q2; Q := @A[0]; Q := @DA[0]; PRc := @R;'#10 +
+    '  Q := @R.Y; Q := @Q^; Pt := @I; Q := Pt; Pt := @F; Pt := @PP;'#10 +
+    '{$T-} B := @I; B := @F; Q := Pt;'#10 +
+    'end.'#10);
+  var LLines := '';
+  for var LD in GModel.Diags do
+    LLines := LLines + ' ' + LD.Code + '@' + IntToStr(LD.Line);
+  var LAll := DiagCount('E2010') = 7;
+  for var LLine := 10 to 16 do
+    if Pos(' E2010@' + IntToStr(LLine) + ' ', LLines + ' ') = 0 then
+      LAll := False;
+  Ok('$T+ assignment: the seven refused are E2010, the rest clean [' +
+    LLines + ' ]', LAll and (Length(GModel.Diags) = 7));
+  Ok('$T+ assignment: an `@X` is named Pointer',
+    DiagHasText('E2010', '''PB'' and ''Pointer'''));
+  GModel.Free;
+end;
+
 procedure TestScopeList;
 var
   LList: TSemaScopeList;
@@ -4342,6 +4384,7 @@ begin
   TestLazyBlockScopes;
   TestScopeList;
   TestOperatorMismatchCodes;
+  TestTypedAddrAssign;
   TestCaptureE2555;
 
   // Phase 1 pools spellings per unit: one heap string per distinct text, a
