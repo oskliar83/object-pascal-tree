@@ -308,6 +308,10 @@ type
     FContext: TPasComplContext;
     FCaretVis: Integer;            // block-scope positional visibility
     FClassSide: Boolean;           // member completion on a TYPE reference
+    // Member completion on a VALUE (a variable, a with target), proven so:
+    // a lone `constructor` constraint gives it no Create (16.4.1). False
+    // where the base is a type or not known to be a value.
+    FValueBase: Boolean;
     FFieldsOnly: Boolean;          // ccRecField: aggregate wants skField only
     // True when FModel IS the project's own model of this file (the oracle /
     // any completion over unedited text): overlay symbol indices are then
@@ -4367,7 +4371,10 @@ begin
            (not FClassSide or
             ClassSideMember(ProjModel(AMid, 'CollectProjMembers'), ASym)) then
           AddSym(AMid, ASym, ACtx, ABucket);
-      end);
+      end, 0,
+      // A value of a type parameter has no Create through a lone
+      // `constructor` constraint - only the type does (16.4.1).
+      {AValueBase} FValueBase);
   finally
     FBaseOwnUnit := LSaveOwn;
   end;
@@ -4807,7 +4814,9 @@ begin
           if ComplValid(LRef) then
           begin
             FClassSide := False;
+            FValueBase := True;
             CollectMembers(LRef, cbWithMember);
+            FValueBase := False;
           end;
         end;
       end;
@@ -11435,6 +11444,7 @@ begin
     FSeen := TDictionary<string, Integer>.Create;
   FAncestryBuilt := False;
   FClassSide := False;
+  FValueBase := False;
   FSelfOv := NIL_SYM;
   FSelfClass := False;
   FFieldsOnly := False;
@@ -11623,6 +11633,13 @@ begin
         if ComplValid(LRef) then
         begin
           FClassSide := LRef.IsTypeRef;
+          // A value: not the type, and not a type parameter named bare (`T.`,
+          // which is no IsTypeRef but names the type all the same).
+          FValueBase := not LRef.IsTypeRef and not (
+            (FModel.Tree.Nodes[LInfo.DotBase].Kind = nkIdent) and
+            (FModel.RefMap[LInfo.DotBase] <> NIL_SYM) and
+            (FModel.Symbols[FModel.RefMap[LInfo.DotBase]].Kind =
+              skGenericParam));
           // `@TClass.Method` takes an INSTANCE method's address through the
           // class name (the vtable-building idiom) - the class-side filter
           // stands down under an address-of.

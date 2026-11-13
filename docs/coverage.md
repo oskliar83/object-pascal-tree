@@ -553,24 +553,17 @@ of less work, not a gap in following the language; its consequences are in
   ...`), read as type arguments.
 
 ### 16.4.1 Type-parameter constraints
-- the `constructor` constraint is not validated at instantiation sites
-  (E2513; class, record, class-type and interface constraints are);
-  constraint members are available for lookup. An interface constraint
-  leaves a typed pointer and a procedural type argument unjudged (dcc:
-  E2514, but a `reference to` type meets `T: IInterface`), and a generic
-  class whose list names another instance of the interface
-  (`TGImpl<string>` for `T: IG<Integer>`).
-- an explicitly instantiated generic METHOD (`F.Pick<TObject>(O)`) is checked
-  against the overload the call bound; a call whose overload is not decided
-  is not checked.
+- an interface constraint leaves a typed pointer and a procedural type
+  argument unjudged (dcc: E2514, but a `reference to` type meets `T:
+  IInterface`), and a generic class whose list names another instance of
+  the interface (`TGImpl<string>` for `T: IG<Integer>`). Constraint members
+  are available for lookup.
 - a class-type constraint (and the attribute check of 19.3.2) is reported
   only when the argument's ancestry is followed to its end: an ancestor
-  that does not resolve - its unit missing from the search path - leaves
-  the argument unchecked, where dcc would know.
-- a lone `constructor` constraint unlocks `T.Create` and no other member,
-  as in dcc; the member walk does not tell the type `T` from a value `V: T`,
-  so `V.Create` (dcc: E2003) is accepted and completion lists `Create` on
-  `V.` too.
+  that does not resolve - its unit neither on the search path nor read as
+  a .dcu - leaves the argument unchecked. dcc, which has that unit, knows;
+  without its declaration there is nothing to follow, and a verdict would
+  be a guess.
 
 ## 17-anonymous-methods.md
 
