@@ -4793,7 +4793,12 @@ begin
         begin
           LRef := ComplNilRef;
           if FIsProjectModel then
+          begin
             LRef.X := FProj.WithTargetTypeX(FProjMid, LTargets[LTi]);
+            // A target of no struct type opens nothing (5.7, E2018).
+            if not FProj.WithOpensX(LRef.X) then
+              Continue;
+          end;
           if not ComplValid(LRef) then
           begin
             LRef := DesignatorType(LTargets[LTi], 0);

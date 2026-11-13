@@ -293,14 +293,10 @@ of less work, not a gap in following the language; its consequences are in
   intra-unit typer still has no ExprType for it.
 
 ### 5.7 The `with` statement
-- the target is typed by the project's expression walk (the same one the
-  cross-type pass runs, as a probe over the target's subtree), so every
-  designator form that walk types is a legal target; the two position rules
-  dcc adds are NOT modelled: a parenthesised target (`with (R) do`) is opened
-  like `R` and writes to its members are not refused (dcc: E2064), and a
-  pointer written without `^` (`with P do`) is opened over the pointee where
-  dcc reports E2018. A non-struct target gets no E2018 either - the body's
-  names simply resolve in the enclosing scope.
+- the write rule behind `with (R) do X := 1` (E2064, a write into a part of
+  a value) is judged at an assignment's target only: a value passed to a
+  `var` parameter (dcc: E2197) or to `Inc` / `Dec` (E2064) is not refused,
+  and neither is a write into a `const` parameter's record (E2064).
 - the intra-unit resolver opens only member sets it can see in its own unit;
   a target of a cross-unit type, or a same-unit type with a cross-unit
   ancestor, is completed by the project pass. Navigation before the project

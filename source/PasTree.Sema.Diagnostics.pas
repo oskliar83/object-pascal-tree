@@ -62,6 +62,11 @@ const
   SE2001_OrdinalTypeRequired = 'E2001 Ordinal type required';
   SE2012_MustBeBoolean = 'E2012 Type of expression must be BOOLEAN';
   SE2028_SetTooLarge = 'E2028 Sets may have at most 256 elements';
+  // A `with` target of no struct type (5.7), and a write into a part of a
+  // value that is no variable (5.1.1, 5.7). Neither names anything.
+  SE2018_RecordObjectClassRequired =
+    'E2018 Record, object or class type required';
+  SE2064_LeftSideCannotBeAssigned = 'E2064 Left side cannot be assigned to';
   // 11 sec. 11.2.1. The single %s is the QUALIFIED member name, `TType.Member`,
   // which is how dcc spells it.
   SE2361_CannotAccessPrivate = 'E2361 Cannot access private symbol %s';

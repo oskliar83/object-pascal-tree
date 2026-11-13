@@ -2076,6 +2076,12 @@ type
       of one unit through one memoized session. }
     function WithTargetTypeX(AId, ANode: Integer;
       AProbe: TPasXProbe = nil): TSemaXType;
+    { Does a `with` over a value of type AX open a scope (5.7)? A record, an
+      `object`, a class, an interface and a class reference do; any other
+      category is dcc's E2018 and opens nothing - a pointer written without
+      `^` too, and a simple type with a helper. A type of unknown category
+      opens: nothing is refused on a guess. }
+    function WithOpensX(const AX: TSemaXType): Boolean;
     { WithTargetTypeX for a designator in INITIALIZER position (3.1.3), with
       the refusals that keep an inferred declaration from being a guess.
       AFollowForeign as UntypedInitTypeX's. }
@@ -19183,7 +19189,8 @@ var
           begin
             LTarget := LTargets[LIdx];
             LTX := XAt(LTarget);
-            if XValid(LTX) and FindMemberX(AId, LTX, LKey, LFMid, LFSym,
+            if XValid(LTX) and WithOpensX(LTX) and
+               FindMemberX(AId, LTX, LKey, LFMid, LFSym,
                LFCtx) then
             begin
               // The target has the name: it is the one the name means.
@@ -20787,6 +20794,294 @@ var
     end;
   end;
 
+  { 5.1.1 / 5.7 - what a write can reach. dcc refuses a write into a part of
+    a VALUE that is no variable (E2064): a field (or a property whose `write`
+    names a field) of a record or `object` value, an element of a static
+    array value. A value is a parenthesised expression (`(R).X := 1`, and
+    the target of `with (R) do X := 1`), a call's result (`GetR.X`, `with
+    GetR do X := 1`), a property's value however it is read (`O.PR.X := 1`
+    with `property PR: TRec read FR write FR`, `O[0].X` through a default
+    array property), and a field or element of one of those. A cast of a
+    variable stays the variable, a selection through a class, an interface
+    or a dereference reaches a variable, a dynamic array's element is one,
+    and a class var is not a part of the value it is named through. A
+    method-setter property written on a value is a call, not a write
+    (`with (R) do Z := 1`, Z's `write SetZ`: legal). dcc64 37.0, 2026-11-13
+    (spec 5.7). Asked only where the binding and the types are reliable;
+    a var argument (E2197) is not judged here. }
+
+  // A static array at N: by its type, or by the inline `array[..] of T` the
+  // variable or field it names is declared with (no type symbol there).
+  function StaticArrayAt(N: Integer): Boolean;
+  var
+    LCore, LMid, LSym: Integer;
+  begin
+    if IsStaticArrayX(CanonTypeX(GetX(N))) then
+      Exit(True);
+    LCore := PeelParens(LM.Tree, N);
+    Result := (LCore <> NIL_NODE) and TargetSym(LCore, LMid, LSym) and
+      (FModels[LMid].Symbols[LSym].Kind in [skVar, skField]) and
+      StaticArrayDef(LMid, FModels[LMid].Symbols[LSym].TypeNode);
+  end;
+
+  // A record or `object` value, or a static array one: a type whose parts
+  // live in the value itself.
+  function ValueTyped(N: Integer): Boolean;
+  var
+    LX: TSemaXType;
+  begin
+    LX := CanonTypeX(GetX(N));
+    Result := (XValid(LX) and not OpenX(LX) and (XCatOf(LX) = tcRecord)) or
+      StaticArrayAt(N);
+  end;
+
+  // A `class var` field (its nkVarSec's Aux = 1): never a part of a value.
+  function IsClassVarField(AMid, ASym: Integer): Boolean;
+  var
+    LDm: TPasSemaModel;
+    LNode: Integer;
+  begin
+    LDm := FModels[AMid];
+    LNode := LDm.Symbols[ASym].DeclNode;
+    while (LNode <> NIL_NODE) and (LDm.Tree.Nodes[LNode].Kind <> nkVarSec) and
+          not (LDm.Tree.Nodes[LNode].Kind in [nkClassType, nkRecordType,
+            nkInterfaceType, nkObjectType, nkHelperType]) do
+      LNode := LDm.Tree.Nodes[LNode].Parent;
+    Result := (LNode <> NIL_NODE) and
+      (LDm.Tree.Nodes[LNode].Kind = nkVarSec) and
+      (LDm.Tree.Nodes[LNode].Aux = 1);
+  end;
+
+  // A property whose `write` names a field - a write through it is the
+  // field's. Read off the declaration's specifier; a text-demoted model
+  // answers no (nothing is refused on what cannot be read).
+  function PropertyWritesField(AMid, ASym: Integer): Boolean;
+  var
+    LDm: TPasSemaModel;
+    LDecl, LSpec, LAcc, LFSym: Integer;
+    LExt: TPasExtRef;
+  begin
+    Result := False;
+    LDm := FModels[AMid];
+    if LDm.Demoted then
+      Exit;
+    LDecl := LDm.Symbols[ASym].DeclNode;
+    if LDecl = NIL_NODE then
+      Exit;
+    LDecl := LDm.Tree.Nodes[LDecl].Parent;
+    if (LDecl = NIL_NODE) or (LDm.Tree.Nodes[LDecl].Kind <> nkPropertyDecl) then
+      Exit;
+    LSpec := LDm.Tree.Nodes[LDecl].FirstChild;
+    while LSpec <> NIL_NODE do
+    begin
+      if (LDm.Tree.Nodes[LSpec].Kind = nkPropSpec) and
+         LDm.Tree.NodeTextEquals(LSpec, 'write') then
+      begin
+        LAcc := LDm.Tree.Nodes[LSpec].FirstChild;
+        if (LAcc <> NIL_NODE) and (LDm.Tree.Nodes[LAcc].Kind = nkMember) then
+          LAcc := LDm.Tree.LastChild(LAcc);
+        if (LAcc = NIL_NODE) or (LDm.Tree.Nodes[LAcc].Kind <> nkIdent) then
+          Exit;
+        LFSym := LDm.RefMap[LAcc];
+        if LFSym <> NIL_SYM then
+          Exit(LDm.Symbols[LFSym].Kind = skField);
+        if LDm.ExtRefMap.TryGetValue(LAcc, LExt) then
+          Exit(FModels[LExt.UnitId].Symbols[LExt.Sym].Kind = skField);
+        Exit;
+      end;
+      LSpec := LDm.Tree.Nodes[LSpec].NextSibling;
+    end;
+  end;
+
+  { The `with` target the bare name N, bound to the member AMid.ASym, is
+    reached through - the climb FindInEnclosingWith makes (the innermost
+    with first, its targets right to left, a target seeing only the ones
+    before it), over this walk's types. NIL_NODE outside a with, past a
+    target this walk did not type, or when the target that has the name
+    is not the member's. }
+  function WithTargetOf(N, AMid, ASym: Integer): Integer;
+  var
+    LCur, LParent, LChild, LLast, LFrom, LIdx, LFMid, LFSym, LFCtx: Integer;
+    LTargets: TArray<Integer>;
+    LTX: TSemaXType;
+    LName: string;
+  begin
+    Result := NIL_NODE;
+    LName := LowerCase(LM.Tree.NodeText(N));
+    LCur := N;
+    LParent := LM.Tree.Nodes[LCur].Parent;
+    while LParent <> NIL_NODE do
+    begin
+      if LM.Tree.Nodes[LParent].Kind = nkWithStmt then
+      begin
+        LTargets := nil;
+        LLast := LM.Tree.WithBody(LParent);
+        LChild := LM.Tree.Nodes[LParent].FirstChild;
+        while (LChild <> NIL_NODE) and (LChild <> LLast) do
+        begin
+          LTargets := LTargets + [LChild];
+          LChild := LM.Tree.Nodes[LChild].NextSibling;
+        end;
+        LFrom := -1;
+        if LCur = LLast then
+          LFrom := High(LTargets)
+        else
+          for LIdx := 0 to High(LTargets) do
+            if LTargets[LIdx] = LCur then
+            begin
+              LFrom := LIdx - 1;
+              Break;
+            end;
+        for LIdx := LFrom downto 0 do
+        begin
+          LTX := GetX(LTargets[LIdx]);
+          if not XValid(LTX) then
+            Exit;
+          if WithOpensX(LTX) and FindVisibleMemberX(AId,
+               StructSymOfNode(LM, N), LTX, LName, LFMid, LFSym, LFCtx) then
+          begin
+            if (LFMid = AMid) and (LFSym = ASym) then
+              Result := LTargets[LIdx];
+            Exit;
+          end;
+        end;
+      end;
+      LCur := LParent;
+      LParent := LM.Tree.Nodes[LCur].Parent;
+    end;
+  end;
+
+  function IsValueOnly(AAssign, B: Integer): Boolean; forward;
+
+  // The field AMid.ASym that the designator N names lies in a value: the
+  // base it is selected from (an nkMember's left side, a bare name's with
+  // target) is a record value that is no variable.
+  function FieldOfValue(AAssign, N, AMid, ASym: Integer): Boolean;
+  var
+    LBase: Integer;
+  begin
+    Result := False;
+    if IsClassVarField(AMid, ASym) then
+      Exit;
+    case LM.Tree.Nodes[N].Kind of
+      nkMember:
+        LBase := LM.Tree.Nodes[N].FirstChild;
+      nkIdent:
+        LBase := WithTargetOf(N, AMid, ASym);
+    else
+      Exit;
+    end;
+    Result := (LBase <> NIL_NODE) and ValueTyped(LBase) and
+      IsValueOnly(AAssign, LBase);
+  end;
+
+  // Is the designator B, of a type ValueTyped accepts, a value rather than
+  // a variable - see the block comment above.
+  function IsValueOnly(AAssign, B: Integer): Boolean;
+  var
+    LCallee, LArg, LBase, LMid, LSym: Integer;
+    LBx: TSemaXType;
+  begin
+    Result := False;
+    if Unreliable(AAssign, B, GetX(B)) then
+      Exit;
+    case LM.Tree.Nodes[B].Kind of
+      nkParen:
+        Result := True;
+      nkCall:
+        begin
+          LCallee := LM.Tree.Nodes[B].FirstChild;
+          if LCallee = NIL_NODE then
+            Exit;
+          if IsTypeDesignator(LCallee) then
+          begin
+            // A cast: of a variable, the variable.
+            LArg := LM.Tree.Nodes[LCallee].NextSibling;
+            Result := (LArg <> NIL_NODE) and
+              (LM.Tree.Nodes[LArg].NextSibling = NIL_NODE) and
+              IsValueOnly(AAssign, LArg);
+          end
+          else
+            Result := True;   // a call's result
+        end;
+      nkIdent, nkMember:
+        if TargetSym(B, LMid, LSym) then
+          case FModels[LMid].Symbols[LSym].Kind of
+            skRoutine, skProperty:
+              Result := True;   // a paren-less call's result, a property's value
+            skField:
+              Result := FieldOfValue(AAssign, B, LMid, LSym);
+          end;
+      nkIndex:
+        begin
+          LBase := LM.Tree.Nodes[B].FirstChild;
+          if LBase = NIL_NODE then
+            Exit;
+          if IsArrayPropertyDesignator(LBase) then
+            Exit(True);
+          if StaticArrayAt(LBase) then
+            Exit(IsValueOnly(AAssign, LBase));
+          // Indexing a struct is its default array property's value.
+          LBx := CanonTypeX(GetX(LBase));
+          Result := XValid(LBx) and
+            (XCatOf(LBx) in [tcClass, tcInterface, tcRecord]);
+        end;
+    end;
+  end;
+
+  // E2064 at an assignment AAssign whose target ADst is a part of a value.
+  procedure CheckWriteTarget(AAssign, ADst: Integer);
+  var
+    LMid, LSym, LBase: Integer;
+    LHit: Boolean;
+  begin
+    if InUntypedWith(AAssign) then
+      Exit;
+    LHit := False;
+    case LM.Tree.Nodes[ADst].Kind of
+      nkIdent, nkMember:
+        if TargetSym(ADst, LMid, LSym) then
+          case FModels[LMid].Symbols[LSym].Kind of
+            skField:
+              LHit := FieldOfValue(AAssign, ADst, LMid, LSym);
+            skProperty:
+              LHit := PropertyWritesField(LMid, LSym) and
+                FieldOfValue(AAssign, ADst, LMid, LSym);
+          end;
+      nkIndex:
+        begin
+          LBase := LM.Tree.Nodes[ADst].FirstChild;
+          LHit := (LBase <> NIL_NODE) and
+            not IsArrayPropertyDesignator(LBase) and StaticArrayAt(LBase) and
+            IsValueOnly(AAssign, LBase);
+        end;
+    end;
+    if LHit then
+      EmitAt(LM, ADst, 'E2064', SE2064_LeftSideCannotBeAssigned);
+  end;
+
+  // E2018 at a with target of no struct type (5.7, WithOpensX). Judged on a
+  // target this walk typed reliably, outside a with whose own target it
+  // could not type.
+  procedure CheckWithTargets(AWith: Integer);
+  var
+    LTarget, LBody: Integer;
+    LTx: TSemaXType;
+  begin
+    if InUntypedWith(AWith) then
+      Exit;
+    LBody := LM.Tree.WithBody(AWith);
+    LTarget := LM.Tree.Nodes[AWith].FirstChild;
+    while (LTarget <> NIL_NODE) and (LTarget <> LBody) do
+    begin
+      LTx := GetX(LTarget);
+      if XValid(LTx) and not WithOpensX(LTx) and
+         not Unreliable(AWith, LTarget, LTx) then
+        EmitAt(LM, LTarget, 'E2018', SE2018_RecordObjectClassRequired);
+      LTarget := LM.Tree.Nodes[LTarget].NextSibling;
+    end;
+  end;
+
   procedure CheckAssigns;
 
     // One value going to one target (2.6.1): ASrc typed ASrcX to the target
@@ -21025,7 +21320,10 @@ var
             if LSrc = NIL_NODE then
               Continue;
             CheckConv(N, LDst, LSrc, LSrc, GetX(LDst), GetX(LSrc));
+            CheckWriteTarget(N, LDst);
           end;
+        nkWithStmt:
+          CheckWithTargets(N);
         nkVarDecl:
           if LM.Tree.Nodes[N].Aux <> 1 then   // not `absolute`
             CheckDecl(N);
@@ -26097,6 +26395,22 @@ begin
   end;
 end;
 
+{ 5.7: the targets dcc opens are of a record, `object`, class, interface or
+  class-reference type (a bare class type name types as its class). Every
+  other category is E2018 and opens nothing - the body's names resolve as
+  outside the with, and dcc reports E2003 on the target's would-be members:
+  a pointer written without `^` (the implicit dereference of `P.F` does not
+  extend to a target), a dynamic or static array, a procedural or
+  anonymous-method type, and a simple type even with a helper in scope
+  (`with S do Length` under TStringHelper, `with I do ToString`). dcc64
+  37.0, 2026-11-13 (spec 5.7). }
+function TPasSemaProject.WithOpensX(const AX: TSemaXType): Boolean;
+begin
+  Result := not XValid(AX) or not (XCatOf(AX) in [tcInteger, tcFloat,
+    tcBoolean, tcChar, tcString, tcPointer, tcNil, tcEnum, tcSet, tcArray,
+    tcProc, tcVariant, tcFile]);
+end;
+
 // True when ANode sits in the BODY of some enclosing `with`. An identifier
 // inside a with's own TARGET expression is NOT in its scope (the target is
 // evaluated in the enclosing one), hence the last-child test.
@@ -26211,7 +26525,9 @@ begin
         begin
           LX := WithTargetTypeX(AId, LTargets[LIdx], AProbe);
           if not XValid(LX) then
-            AUntyped := True;
+            AUntyped := True
+          else if not WithOpensX(LX) then
+            Continue;   // E2018: no scope opens (5.7)
           if XValid(LX) and (LHere = -2) then
             LHere := StructSymOfNode(LM, ANode);
           if XValid(LX) and FindVisibleMemberX(AId, LHere, LX, ANameLower,
