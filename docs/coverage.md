@@ -225,9 +225,8 @@ of less work, not a gap in following the language; its consequences are in
   operators. A constant expression over a TYPECAST constant is typed by
   the cast here, by its folded value in dcc (`KC + 0` of `KC =
   Cardinal($200)`, `(Cardinal(1) shl 31) - 1` Integer; spec 4.2.1, local/
-  cov-exprs-2026-11 tc, tc2) - beside a variable both keep the cast's type. `AnsiChar + AnsiChar` (dcc's
-  anonymous short string) is typed ShortString; pointer minus pointer is
-  left untyped. The intra-unit typer cannot tell a code-page string declared
+  cov-exprs-2026-11 tc, tc2) - beside a variable both keep the cast's type.
+  The intra-unit typer cannot tell a code-page string declared
   in another unit (UTF8String, RawByteString) from a plain AnsiString-kind
   type it does not see, so those joins are the project level's.
 
@@ -249,7 +248,6 @@ of less work, not a gap in following the language; its consequences are in
   reads its range from bounds and values the integer folder reads (`0..N *
   8000` is Word) - one it cannot (`SizeOf(T)` of a record or another
   non-integer type) leaves the range unknown and `Ord` Integer;
-  `Abs` of a subrange past 32 bits reads Integer where dcc says Int64;
   `GetTypeKind` is typed at the
   project level only (System.TTypeKind is a real declaration the intra-unit
   typer cannot see); `Slice` stays untyped (it is legal in one position only,
