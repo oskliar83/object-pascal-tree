@@ -540,6 +540,12 @@ const
     '  TNeedRecord<T: record> = class end;'#10 +
     '  TNeedBase<T: TBase> = class end;'#10 +
     '  TFree<T> = class end;'#10 +
+    '  IBase = interface end;'#10 +
+    '  IDer = interface(IBase) end;'#10 +
+    '  TImplB = class(TBase, IBase) end;'#10 +
+    '  TImplSub = class(TImplB) end;'#10 +
+    '  TOnlyDer = class(TBase, IDer) end;'#10 +
+    '  TNeedIntf<T: IBase> = class end;'#10 +
     'implementation'#10'end.'#10;
 
   UNIT_CONUSE =
@@ -556,6 +562,15 @@ const
     '  Ok5: TNeedBase<TDeriv>;'#10 +         // descendant
     '  Ok6: TNeedBase<TBase>;'#10 +          // the constraint type itself
     '  Ok7: TFree<string>;'#10 +
+    // 16.4.1 interface constraints: a class LISTING IBase (or an ancestor
+    // class listing it), IBase and its descendants; a listed descendant
+    // interface alone and a record are E2514.
+    '  Bad5: TNeedIntf<TOnlyDer>;'#10 +
+    '  Bad6: TNeedIntf<TRec>;'#10 +
+    '  Ok8: TNeedIntf<TImplB>;'#10 +
+    '  Ok9: TNeedIntf<TImplSub>;'#10 +
+    '  Ok10: TNeedIntf<IDer>;'#10 +
+    '  Ok11: TNeedIntf<IBase>;'#10 +
     'implementation'#10'end.'#10;
 
   // 16.1.2 - one generic name declared at several ARITIES. These are two
@@ -5039,6 +5054,59 @@ begin
     SemaKey(LStr).Hash = LKey.Hash);
   Ok('non-ASCII fold: ...and compare equal', SemaKeyEquals(LStr, LKey));
   Ok('non-ASCII fold: ...and print the same key', SemaKeyText(LKey) = LStr);
+end;
+
+// 4.5 (dcc64 37.0, local/probe-cov-refresh Q2, Q3): an overloaded comparison
+// is of its `class operator`'s result type, not Boolean - `I := A = B` for an
+// `Equal: Integer` compiles, and so do `S := A < B` for a `LessThan: string`
+// and `S := 5 in A` for an `In: string`. Both typers took every comparison
+// for Boolean: three false E2010. A Boolean `Equal` keeps the E2010 of `I :=
+// P = P2`.
+procedure TestComparisonOperatorType;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_cmp_operator');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'CmpOpP.dpr'),
+    'program CmpOpP;'#10'type'#10 +
+    '  TR = record X: Integer;'#10 +
+    '    class operator Equal(const A, B: TR): Integer;'#10 +
+    '    class operator LessThan(const A, B: TR): string;'#10 +
+    '    class operator In(const A: Integer; const B: TR): string;'#10 +
+    '  end;'#10 +
+    '  TP = record X: Integer;'#10 +
+    '    class operator Equal(const A, B: TP): Boolean;'#10 +
+    '  end;'#10 +
+    'class operator TR.Equal(const A, B: TR): Integer; begin Result := 7; end;'#10 +
+    'class operator TR.LessThan(const A, B: TR): string; begin Result := ''''; end;'#10 +
+    'class operator TR.In(const A: Integer; const B: TR): string; begin Result := ''''; end;'#10 +
+    'class operator TP.Equal(const A, B: TP): Boolean; begin Result := True; end;'#10 +
+    'var A, B: TR; P, P2: TP; I: Integer; S: string; Bo: Boolean;'#10 +
+    'begin'#10 +
+    '  I := A = B;'#10 +
+    '  S := A < B;'#10 +
+    '  S := 5 in A;'#10 +
+    '  Bo := P = P2;'#10 +
+    '  I := P = P2;'#10 +
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'CmpOpP.dpr'));
+    LM := ModelByName('cmpopp');
+    Ok('4.5: the program loaded', LM <> nil);
+    if LM <> nil then
+      Ok('4.5: an overloaded comparison is its operator''s type - one E2010, ' +
+        'for the Boolean Equal into an Integer',
+        (DiagCount(LM, 'E2010') = 1) and
+        DiagHasText(LM, 'E2010', '''Integer'' and ''Boolean'''));
+  finally
+    GProj.Free;
+  end;
+  TDirectory.Delete(LDir, True);
 end;
 
 // 11.1.1 (audit P7, C1-11; local/probe-p7/root R1-R7): the implicit root of a
@@ -13995,14 +14063,16 @@ begin
     // 16.4.1 constraints, checked cross-model (see UNIT_CON/UNIT_CONUSE).
     var LCU := ModelByName('unitconuse');
     Ok('constraints: UnitConUse loaded', Assigned(LCU));
-    Ok('constraints: exactly 4 violations, no more',
-      Length(LCU.Diags) = 4);
+    Ok('constraints: exactly 6 violations, no more',
+      Length(LCU.Diags) = 6);
     Ok('constraints: E2511 for a non-class under `T: class`',
       DiagCount(LCU, 'E2511') = 1);
     Ok('constraints: E2512 twice - managed string and a dynamic array',
       DiagCount(LCU, 'E2512') = 2);
     Ok('constraints: E2515 for an unrelated class under `T: TBase`',
       DiagCount(LCU, 'E2515') = 1);
+    Ok('constraints: E2514 for a class listing only a descendant interface ' +
+      'and for a record under `T: IBase`', DiagCount(LCU, 'E2514') = 2);
     // The declaring unit itself must stay clean: a constraint is not a
     // violation of itself, and the open parameter T inside the generic's own
     // body constrains nothing.
@@ -19773,6 +19843,7 @@ begin
   TestIncludeRows;
   TestNonAsciiFold;
   TestImplicitRoot;
+  TestComparisonOperatorType;
   TestInstanceSize;
   TestOperatorChains;
   TestDonorSafety;

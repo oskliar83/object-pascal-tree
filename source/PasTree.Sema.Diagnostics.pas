@@ -104,6 +104,8 @@ const
   SE2511_MustBeClass = 'E2511 Type parameter ''%s'' must be a class type';
   SE2512_MustBeValueType =
     'E2512 Type parameter ''%s'' must be a non-nullable value type';
+  SE2514_MustSupportInterface =
+    'E2514 Type parameter ''%s'' must support interface ''%s''';
   SE2515_NotCompatibleWith =
     'E2515 Type parameter ''%s'' is not compatible with type ''%s''';
 

@@ -1400,6 +1400,8 @@ type
     function ConstraintsOfParamX(const AParam: TSemaXType;
       ACtorOnly: Boolean = False): TArray<TSemaXType>;
     function RoutineNameOfParam(AMid, ANode: Integer): string;
+    function InterfaceConstraintFails(const AArg: TSemaXType;
+      ACat: TSemaTypeCat; const AIntf: TSemaXType): Boolean;
     procedure CheckConstraints(AId: Integer);
     function ResolveCustomAttributeX(AId: Integer): TSemaXType;
     procedure CheckAttributes(AId: Integer);
@@ -11246,6 +11248,34 @@ begin
   Result := xdUnknown;   // the depth cap
 end;
 
+{ Does the type argument AArg (category ACat) fail the interface constraint
+  AIntf (canonical) - dcc's E2514 (16.4.1, dcc64 37.0)? A class meets it when
+  a class of its chain LISTS AIntf (XImplementsX: a listed descendant
+  interface does not count), an interface when it is AIntf or descends from
+  it (XDescent, the implicit IInterface root included); a value category
+  meets none. Only a definite answer fails: an ancestry or a list that does
+  not resolve is silence, and so are the categories dcc does not reject
+  alike - a pointer (the untyped Pointer passes, a compiler gap), a
+  procedural type (a `reference to` type is an interface) - and an unknown
+  one. }
+function TPasSemaProject.InterfaceConstraintFails(const AArg: TSemaXType;
+  ACat: TSemaTypeCat; const AIntf: TSemaXType): Boolean;
+begin
+  if not XValid(AIntf) then
+    Exit(False);
+  case ACat of
+    tcClass:
+      Result := XImplementsX(CanonTypeX(AArg), AIntf) = xdNo;
+    tcInterface:
+      Result := XDescent(CanonTypeX(AArg), AIntf) = xdNo;
+    tcInteger, tcFloat, tcBoolean, tcChar, tcString, tcEnum, tcSet, tcArray,
+    tcRecord, tcClassOf, tcVariant:
+      Result := True;
+  else
+    Result := False;
+  end;
+end;
+
 { 16.4.1 - type-parameter constraints, checked at each instantiation site.
 
   A DIAGNOSTIC pass, so it is deliberately conservative: every uncertainty
@@ -11264,11 +11294,13 @@ end;
   A generic METHOD's explicit instantiation (`F.Pick<TObject>(O)`) is checked
   the same way, against the overload the call bound (16.4.1).
 
+    T: SomeIntf    a class whose own or an ancestor class's list NAMES it
+                   (XImplementsX - a listed descendant interface does not
+                   count), the interface itself or a descendant interface
+                   (XDescent); E2514 for those that do not and for every
+                   value category (InterfaceConstraintFails, dcc64 37.0).
+
   Not checked, and each for a stated reason:
-    T: SomeInterface  needs the implemented-interface list, including the ones
-                      inherited from ancestors - a traversal nothing here does
-                      yet (FindMemberX deliberately follows only the FIRST
-                      heritage entry). Silence is correct until it exists.
     constructor       satisfied by essentially every class, since TObject
                       declares a parameterless constructor. Checking it would
                       cost a member walk to find approximately no bugs. }
@@ -11366,6 +11398,12 @@ begin
               // dcc names the real class, not an alias (16.4.1).
               EmitAt(LM, LArgNode, 'E2515',
                 Format(SE2515_NotCompatibleWith,
+                  [LParamName, XTypeText(CanonTypeX(LConX))]))
+            else if XValid(LConX) and (XCatOf(LConX) = tcInterface) and
+                    InterfaceConstraintFails(LArgX, LCat,
+                      CanonTypeX(LConX)) then
+              EmitAt(LM, LArgNode, 'E2514',
+                Format(SE2514_MustSupportInterface,
                   [LParamName, XTypeText(CanonTypeX(LConX))]));
             Continue;
           end;
@@ -23719,7 +23757,18 @@ begin
   if not LUnary and
      (LOp in [tkEqual, tkNotEqual, tkLess, tkLessEqual, tkGreater,
       tkGreaterEqual, tkIn, tkIs]) then
+  begin
+    // An overloaded comparison is of its operator's result type, which
+    // need not be Boolean (4.5: `I := A = B` for an `Equal: Integer`); one
+    // the operators do not decide stays Boolean, as before.
+    if (LOp <> tkIs) and ((LcL = tcRecord) or (LcR = tcRecord)) then
+    begin
+      Result := RecordOperatorX(LOp, False, LL, LR);
+      if XValid(Result) then
+        Exit;
+    end;
     Exit(BuiltinX(AMid, 'boolean'));
+  end;
   if (LcL = tcRecord) or (LcR = tcRecord) then
     Exit(RecordOperatorX(LOp, LUnary, LL, LR));
   if (LcL in [tcClass, tcInterface, tcVariant]) or
@@ -24204,6 +24253,14 @@ begin
           LNames[0] := 'logicalxor';
           LNames[1] := 'bitwisexor';
         end;
+      // A comparison's operator may give any type (4.5).
+      tkEqual: LNames[0] := 'equal';
+      tkNotEqual: LNames[0] := 'notequal';
+      tkLess: LNames[0] := 'lessthan';
+      tkLessEqual: LNames[0] := 'lessthanorequal';
+      tkGreater: LNames[0] := 'greaterthan';
+      tkGreaterEqual: LNames[0] := 'greaterthanorequal';
+      tkIn: LNames[0] := 'in';
     end;
   if LNames[0] = '' then
     Exit;
