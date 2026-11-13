@@ -2871,6 +2871,39 @@ begin
   finally
     GModel.Free;
   end;
+  // An ancestor's overload set: the call's argument count picks the member,
+  // and the name is typed by it, not by the set's head (System.JSON.Builders'
+  // TPairs.Add over TBaseCollection's two Adds).
+  Analyze(
+    'unit U; interface type'#10 +
+    '  TE = class end; TP = class end;'#10 +
+    '  TA = class function Add(const V: Single): TE; overload;'#10 +
+    '    function Add(const K: string; const V: Single): TP; overload; end;'#10 +
+    '  TB = class(TA) function Add(const K: string; const V: Single): TP;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TA.Add(const V: Single): TE; begin Result := nil; end;'#10 +
+    'function TA.Add(const K: string; const V: Single): TP;'#10 +
+    'begin Result := nil; end;'#10 +
+    'function TB.Add(const K: string; const V: Single): TP;'#10 +
+    'begin Result := inherited Add(K, V); end;'#10 +
+    'end.');
+  try
+    var LName := '';
+    for var LN := 0 to High(GTree.Nodes) do
+      if GTree.Nodes[LN].Kind = nkInherited then
+      begin
+        var LLeaf := GTree.Nodes[LN].FirstChild;
+        while (LLeaf <> NIL_NODE) and (GTree.Nodes[LLeaf].Kind <> nkIdent) do
+          LLeaf := GTree.Nodes[LLeaf].FirstChild;
+        if (LLeaf <> NIL_NODE) and (GModel.ExprType[LLeaf] <> NIL_SYM) then
+          LName := GModel.Symbols[GModel.ExprType[LLeaf]].Name;
+      end;
+    Ok('inherited: an overload set''s name is typed by the overload the ' +
+      'arguments pick [' + LName + ']', LName = 'TP');
+  finally
+    GModel.Free;
+  end;
 end;
 
 begin
