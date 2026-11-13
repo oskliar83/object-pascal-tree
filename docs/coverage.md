@@ -205,13 +205,12 @@ of less work, not a gap in following the language; its consequences are in
   type: dcc's are anonymous, and nothing in PasTree can name them.
 
 ### 3.3.2 Name resolution order
-- a forward class or interface is read from the start of its type section,
-  not from the forward: a reference above `TFoo = class;` in that section
-  binds the completed TFoo where dcc reports E2003 or takes a used unit's
-  TFoo.
-- an implementation heading written below a type that its declaration's
-  heading named above (the same name, two types) pairs with the declaration
-  all the same: dcc's E2037 there is not reported.
+- an implementation heading is checked against its declaration (E2037) only
+  where the pairing is certain: a struct's one routine of the name, neither
+  overloaded nor generic, the heading writing its own list with the
+  declaration's count and modes, every type a plain name. dcc's follow-on
+  reports are not given: E2065 at a declaration whose heading differed, and
+  the E2004 for both halves of a forward completed after an E2003 above it.
 
 ## 04-expressions-operators.md
 

@@ -1421,6 +1421,7 @@ type
     procedure CheckConstraints(AId: Integer);
     function ResolveCustomAttributeX(AId: Integer): TSemaXType;
     procedure CheckAttributes(AId: Integer);
+    procedure CheckHeadingPairs(AId: Integer);
     function InterfaceGuidBracket(AModel: TPasSemaModel;
       AAttr: Integer): Boolean;
     function RecordHasLifecycleOp(AMid, ADefNode: Integer): Boolean;
@@ -10889,6 +10890,7 @@ begin
           begin
             CheckConstraints(AIds[0]);
             CheckAttributes(AIds[0]);
+            CheckHeadingPairs(AIds[0]);
           end;
         except
           on E: Exception do
@@ -10902,6 +10904,7 @@ begin
         CheckCalls(AIds[ASlot]);
         CheckConstraints(AIds[ASlot]);
         CheckAttributes(AIds[ASlot]);
+        CheckHeadingPairs(AIds[ASlot]);
       end,
       function(ASlot: Integer): Integer
       begin
@@ -12036,6 +12039,124 @@ begin
     if XDescent(LAttrX, LCustomAttrX) = xdNo then
       EmitAt(LM, LRef, 'E2010', Format(SE2010_IncompatibleTypes,
         [XTypeText(LAttrX), 'TCustomAttribute']));
+  end;
+end;
+
+{ 3.3.2 point 3 (dcc64 37.0, 2026-11-13): a method's implementation heading
+  names its parameter types where it stands, and a type written between the
+  declaration and the heading - `TX = Byte` below a class whose `M(A: TX)`
+  took a used unit's `TX = Int64` - makes the heading another routine:
+  `E2037 Declaration of 'M' differs from previous declaration`, at the
+  heading. Reported only where the pairing is certain: the struct declares
+  one routine of that name, not overloaded, neither generic; the heading
+  writes its own list, with the declaration's count and modes, every type a
+  plain name both sides resolve; one pair of them is not the same type
+  (CanonTypeX, XSameType: an alias is its type, `string` UnicodeString). }
+procedure TPasSemaProject.CheckHeadingPairs(AId: Integer);
+var
+  LM: TPasSemaModel;
+  LScope, LStruct, LNode, LChild, LName, LDecl, LDeclScope, LIdx: Integer;
+  LImplParams, LDeclParams: TArray<Integer>;
+  LDiffers: Boolean;
+
+  function ParamsOf(AMid, AScope: Integer): TArray<Integer>;
+  var
+    LList: TSemaSymList;
+    LI, LCount: Integer;
+  begin
+    LList := FModels[AMid].Scopes[AScope].Symbols;
+    SetLength(Result, LList.Count);
+    LCount := 0;
+    for LI := 0 to LList.Count - 1 do
+      if FModels[AMid].Symbols[LList[LI]].Kind = skParam then
+      begin
+        Result[LCount] := LList[LI];
+        Inc(LCount);
+      end;
+    SetLength(Result, LCount);
+  end;
+
+  // The declared type of parameter ASym, when it is written as a plain name
+  // that resolves to a type that is no generic parameter; XNil otherwise.
+  function SlotX(AMid, ASym: Integer): TSemaXType;
+  var
+    LType: Integer;
+  begin
+    Result := XNil;
+    LType := FModels[AMid].Symbols[ASym].TypeNode;
+    if (LType = NIL_NODE) or not (FModels[AMid].Tree.Nodes[LType].Kind in
+       [nkIdent, nkMember]) then
+      Exit;
+    Result := CanonTypeX(SymDeclTypeX(AMid, ASym));
+    if XValid(Result) and
+       (FModels[Result.UnitId].Symbols[Result.Sym].Kind = skGenericParam) then
+      Result := XNil;
+  end;
+
+begin
+  LM := FModels[AId];
+  if not LM.AllUsesResolved then
+    Exit;
+  for LScope := 0 to LM.Scopes.Count - 1 do
+  begin
+    if LM.Scopes[LScope].Kind <> sckRoutine then
+      Continue;
+    LStruct := LM.Scopes[LScope].StructSym;
+    LNode := LM.Scopes[LScope].OwnerNode;
+    if (LStruct = NIL_SYM) or (LNode = NIL_NODE) or
+       (LM.Tree.Nodes[LNode].Kind <> nkRoutine) or
+       (sfGeneric in LM.Symbols[LStruct].Flags) or
+       (LM.Symbols[LStruct].MemberScope = NIL_SCOPE) then
+      Continue;
+    // The heading's name: its last name segment, with no type parameters of
+    // its own; and a list of its own, no `overload`.
+    LName := NIL_NODE;
+    LChild := PasSkipAttrGroups(LM.Tree, LM.Tree.Nodes[LNode].FirstChild);
+    while (LChild <> NIL_NODE) and
+          ((nfName in LM.Tree.Nodes[LChild].Flags) or
+           (LM.Tree.Nodes[LChild].Kind = nkGenericParams)) do
+    begin
+      if LM.Tree.Nodes[LChild].Kind = nkGenericParams then
+        LName := NIL_NODE
+      else if LM.Tree.Nodes[LChild].Kind = nkIdent then
+        LName := LChild;
+      LChild := LM.Tree.Nodes[LChild].NextSibling;
+    end;
+    if (LName = NIL_NODE) or (LChild = NIL_NODE) or
+       (LM.Tree.Nodes[LChild].Kind <> nkParams) then
+      Continue;
+    LDecl := LM.FindLocal(LM.Symbols[LStruct].MemberScope,
+      PasNodeKey(LM.Tree, LName));
+    if (LDecl = NIL_SYM) or (LM.Symbols[LDecl].Kind <> skRoutine) or
+       (LM.Symbols[LDecl].NextOverload <> NIL_SYM) or
+       (sfOverloadDirective in LM.Symbols[LDecl].Flags) or
+       (sfGeneric in LM.Symbols[LDecl].Flags) then
+      Continue;
+    LDeclScope := LM.Symbols[LDecl].MemberScope;
+    if (LDeclScope = NIL_SCOPE) or (LDeclScope = LScope) then
+      Continue;
+    LImplParams := ParamsOf(AId, LScope);
+    LDeclParams := ParamsOf(AId, LDeclScope);
+    if Length(LImplParams) <> Length(LDeclParams) then
+      Continue;
+    LDiffers := False;
+    for LIdx := 0 to High(LImplParams) do
+    begin
+      if ParamModeOf(LM, LImplParams[LIdx]) <>
+         ParamModeOf(LM, LDeclParams[LIdx]) then
+      begin
+        LDiffers := False;
+        Break;
+      end;
+      var LImplX := SlotX(AId, LImplParams[LIdx]);
+      var LDeclX := SlotX(AId, LDeclParams[LIdx]);
+      if XValid(LImplX) and XValid(LDeclX) and
+         not XSameType(LImplX, LDeclX) then
+        LDiffers := True;
+    end;
+    if LDiffers and not LM.HasDiagAt(LName) then
+      EmitAt(LM, LName, 'E2037', Format(SE2037_DeclarationDiffers,
+        [LM.Tree.NodeText(LName)]));
   end;
 end;
 
@@ -27286,6 +27407,7 @@ begin
     CheckCalls(Result);
     CheckConstraints(Result);
     CheckAttributes(Result);
+    CheckHeadingPairs(Result);
     // Expressions for the requested unit only.
     CrossType(Result);
     // Only the requested unit gets the full cross treatment here (AnalyzeFile's

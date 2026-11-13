@@ -9798,6 +9798,120 @@ begin
   end;
 end;
 
+{ Spec 3.3.2 point 3 (dcc64 37.0, 2026-11-13): an implementation heading
+  names its types where it stands - below the implementation's `TX = Byte`
+  `procedure TK.M(A: TX)` is not the declaration's `M(A: TX)`, which took
+  the used unit's `TX = Int64`: E2037 at the heading. `UX.TX`, and Int64 /
+  LongInt for the declaration's TX / Integer, are the same types. }
+procedure TestHeadingPairE2037;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_e2037');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10'  TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UX.pas'),
+    'unit UX;'#10'interface'#10'type'#10'  TX = Int64;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'U37.pas'),
+    'unit U37;'#10 +                                          // 1
+    'interface'#10 +                                          // 2
+    'uses UX;'#10 +                                           // 3
+    'type'#10 +                                               // 4
+    '  TK = class'#10 +                                       // 5
+    '    procedure M(A: TX);'#10 +                            // 6
+    '    procedure N(A: TX);'#10 +                            // 7
+    '    procedure O(A: TX; B: Integer);'#10 +                // 8
+    '    procedure Q(const S: string; A: TX);'#10 +           // 9
+    '  end;'#10 +                                             // 10
+    'implementation'#10 +                                     // 11
+    'type'#10 +                                               // 12
+    '  TX = Byte;'#10 +                                       // 13
+    'procedure TK.M(A: TX);'#10 +                             // 14 E2037 col 14
+    'begin'#10'end;'#10 +                                     // 15-16
+    'procedure TK.N(A: UX.TX);'#10 +                          // 17
+    'begin'#10'end;'#10 +                                     // 18-19
+    'procedure TK.O(A: Int64; B: LongInt);'#10 +              // 20
+    'begin'#10'end;'#10 +                                     // 21-22
+    'procedure TK.Q(const S: UnicodeString; A: TX);'#10 +     // 23 E2037 col 14
+    'begin'#10'end;'#10 +                                     // 24-25
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+    LM := ModelByName('u37');
+    Ok('e2037: M and Q, whose TX is the unit''s Byte [' +
+      DiagSites(LM, 'E2037') + ']', DiagSites(LM, 'E2037') = '14:14 23:14');
+    Ok('e2037: naming the method',
+      DiagHasText(LM, 'E2037', 'Declaration of ''M'' differs from previous ' +
+      'declaration'));
+    Ok('e2037: nothing else', Length(LM.Diags) = 2);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
+{ Spec 3.3.2 point 3, 11.1.1 (dcc64 37.0, 2026-11-13): a class completing a
+  forward `TFoo = class;` is named from the forward on - a field between the
+  two reads the completed class - but not above the forward, where the
+  search goes on outward: a used unit's TFoo, or E2003. }
+procedure TestForwardPosition;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_fwdpos');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10'  TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UF.pas'),
+    'unit UF;'#10'interface'#10'type'#10 +
+    '  TFoo = class X: Integer; end;'#10 +
+    '  TBar = class Y: Integer; end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UL.pas'),
+    'unit UL;'#10 +                                        // 1
+    'interface'#10 +                                       // 2
+    'type'#10 +                                            // 3
+    '  TA = class P: TQux; end;'#10 +                      // 4 E2003 col 17
+    '  TQux = class;'#10 +                                 // 5
+    '  TQux = class Z: Integer; end;'#10 +                 // 6
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'FW.dpr'),
+    'program FW;'#10'uses UF, UL;'#10'type'#10 +
+    '  TA = class P: TFoo; Q: TBar; end;'#10 +
+    '  TFoo = class;'#10'  TBar = class;'#10 +
+    '  TB = class R: TFoo; end;'#10 +
+    '  TFoo = class Z: Integer; end;'#10 +
+    '  TBar = class W: Integer; end;'#10 +
+    'var A: TA; B: TB;'#10 +
+    'begin'#10'  A.P.X := 1;'#10'  A.Q.Y := 1;'#10'  B.R.Z := 1;'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'FW.dpr'));
+    LM := ModelByName('fw');
+    Ok('fwdpos: a field above the forward is the used unit''s TFoo, TBar',
+      (CrossRefCountInUnit(LM, 'TFoo', 'TFoo', 'uf') = 1) and
+      (CrossRefCountInUnit(LM, 'TBar', 'TBar', 'uf') = 1) and
+      (CrossRefCountInUnit(LM, 'X', 'X', 'uf') = 1) and
+      (CrossRefCountInUnit(LM, 'Y', 'Y', 'uf') = 1));
+    Ok('fwdpos: one below it the completed class', LocalRefCount(LM, 'Z') = 1);
+    Ok('fwdpos: nothing reported', Length(LM.Diags) = 0);
+    LM := ModelByName('ul');
+    Ok('fwdpos: with no other TQux it is E2003 [' + DiagSites(LM, 'E2003') +
+      ']', DiagSites(LM, 'E2003') = '4:17');
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 { Spec 14.1.1 (dcc64 37.0, 2026-11-13): in an interface's first bracket a
   typed TGUID constant or a variable is dropped with W1074 naming it, no
   GUID; a true constant there is the GUID, after a dropped item of a comma
@@ -20506,6 +20620,8 @@ begin
   TestAttributeW1074;
   TestAttributeImplHeaderParam;
   TestGuidClauseDrops;
+  TestForwardPosition;
+  TestHeadingPairE2037;
   TestAttributeGuidAndPositions;
   TestHelperVisibility;
   TestBuiltinIdentity;
