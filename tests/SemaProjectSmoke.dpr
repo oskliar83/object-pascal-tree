@@ -10926,6 +10926,54 @@ begin
   end;
 end;
 
+{ 19.3.2 W1074 is a verdict on a complete lookup only. A dotted `uses` name
+  the search found by its last segment alone - `uses Lib.Serial.Commons`
+  reaching a `Commons.pas` of a unit Commons, a tolerance dcc does not
+  have - leaves the attribute's name looked up in the wrong unit: no W1074
+  there. The control unit, whose dotted name is found as written, still
+  gets it. (A false W1074 in a third-party corpus with several Commons.pas.) }
+procedure TestAttributeW1074LeafGuess;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_attrleaf');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10'  TObject = class end;'#10 +
+    '  TCustomAttribute = class(TObject) end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'Commons.pas'),
+    'unit Commons;'#10'interface'#10'const K = 1;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'Lib.Other.pas'),
+    'unit Lib.Other;'#10'interface'#10'const K = 1;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UGuess.pas'),
+    'unit UGuess;'#10'interface'#10'uses Lib.Serial.Commons;'#10'type'#10 +
+    '  TX = class'#10'    [NameAs(''n'')] FN: Integer;'#10'  end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UExact.pas'),
+    'unit UExact;'#10'interface'#10'uses Lib.Other;'#10'type'#10 +
+    '  TX = class'#10'    [NameAs(''n'')] FN: Integer;'#10'  end;'#10 +
+    'implementation'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+    LM := ModelByName('uguess');
+    Ok('attrleaf: the uses name reached Commons.pas by its last segment',
+      Assigned(LM) and (Length(LM.UsesList) = 1) and
+      (LM.UsesList[0].UnitId >= 0));
+    Ok('attrleaf: no W1074 through that guess [' + DiagSites(LM, 'W1074') +
+      ']', DiagCount(LM, 'W1074') = 0);
+    Ok('attrleaf: the exact unit''s W1074 stands',
+      DiagCount(ModelByName('uexact'), 'W1074') = 1);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 { Spec 19.3.2 (dcc64 37.0, 2026-11-13): an attribute dcc drops is W1074 -
   naming what its name found when that is a declared non-type (`[C]`,
   `[F(1)]`, `[C.X]`, `[C(Undeclared)]`, `[System.MaxInt]`, and
@@ -21854,6 +21902,7 @@ begin
   TestTypedAddress;
   TestAttributeSuffixFirst;
   TestAttributeW1074;
+  TestAttributeW1074LeafGuess;
   TestAttributeImplHeaderParam;
   TestGuidClauseDrops;
   TestForwardPosition;
