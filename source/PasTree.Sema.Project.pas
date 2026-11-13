@@ -1602,6 +1602,9 @@ type
       ranking reads it (TSemaArgConv): OpFactsX's facts, and its kind -
       ConvArgKindOf, or PChar / PAnsiChar by ConvPtrKindX. }
     function ArgConvX(AMid, ANode: Integer; const AX: TSemaXType): TSemaArgConv;
+    // Is argument ANode an AnsiChar element dcc ranks below the Ansi strings
+    // (TSemaArgConv.AnsiElem: `PA[0]`, `S20[1]`, `Cy[1]`; 7.2.1)?
+    function AnsiElemX(AMid, ANode: Integer): Boolean;
     { Is ANode of model AMid (parentheses peeled) a name or a member access
       bound to a constant (skConst)? The one name shape FoldConvConst may
       fold (`Integer.MaxValue`), asked before its closures are made. }
@@ -16249,6 +16252,47 @@ begin
     (not ATrueOnly or (FModels[LBMid].Symbols[LBSym].TypeNode = NIL_NODE));
 end;
 
+function TPasSemaProject.AnsiElemX(AMid, ANode: Integer): Boolean;
+var
+  LT: TPasTree;
+  LCore, LBase, LBMid, LBSym: Integer;
+  LX: TSemaXType;
+  LName: string;
+begin
+  Result := False;
+  LT := FModels[AMid].Tree;
+  LCore := PeelParens(LT, ANode);
+  if (LCore = NIL_NODE) or (LT.Nodes[LCore].Kind <> nkIndex) then
+    Exit;
+  LBase := LT.Nodes[LCore].FirstChild;
+  if (LBase = NIL_NODE) or
+     not (LT.Nodes[LBase].Kind in [nkIdent, nkMember]) or
+     not DesignatorSymX(AMid, LBase, LBMid, LBSym) then
+    Exit;
+  // An inline `string[N]`.
+  if (FModels[LBMid].Symbols[LBSym].TypeNode <> NIL_NODE) and
+     (FModels[LBMid].Tree.Nodes[FModels[LBMid].Symbols[LBSym].TypeNode].Kind =
+      nkStringType) then
+    Exit(True);
+  LX := CanonTypeX(DeclTypeX(LBMid, LBSym));
+  if not XValid(LX) then
+    Exit;
+  case XCatOf(LX) of
+    tcPointer:
+      Result := ConvPtrKindX(LX) = cnkPAnsiChar;
+    tcString:
+      begin
+        LName := FModels[LX.UnitId].Symbols[LX.Sym].NameLower;
+        case OpFactsX(AMid, NIL_NODE, LX).Text of
+          stkShort:
+            Result := LName <> 'shortstring';
+          stkCodePage:
+            Result := LName <> 'utf8string';
+        end;
+      end;
+  end;
+end;
+
 function TPasSemaProject.ArgConvX(AMid, ANode: Integer;
   const AX: TSemaXType): TSemaArgConv;
 var
@@ -16300,6 +16344,8 @@ begin
         end;
         // A subrange value: by its range, a character one as a Char.
         FConv.SubrangeConv(LX, Result);
+        Result.AnsiElem := (Result.Kind = cnkAnsiChar) and (ANode <> NIL_NODE) and
+          AnsiElemX(AMid, ANode);
       end;
     tcPointer:
       Result.Kind := ConvPtrKindX(LX);
@@ -23967,7 +24013,9 @@ begin
         var LOp := OpFactsX(AMid, NIL_NODE, LX);
         Result.Rank := LOp.Rank;
         Result.Unsigned := LOp.Unsigned;
-      end;
+      end
+      else if Result.Cat = tcChar then
+        Result.Rank := CharFactsWidth(OpFactsX(AMid, NIL_NODE, LX));
       case Result.Cat of
         tcArray:
           if ArrayDefOfX(AMid, NIL_NODE, LX, LDefMid, LDef) then
