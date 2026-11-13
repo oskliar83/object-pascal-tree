@@ -39,13 +39,6 @@ of less work, not a gap in following the language; its consequences are in
 
 ## 01-program-structure.md
 
-### 1.2.3 Qualified name resolution
-- a unit qualifier's missing member (`System.Missing`, `ThisUnit.Missing`) is
-  E2003 except inside a `with` body, a method body or a type declaration: a
-  name that reads as a unit qualifier there may be a with member or an
-  inherited member, which only later passes decide, so the verdict is not
-  given. dcc reports those too.
-
 ### 1.3.1 Switch & parameter directives
 - `{$X-}`'s E2014 (a function called as a statement) is withheld for an
   overloaded function and inside a `with` whose target was not typed, as

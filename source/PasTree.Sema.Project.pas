@@ -1201,7 +1201,8 @@ type
     procedure CrossResolve(AId: Integer);
     function UndeclaredReported(AModel: TPasSemaModel): Boolean; inline;
     procedure ReportMissingUnitMember(AId: Integer; AModel: TPasSemaModel;
-      AMember, AName, AUid: Integer);
+      AMember, AName, AUid: Integer; ALate: Boolean = False);
+    procedure CheckLateUnitMembers(AId: Integer);
     procedure CheckVisibility(AId, ANameNode, AMemMid, AMemSym: Integer);
     function MemberHiddenAt(AId, AHere, AMemMid, AMemSym: Integer): Boolean;
     function FindVisibleMemberX(AId, AHere: Integer; const ABase: TSemaXType;
@@ -10891,6 +10892,7 @@ begin
             CheckConstraints(AIds[0]);
             CheckAttributes(AIds[0]);
             CheckHeadingPairs(AIds[0]);
+            CheckLateUnitMembers(AIds[0]);
           end;
         except
           on E: Exception do
@@ -10905,6 +10907,7 @@ begin
         CheckConstraints(AIds[ASlot]);
         CheckAttributes(AIds[ASlot]);
         CheckHeadingPairs(AIds[ASlot]);
+        CheckLateUnitMembers(AIds[ASlot]);
       end,
       function(ASlot: Integer): Integer
       begin
@@ -21232,16 +21235,18 @@ end;
   `System.Integer` all compile), and for the unit itself its implementation
   too (`ThisUnit.ImplVar` compiles). Not reported where the verdict is not
   ours yet: a node with no scope (a `uses` item, the unit's own name, an
-  expression attribute), a closure with an unresolved `uses`, a with body - a
-  name that reads as a unit qualifier there is a with member first, which
-  only the with pass decides - and a method body or a type declaration, where
-  an inherited member does the same. }
+  expression attribute) and a closure with an unresolved `uses`. Deferred
+  (ALate False): a with body - a name that reads as a unit qualifier there is
+  a with member first, which only the with pass decides - and a method body
+  or a type declaration, where an inherited member does the same;
+  CheckLateUnitMembers judges those (ALate True) once both passes ran. }
 procedure TPasSemaProject.ReportMissingUnitMember(AId: Integer;
-  AModel: TPasSemaModel; AMember, AName, AUid: Integer);
+  AModel: TPasSemaModel; AMember, AName, AUid: Integer; ALate: Boolean);
 var
   LKey: TSemaKey;
   LVis: TPasVisibleToken;
   LScope, LUp, LMatch: Integer;
+  LDeferred: Boolean;
 begin
   if not AModel.AllUsesResolved then
     Exit;
@@ -21278,22 +21283,68 @@ begin
   if (AUid = AId) and (LScope <> NIL_SCOPE) and
      (AModel.Resolve(LScope, LKey) <> NIL_SYM) then
     Exit;
+  // In a with body, a method body or a type declaration the qualifier may
+  // be a with member or an inherited member (`Printers.Count` in a
+  // descendant of a class with a `Printers` property, under `uses
+  // Printers`), which the with and inherited passes bind after this one -
+  // FindMemberX reads other models' maps. Judged late there, and only
+  // there.
+  LDeferred := False;
   LUp := AModel.Tree.Nodes[AMember].Parent;
-  while LUp <> NIL_NODE do
+  while (LUp <> NIL_NODE) and not LDeferred do
   begin
-    if AModel.Tree.Nodes[LUp].Kind = nkWithStmt then
-      Exit;
+    LDeferred := AModel.Tree.Nodes[LUp].Kind = nkWithStmt;
     LUp := AModel.Tree.Nodes[LUp].Parent;
   end;
-  // Likewise in a method body or a type declaration: an inherited member
-  // shadows a unit name (`Printers.Count` in a descendant of a class with a
-  // `Printers` property, under `uses Printers`), and inherited members are
-  // bound only after this pass - by FindMemberX, which reads other models'
-  // maps. Not judged there.
-  if (StructSymOfNode(AModel, AMember) <> NIL_SYM) or
-     (DeclStructsOfNode(AModel, AMember) <> nil) then
+  LDeferred := LDeferred or
+    (StructSymOfNode(AModel, AMember) <> NIL_SYM) or
+    (DeclStructsOfNode(AModel, AMember) <> nil);
+  if LDeferred <> ALate then
     Exit;
   EmitE2003(AModel, AName, AId);
+end;
+
+{ 1.2.3 (dcc64 37.0): the deferred half of ReportMissingUnitMember, once the
+  with and inherited passes have bound what they bind. A member of a unit
+  qualifier still unbound, under a head no pass rebound to a with or an
+  inherited member - still the unit - is E2003 as anywhere else; a head
+  inside a with whose target's type is not known stays unjudged. }
+procedure TPasSemaProject.CheckLateUnitMembers(AId: Integer);
+var
+  LM: TPasSemaModel;
+  LNode, LBase, LName, LLeft, LHead, LUid: Integer;
+begin
+  LM := FModels[AId];
+  if not LM.AllUsesResolved then
+    Exit;
+  for LNode := 0 to High(LM.Tree.Nodes) do
+  begin
+    if LM.Tree.Nodes[LNode].Kind <> nkMember then
+      Continue;
+    LBase := LM.Tree.Nodes[LNode].FirstChild;
+    if LBase = NIL_NODE then
+      Continue;
+    LName := LM.Tree.Nodes[LBase].NextSibling;
+    if (LName = NIL_NODE) or (LM.Tree.Nodes[LName].Kind <> nkIdent) or
+       (LM.RefMap[LName] <> NIL_SYM) or LM.ExtRefMap.ContainsKey(LName) then
+      Continue;
+    LLeft := LBase;
+    while LM.Tree.Nodes[LLeft].Kind = nkMember do
+      LLeft := LM.Tree.Nodes[LLeft].FirstChild;
+    if (LLeft = NIL_NODE) or (LM.Tree.Nodes[LLeft].Kind <> nkIdent) or
+       LM.ExtRefMap.ContainsKey(LLeft) then
+      Continue;
+    LHead := LocalHead(LM, LBase);
+    if LHead = NIL_SYM then
+      LUid := UnitNameOf(AId, LBase)
+    else if LM.Symbols[LHead].Kind = skUnitRef then
+      LUid := UsesUnitOf(AId, LHead)
+    else
+      Continue;
+    if (LUid < 0) or LM.InUnopenedWithBody(LNode) then
+      Continue;
+    ReportMissingUnitMember(AId, LM, LNode, LName, LUid, True);
+  end;
 end;
 
 { Whether AModel's undeclared names are reported: always when every import
@@ -27408,6 +27459,7 @@ begin
     CheckConstraints(Result);
     CheckAttributes(Result);
     CheckHeadingPairs(Result);
+    CheckLateUnitMembers(Result);
     // Expressions for the requested unit only.
     CrossType(Result);
     // Only the requested unit gets the full cross treatment here (AnalyzeFile's
