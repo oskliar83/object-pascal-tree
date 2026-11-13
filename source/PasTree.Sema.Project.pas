@@ -12058,26 +12058,10 @@ end;
 procedure TPasSemaProject.CheckHeadingPairs(AId: Integer);
 var
   LM: TPasSemaModel;
-  LScope, LStruct, LNode, LChild, LName, LDecl, LDeclScope, LIdx: Integer;
-  LImplParams, LDeclParams: TArray<Integer>;
+  LScope, LStruct, LNode, LChild, LName, LDecl, LDeclScope: Integer;
+  LI, LJ, LImplP, LDeclP: Integer;
+  LImplList, LDeclList: TSemaSymList;
   LDiffers: Boolean;
-
-  function ParamsOf(AMid, AScope: Integer): TArray<Integer>;
-  var
-    LList: TSemaSymList;
-    LI, LCount: Integer;
-  begin
-    LList := FModels[AMid].Scopes[AScope].Symbols;
-    SetLength(Result, LList.Count);
-    LCount := 0;
-    for LI := 0 to LList.Count - 1 do
-      if FModels[AMid].Symbols[LList[LI]].Kind = skParam then
-      begin
-        Result[LCount] := LList[LI];
-        Inc(LCount);
-      end;
-    SetLength(Result, LCount);
-  end;
 
   // The declared type of parameter ASym, when it is written as a plain name
   // that resolves to a type that is no generic parameter; XNil otherwise.
@@ -12094,6 +12078,43 @@ var
     if XValid(Result) and
        (FModels[Result.UnitId].Symbols[Result.Sym].Kind = skGenericParam) then
       Result := XNil;
+  end;
+
+  // The binding of a type slot's written name (its last segment): the symbol
+  // in this model, or another model's; False when unbound or not a name.
+  function SlotBinding(ASym: Integer; out AMid, ABound: Integer): Boolean;
+  var
+    LType: Integer;
+    LExt: TPasExtRef;
+  begin
+    Result := False;
+    LType := LM.Symbols[ASym].TypeNode;
+    if (LType = NIL_NODE) or not (LM.Tree.Nodes[LType].Kind in [nkIdent,
+       nkMember]) then
+      Exit;
+    if LM.Tree.Nodes[LType].Kind = nkMember then
+      LType := LM.Tree.LastChild(LType);
+    if LType = NIL_NODE then
+      Exit;
+    AMid := AId;
+    ABound := LM.RefMap[LType];
+    if ABound = NIL_SYM then
+    begin
+      if not LM.ExtRefMap.TryGetValue(LType, LExt) then
+        Exit;
+      AMid := LExt.UnitId;
+      ABound := LExt.Sym;
+    end;
+    Result := True;
+  end;
+
+  function SameSlotBinding(AImpl, ADecl: Integer): Boolean;
+  var
+    LMid1, LSym1, LMid2, LSym2: Integer;
+  begin
+    Result := SlotBinding(AImpl, LMid1, LSym1) and
+      SlotBinding(ADecl, LMid2, LSym2) and (LMid1 = LMid2) and
+      (LSym1 = LSym2);
   end;
 
 begin
@@ -12138,21 +12159,43 @@ begin
     LDeclScope := LM.Symbols[LDecl].MemberScope;
     if (LDeclScope = NIL_SCOPE) or (LDeclScope = LScope) then
       Continue;
-    LImplParams := ParamsOf(AId, LScope);
-    LDeclParams := ParamsOf(AId, LDeclScope);
-    if Length(LImplParams) <> Length(LDeclParams) then
-      Continue;
+    // The two parameter lists in step, in their scopes' order (a list's
+    // locals follow its parameters), no array built: this runs per method.
+    LImplList := LM.Scopes[LScope].Symbols;
+    LDeclList := LM.Scopes[LDeclScope].Symbols;
+    LI := 0;
+    LJ := 0;
     LDiffers := False;
-    for LIdx := 0 to High(LImplParams) do
+    while True do
     begin
-      if ParamModeOf(LM, LImplParams[LIdx]) <>
-         ParamModeOf(LM, LDeclParams[LIdx]) then
+      while (LI < LImplList.Count) and
+            (LM.Symbols[LImplList[LI]].Kind <> skParam) do
+        Inc(LI);
+      while (LJ < LDeclList.Count) and
+            (LM.Symbols[LDeclList[LJ]].Kind <> skParam) do
+        Inc(LJ);
+      if (LI >= LImplList.Count) or (LJ >= LDeclList.Count) then
+      begin
+        // Another count is another E2037, not judged here.
+        if (LI < LImplList.Count) or (LJ < LDeclList.Count) then
+          LDiffers := False;
+        Break;
+      end;
+      LImplP := LImplList[LI];
+      LDeclP := LDeclList[LJ];
+      Inc(LI);
+      Inc(LJ);
+      if ParamModeOf(LM, LImplP) <> ParamModeOf(LM, LDeclP) then
       begin
         LDiffers := False;
         Break;
       end;
-      var LImplX := SlotX(AId, LImplParams[LIdx]);
-      var LDeclX := SlotX(AId, LDeclParams[LIdx]);
+      // The same binding of the written name is the same type: most pairs
+      // end here, with nothing resolved.
+      if SameSlotBinding(LImplP, LDeclP) then
+        Continue;
+      var LImplX := SlotX(AId, LImplP);
+      var LDeclX := SlotX(AId, LDeclP);
       if XValid(LImplX) and XValid(LDeclX) and
          not XSameType(LImplX, LDeclX) then
         LDiffers := True;
@@ -21299,51 +21342,47 @@ begin
   LDeferred := LDeferred or
     (StructSymOfNode(AModel, AMember) <> NIL_SYM) or
     (DeclStructsOfNode(AModel, AMember) <> nil);
-  if LDeferred <> ALate then
-    Exit;
-  EmitE2003(AModel, AName, AId);
+  if LDeferred and not ALate then
+    AModel.LateUnitMembers := AModel.LateUnitMembers + [AMember, AName, AUid]
+  else if LDeferred = ALate then
+    EmitE2003(AModel, AName, AId);
 end;
 
 { 1.2.3 (dcc64 37.0): the deferred half of ReportMissingUnitMember, once the
-  with and inherited passes have bound what they bind. A member of a unit
-  qualifier still unbound, under a head no pass rebound to a with or an
+  with and inherited passes have bound what they bind - the candidates
+  CrossResolve left (TPasSemaModel.LateUnitMembers), not a walk over the
+  tree. A member of a unit qualifier still unbound, under a head no pass rebound to a with or an
   inherited member - still the unit - is E2003 as anywhere else; a head
   inside a with whose target's type is not known stays unjudged. }
 procedure TPasSemaProject.CheckLateUnitMembers(AId: Integer);
 var
   LM: TPasSemaModel;
-  LNode, LBase, LName, LLeft, LHead, LUid: Integer;
+  LIdx, LNode, LBase, LName, LLeft, LHead: Integer;
+  LLate: TArray<Integer>;
 begin
   LM := FModels[AId];
-  if not LM.AllUsesResolved then
-    Exit;
-  for LNode := 0 to High(LM.Tree.Nodes) do
+  LLate := LM.LateUnitMembers;
+  LM.LateUnitMembers := nil;
+  LIdx := 0;
+  while LIdx + 2 <= High(LLate) do
   begin
-    if LM.Tree.Nodes[LNode].Kind <> nkMember then
+    LNode := LLate[LIdx];
+    LName := LLate[LIdx + 1];
+    Inc(LIdx, 3);
+    if (LM.RefMap[LName] <> NIL_SYM) or LM.ExtRefMap.ContainsKey(LName) then
       Continue;
+    // The head no pass rebound: still unbound, or still the unit reference.
     LBase := LM.Tree.Nodes[LNode].FirstChild;
-    if LBase = NIL_NODE then
-      Continue;
-    LName := LM.Tree.Nodes[LBase].NextSibling;
-    if (LName = NIL_NODE) or (LM.Tree.Nodes[LName].Kind <> nkIdent) or
-       (LM.RefMap[LName] <> NIL_SYM) or LM.ExtRefMap.ContainsKey(LName) then
-      Continue;
     LLeft := LBase;
     while LM.Tree.Nodes[LLeft].Kind = nkMember do
       LLeft := LM.Tree.Nodes[LLeft].FirstChild;
-    if (LLeft = NIL_NODE) or (LM.Tree.Nodes[LLeft].Kind <> nkIdent) or
-       LM.ExtRefMap.ContainsKey(LLeft) then
+    if LM.ExtRefMap.ContainsKey(LLeft) then
       Continue;
     LHead := LocalHead(LM, LBase);
-    if LHead = NIL_SYM then
-      LUid := UnitNameOf(AId, LBase)
-    else if LM.Symbols[LHead].Kind = skUnitRef then
-      LUid := UsesUnitOf(AId, LHead)
-    else
+    if ((LHead <> NIL_SYM) and (LM.Symbols[LHead].Kind <> skUnitRef)) or
+       LM.InUnopenedWithBody(LNode) then
       Continue;
-    if (LUid < 0) or LM.InUnopenedWithBody(LNode) then
-      Continue;
-    ReportMissingUnitMember(AId, LM, LNode, LName, LUid, True);
+    ReportMissingUnitMember(AId, LM, LNode, LName, LLate[LIdx - 1], True);
   end;
 end;
 
@@ -21398,6 +21437,7 @@ var
 begin
   LModel := FModels[AId];
   LShadows := UsesBuiltinShadows(AId);
+  LModel.LateUnitMembers := nil;
   for LNode := 0 to High(LModel.RefMap) do
   begin
     case LModel.Tree.Nodes[LNode].Kind of

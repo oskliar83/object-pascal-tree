@@ -697,6 +697,12 @@ type
       typer sees this unit's symbols alone). Set before the typer runs and
       never written after. }
     ProjectAssign: Boolean;
+    { 1.2.3: the unit-qualified members CrossResolve left to the calls pass
+      (TPasSemaProject.CheckLateUnitMembers) - a with body, a method body or
+      a type declaration, where a with or an inherited member may still take
+      the qualifier: (member node, name node, unit id) triples. Written by
+      CrossResolve, emptied when judged. }
+    LateUnitMembers: TArray<Integer>;
     { The names the oracle was asked for that stream - every `Declared(X)`
       and symbol question (`SizeOf(T)`, a const) the first pass could not
       answer, lower-cased, dotted names split into their segments. Empty
