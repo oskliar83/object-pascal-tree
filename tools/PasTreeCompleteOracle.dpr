@@ -100,7 +100,7 @@ var
 const
   CTX_NAMES: array[TPasComplContext] of string = ('none', 'member', 'uses',
     'type', 'statement', 'expression', 'recfield', 'inherited', 'label',
-    'propread', 'propwrite');
+    'propread', 'propwrite', 'propstored');
 
 // The Studio SOURCE trees a .dproj needs on top of its own paths - copied
 // from PasTreeSemaProject's -dproj mode (see the note there for why each
