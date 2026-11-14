@@ -2473,6 +2473,181 @@ begin
   end;
 end;
 
+// FindUnusedSymbols (PasTree.Sema.Lint). Used another way than by a name
+// in code, so not rows: TBase.Count (a descendant redeclares it), TBase.Hidden
+// (a descendant's bare inherited), TBase.Draw (an interface a descendant
+// lists names it), TBase.Run (virtual), TFuncImpl.Invoke (a method reference
+// type it implements), TPlainForm.Click (the first section of a streaming
+// class), MarkAttribute.Create (an attribute), TList.GetEnumerator (for-in).
+// Rows: TBase.Spare, TDerived.Hidden, TFuncImpl, TPlainForm, TMarked, TRec.Spare
+// (a record's field - a doubt), TNever, CNever, NeverProc, DeadProc (a branch
+// not compiled names it - a doubt), TextProc (its name a whole string literal:
+// a routine, no doubt - TNever, a type so named, has one), Ov(string) (the
+// other overload is used - a doubt). A local variable is not weighed.
+procedure TestUnusedSymbols;
+const
+  UNUSED_A =
+    'unit UnusedA;'#13#10 +
+    'interface'#13#10 +
+    'type'#13#10 +
+    '  TPersistent = class end;'#13#10 +
+    '  TCustomAttribute = class end;'#13#10 +
+    '  MarkAttribute = class(TCustomAttribute)'#13#10 +
+    '  public'#13#10 +
+    '    constructor Create(AValue: Integer);'#13#10 +
+    '  end;'#13#10 +
+    '  IShape = interface'#13#10 +
+    '    procedure Draw;'#13#10 +
+    '  end;'#13#10 +
+    '  TIntFunc = reference to function: Integer;'#13#10 +
+    '  TBase = class'#13#10 +
+    '  private'#13#10 +
+    '    FCount: Integer;'#13#10 +
+    '  public'#13#10 +
+    '    procedure Hidden;'#13#10 +
+    '    procedure Spare;'#13#10 +
+    '    procedure Draw;'#13#10 +
+    '    procedure Run; virtual;'#13#10 +
+    '    property Count: Integer read FCount;'#13#10 +
+    '  end;'#13#10 +
+    '  TDerived = class(TBase, IShape)'#13#10 +
+    '  public'#13#10 +
+    '    procedure Hidden;'#13#10 +
+    '    property Count;'#13#10 +
+    '  end;'#13#10 +
+    '  TFuncImpl = class(TBase, TIntFunc)'#13#10 +
+    '    function Invoke: Integer;'#13#10 +
+    '  end;'#13#10 +
+    '  TPlainForm = class(TPersistent)'#13#10 +
+    '    procedure Click;'#13#10 +
+    '  end;'#13#10 +
+    '  TEnum = class'#13#10 +
+    '    function MoveNext: Boolean;'#13#10 +
+    '  end;'#13#10 +
+    '  TList = class'#13#10 +
+    '    function GetEnumerator: TEnum;'#13#10 +
+    '  end;'#13#10 +
+    '  [Mark(1)]'#13#10 +
+    '  TMarked = class end;'#13#10 +
+    '  TRec = record'#13#10 +
+    '    Used, Spare: Integer;'#13#10 +
+    '  end;'#13#10 +
+    '  TNever = class end;'#13#10 +
+    'const'#13#10 +
+    '  CUsed = 1;'#13#10 +
+    '  CNever = 2;'#13#10 +
+    'var'#13#10 +
+    '  GDerived: TDerived;'#13#10 +
+    'procedure UsedProc;'#13#10 +
+    'procedure NeverProc;'#13#10 +
+    'procedure DeadProc;'#13#10 +
+    'procedure TextProc;'#13#10 +
+    'procedure Ov(A: Integer); overload;'#13#10 +
+    'procedure Ov(const S: string); overload;'#13#10 +
+    'implementation'#13#10 +
+    'constructor MarkAttribute.Create(AValue: Integer); begin end;'#13#10 +
+    'procedure TBase.Hidden; begin end;'#13#10 +
+    'procedure TBase.Spare; begin end;'#13#10 +
+    'procedure TBase.Draw; begin end;'#13#10 +
+    'procedure TBase.Run; begin end;'#13#10 +
+    'procedure TDerived.Hidden; begin inherited; end;'#13#10 +
+    'function TFuncImpl.Invoke: Integer; begin Result := 0; end;'#13#10 +
+    'procedure TPlainForm.Click; begin end;'#13#10 +
+    'function TEnum.MoveNext: Boolean; begin Result := False; end;'#13#10 +
+    'function TList.GetEnumerator: TEnum; begin Result := nil; end;'#13#10 +
+    'procedure UsedProc;'#13#10 +
+    'var R: TRec; L: Integer;'#13#10 +
+    'begin'#13#10 +
+    '  R.Used := CUsed + GDerived.Count;'#13#10 +
+    'end;'#13#10 +
+    'procedure NeverProc; begin end;'#13#10 +
+    'procedure DeadProc; begin end;'#13#10 +
+    'procedure TextProc; begin end;'#13#10 +
+    'procedure Ov(A: Integer); begin end;'#13#10 +
+    'procedure Ov(const S: string); begin end;'#13#10 +
+    'procedure Caller;'#13#10 +
+    'begin'#13#10 +
+    '  UsedProc;'#13#10 +
+    '  Ov(1);'#13#10 +
+    '  {$IFDEF NEVER_DEFINED} DeadProc; {$ENDIF}'#13#10 +
+    '  if ''TextProc'' = '''' then Exit;'#13#10 +
+    '  if ''UnusedA.TNever'' = '''' then Exit;'#13#10 +
+    'end;'#13#10 +
+    'initialization'#13#10 +
+    '  Caller;'#13#10 +
+    'end.'#13#10;
+var
+  LDir: string;
+  LProj: TPasSemaProject;
+  LNav: TPasNavigator;
+  LRows: TArray<TPasUnusedSymbol>;
+  LSkips: TPasUnusedSkips;
+  LNames: string;
+
+  function Row(const AName: string): Integer;
+  begin
+    for var LI := 0 to High(LRows) do
+      if SameText(LRows[LI].Name, AName) then
+        Exit(LI);
+    Result := -1;
+  end;
+
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_unused_symbols');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnusedA.pas'), UNUSED_A);
+  LProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  LNav := nil;
+  try
+    LProj.AnalyzeDirectory(LDir);
+    LNav := TPasNavigator.Create(LProj);
+    LRows := FindUnusedSymbols(LNav,
+      [LProj.ModelIdOf(TPath.Combine(LDir, 'UnusedA.pas'))], LSkips);
+    LNames := '';
+    for var LR in LRows do
+      LNames := LNames + LR.Name + ' ';
+    Ok('unused symbols: the rows (' + LNames + ')',
+      (Row('TBase.Spare') >= 0) and (Row('TDerived.Hidden') >= 0) and
+      (Row('TFuncImpl') >= 0) and (Row('TPlainForm') >= 0) and
+      (Row('TMarked') >= 0) and (Row('TRec.Spare') >= 0) and
+      (Row('TNever') >= 0) and (Row('CNever') >= 0) and
+      (Row('NeverProc') >= 0) and (Row('DeadProc') >= 0) and
+      (Row('TextProc') >= 0));
+    Ok('unused symbols: used another way, not rows (' + LNames + ')',
+      (Row('TBase.Count') < 0) and (Row('TBase.Hidden') < 0) and
+      (Row('TBase.Draw') < 0) and (Row('TBase.Run') < 0) and
+      (Row('TFuncImpl.Invoke') < 0) and (Row('TPlainForm.Click') < 0) and
+      (Row('MarkAttribute.Create') < 0) and
+      (Row('TList.GetEnumerator') < 0) and (Row('TEnum.MoveNext') < 0) and
+      (Row('UsedProc') < 0) and (Row('Caller') < 0) and (Row('CUsed') < 0) and
+      (Row('TRec.Used') < 0) and (Row('TBase.FCount') < 0) and
+      (Row('L') < 0));
+    Ok('unused symbols: the skips counted', (LSkips[usDispatch] = 1) and
+      (LSkips[usImplements] = 2) and (LSkips[usPublished] = 1) and
+      (LSkips[usAttribute] = 1) and (LSkips[usForIn] = 2) and
+      (LSkips[usInterface] = 1));
+    Ok('unused symbols: doubts - a dead branch, a type named by a string (a routine is not), a record field',
+      (Row('DeadProc') >= 0) and (LRows[Row('DeadProc')].Doubts <> nil) and
+      (Row('TextProc') >= 0) and (LRows[Row('TextProc')].Doubts = nil) and
+      (Row('TNever') >= 0) and (LRows[Row('TNever')].Doubts <> nil) and
+      (Row('TRec.Spare') >= 0) and LRows[Row('TRec.Spare')].RecordField and
+      (Row('NeverProc') >= 0) and (LRows[Row('NeverProc')].Doubts = nil));
+    Ok('unused symbols: an overload beside one in use - one row, a doubt',
+      (Row('Ov') >= 0) and (LRows[Row('Ov')].Doubts <> nil) and
+      (LRows[Row('Ov')].Line = 57));
+    Ok('unused symbols: a row is its name''s place',
+      (Row('NeverProc') >= 0) and (LRows[Row('NeverProc')].Line = 53) and
+      (LRows[Row('NeverProc')].Col = 11));
+  finally
+    LNav.Free;
+    LProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 function DiagCount(AModel: TPasSemaModel; const ACode: string): Integer;
 var
   LIdx: Integer;
@@ -7141,6 +7316,7 @@ begin
   TestRoutinePairs;
   TestUnitIdentity;
   TestUnusedUses;
+  TestUnusedSymbols;
   TestUnreferencedUnits;
   TestLintGlobalInit;
   TestLintLight;
