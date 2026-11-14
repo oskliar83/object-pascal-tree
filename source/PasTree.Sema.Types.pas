@@ -8207,9 +8207,13 @@ end;
   scope declaring the name more than once? }
 function TPasSemaTyper.InheritedOverloadHead(N, ASym: Integer): Boolean;
 var
-  LUp, LParent, LHead: Integer;
+  LUp, LParent: Integer;
 begin
+  // Of a set: chained to a later declaration, or chained after one.
   Result := False;
+  if (M.Symbols[ASym].NextOverload = NIL_SYM) and
+     not (sfOverload in M.Symbols[ASym].Flags) then
+    Exit;
   LUp := N;
   LParent := T.Nodes[LUp].Parent;
   while (LParent <> NIL_NODE) and
@@ -8219,12 +8223,8 @@ begin
     LUp := LParent;
     LParent := T.Nodes[LUp].Parent;
   end;
-  if (LParent = NIL_NODE) or (Kind(LParent) <> nkInherited) or
-     (Child(LParent) <> LUp) or (M.Symbols[ASym].Scope = NIL_SCOPE) then
-    Exit;
-  LHead := M.FindLocalNoHelpers(M.Symbols[ASym].Scope,
-    SemaKey(M.Symbols[ASym].NameLower));
-  Result := (LHead <> NIL_SYM) and (M.Symbols[LHead].NextOverload <> NIL_SYM);
+  Result := (LParent <> NIL_NODE) and (Kind(LParent) = nkInherited) and
+    (Child(LParent) = LUp);
 end;
 
 function TPasSemaTyper.TypeOfIdent(N: Integer): Integer;
