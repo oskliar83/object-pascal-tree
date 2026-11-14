@@ -11114,6 +11114,66 @@ begin
   end;
 end;
 
+{ E2003 behind the same guess (UndeclaredReported): a unit whose dotted
+  `uses` name reached a file of another unit by its last segment reports no
+  undeclared name - neither a bare one nor a member of a known type (a guessed
+  unit may have typed the qualifier) - and the control unit, whose dotted
+  name is found as written, keeps both. ReportUndeclaredBehindMissingUnits
+  reports behind the guess too, as behind a missing unit. }
+procedure TestE2003LeafGuess;
+const
+  CBody = 'type'#10'  TR = record A: Integer; end;'#10 +
+    'implementation'#10'procedure P;'#10'var R: TR;'#10'begin'#10 +
+    '  Undecl := 1;'#10'  R.Nope := 2;'#10'end;'#10'end.'#10;
+var
+  LDir: string;
+  LPass: Integer;
+begin
+  LDir := FreshDir('pastree_sema_e2003leaf');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10'  TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'Commons.pas'),
+    'unit Commons;'#10'interface'#10'const K = 1;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'Lib.Other.pas'),
+    'unit Lib.Other;'#10'interface'#10'const K = 1;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UGuess.pas'),
+    'unit UGuess;'#10'interface'#10'uses Lib.Serial.Commons;'#10 + CBody);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UExact.pas'),
+    'unit UExact;'#10'interface'#10'uses Lib.Other;'#10 + CBody);
+  for LPass := 0 to 1 do
+  begin
+    GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+    try
+      GProj.ReportUnresolvedMembers := True;
+      GProj.ReportUndeclaredBehindMissingUnits := LPass = 1;
+      GProj.AnalyzeDirectory(LDir);
+      if LPass = 0 then
+      begin
+        Ok('e2003leaf: the uses name reached Commons.pas by its last segment',
+          Assigned(ModelByName('uguess')) and
+          (ModelByName('uguess').UsesList[0].UnitId >= 0));
+        Ok('e2003leaf: no E2003 through that guess [' +
+          DiagSites(ModelByName('uguess'), 'E2003') + ']',
+          DiagCount(ModelByName('uguess'), 'E2003') = 0);
+      end
+      else
+        Ok('e2003leaf: reported behind the guess under the switch [' +
+          DiagSites(ModelByName('uguess'), 'E2003') + ']',
+          DiagCount(ModelByName('uguess'), 'E2003') = 2);
+      Ok('e2003leaf: the exact unit''s two E2003 stand [' +
+        DiagSites(ModelByName('uexact'), 'E2003') + ']',
+        DiagCount(ModelByName('uexact'), 'E2003') = 2);
+    finally
+      GProj.Free;
+    end;
+  end;
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+end;
+
 { Spec 19.3.2 (dcc64 37.0, 2026-11-13): an attribute dcc drops is W1074 -
   naming what its name found when that is a declared non-type (`[C]`,
   `[F(1)]`, `[C.X]`, `[C(Undeclared)]`, `[System.MaxInt]`, and
@@ -22210,6 +22270,7 @@ begin
   TestAttributeSuffixFirst;
   TestAttributeW1074;
   TestAttributeW1074LeafGuess;
+  TestE2003LeafGuess;
   TestAttributeImplHeaderParam;
   TestGuidClauseDrops;
   TestForwardPosition;
