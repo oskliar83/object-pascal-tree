@@ -18,7 +18,7 @@ The spec keeps exactly one PasTree-facing convention, and it earns its place:
 the `*AST:*` hints, which name the node kind a construct lowers to. Those are
 a vocabulary contract, and `tools/KindsCheck` mechanically cross-checks them.
 
-**Status: as of v0.181.2 (2026-11-13).** A gap is either listed here or it is
+**Status: as of v0.190.8 (2026-11-14).** A gap is either listed here or it is
 not a known gap. When you close one, delete the entry in the same commit.
 
 Not listed here, deliberately: bugs (those are fixed, not documented) and
@@ -134,7 +134,6 @@ of less work, not a gap in following the language; its consequences are in
   (a record, a class, a string - its size is the layout's) has no value
   here: the subrange is categorized by the bound's shape but has no range,
   so an argument of it gives no evidence in overload choice.
-
 
 ### 2.6.1 Identity, compatibility, assignment-compatibility
 - assignment-compatibility is checked (E2010) at an assignment, an
