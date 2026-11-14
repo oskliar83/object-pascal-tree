@@ -12592,10 +12592,228 @@ end;
 procedure TPasSemaProject.CheckAttributes(AId: Integer);
 var
   LM: TPasSemaModel;
+
+  // The head word of routine node ARoutine: its first token (`class` stands
+  // outside the span).
+  function HeadKind(ARoutine: Integer): TPasTokenKind;
+  begin
+    Result := LM.Tree.Source.VisibleKind(LM.Tree.Nodes[ARoutine].FirstToken);
+  end;
+
+  // The `end` of a class or interface body AStruct (hints may follow it).
+  function StructEndToken(AStruct: Integer): Integer;
+  begin
+    Result := LM.Tree.Nodes[AStruct].LastToken;
+    while (Result > LM.Tree.Nodes[AStruct].FirstToken) and
+          (LM.Tree.Source.VisibleKind(Result) <> tkEnd) do
+      Dec(Result);
+    if LM.Tree.Source.VisibleKind(Result) <> tkEnd then
+      Result := -1;
+  end;
+
+  { Where a group dcc cannot place ends (spec 19.3.2, dcc64 37.0,
+    local/fu-attrs R1-R10, Pa1, Pa2, Pb1-Pb3, Pd, Q1-Q6): the visible token
+    of its E2289, -1 when it lands on a declaration or the walk cannot tell.
+    AAttr is an attribute of a group; AResult: a `Result:` one, which only a
+    function takes - else a plain group, which any member but a constant
+    takes. Read where the rule is certain: a parameter (Result: at once, at
+    the declaration's last name); a class's or an interface's member list
+    (the walk goes on across fields, methods that do not take it,
+    properties, visibility words, attribute groups and nested var / const
+    sections - a nested type section is left unread, a class in it would
+    end the walk at its own `end` - to the struct's `end`); a procedure,
+    constructor or destructor with a body (Result: at the token after the
+    routine); a type declaration of a class or an interface (Result: into
+    its members). Anything else, a record's list included (the walk goes
+    on past a record's `end`), is not read. }
+  function DanglingEnd(AAttr: Integer; AResult: Boolean): Integer;
+  var
+    LGroup, LUp, LCur, LStruct, LFirst, LLast: Integer;
+    LDone: Boolean;
+
+    // The struct body ANode stands in directly or through a var / const
+    // section; NIL_NODE for anything else.
+    function BodyOf(ANode: Integer): Integer;
+    begin
+      Result := LM.Tree.Nodes[ANode].Parent;
+      if (Result <> NIL_NODE) and
+         (LM.Tree.Nodes[Result].Kind in [nkVarSec, nkConstSec]) then
+        Result := LM.Tree.Nodes[Result].Parent;
+      if (Result = NIL_NODE) or
+         not (LM.Tree.Nodes[Result].Kind in [nkClassType, nkInterfaceType]) or
+         PasIsForwardStruct(LM.Tree, Result) then
+        Result := NIL_NODE;
+    end;
+
+    // Walks the member list from ANode (inclusive) to its struct's end:
+    // ADone True when a member takes the group or the walk gives up, else
+    // the struct's `end` is due.
+    procedure WalkFrom(ANode: Integer; out ADone: Boolean);
+    var
+      LKid: Integer;
+    begin
+      ADone := False;
+      while (ANode <> NIL_NODE) and not ADone do
+      begin
+        case LM.Tree.Nodes[ANode].Kind of
+          nkRoutine:
+            case HeadKind(ANode) of
+              tkFunction:
+                ADone := True;
+              tkProcedure, tkConstructor, tkDestructor:
+                ADone := not AResult;
+            else
+              ADone := True;   // an operator: not read
+            end;
+          nkVarDecl, nkPropertyDecl:
+            ADone := not AResult;
+          nkConstDecl, nkVisibility, nkAttrGroup:
+            ;
+          nkVarSec, nkConstSec:
+            begin
+              LKid := LM.Tree.Nodes[ANode].FirstChild;
+              while (LKid <> NIL_NODE) and not ADone do
+              begin
+                case LM.Tree.Nodes[LKid].Kind of
+                  nkVarDecl:
+                    ADone := not AResult;
+                  nkConstDecl, nkAttrGroup:
+                    ;
+                else
+                  ADone := True;
+                end;
+                LKid := LM.Tree.Nodes[LKid].NextSibling;
+              end;
+            end;
+        else
+          ADone := True;   // a nested type section, an error: not read
+        end;
+        ANode := LM.Tree.Nodes[ANode].NextSibling;
+      end;
+    end;
+
+  begin
+    Result := -1;
+    LGroup := LM.Tree.Nodes[AAttr].Parent;
+    if (LGroup = NIL_NODE) or (LM.Tree.Nodes[LGroup].Kind <> nkAttrGroup) then
+      Exit;
+    LUp := LM.Tree.Nodes[LGroup].Parent;
+    if LUp = NIL_NODE then
+      Exit;
+    case LM.Tree.Nodes[LUp].Kind of
+      nkParam:
+        if AResult and (LM.Tree.Nodes[LUp].Parent <> NIL_NODE) and
+           (LM.Tree.Nodes[LM.Tree.Nodes[LUp].Parent].Kind = nkParams) and
+           (LM.Tree.Nodes[LM.Tree.Nodes[LUp].Parent].Parent <> NIL_NODE) and
+           (LM.Tree.Nodes[LM.Tree.Nodes[LM.Tree.Nodes[LUp].Parent].Parent].Kind =
+             nkRoutine) then
+        begin
+          LCur := LM.Tree.Nodes[LUp].FirstChild;
+          LLast := NIL_NODE;
+          while LCur <> NIL_NODE do
+          begin
+            if (LM.Tree.Nodes[LCur].Kind = nkIdent) and
+               (nfName in LM.Tree.Nodes[LCur].Flags) then
+              LLast := LCur;
+            LCur := LM.Tree.Nodes[LCur].NextSibling;
+          end;
+          if LLast <> NIL_NODE then
+            Result := LM.Tree.Nodes[LLast].FirstToken;
+        end;
+      nkClassType, nkInterfaceType, nkVarDecl, nkConstDecl, nkPropertyDecl:
+        begin
+          if LM.Tree.Nodes[LUp].Kind in [nkClassType, nkInterfaceType] then
+          begin
+            LStruct := LUp;
+            LCur := LM.Tree.Nodes[LGroup].NextSibling;
+            if PasIsForwardStruct(LM.Tree, LStruct) then
+              Exit;
+          end
+          else
+          begin
+            // A member's leading group: that member takes it, but a
+            // constant (which never does) and, for Result:, any.
+            LStruct := BodyOf(LUp);
+            if LStruct = NIL_NODE then
+              Exit;
+            if not AResult and (LM.Tree.Nodes[LUp].Kind <> nkConstDecl) then
+              Exit;
+            LCur := LM.Tree.Nodes[LUp].NextSibling;
+            // Out of a section: the rest of it, then the struct's list.
+            if LM.Tree.Nodes[LM.Tree.Nodes[LUp].Parent].Kind in
+               [nkVarSec, nkConstSec] then
+            begin
+              while LCur <> NIL_NODE do
+              begin
+                case LM.Tree.Nodes[LCur].Kind of
+                  nkVarDecl:
+                    if not AResult then
+                      Exit;
+                  nkConstDecl, nkAttrGroup:
+                    ;
+                else
+                  Exit;
+                end;
+                LCur := LM.Tree.Nodes[LCur].NextSibling;
+              end;
+              LCur := LM.Tree.Nodes[LM.Tree.Nodes[LUp].Parent].NextSibling;
+            end;
+          end;
+          WalkFrom(LCur, LDone);
+          if not LDone then
+            Result := StructEndToken(LStruct);
+        end;
+      nkTypeDecl:
+        if AResult then
+        begin
+          // `[Result: Tag] TZ = class ... end`: into its members.
+          LCur := LM.Tree.Nodes[LUp].FirstChild;
+          while (LCur <> NIL_NODE) and
+                not (LM.Tree.Nodes[LCur].Kind in [nkClassType,
+                  nkInterfaceType]) do
+            LCur := LM.Tree.Nodes[LCur].NextSibling;
+          if (LCur = NIL_NODE) or PasIsForwardStruct(LM.Tree, LCur) then
+            Exit;
+          LStruct := LCur;
+          // Past the heritage list and the GUID: the first member.
+          LCur := LM.Tree.Nodes[LStruct].FirstChild;
+          while (LCur <> NIL_NODE) and (LM.Tree.Nodes[LCur].Kind in [nkIdent,
+                nkMember, nkTypeArgs, nkGuid]) do
+            LCur := LM.Tree.Nodes[LCur].NextSibling;
+          WalkFrom(LCur, LDone);
+          if not LDone then
+            Result := StructEndToken(LStruct);
+        end;
+    else
+      // A group before a routine in a declaration list: the routine after
+      // it (past more groups) takes it or, for Result:, ends it with its
+      // body.
+      if not AResult then
+        Exit;
+      LCur := LM.Tree.Nodes[LGroup].NextSibling;
+      while (LCur <> NIL_NODE) and (LM.Tree.Nodes[LCur].Kind = nkAttrGroup) do
+        LCur := LM.Tree.Nodes[LCur].NextSibling;
+      if (LCur = NIL_NODE) or (LM.Tree.Nodes[LCur].Kind <> nkRoutine) or
+         not (HeadKind(LCur) in [tkProcedure, tkConstructor, tkDestructor]) then
+        Exit;
+      LFirst := LM.Tree.Nodes[LCur].FirstChild;
+      while (LFirst <> NIL_NODE) and
+            (LM.Tree.Nodes[LFirst].Kind <> nkRoutineBody) do
+        LFirst := LM.Tree.Nodes[LFirst].NextSibling;
+      if LFirst = NIL_NODE then
+        Exit;   // no body: a declaration, the walk goes on - not read
+      Result := LM.Tree.Nodes[LCur].LastToken + 1;
+      if Result > High(LM.Tree.Source.Visible) then
+        Result := -1;
+    end;
+  end;
+
+var
   LCustomAttrX, LAttrX: TSemaXType;
-  LNode, LRef, LHead, LSym, LKMid, LAnchor: Integer;
+  LNode, LRef, LHead, LSym, LKMid, LAnchor, LTok: Integer;
   LExt: TPasExtRef;
   LKind: TPasNodeKind;
+  LResult: Boolean;
 begin
   LCustomAttrX := ResolveCustomAttributeX(AId);
   if not XValid(LCustomAttrX) then
@@ -12681,9 +12899,22 @@ begin
       Continue;
     if XCatOf(LAttrX) <> tcClass then
       Continue;
-    if XDescent(LAttrX, LCustomAttrX) = xdNo then
-      EmitAt(LM, LRef, 'E2010', Format(SE2010_IncompatibleTypes,
-        [XTypeText(LAttrX), 'TCustomAttribute']));
+    case XDescent(LAttrX, LCustomAttrX) of
+      xdNo:
+        EmitAt(LM, LRef, 'E2010', Format(SE2010_IncompatibleTypes,
+          [XTypeText(LAttrX), 'TCustomAttribute']));
+      xdYes:
+        // A group nothing takes (19.3.2): E2289 where its walk ends.
+        if (LKind = nkAttribute) and not LM.HasDiagAt(LNode) then
+        begin
+          LResult := nfAttrTarget in LM.Tree.Nodes[LNode].Flags;
+          LTok := DanglingEnd(LNode, LResult);
+          if LTok >= 0 then
+            EmitAtToken(LM, LNode, LTok, 'E2289',
+              Format(SE2289_UnresolvedCustomAttribute,
+              [FModels[LAttrX.UnitId].Symbols[LAttrX.Sym].Name]));
+        end;
+    end;
   end;
 end;
 
