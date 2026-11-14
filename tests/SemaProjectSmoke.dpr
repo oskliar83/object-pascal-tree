@@ -11254,6 +11254,201 @@ begin
   end;
 end;
 
+{ Spec 19.3.2 (dcc64 37.0, 2026-11-14, local/fu-attrs P1-P7): an attribute
+  with its arguments is a call of its class's Create. One candidate: the
+  arguments converted left to right, the first that does not is E2010 at it,
+  then E2034 at the first argument too many, E2035 at the `)` (the `]` with
+  no parentheses). An overload set - TObject's Create joining it - is E2034
+  past every count, else E2250 at the `)`. A call that fits: E2026 at the
+  `)` for a variable, a typed constant, a function's result. The nearest
+  Create hides the ancestors' unless it says overload; a class constructor
+  and a constructor of another name are no candidates. The attribute binds
+  the constructor it calls (CallTargetX), and an edit of it - or a
+  constructor added to the class - redoes the unit that names it. }
+procedure TestAttributeCtorArgs;
+const
+  UA_STR =
+    'unit UA;'#10'interface'#10'type'#10 +
+    '  TagAttribute = class(TCustomAttribute)'#10 +
+    '    constructor Create(const S: string);'#10'  end;'#10 +
+    '  BareAttribute = class(TCustomAttribute) end;'#10 +
+    'implementation'#10 +
+    'constructor TagAttribute.Create(const S: string); begin end;'#10 +
+    'end.'#10;
+  UA_INT =
+    'unit UA;'#10'interface'#10'type'#10 +
+    '  TagAttribute = class(TCustomAttribute)'#10 +
+    '    constructor Create(I: Integer);'#10'  end;'#10 +
+    '  BareAttribute = class(TCustomAttribute) end;'#10 +
+    'implementation'#10 +
+    'constructor TagAttribute.Create(I: Integer); begin end;'#10 +
+    'end.'#10;
+  UA_BARE_CTOR =
+    'unit UA;'#10'interface'#10'type'#10 +
+    '  TagAttribute = class(TCustomAttribute)'#10 +
+    '    constructor Create(I: Integer);'#10'  end;'#10 +
+    '  BareAttribute = class(TCustomAttribute)'#10 +
+    '    constructor Create(const S: string);'#10'  end;'#10 +
+    'implementation'#10 +
+    'constructor TagAttribute.Create(I: Integer); begin end;'#10 +
+    'constructor BareAttribute.Create(const S: string); begin end;'#10 +
+    'end.'#10;
+var
+  LDir, LUA: string;
+  LM: TPasSemaModel;
+  LExt: TPasExtRef;
+  LBound: Boolean;
+begin
+  LDir := FreshDir('pastree_sema_attrctor');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class constructor Create; end;'#10 +
+    '  TClass = class of TObject;'#10 +
+    '  TCustomAttribute = class(TObject) end;'#10 +
+    'implementation'#10'constructor TObject.Create; begin end;'#10 +
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'AC.dpr'),
+    'program AC;'#10 +                                                // 1
+    'type'#10 +                                                       // 2
+    '  TagAttribute = class(TCustomAttribute) constructor Create(const S: string); end;'#10 + // 3
+    '  T2Attribute = class(TCustomAttribute) constructor Create(A: Integer; const B: string); end;'#10 + // 4
+    '  TOvAttribute = class(TCustomAttribute) constructor Create(I: Integer); overload; constructor Create(const S: string); overload; end;'#10 + // 5
+    '  TNoneAttribute = class(TCustomAttribute) end;'#10 +           // 6
+    '  THideAttribute = class(TagAttribute) constructor Create(I: Integer); end;'#10 + // 7
+    '  TJoinAttribute = class(TOvAttribute) constructor Create(B: Boolean); overload; end;'#10 + // 8
+    '  TCAttribute = class(TCustomAttribute) class constructor Create; constructor Create(C: TClass); end;'#10 + // 9
+    '  TDAttribute = class(TCustomAttribute) constructor Create(D: Double); end;'#10 + // 10
+    '  TMkAttribute = class(TCustomAttribute) constructor Make(const S: string); end;'#10 + // 11
+    'const'#10 +                                                      // 12
+    '  CI = 1;'#10 +                                                  // 13
+    '  CS = ''abc'';'#10 +                                            // 14
+    '  TC: Integer = 5;'#10 +                                         // 15
+    'var GV: Integer;'#10 +                                           // 16
+    'function F: Integer; begin Result := 0; end;'#10 +               // 17
+    'type'#10 +                                                       // 18
+    '  TX = class'#10 +                                               // 19
+    '    [Tag(''x'')] [Tag(CS)] F01: Integer;'#10 +                   // 20 valid
+    '    [Tag(1)] F02: Integer;'#10 +                                 // 21 E2010
+    '    [Tag(1.5)] F03: Integer;'#10 +                               // 22 E2010
+    '    [T2(''a'', ''b'')] F04: Integer;'#10 +                       // 23 E2010 'a'
+    '    [T2(1, 2)] F05: Integer;'#10 +                               // 24 E2010 2
+    '    [Tag(''a'','#10 +                                            // 25
+    '      2)] F06: Integer;'#10 +                                    // 26 E2034 2
+    '    [Tag(1,'#10 +                                                // 27 E2010 1
+    '      2)] F07: Integer;'#10 +                                    // 28 E2034 2
+    '    [Tag] F08: Integer;'#10 +                                    // 29 E2035 ]
+    '    [T2(1)] F09: Integer;'#10 +                                  // 30 E2035 )
+    '    [TOv(1)] [TOv(''x'')] [TOv] F10: Integer;'#10 +              // 31 valid
+    '    [TOv(1.5)] F11: Integer;'#10 +                               // 32 E2250 )
+    '    [TOv(1, 2)] F12: Integer;'#10 +                              // 33 E2034 2
+    '    [TNone] [TNone()] F13: Integer;'#10 +                        // 34 valid
+    '    [TNone(1)] F14: Integer;'#10 +                               // 35 E2034 1
+    '    [THide(''x'')] F15: Integer;'#10 +                           // 36 E2010
+    '    [THide] F16: Integer;'#10 +                                  // 37 E2035 ]
+    '    [TJoin(True)] [TJoin(1)] [TJoin(''x'')] [TJoin] F17: Integer;'#10 + // 38 valid
+    '    [TC(TObject)] [TC(nil)] F18: Integer;'#10 +                  // 39 valid
+    '    [TD(1)] [TD(CI)] F19: Integer;'#10 +                         // 40 valid
+    '    [TMk(''x'')] F20: Integer;'#10 +                             // 41 E2034 'x'
+    '    [Tag(GV)] F21: Integer;'#10 +                                // 42 E2010 (type first)
+    '    [TOv(GV)] F22: Integer;'#10 +                                // 43 E2026 )
+    '    [T2(TC, ''x'')] F23: Integer;'#10 +                          // 44 E2026 )
+    '    [T2(F, ''x'')] F24: Integer;'#10 +                           // 45 E2026 )
+    '    [T2(CI * 2, CS + ''d'')] F25: Integer;'#10 +                 // 46 valid
+    '    [T2(GV + 1, ''x'')] F26: Integer;'#10 +                      // 47 E2026 )
+    '    [T2(CI, Undeclared)] F27: Integer;'#10 +                     // 48 E2003 only
+    '  end;'#10 +                                                     // 49
+    'begin'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'AC.dpr'));
+    LM := ModelByName('ac');
+    Ok('attrctor: E2010 at the first argument that does not convert [' +
+      DiagSites(LM, 'E2010') + ']', DiagSites(LM, 'E2010') =
+      '21:10 22:10 23:9 24:12 27:10 36:12 42:10');
+    Ok('attrctor: ...named as dcc names them',
+      DiagHasText(LM, 'E2010', '''string'' and ''Integer''') and
+      DiagHasText(LM, 'E2010', '''string'' and ''Extended''') and
+      DiagHasText(LM, 'E2010', '''Integer'' and ''Char'''));
+    Ok('attrctor: E2034 at the argument too many, a set''s too [' +
+      DiagSites(LM, 'E2034') + ']', DiagSites(LM, 'E2034') =
+      '26:7 28:7 33:13 35:12 41:10');
+    Ok('attrctor: E2035 at the ) - at the ] with no parentheses [' +
+      DiagSites(LM, 'E2035') + ']', DiagSites(LM, 'E2035') =
+      '29:9 30:10 37:11');
+    Ok('attrctor: E2250 at the ) of a set none takes [' +
+      DiagSites(LM, 'E2250') + ']', (DiagSites(LM, 'E2250') = '32:13') and
+      DiagHasText(LM, 'E2250', '''Create'''));
+    Ok('attrctor: E2026 at the ) of a call that fits [' +
+      DiagSites(LM, 'E2026') + ']', DiagSites(LM, 'E2026') =
+      '43:12 44:16 45:15 47:20');
+    Ok('attrctor: an undeclared argument is its E2003 alone',
+      (DiagSites(LM, 'E2003') = '48:13') and (Length(LM.Diags) = 21));
+    // The constructor the attribute calls: the own unit's, by its overload.
+    LBound := False;
+    for var LPair in LM.CallTargetX do
+      if (LM.Tree.Nodes[LPair.Key].Kind = nkAttribute) and
+         (LM.Tree.NodeText(LM.Tree.Nodes[LPair.Key].FirstChild) = 'TJoin') and
+         (LM.Tree.Nodes[LM.Tree.Nodes[LPair.Key].FirstChild].NextSibling <>
+           NIL_NODE) and
+         (LM.Tree.NodeText(LM.Tree.Nodes[LM.Tree.Nodes[LPair.Key].FirstChild].
+           NextSibling) = '1') then
+      begin
+        LExt := LPair.Value;
+        var LOm := GProj.Model(LExt.UnitId);
+        LBound := (LOm.Symbols[LExt.Sym].NameLower = 'create') and
+          (LOm.Symbols[LOm.Scopes[LOm.Symbols[LExt.Sym].Scope].StructSym].
+            NameLower = 'tovattribute');
+      end;
+    Ok('attrctor: [TJoin(1)] binds TOvAttribute''s Create (CallTargetX)',
+      LBound);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
+  // Incremental: the constructor of another unit changed, then one added to
+  // a class that had none - the unit naming the attribute is redone.
+  LDir := FreshDir('pastree_sema_attrctorinc');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class constructor Create; end;'#10 +
+    '  TCustomAttribute = class(TObject) end;'#10 +
+    'implementation'#10'constructor TObject.Create; begin end;'#10 +
+    'end.'#10);
+  LUA := TPath.Combine(LDir, 'UA.pas');
+  TFile.WriteAllText(LUA, UA_STR);
+  TFile.WriteAllText(TPath.Combine(LDir, 'AI.dpr'),
+    'program AI;'#10'uses UA;'#10'type'#10 +
+    '  TX = class'#10 +
+    '    [Tag(''x'')] [Bare(''y'')] F: Integer;'#10 +
+    '  end;'#10'begin'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'AI.dpr'));
+    Ok('attrctor inc: first build, Bare(''y'') too many',
+      DiagSites(ModelByName('ai'), 'E2034') = '5:22');
+    GProj.SetBuffer(LUA, UA_INT, 1);
+    Ok('attrctor inc: the changed constructor [' + GProj.StageTimings + ']',
+      GProj.AnalyzeModuleOnly(LUA) and
+      (DiagSites(ModelByName('ai'), 'E2010') = '5:10'));
+    Ok('attrctor inc: ...the project a fresh build makes',
+      ProjSig(GProj) = FreshSig(TPath.Combine(LDir, 'AI.dpr'), [LDir], [LUA],
+        [UA_INT]));
+    GProj.SetBuffer(LUA, UA_BARE_CTOR, 2);
+    Ok('attrctor inc: a constructor added [' + GProj.StageTimings + ']',
+      GProj.AnalyzeModuleOnly(LUA) and
+      (DiagCount(ModelByName('ai'), 'E2034') = 0));
+    Ok('attrctor inc: ...the project a fresh build makes',
+      ProjSig(GProj) = FreshSig(TPath.Combine(LDir, 'AI.dpr'), [LDir], [LUA],
+        [UA_BARE_CTOR]));
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // A3-14, E2-29: which helper applies is the referring unit's question - an
 // implementation-section helper is its unit's own, and of two helpers for
 // one type only the later is active, a name it lacks being the type's own
@@ -22269,6 +22464,7 @@ begin
   TestTypedAddress;
   TestAttributeSuffixFirst;
   TestAttributeW1074;
+  TestAttributeCtorArgs;
   TestAttributeW1074LeafGuess;
   TestE2003LeafGuess;
   TestAttributeImplHeaderParam;

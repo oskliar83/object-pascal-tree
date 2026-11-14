@@ -600,8 +600,18 @@ of less work, not a gap in following the language; its consequences are in
   where the list ends without one (one E2289 per compile), and PasTree
   reports no E2289 at all. An expression before the colon (`[1: Tag]`, W1074
   for dcc) is a parse error.
-- an attribute's arguments are not checked against its constructors (dcc's
-  E2010 for `[Bar(1, 2)]` against `Create(const S: string)`).
+- an attribute's arguments are checked against its constructors (E2010,
+  E2034, E2035, E2250, E2026) only where every part is read reliably: a
+  record, Variant, procedural, array, untyped, `var` or `out` parameter in
+  the set (dcc takes a constant for a record or a Variant by its own rule -
+  TValue's `[TV('x')]` compiles, `[TV(1)]` is E2026), a generic class, an
+  argument typed by an overload choice and a helper's Create leave the
+  attribute unchecked. A string of more than one character for a Char is
+  not reported (the assignment's leniency), nor a constant out of a
+  parameter's range (E1012 / W1012); E2026 only for a variable, a typed
+  constant, a declared function, `@X` and an operator over one of them
+  (`Length(GS)` passes). dcc reports one error a line; two failing
+  attributes on one line are two diagnostics here.
 
 ## B-lexical-grammar.md
 

@@ -1422,10 +1422,18 @@ type
     function UnknownAncestryX(const AX: TSemaXType): Boolean;
     procedure EmitAt(AModel: TPasSemaModel; ANode: Integer;
       const ACode, AMsg: string; const ANote: string = '');
+    { EmitAt at the visible token ATok instead of ANode's first: a verdict dcc
+      gives at a token no node starts with - a call's `)`. ANode stays the
+      diagnostic's node. }
+    procedure EmitAtToken(AModel: TPasSemaModel; ANode, ATok: Integer;
+      const ACode, AMsg: string; const ANote: string = '');
     { The line and column of ANode's first token, AFile its file id; zeros
       and False when the token is out of range. EmitAt's, EmitE2003's and
       NodeSite's one position. }
     class function NodeLineCol(AModel: TPasSemaModel; ANode: Integer;
+      out AFile, ALine, ACol: Integer): Boolean; static;
+    // NodeLineCol's position of the visible token ATok.
+    class function TokenLineCol(AModel: TPasSemaModel; ATok: Integer;
       out AFile, ALine, ACol: Integer): Boolean; static;
     function CalleeShadowsUses(AModel: TPasSemaModel;
       ACallee, ALocalSym: Integer): Boolean;
@@ -10817,21 +10825,26 @@ begin
     [AModel.Tree.NodeText(ANode)]));
 end;
 
-class function TPasSemaProject.NodeLineCol(AModel: TPasSemaModel;
-  ANode: Integer; out AFile, ALine, ACol: Integer): Boolean;
+class function TPasSemaProject.TokenLineCol(AModel: TPasSemaModel;
+  ATok: Integer; out AFile, ALine, ACol: Integer): Boolean;
 var
   LVis: TPasVisibleToken;
-  LTok: Integer;
 begin
   AFile := 0; ALine := 0; ACol := 0;
-  LTok := AModel.Tree.Nodes[ANode].FirstToken;
-  Result := (LTok >= 0) and (LTok <= High(AModel.Tree.Source.Visible));
+  Result := (ATok >= 0) and (ATok <= High(AModel.Tree.Source.Visible));
   if not Result then
     Exit;
-  LVis := AModel.Tree.Source.Visible[LTok];
+  LVis := AModel.Tree.Source.Visible[ATok];
   AFile := LVis.FileId;
   AModel.Tree.Source.Files[LVis.FileId].OffsetToLineCol(
     AModel.Tree.Source.Files[LVis.FileId].Tokens[LVis.TokenIndex].Start,
+    ALine, ACol);
+end;
+
+class function TPasSemaProject.NodeLineCol(AModel: TPasSemaModel;
+  ANode: Integer; out AFile, ALine, ACol: Integer): Boolean;
+begin
+  Result := TokenLineCol(AModel, AModel.Tree.Nodes[ANode].FirstToken, AFile,
     ALine, ACol);
 end;
 
@@ -10842,6 +10855,18 @@ var
   LDiag: TSemaDiag;
 begin
   NodeLineCol(AModel, ANode, LFile, LLine, LCol);
+  LDiag := MakeDiag(ACode, AMsg, ANode, LFile, LLine, LCol);
+  LDiag.Note := ANote;
+  AModel.AddDiag(LDiag);
+end;
+
+procedure TPasSemaProject.EmitAtToken(AModel: TPasSemaModel; ANode,
+  ATok: Integer; const ACode, AMsg: string; const ANote: string);
+var
+  LFile, LLine, LCol: Integer;
+  LDiag: TSemaDiag;
+begin
+  TokenLineCol(AModel, ATok, LFile, LLine, LCol);
   LDiag := MakeDiag(ACode, AMsg, ANode, LFile, LLine, LCol);
   LDiag.Note := ANote;
   AModel.AddDiag(LDiag);
@@ -22275,6 +22300,15 @@ var
       if (XCatOf(ASrcX) = tcNil) or
          LM.AnonTypeSyms.ContainsKey(PeelParens(LM.Tree, ASrc)) then
         LSrcName := 'Pointer'
+      // A one-character literal is a Char's (`I := 'a'` is `'Integer' and
+      // 'Char'`, dcc64 37.0; spec 19.3.2 `[TI('a')]`).
+      else if IsOneCharLiteralNode(LM.Tree, PeelParens(LM.Tree, ASrc)) then
+        LSrcName := 'Char'
+      // A real literal is dcc64's Double, dcc32's Extended (`I := 1.5`;
+      // an Extended variable stays 'Extended' on both).
+      else if (FPlatform = pfWin64) and (PeelParens(LM.Tree, ASrc) <> NIL_NODE)
+        and (LM.Tree.Nodes[PeelParens(LM.Tree, ASrc)].Kind = nkRealLit) then
+        LSrcName := 'Double'
       else
         LSrcName := XTypeText(ASrcX);
       EmitAt(LM, AAt, 'E2010', Format(SE2010_IncompatibleTypes,
@@ -22465,8 +22499,359 @@ var
     end;
 
   var
+    // TCustomAttribute, read by the first attribute CheckAttrArgs judges.
+    LCustomAttrX: TSemaXType;
+    LCustomAttrRead: Boolean;
+
+    // Is the argument ANode a value dcc certainly folds to no constant (19.3.2:
+    // E2026)? A unit-level or local variable, a typed constant, a call of a
+    // declared routine, `@X`, and an operator over one of them. Asked only
+    // where ConstExprKind found no constant either; anything it cannot place
+    // - a type name, a resourcestring, an intrinsic over a variable - is not.
+    function CertainlyNotConst(ANode, ADepth: Integer): Boolean;
+    var
+      LCore, LOpd, LMid, LSym, LScope: Integer;
+    begin
+      Result := False;
+      if ADepth > 8 then
+        Exit;
+      LCore := PeelParens(LM.Tree, ANode);
+      if LCore = NIL_NODE then
+        Exit;
+      case LM.Tree.Nodes[LCore].Kind of
+        nkIdent, nkMember:
+          if TargetSym(LCore, LMid, LSym) then
+          begin
+            LScope := FModels[LMid].Symbols[LSym].Scope;
+            if (LScope <> NIL_SCOPE) and
+               (FModels[LMid].Scopes[LScope].StructSym <> NIL_SYM) then
+              Exit;   // a member: dcc sees none in an attribute's arguments
+            case FModels[LMid].Symbols[LSym].Kind of
+              skVar:
+                Result := True;
+              skConst:
+                Result := not (sfBuiltin in FModels[LMid].Symbols[LSym].Flags) and
+                  (FModels[LMid].Symbols[LSym].TypeNode <> NIL_NODE);
+              // A function named alone is called (no procedural parameter
+              // gets here).
+              skRoutine:
+                Result := not (sfBuiltin in FModels[LMid].Symbols[LSym].Flags) and
+                  (FModels[LMid].Symbols[LSym].TypeNode <> NIL_NODE);
+            end;
+          end;
+        nkUnaryOp:
+          if IsAddrOfExpr(LM.Tree, LCore, LOpd) then
+            Result := True
+          else
+            Result := CertainlyNotConst(LM.Tree.Nodes[LCore].FirstChild,
+              ADepth + 1);
+        nkBinaryOp:
+          begin
+            LOpd := LM.Tree.Nodes[LCore].FirstChild;
+            while (LOpd <> NIL_NODE) and not Result do
+            begin
+              Result := CertainlyNotConst(LOpd, ADepth + 1);
+              LOpd := LM.Tree.Nodes[LOpd].NextSibling;
+            end;
+          end;
+        nkCall:
+          begin
+            LOpd := LM.Tree.Nodes[LCore].FirstChild;
+            Result := (LOpd <> NIL_NODE) and
+              (LM.Tree.Nodes[LOpd].Kind in [nkIdent, nkMember]) and
+              TargetSym(LOpd, LMid, LSym) and
+              (FModels[LMid].Symbols[LSym].Kind = skRoutine) and
+              not (sfBuiltin in FModels[LMid].Symbols[LSym].Flags);
+          end;
+      end;
+    end;
+
+    { 19.3.2: an attribute with its arguments is a call of its class's
+      constructor - dcc's E2010, E2034, E2035, E2250 and E2026 at it (spec
+      19.3.2, dcc64 37.0, local/fu-attrs P1-P7). The set is the class's
+      `Create`: the nearest level of the ancestry declaring one, the next
+      level's joining while the set says `overload` (ChainSaysOverload, the
+      walk's 6.3.1 rule) - TObject's parameterless Create joins an overload
+      set. One candidate: the arguments are converted left to right as values
+      are assigned (AssignConvX - an attribute's parameters are value or
+      const ones), the first that does not convert is E2010 at it, then the
+      count (E2034 at the first argument too many, E2035 at the `)`). Two or
+      more: E2034 at the `)` past every candidate's count, else E2250 at the
+      `)` when none takes the arguments. A call that fits: E2026 at the `)`
+      for the first argument certainly no constant.
+      Judged only where every part is read reliably, the rest silent
+      (error-tolerant is the primary mode): a name-form attribute of a
+      resolved non-generic class descending from TCustomAttribute, its
+      ancestry known, no helper's Create in front of it, every argument a
+      plain expression the walk typed by no overload choice; every candidate
+      a constructor (a method named Create is dcc's E2003), no generic one, no
+      untyped, `var` / `out`, array, record, Variant or procedural parameter
+      (a record or a Variant takes a constant by the compiler's own rule -
+      TValue's `[TV('x')]` compiles, a Variant's `[TV(1)]` does not). dcc
+      gives one error a line; E2034 / E2035 after an E2010 on the same line
+      is left out for that.
+      The binding goes to CallTargetX at the attribute node - the candidate
+      the call takes, or the set's head when none does: an edit of the
+      constructor redoes the unit that names the attribute (the pair test of
+      SelectConsumers), as it redoes a call. }
+    procedure CheckAttrArgs(AAttr: Integer);
+    const
+      MAX_ARGS = 32;
+    var
+      LRef, LArg, LN, LI, LTok, LLevelSym, LScope, LHead, LCand: Integer;
+      LMid, LSym, LCtx, LPDecl, LReq, LTot, LMaxTot, LMinReq, LFits: Integer;
+      LFile, LLine, LCol, LErrLine: Integer;
+      LArgs: array[0..MAX_ARGS - 1] of Integer;
+      LArgX: array[0..MAX_ARGS - 1] of TSemaXType;
+      LAttrX, LLevel, LParX: TSemaXType;
+      LCands: TArray<TPasExtRef>;
+      LPars: TArray<Integer>;
+      LParXs: TArray<TArray<TSemaXType>>;
+      LReqs, LTots: TArray<Integer>;
+      LVariadic, LOk, LJoin: Boolean;
+      LFit: TPasExtRef;
+      LNames: TArray<string>;
+      LName: string;
+
+      function ArgLine(AArg: Integer): Integer;
+      var
+        LF, LC: Integer;
+      begin
+        NodeLineCol(LM, AArg, LF, Result, LC);
+      end;
+
+    begin
+      if (LM.Tree.Nodes[AAttr].Aux <> amaNone) or
+         not PasAttrIsName(LM.Tree, AAttr) or LM.HasDiagAt(AAttr) then
+        Exit;
+      LRef := LM.Tree.Nodes[AAttr].FirstChild;
+      if (LRef = NIL_NODE) or
+         not (LM.Tree.Nodes[LRef].Kind in [nkIdent, nkMember]) or
+         LM.HasDiagAt(LRef) then
+        Exit;
+      // The class: resolved, an attribute, its ancestry whole.
+      LAttrX := CanonTypeX(ResolveTypeExpr(AId, LRef));
+      if not XValid(LAttrX) or (LAttrX.Inst <> NIL_INST) or
+         (XCatOf(LAttrX) <> tcClass) or UnknownAncestryX(LAttrX) then
+        Exit;
+      if not LCustomAttrRead then
+      begin
+        LCustomAttrX := ResolveCustomAttributeX(AId);
+        LCustomAttrRead := True;
+      end;
+      if not XValid(LCustomAttrX) or
+         (XDescent(LAttrX, LCustomAttrX) <> xdYes) then
+        Exit;
+      // A helper's Create would stand in front of the class's own.
+      if not FindMemberX(AId, LAttrX, 'create', LMid, LSym, LCtx) then
+        Exit;
+      LScope := FModels[LMid].Symbols[LSym].Scope;
+      if (LScope = NIL_SCOPE) or
+         (FModels[LMid].Scopes[LScope].StructSym = NIL_SYM) or
+         XValid(HelperTargetX(LMid, FModels[LMid].Scopes[LScope].StructSym)) then
+        Exit;
+      // The set, nearest level first.
+      LCands := nil;
+      LLevel := LAttrX;
+      for var LHop := 1 to 64 do
+      begin
+        LLevelSym := LLevel.Sym;
+        LScope := FModels[LLevel.UnitId].Symbols[LLevelSym].MemberScope;
+        if LScope = NIL_SCOPE then
+          Exit;
+        LHead := FModels[LLevel.UnitId].FindLocalNoHelpers(LScope,
+          SemaKey('create'));
+        while (LHead <> NIL_SYM) and IsClassCtorDtorSym(LLevel.UnitId, LHead) do
+          LHead := FModels[LLevel.UnitId].Symbols[LHead].NextOverload;
+        LJoin := True;
+        if LHead <> NIL_SYM then
+        begin
+          LCand := LHead;
+          while LCand <> NIL_SYM do
+          begin
+            if not IsClassCtorDtorSym(LLevel.UnitId, LCand) then
+            begin
+              if not IsConstructorSym(LLevel.UnitId, LCand) or
+                 (GenericParamCount(LLevel.UnitId, LCand) > 0) or
+                 (Length(LCands) >= 16) then
+                Exit;
+              LFit.UnitId := LLevel.UnitId;
+              LFit.Sym := LCand;
+              LCands := LCands + [LFit];
+            end;
+            LCand := FModels[LLevel.UnitId].Symbols[LCand].NextOverload;
+          end;
+          LJoin := ChainSaysOverload(LLevel.UnitId, LHead);
+        end;
+        if not LJoin then
+          Break;
+        LLevel := AncestorOfX(LLevel);
+        if not XValid(LLevel) then
+          Break;
+        LLevel := CanonTypeX(LLevel);
+        if not XValid(LLevel) or (LLevel.Inst <> NIL_INST) then
+          Exit;
+      end;
+      if LCands = nil then
+        Exit;
+      // The pair before any argument decides: an edit of the set redoes
+      // this unit whatever the arguments are now.
+      LM.CallTargetX.AddOrSetValue(AAttr, LCands[0]);
+      // The arguments: plain expressions, typed reliably.
+      LN := 0;
+      LArg := LM.Tree.Nodes[LRef].NextSibling;
+      while LArg <> NIL_NODE do
+      begin
+        if (LN = MAX_ARGS) or (LM.Tree.Nodes[LArg].Kind in [nkError, nkMissing,
+           nkFormattedArg, nkNamedArg]) then
+          Exit;
+        LArgs[LN] := LArg;
+        LArgX[LN] := GetX(LArg);
+        if not XValid(LArgX[LN]) or
+           (XCatOf(CanonTypeX(LArgX[LN])) = tcUnknown) or
+           Unreliable(AAttr, LArg, LArgX[LN]) then
+          Exit;
+        Inc(LN);
+        LArg := LM.Tree.Nodes[LArg].NextSibling;
+      end;
+      // Each candidate's parameters: plain value types.
+      SetLength(LParXs, Length(LCands));
+      SetLength(LReqs, Length(LCands));
+      SetLength(LTots, Length(LCands));
+      SetLength(LNames, Length(LCands));
+      LMaxTot := -1;
+      LMinReq := MaxInt;
+      for LI := 0 to High(LCands) do
+      begin
+        LMid := LCands[LI].UnitId;
+        LCand := LCands[LI].Sym;
+        if not RoutineArity(LMid, LCand, LReq, LTot, LVariadic) or LVariadic or
+           (sfVarArgs in FModels[LMid].Symbols[LCand].Flags) then
+          Exit;
+        LPars := XParamSyms(LMid, LCand);
+        if Length(LPars) <> LTot then
+          Exit;
+        SetLength(LParXs[LI], LTot);
+        LName := '';
+        for var LP := 0 to LTot - 1 do
+        begin
+          if (FModels[LMid].Symbols[LPars[LP]].TypeNode = NIL_NODE) or
+             (FModels[LMid].Tree.Nodes[FModels[LMid].Symbols[LPars[LP]].TypeNode].
+               Kind = nkArrayType) then
+            Exit;
+          LParX := DeclTypeX(LMid, LPars[LP]);
+          if not XValid(LParX) or OpenX(LParX) or NestedInGenericX(LParX) or
+             (XCatOf(CanonTypeX(LParX)) in [tcUnknown, tcRecord, tcVariant,
+               tcProc, tcArray, tcFile]) then
+            Exit;
+          LPDecl := FModels[LMid].Symbols[LPars[LP]].DeclNode;
+          while (LPDecl <> NIL_NODE) and
+                (FModels[LMid].Tree.Nodes[LPDecl].Kind <> nkParam) do
+            LPDecl := FModels[LMid].Tree.Nodes[LPDecl].Parent;
+          if (LPDecl = NIL_NODE) or
+             (FModels[LMid].Tree.Nodes[LPDecl].Flags * [nfVar, nfOut] <> []) then
+            Exit;
+          LParXs[LI][LP] := LParX;
+          if LName <> '' then
+            LName := LName + ', ';
+          LName := LName + XTypeText(LParX);
+        end;
+        LReqs[LI] := LReq;
+        LTots[LI] := LTot;
+        LNames[LI] := FModels[LMid].Symbols[LCand].Name + '(' + LName + ')';
+        LMaxTot := Max(LMaxTot, LTot);
+        LMinReq := Min(LMinReq, LReq);
+      end;
+      // The `)` - or, with no parentheses, the token after the name.
+      LTok := LM.Tree.Nodes[AAttr].LastToken;
+      if (LTok < 0) or (LTok > High(LM.Tree.Source.Visible)) then
+        Exit;
+      if LM.Tree.Source.VisibleKind(LTok) <> tkRParen then
+        Inc(LTok);
+      LFit := LCands[0];
+      if (Length(LCands) = 1) and not (sfOverloadDirective in
+         FModels[LFit.UnitId].Symbols[LFit.Sym].Flags) then
+      begin
+        LM.CallTargetX.AddOrSetValue(AAttr, LFit);
+        LErrLine := -1;
+        for LI := 0 to Min(LN, LTots[0]) - 1 do
+          if CheckConv(AAttr, LRef, LArgs[LI], LArgs[LI], LParXs[0][LI],
+             LArgX[LI]) then
+          begin
+            LErrLine := ArgLine(LArgs[LI]);
+            Break;
+          end;
+        if LN > LTots[0] then
+        begin
+          if ArgLine(LArgs[LTots[0]]) <> LErrLine then
+            EmitAt(LM, LArgs[LTots[0]], 'E2034', SE2034_TooManyActualParams);
+          Exit;
+        end;
+        if LN < LReqs[0] then
+        begin
+          TokenLineCol(LM, LTok, LFile, LLine, LCol);
+          if LLine <> LErrLine then
+            EmitAtToken(LM, AAttr, LTok, 'E2035',
+              SE2035_NotEnoughActualParams);
+          Exit;
+        end;
+        if LErrLine >= 0 then
+          Exit;
+      end
+      else
+      begin
+        LFits := 0;
+        for LI := 0 to High(LCands) do
+        begin
+          if (LN < LReqs[LI]) or (LN > LTots[LI]) then
+            Continue;
+          LOk := True;
+          for var LA := 0 to LN - 1 do
+            if AssignConvX(AAttr, LArgs[LA], LParXs[LI][LA], LArgX[LA]) =
+               TSemaConv.scNone then
+            begin
+              LOk := False;
+              Break;
+            end;
+          if LOk then
+          begin
+            Inc(LFits);
+            if LFits = 1 then
+              LFit := LCands[LI];
+          end;
+        end;
+        if LFits = 1 then
+          LM.CallTargetX.AddOrSetValue(AAttr, LFit)
+        else
+          LM.CallTargetX.AddOrSetValue(AAttr, LCands[0]);
+        if LFits = 0 then
+        begin
+          if LN > LMaxTot then
+            EmitAt(LM, LArgs[LMaxTot], 'E2034', SE2034_TooManyActualParams)
+          else if LN < LMinReq then
+            EmitAtToken(LM, AAttr, LTok, 'E2035', SE2035_NotEnoughActualParams)
+          else
+            EmitAtToken(LM, AAttr, LTok, 'E2250', Format(SE2250_NoOverload,
+              [FModels[LCands[0].UnitId].Symbols[LCands[0].Sym].Name]),
+              'candidates: ' + CandidateList(LNames));
+          Exit;
+        end;
+      end;
+      // The call fits: its arguments must be constants.
+      for LI := 0 to LN - 1 do
+        if not IsConstArgX(AId, LArgs[LI]) and
+           CertainlyNotConst(LArgs[LI], 0) then
+        begin
+          EmitAtToken(LM, AAttr, LTok, 'E2026', SE2026_ConstantExpected);
+          Break;
+        end;
+    end;
+
+  var
     N, LDst, LSrc: Integer;
   begin
+    LCustomAttrRead := False;
+    LCustomAttrX := XNil;
     for N := 0 to High(LM.Tree.Nodes) do
       case LM.Tree.Nodes[N].Kind of
         nkAssign:
@@ -22513,6 +22898,8 @@ var
         nkExprStmt:
           if Length(LM.Tree.Source.SwitchEvents) > 0 then
             CheckCallStmt(N);
+        nkAttribute:
+          CheckAttrArgs(N);
       end;
     // `A[0, 1]` over `array of TCells`: the comma list ran from the array
     // into a default property (13.1.4) - recorded by the walk.
@@ -30855,6 +31242,21 @@ begin
       LStem := ANew.Symbols[LNewIdx].NameLower;
       if (Length(LStem) > 9) and LStem.EndsWith('attribute') then
         AAdded.AddOrSetValue(Copy(LStem, 1, Length(LStem) - 9), 0);
+      // An attribute is a call of its class's Create that never spells it
+      // (19.3.2): a constructor added to a class adds the class's name, so a
+      // unit naming the class as an attribute is redone - the pair test
+      // covers a changed or removed one (CheckAttrArgs' CallTargetX).
+      if (ANew.Symbols[LNewIdx].Kind = skRoutine) and
+         (ANew.Symbols[LNewIdx].Scope <> NIL_SCOPE) and
+         (ANew.Scopes[ANew.Symbols[LNewIdx].Scope].StructSym <> NIL_SYM) and
+         (ANew.RoutineHead(LNewIdx) = rhConstructor) then
+      begin
+        LStem := ANew.Symbols[ANew.Scopes[ANew.Symbols[LNewIdx].Scope].
+          StructSym].NameLower;
+        AAdded.AddOrSetValue(LStem, 0);
+        if (Length(LStem) > 9) and LStem.EndsWith('attribute') then
+          AAdded.AddOrSetValue(Copy(LStem, 1, Length(LStem) - 9), 0);
+      end;
     end;
   AAnyChange := (LNChanged > 0) or (LNRemoved > 0) or (LNAdded > 0);
   ACounts := Format('changed=%d;removed=%d;added=%d;names=%s/%s/%s',
