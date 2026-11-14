@@ -3292,8 +3292,10 @@ begin
 
     nkAttribute:
       // An attribute that is not a name - `['abc']`, `[C + 1]`, `[(TA)]` - is
-      // dcc's W1074, dropped with no name in it looked up (`[(Undeclared)]`
-      // compiles, F32): left unvisited, as nkNamedArg's name is.
+      // dcc's W1074 or an error, dropped with nothing in it looked up but the
+      // name it starts with (`[(Undeclared)]`, `[C + Undeclared]` compile,
+      // F32; `[C + 1]` names C, `[TA + 1]` is E2029 - PasAttrExprHead): the
+      // rest is left unvisited, as nkNamedArg's name is.
       if PasAttrIsName(FTree, ANode) then
       begin
         LChild := FirstChild(ANode);
@@ -3302,6 +3304,12 @@ begin
           Collect(LChild, AScope);
           LChild := NextSib(LChild);
         end;
+      end
+      else
+      begin
+        LChild := PasAttrExprHead(FTree, ANode);
+        if LChild <> NIL_NODE then
+          Collect(LChild, AScope);
       end;
 
   else

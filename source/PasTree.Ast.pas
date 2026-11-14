@@ -527,6 +527,18 @@ type
     (dcc64 37.0, local/probe-b56 RT2, RT5). }
   function PasAttrIsName(const ATree: TPasTree; AAttr: Integer): Boolean;
 
+  { The name an EXPRESSION attribute starts with (19.3.2): dcc reads a name
+    first wherever the attribute starts with one - `[C + 1]`, `[TA[1]]`,
+    `[C.X * 2]`, `[TA(1) + 1]` - and judges it before the tokens after it
+    (an attribute class is E2029 at them, another class E2010, any other
+    name W1074 naming it). The nkIdent or the nkMember chain that is the
+    leftmost operand down the left spine (binary operators, ranges, calls,
+    indexes, dereferences), when its first token is the attribute's first;
+    NIL_NODE for a name attribute, one with a target, `Result` with no colon,
+    and an expression that starts with anything else (`[(TA)]`, `[-X]`,
+    `['a' + C]` look up no name). }
+  function PasAttrExprHead(const ATree: TPasTree; AAttr: Integer): Integer;
+
   { ANode, or the first sibling after it that is no nkAttrGroup; NIL_NODE when
     none is. The names of a list that attribute groups may stand between - a
     routine parameter's (`const [Ref] A, [Ref] B`), a generic parameter
@@ -656,6 +668,41 @@ begin
     ATree.NodeTextEquals(AAttr, '&result'));
 end;
 
+const
+  // The left-spine kinds PasAttrExprHead descends: the operand on the left
+  // is the node's first child, and it starts the node's text.
+  ATTR_EXPR_SPINE = [nkBinaryOp, nkRange, nkCall, nkIndex, nkDeref];
+
+function PasAttrExprHead(const ATree: TPasTree; AAttr: Integer): Integer;
+var
+  LCur, LLeaf: Integer;
+begin
+  Result := NIL_NODE;
+  if (nfAttrTarget in ATree.Nodes[AAttr].Flags) or
+     PasAttrIsName(ATree, AAttr) or
+     ATree.NodeTextEquals(AAttr, 'result') or
+     ATree.NodeTextEquals(AAttr, '&result') then
+    Exit;
+  LCur := ATree.Nodes[AAttr].FirstChild;
+  while (LCur <> NIL_NODE) and (ATree.Nodes[LCur].Kind in ATTR_EXPR_SPINE) do
+    LCur := ATree.Nodes[LCur].FirstChild;
+  if (LCur = NIL_NODE) or not (ATree.Nodes[LCur].Kind in [nkIdent, nkMember]) then
+    Exit;
+  // A dotted name of identifiers, starting the attribute.
+  LLeaf := LCur;
+  while ATree.Nodes[LLeaf].Kind = nkMember do
+  begin
+    if (ATree.Nodes[LLeaf].FirstChild = NIL_NODE) or
+       (ATree.LastChild(LLeaf) = NIL_NODE) or
+       (ATree.Nodes[ATree.LastChild(LLeaf)].Kind <> nkIdent) then
+      Exit;
+    LLeaf := ATree.Nodes[LLeaf].FirstChild;
+  end;
+  if (ATree.Nodes[LLeaf].Kind = nkIdent) and
+     (ATree.Nodes[LLeaf].FirstToken = ATree.Nodes[AAttr].FirstToken) then
+    Result := LCur;
+end;
+
 function NodeInRoutineBody(const ATree: TPasTree; ANode: Integer): Boolean;
 var
   LNode: Integer;
@@ -774,10 +821,37 @@ end;
 function PasIsAttributeTypeRef(const ATree: TPasTree;
   ANode: Integer): Boolean;
 var
-  LParent: Integer;
+  LParent, LUp: Integer;
 begin
   LParent := ATree.Nodes[ANode].Parent;
-  Result := (LParent <> NIL_NODE) and
+  if LParent = NIL_NODE then
+    Exit(False);
+  // The name an expression attribute starts with (PasAttrExprHead): up the
+  // left spine to the attribute. Most left operands are no attribute's: the
+  // token before one is `[` or `,` (or a target's `:`, which has none).
+  if (ATree.Nodes[LParent].Kind in ATTR_EXPR_SPINE) and
+     (ATree.Nodes[LParent].FirstChild = ANode) and
+     (ATree.Nodes[ANode].Kind in [nkIdent, nkMember]) then
+  begin
+    LUp := ANode;
+    while (LUp <> NIL_NODE) and (ATree.Nodes[LUp].Kind = nkMember) do
+      LUp := ATree.Nodes[LUp].FirstChild;
+    if (LUp = NIL_NODE) or (ATree.Nodes[LUp].FirstToken < 1) or
+       not (ATree.Source.VisibleKind(ATree.Nodes[LUp].FirstToken - 1) in
+         [tkLBracket, tkComma]) then
+      Exit(False);
+    LUp := LParent;
+    while (ATree.Nodes[LUp].Parent <> NIL_NODE) and
+          (ATree.Nodes[ATree.Nodes[LUp].Parent].Kind in ATTR_EXPR_SPINE) and
+          (ATree.Nodes[ATree.Nodes[LUp].Parent].FirstChild = LUp) do
+      LUp := ATree.Nodes[LUp].Parent;
+    LParent := ATree.Nodes[LUp].Parent;
+    Exit((LParent <> NIL_NODE) and
+      (ATree.Nodes[LParent].Kind = nkAttribute) and
+      (ATree.Nodes[LParent].FirstChild = LUp) and
+      (PasAttrExprHead(ATree, LParent) = ANode));
+  end;
+  Result :=
     ((ATree.Nodes[LParent].Kind = nkAttribute) or
      ((ATree.Nodes[LParent].Kind = nkGuid) and
       (ATree.Nodes[ANode].Kind in [nkIdent, nkMember]))) and

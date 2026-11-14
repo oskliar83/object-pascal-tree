@@ -10348,6 +10348,10 @@ var
 begin
   LM := FModels[AId];
   LCur := LM.Tree.Nodes[AAttr].FirstChild;
+  // An expression attribute: the name it starts with (PasAttrExprHead).
+  if (LM.Tree.Nodes[AAttr].Kind = nkAttribute) and
+     not PasAttrIsName(LM.Tree, AAttr) then
+    LCur := PasAttrExprHead(LM.Tree, AAttr);
   if (LCur <> NIL_NODE) and (LM.Tree.Nodes[LCur].Kind = nkTypeArgs) then
     LCur := LM.Tree.Nodes[LCur].FirstChild;
   if LCur = NIL_NODE then
@@ -12808,6 +12812,84 @@ var
     end;
   end;
 
+  { An expression attribute that starts with a name (PasAttrExprHead,
+    spec 19.3.2): dcc resolves the name - the suffixed one first - and an
+    attribute class takes its arguments and nothing more: `[TA + 1]`,
+    `[TA[1]]`, `[TA = TA]` are E2029 `',' or ']' expected but '+' found` at
+    the token after the name; another class is the name attribute's E2010;
+    any other declaration W1074 naming it (`[C + 1]`: 'C'). True when that
+    verdict - or a silence - is given here, False for the unnamed W1074 (an
+    undeclared name, no name, a closure not whole). An attribute class with
+    arguments before the rest (`[TA(1) + 1]`) is left silent: its arguments
+    are judged first (E2034 for dcc there), which an expression's call is
+    not read for. }
+  function ExprAttrJudged(AAttr: Integer; const ACustomAttrX: TSemaXType):
+    Boolean;
+  var
+    LChain, LName, LSym, LKMid, LUp, LTok: Integer;
+    LExt: TPasExtRef;
+    LX: TSemaXType;
+    LText: string;
+  begin
+    Result := False;
+    LChain := PasAttrExprHead(LM.Tree, AAttr);
+    if (LChain = NIL_NODE) or not LM.AllUsesResolved then
+      Exit;
+    LName := AttrDecidingName(AId, AAttr);
+    if LName = NIL_NODE then
+      Exit;
+    LSym := LM.RefMap[LName];
+    LKMid := AId;
+    if (LSym = NIL_SYM) and LM.ExtRefMap.TryGetValue(LName, LExt) then
+    begin
+      LKMid := LExt.UnitId;
+      LSym := LExt.Sym;
+    end;
+    if LSym = NIL_SYM then
+      Exit;
+    case FModels[LKMid].Symbols[LSym].Kind of
+      skUnitRef:
+        Exit;
+      skType, skBuiltinType, skGenericParam:
+        ;
+    else
+      if not LM.HasDiagAt(AAttr) and not UsesLeafGuessed(LM) then
+        EmitAt(LM, AAttr, 'W1074', Format(SW1074_UnknownCustomAttributeName,
+          [FModels[LKMid].Symbols[LSym].Name]));
+      Exit(True);
+    end;
+    Result := True;
+    LX := ResolveTypeExpr(AId, LChain);
+    if not XValid(LX) or (XCatOf(LX) <> tcClass) or
+       not XValid(ACustomAttrX) or LM.HasDiagAt(AAttr) then
+      Exit;
+    case XDescent(LX, ACustomAttrX) of
+      xdNo:
+        EmitAt(LM, LChain, 'E2010', Format(SE2010_IncompatibleTypes,
+          [XTypeText(LX), 'TCustomAttribute']));
+      xdYes:
+        begin
+          LUp := LM.Tree.Nodes[LChain].Parent;
+          if (LUp <> NIL_NODE) and (LM.Tree.Nodes[LUp].Kind = nkCall) then
+            Exit;
+          LTok := LM.Tree.Nodes[LChain].LastToken + 1;
+          if LTok > High(LM.Tree.Source.Visible) then
+            Exit;
+          LText := LM.Tree.Source.VisibleText(LTok);
+          if LM.Tree.Source.VisibleKind(LTok) = tkIdentifier then
+            LText := 'identifier ' + QuotedStr(LText)
+          else
+          begin
+            if (LText <> '') and CharInSet(LText[1], ['A'..'Z', 'a'..'z']) then
+              LText := UpperCase(LText);   // a word: dcc spells it so
+            LText := QuotedStr(LText);
+          end;
+          EmitAtToken(LM, AAttr, LTok, 'E2029', Format(SE2029_ListExpected,
+            [LText]));
+        end;
+    end;
+  end;
+
 var
   LCustomAttrX, LAttrX: TSemaXType;
   LNode, LRef, LHead, LSym, LKMid, LAnchor, LTok: Integer;
@@ -12839,10 +12921,11 @@ begin
       if LM.Tree.Nodes[LNode].Aux <> amaNone then
         Continue;
       // An expression attribute (`[(TObject)]`, `[1 + 2]`, a target other
-      // than Result, `[Result]`) is W1074 and dropped, never E2010 (F32).
+      // than Result, `[Result]`) is W1074 and dropped (F32) - judged by the
+      // name it starts with when it starts with one (ExprAttrJudged).
       if not PasAttrIsName(LM.Tree, LNode) then
       begin
-        if not LM.HasDiagAt(LNode) then
+        if not ExprAttrJudged(LNode, LCustomAttrX) and not LM.HasDiagAt(LNode) then
           EmitAt(LM, LNode, 'W1074', SW1074_UnknownCustomAttribute);
         Continue;
       end;
