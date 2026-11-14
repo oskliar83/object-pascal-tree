@@ -2670,6 +2670,17 @@ begin
       Exit(True);
 end;
 
+// How many of AModel's ACode diagnostics hold ASubstr.
+function DiagCountText(AModel: TPasSemaModel; const ACode,
+  ASubstr: string): Integer;
+begin
+  Result := 0;
+  for var LIdx := 0 to High(AModel.Diags) do
+    if (AModel.Diags[LIdx].Code = ACode) and
+       AModel.Diags[LIdx].Msg.Contains(ASubstr) then
+      Inc(Result);
+end;
+
 // The line of AModel's first ACode diagnostic; -1 when it has none.
 function DiagLine(AModel: TPasSemaModel; const ACode: string): Integer;
 begin
@@ -11247,6 +11258,71 @@ begin
       DiagHasText(LM, 'E2029', ''','' or '']'' expected but ''.'' found'));
     Ok('attrw1074: no E2003, nothing else',
       Length(LM.Diags) = 20);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
+{ Spec 19.3.2 (dcc64 37.0, x-f32, local/fu-attrs P11): an expression
+  attribute that starts with a name is judged by that name, looked up suffix
+  first: an attribute class is E2029 at the token after it (`[TA + 1]`,
+  `[TA[1]]`, `[Tag + 1]`, a word upper-cased), another class E2010, any
+  other declaration W1074 naming it (`[C + 1]`, `[C.X + 1]`). An undeclared
+  name and an expression that starts with anything else are the unnamed
+  W1074, nothing else looked up; an attribute class with arguments before
+  the rest is not read (silent). }
+procedure TestAttributeExprHead;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_attrexprhead');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10'  TObject = class end;'#10 +
+    '  TCustomAttribute = class(TObject) end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'AE.dpr'),
+    'program AE;'#10 +                                   // 1
+    'type'#10 +                                          // 2
+    '  TA = class(TCustomAttribute) end;'#10 +           // 3
+    '  TagAttribute = class(TCustomAttribute) end;'#10 + // 4
+    'const C = 1;'#10 +                                  // 5
+    'type'#10 +                                          // 6
+    '  TX = class'#10 +                                  // 7
+    '    [C + 1] F1: Integer;'#10 +                      // 8 W 'C'
+    '    [TA + 1] F2: Integer;'#10 +                     // 9 E2029 '+'
+    '    [TA[1]] F3: Integer;'#10 +                      // 10 E2029 '['
+    '    [TA = TA] F4: Integer;'#10 +                    // 11 E2029 '='
+    '    [Tag + 1] F5: Integer;'#10 +                    // 12 E2029 '+'
+    '    [TObject + 1] F6: Integer;'#10 +                // 13 E2010
+    '    [C * 2, TA] F7: Integer;'#10 +                  // 14 W 'C'
+    '    [Undeclared + 1] F8: Integer;'#10 +             // 15 W
+    '    [C.X + 1] F9: Integer;'#10 +                    // 16 W 'C'
+    '    [(TA) + 1] F10: Integer;'#10 +                  // 17 W
+    '    [TA(1) + 1] F11: Integer;'#10 +                 // 18 not read
+    '    [''a'' + C] F12: Integer;'#10 +                 // 19 W
+    '    [TA and 1] F13: Integer;'#10 +                  // 20 E2029 'AND'
+    '  end;'#10 +                                        // 21
+    'begin'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'AE.dpr'));
+    LM := ModelByName('ae');
+    Ok('attrexprhead: E2029 after an attribute class [' +
+      DiagSites(LM, 'E2029') + ']', (DiagSites(LM, 'E2029') =
+      '9:9 10:8 11:9 12:10 20:9') and
+      DiagHasText(LM, 'E2029', ''','' or '']'' expected but ''+'' found') and
+      DiagHasText(LM, 'E2029', 'but ''AND'' found'));
+    Ok('attrexprhead: E2010 for another class [' + DiagSites(LM, 'E2010') +
+      ']', (DiagSites(LM, 'E2010') = '13:6') and
+      DiagHasText(LM, 'E2010', '''TObject'' and ''TCustomAttribute'''));
+    Ok('attrexprhead: W1074, naming what the name found [' +
+      DiagSites(LM, 'W1074') + ']', (DiagSites(LM, 'W1074') =
+      '8:6 14:6 15:6 16:6 17:6 19:6') and
+      (DiagCountText(LM, 'W1074', ': ''C''') = 3));
+    Ok('attrexprhead: nothing else, no E2003', Length(LM.Diags) = 12);
   finally
     GProj.Free;
     if TDirectory.Exists(LDir) then
@@ -22576,6 +22652,7 @@ begin
   TestAttributeW1074;
   TestAttributeCtorArgs;
   TestAttributeE2289;
+  TestAttributeExprHead;
   TestAttributeW1074LeafGuess;
   TestE2003LeafGuess;
   TestAttributeImplHeaderParam;

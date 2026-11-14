@@ -592,9 +592,17 @@ of less work, not a gap in following the language; its consequences are in
   expression form dcc drops with W1074). dcc is wider still: after a name
   that is no attribute class it skips tokens up to the `,` or `]` - `[C + + ]`
   and `[C (]` compile - and PasTree reads an expression there, so token runs
-  that are no expression are parse errors. `[C < 1]` reads as type arguments.
-  The same reading looks up no name in `[C + 1]`, so its W1074 names nothing
-  where dcc's names `'C'`, and `[TA + 1]` is W1074 where dcc reports E2029.
+  that are no expression are parse errors. That stays: the tree has no node
+  for a run of tokens that is no expression - an nkError there would put an
+  error node into valid code (the tree checker's I8) and a new raw-token kind
+  would be a contract read for the checker, the printer and every consumer,
+  for code no one writes; and whether the run is skipped or E2029 is the
+  name's question (an attribute class's is E2029), which the parser cannot
+  ask. `[C < 1]` reads as type arguments. The expression's leading name is
+  judged as dcc judges it (`[C + 1]` W1074 `'C'`, `[TA + 1]` E2029, `[TObject
+  + 1]` E2010), but an attribute class with arguments before the rest
+  (`[TA(1) + 1]`, its arguments judged first) and a dotted name past one
+  (`[TA.ClassName]`, E2029 at the `.`) are not reported.
 - E2289 for a group dcc cannot place is reported where the walk is read
   exactly: a `Result:` attribute on a parameter, in a class's or an
   interface's member list with no function before its `end`, before a
