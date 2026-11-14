@@ -17571,6 +17571,35 @@ var
 
   // An integer operator argument ranks by dcc's anonymous subrange of it,
   // read from its operands (OpRangeConv, 4.2.1 / 6.3.1).
+  // Is leaf N a variable, parameter, field, property or element of a signed
+  // 32- or 64-bit builtin integer type - a value of its type's whole range?
+  function SignedVarLeafX(N: Integer): Boolean;
+  var
+    LX: TSemaXType;
+    LMid, LSym: Integer;
+    LName: string;
+  begin
+    Result := False;
+    LX := GetX(N);
+    if not XValid(LX) or
+       (FModels[LX.UnitId].Symbols[LX.Sym].Kind <> skBuiltinType) or
+       (FModels[LX.UnitId].Symbols[LX.Sym].NumRank < 3) then
+      Exit;
+    LName := FModels[LX.UnitId].Symbols[LX.Sym].NameLower;
+    if (LName <> 'integer') and (LName <> 'int64') and
+       (LName <> 'longint') and (LName <> 'nativeint') and
+       (LName <> 'fixedint') then
+      Exit;
+    case LM.Tree.Nodes[N].Kind of
+      nkIndex:
+        Result := True;
+      nkIdent, nkMember:
+        Result := DesignatorSymX(AId, N, LMid, LSym) and
+          (FModels[LMid].Symbols[LSym].Kind in [skVar, skParam, skField,
+           skProperty]);
+    end;
+  end;
+
   procedure OpRangeArgX(ACore: Integer; var AConv: TSemaArgConv);
   var
     LLeaves: TSemaOpRangeLeaves;
@@ -17579,13 +17608,25 @@ var
   begin
     if not OpRangeLeaves(LM.Tree, ACore, AConv, LLeaves) then
       Exit;
-    var LFacts := ConstFactsX(AId);
+    // Arithmetic over a signed 32- or 64-bit variable (`I + 1`, `Count - 1`
+    // - the common case) keeps its type's ranking (OpRangeArithOnly): no
+    // operand need be read.
+    if OpRangeArithOnly(LM.Tree, ACore, LLeaves) then
+      for I := 0 to LLeaves.Count - 1 do
+        if not LLeaves.IsOp[I] and SignedVarLeafX(LLeaves.Nodes[I]) then
+          Exit;
+    var LFacts: TSemaConstFactsFunc := nil;
     for I := 0 to LLeaves.Count - 1 do
     begin
       LLeafX := GetX(LLeaves.Nodes[I]);
       if XValid(LLeafX) then
-        SetOpRangeLeaf(LLeaves, I, ArgConvX(AId, LLeaves.Nodes[I], LLeafX),
-          LM.Tree, LFacts);
+      begin
+        var LConv := ArgConvX(AId, LLeaves.Nodes[I], LLeafX);
+        if not Assigned(LFacts) and
+           OpRangeLeafAsksFacts(LM.Tree, LLeaves, I, LConv) then
+          LFacts := ConstFactsX(AId);
+        SetOpRangeLeaf(LLeaves, I, LConv, LM.Tree, LFacts);
+      end;
     end;
     OpRangeConv(LM.Tree, ACore, LLeaves, AConv);
   end;
@@ -25253,7 +25294,19 @@ begin
         Result.Unsigned := LOp.Unsigned;
       end
       else if Result.Cat = tcChar then
-        Result.Rank := CharFactsWidth(OpFactsX(AMid, NIL_NODE, LX));
+      begin
+        // CharFactsWidth's answer, read off the builtin it is stored as.
+        var LCB := StorageBaseX(LX);
+        if XValid(LCB) and
+           (FModels[LCB.UnitId].Symbols[LCB.Sym].Kind = skBuiltinType) then
+        begin
+          var LCN := FModels[LCB.UnitId].Symbols[LCB.Sym].NameLower;
+          if LCN = 'ansichar' then
+            Result.Rank := 1
+          else if (LCN = 'char') or (LCN = 'widechar') then
+            Result.Rank := 2;
+        end;
+      end;
       case Result.Cat of
         tcArray:
           if ArrayDefOfX(AMid, NIL_NODE, LX, LDefMid, LDef) then
@@ -25958,7 +26011,7 @@ begin
   if not OpRangeLeaves(LM.Tree, ANode, LArg, LLeaves) then
     Exit;
   // Each operand by the type this pass gave it, else the unit's.
-  var LFacts := ConstFactsX(AMid);
+  var LFacts: TSemaConstFactsFunc := nil;
   for var I := 0 to LLeaves.Count - 1 do
   begin
     var N := LLeaves.Nodes[I];
@@ -25968,7 +26021,13 @@ begin
       else
         LX := XNil;
     if XValid(LX) then
-      SetOpRangeLeaf(LLeaves, I, ArgConvX(AMid, N, LX), LM.Tree, LFacts);
+    begin
+      var LConv := ArgConvX(AMid, N, LX);
+      if not Assigned(LFacts) and
+         OpRangeLeafAsksFacts(LM.Tree, LLeaves, I, LConv) then
+        LFacts := ConstFactsX(AMid);
+      SetOpRangeLeaf(LLeaves, I, LConv, LM.Tree, LFacts);
+    end;
   end;
   MarkOpNonNeg(LM.Tree, ANode, AOp, LLeaves, AF);
 end;

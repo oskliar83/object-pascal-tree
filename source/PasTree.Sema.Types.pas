@@ -1226,6 +1226,18 @@ procedure SubrangeArgConv(var AConv: TSemaArgConv; ALo, AHi: Int64);
   overlay go through these (TSemaOpRangeLeaves). }
 function OpRangeLeaves(const ATree: TPasTree; ANode: Integer;
   const AArg: TSemaArgConv; out ALeaves: TSemaOpRangeLeaves): Boolean;
+// Does SetOpRangeLeaf ask AFacts for leaf AIndex (a constant it may not
+// fold)? A caller makes the facts closure only then.
+function OpRangeLeafAsksFacts(const ATree: TPasTree;
+  const ALeaves: TSemaOpRangeLeaves; AIndex: Integer;
+  const AConv: TSemaArgConv): Boolean;
+// Is the operator at ANode, with every operator listed below it, arithmetic
+// (`+ - * div mod` or a sign, no shift)? Then one operand that is a signed
+// 32- or 64-bit VARIABLE decides the range - all of Integer, or none - and
+// an Integer operator's ranking stays its type's: the caller may skip the
+// leaves (a cost only, never a different answer).
+function OpRangeArithOnly(const ATree: TPasTree; ANode: Integer;
+  const ALeaves: TSemaOpRangeLeaves): Boolean;
 procedure SetOpRangeLeaf(var ALeaves: TSemaOpRangeLeaves; AIndex: Integer;
   const AConv: TSemaArgConv; const ATree: TPasTree;
   const AFacts: TSemaConstFactsFunc);
@@ -4569,6 +4581,40 @@ begin
   Result := True;
 end;
 
+function OpRangeLeafAsksFacts(const ATree: TPasTree;
+  const ALeaves: TSemaOpRangeLeaves; AIndex: Integer;
+  const AConv: TSemaArgConv): Boolean;
+begin
+  Result := (AConv.Facts.Cat = tcInteger) and not AConv.Facts.IntConst and
+    not ALeaves.IsOp[AIndex] and
+    MayFoldConvConst(ATree, ALeaves.Nodes[AIndex]);
+end;
+
+function OpRangeArithOnly(const ATree: TPasTree; ANode: Integer;
+  const ALeaves: TSemaOpRangeLeaves): Boolean;
+
+  function Arith(N: Integer): Boolean;
+  begin
+    case ATree.Nodes[N].Kind of
+      nkBinaryOp:
+        Result := OpNodeTok(ATree, N) in [tkPlus, tkMinus, tkStar, tkDiv,
+          tkMod];
+      nkUnaryOp:
+        Result := True;   // a sign: IsRangeOpNode lists no other
+    else
+      Result := False;
+    end;
+  end;
+
+var
+  I: Integer;
+begin
+  Result := Arith(PeelParens(ATree, ANode));
+  for I := 0 to ALeaves.Count - 1 do
+    if Result and ALeaves.IsOp[I] then
+      Result := Arith(ALeaves.Nodes[I]);
+end;
+
 procedure SetOpRangeLeaf(var ALeaves: TSemaOpRangeLeaves; AIndex: Integer;
   const AConv: TSemaArgConv; const ATree: TPasTree;
   const AFacts: TSemaConstFactsFunc);
@@ -4581,8 +4627,7 @@ begin
   if AConv.Facts.Cat <> tcInteger then
     LKnown := False
   // A constant this typer does not fold (`SizeOf(T)`): its value unknown.
-  else if not AConv.Facts.IntConst and not ALeaves.IsOp[AIndex] and
-          MayFoldConvConst(ATree, LN) and
+  else if OpRangeLeafAsksFacts(ATree, ALeaves, AIndex, AConv) and
           (ConstExprKind(ATree, LN, 0, AFacts) <> sckNone) then
     LKnown := False
   else if AConv.Facts.IntConst then
@@ -6807,6 +6852,19 @@ begin
      (LName <> 'high') and (LName <> 'low') and (LName <> 'sizeof') and
      (LName <> 'sqr') then
     Exit;
+  // SizeOf / Sqr: folded first - SizeOf of anything but an integer type
+  // fails there at once - and only a value is asked whether it is a
+  // constant dcc folds.
+  if (LName = 'sizeof') or (LName = 'sqr') then
+  begin
+    if FoldedIntValue(ATree, LCall, 0, AFacts, AName, LV) and
+       (ConstExprKind(ATree, LCall, 0, AFacts) <> sckNone) then
+    begin
+      AF.IntConst := True;
+      AF.IntValue := LV;
+    end;
+    Exit;
+  end;
   if ConstExprKind(ATree, LCall, 0, AFacts) = sckNone then
     Exit;
   if (LName = 'high') or (LName = 'low') or (LName = 'ord') then
@@ -7094,7 +7152,7 @@ var
   LLeaf: TSemaArgConv;
   LAt, LN, I: Integer;
 begin
-  var LFacts := ConstFacts();
+  var LFacts: TSemaConstFactsFunc := nil;
   for I := 0 to ALeaves.Count - 1 do
   begin
     LN := ALeaves.Nodes[I];
@@ -7109,6 +7167,8 @@ begin
        (MayFoldConvConst(T, LN) or IsConstName(LN)) then
       FoldConvConst(T, LN, ConstFacts(), OrdNameValue(), LLeaf);
     FConv.SubrangeConv(UX(LAt), LLeaf);
+    if not Assigned(LFacts) and OpRangeLeafAsksFacts(T, ALeaves, I, LLeaf) then
+      LFacts := ConstFacts();
     SetOpRangeLeaf(ALeaves, I, LLeaf, T, LFacts);
   end;
 end;
