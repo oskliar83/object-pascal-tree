@@ -1357,6 +1357,10 @@ type
     procedure RunWithOver(const AIds: TArray<Integer>);
     procedure RunCallChecksOver(const AIds: TArray<Integer>);
     procedure RunCrossTypeOver(const AIds: TArray<Integer>);
+    { 6.10: the plain reading of an asm operand's `A.B` / `A[...].B` - B a
+      name of its own where A's type has no member B. After the cross-type
+      merge, AId's own maps only. }
+    procedure BindAsmNames(AId: Integer);
     { CrossType's overlay into AId's maps - an EXT_TOMBSTONE_UNIT entry
       removes the ExtRefMap binding, any other is written, then the inferred
       symbol types. Sequential, after every worker: a sibling reads AId's
@@ -10746,6 +10750,16 @@ begin
   // positive. Gated here rather than at the call sites because several
   // passes reach this verdict; CheckAttributes exempts the same set.
   if IsMagicAttributeRef(AModel, ANode) then
+    Exit;
+  // A name in a BASM operand (6.10): dcc says E2003 for one nothing declares,
+  // but which words of an instruction are Pascal names is the parser's
+  // reading of a language it does not parse (TPasParser.ParseAsmBody) - an
+  // operand word it took for a name may be one BASM knows. Bound when it
+  // binds, never reported.
+  var LUp := AModel.Tree.Nodes[ANode].Parent;
+  while (LUp <> NIL_NODE) and (AModel.Tree.Nodes[LUp].Kind = nkMember) do
+    LUp := AModel.Tree.Nodes[LUp].Parent;
+  if (LUp <> NIL_NODE) and (AModel.Tree.Nodes[LUp].Kind = nkAsmStmt) then
     Exit;
   // Where dcc says W1074 instead - see SilentAttributeRef: an attribute whose
   // name starts with an undeclared identifier, judged by the gates below.
@@ -22654,6 +22668,94 @@ end;
 
 // The buffers are sized to the whole model table and created for the set's
 // slots only, as RunCallChecksOver's.
+{ dcc reads `A.B` in a BASM operand as A's member B when A's type has one
+  and as the name B otherwise - its value or offset added - and so `A[...].B`
+  (TTypeInfo.Name[ECX+1].TTypeData.PropCount, Value.Integer[4],
+  Address.vmtSelfPtr in the RTL; dcc32 37.0, 2026-11-14, spec 6.10). The
+  member reading is the passes' before this; a name they left unbound is
+  looked up here the way a bare name at the asm body is: this unit's scopes
+  at the chain's head, then the used units, System and SysInit. An inherited
+  member of another unit's ancestor is not among them - the inherited pass
+  is over. }
+procedure TPasSemaProject.BindAsmNames(AId: Integer);
+var
+  LM: TPasSemaModel;
+
+  procedure Visit(ANode: Integer);
+  var
+    LBase, LName, LHead, LUid, LSym: Integer;
+    LExt: TPasExtRef;
+  begin
+    if LM.Tree.Nodes[ANode].Kind <> nkMember then
+      Exit;
+    LBase := LM.Tree.Nodes[ANode].FirstChild;
+    Visit(LBase);
+    LName := LM.Tree.Nodes[LBase].NextSibling;
+    if (LName = NIL_NODE) or (LM.RefMap[LName] <> NIL_SYM) or
+       LM.ExtRefMap.ContainsKey(LName) then
+      Exit;
+    // A base this step bound itself to a type (`.TTypeData` above): the
+    // member reading the passes could not give, B in that type.
+    LHead := LBase;
+    if LM.Tree.Nodes[LHead].Kind = nkMember then
+      LHead := LM.Tree.Nodes[LM.Tree.Nodes[LHead].FirstChild].NextSibling;
+    LUid := AId;
+    LSym := LM.RefMap[LHead];
+    if (LSym = NIL_SYM) and LM.ExtRefMap.TryGetValue(LHead, LExt) then
+    begin
+      LUid := LExt.UnitId;
+      LSym := LExt.Sym;
+    end;
+    if (LSym <> NIL_SYM) and (FModels[LUid].Symbols[LSym].Kind = skType) and
+       (FModels[LUid].Symbols[LSym].MemberScope <> NIL_SCOPE) then
+    begin
+      LSym := FModels[LUid].FindLocalDeep(
+        FModels[LUid].Symbols[LSym].MemberScope, PasNodeKey(LM.Tree, LName));
+      if LSym <> NIL_SYM then
+      begin
+        if LUid = AId then
+          LM.RefMap[LName] := LSym
+        else
+        begin
+          LExt.UnitId := LUid;
+          LExt.Sym := LSym;
+          LM.ExtRefMap.AddOrSetValue(LName, LExt);
+        end;
+        Exit;
+      end;
+    end;
+    LHead := LBase;
+    while LM.Tree.Nodes[LHead].Kind = nkMember do
+      LHead := LM.Tree.Nodes[LHead].FirstChild;
+    if (LHead > High(LM.NodeScope)) or (LM.NodeScope[LHead] = NIL_SCOPE) then
+      Exit;
+    LSym := LM.ResolveAt(LM.NodeScope[LHead], PasNodeKey(LM.Tree, LName),
+      LM.Tree.Nodes[LName].FirstToken);
+    if LSym <> NIL_SYM then
+      LM.RefMap[LName] := LSym
+    else if FindCrossUnqualified(AId, LName, LM.Tree.NodeNameLower(LName),
+      LUid, LSym) then
+    begin
+      LExt.UnitId := LUid;
+      LExt.Sym := LSym;
+      LM.ExtRefMap.AddOrSetValue(LName, LExt);
+    end;
+  end;
+
+begin
+  LM := FModels[AId];
+  for var LNode := 0 to High(LM.Tree.Nodes) do
+    if LM.Tree.Nodes[LNode].Kind = nkAsmStmt then
+    begin
+      var LChild := LM.Tree.Nodes[LNode].FirstChild;
+      while LChild <> NIL_NODE do
+      begin
+        Visit(LChild);
+        LChild := LM.Tree.Nodes[LChild].NextSibling;
+      end;
+    end;
+end;
+
 procedure TPasSemaProject.RunCrossTypeOver(const AIds: TArray<Integer>);
 var
   LId: Integer;
@@ -22710,6 +22812,11 @@ begin
         FreeAndNil(FXNewExt[LMid]);
         FreeAndNil(FXNewSymType[LMid]);
         FreeAndNil(FXNewExprType[LMid]);
+      end, LMidOf);
+    ForEachIndex(High(AIds), 'asm-names',
+      procedure(ASlot: Integer)
+      begin
+        BindAsmNames(AIds[ASlot]);
       end, LMidOf);
     // Only now are the bindings final - see RunVisibilityPass. No-op unless
     // ReportVisibility asked for it.

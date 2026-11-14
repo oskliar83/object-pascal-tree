@@ -4459,22 +4459,22 @@ begin
     AsmModeCase('F26: a dead asm does not open BASM mode',
       'function R: Cardinal; {$ifdef NEVER} asm {$endif}'#13#10 +
       'asm'#13#10'  mov eax, 1'#13#10'end;'#13#10, '',
-      'asm [mov] [eax,] [1] [end]', 0),
+      'asm [mov] [eax] [,] [1] [end]', 0),
     AsmModeCase('F26: a dead end does not close it',
       'function R: Cardinal;'#13#10'asm'#13#10'  mov eax, 1'#13#10 +
       '  {$ifdef NEVER} end; begin {$endif}'#13#10'  mov eax, 2'#13#10 +
       'end;'#13#10, '',
-      'asm [mov] [eax,] [1] [mov] [eax,] [2] [end]', 0),
+      'asm [mov] [eax] [,] [1] [mov] [eax] [,] [2] [end]', 0),
     AsmModeCase('F26: two asm heads, one live',
       'function R: Cardinal;'#13#10 +
       '{$ifdef NEVER} asm {$else} asm {$endif}'#13#10'  mov eax, 1'#13#10 +
       'end;'#13#10, '',
-      'asm [mov] [eax,] [1] [end]', 0),
+      'asm [mov] [eax] [,] [1] [end]', 0),
     AsmModeCase('F26: a live asm, a dead Pascal alternative',
       'procedure P;'#13#10'{$ifndef NEVER}'#13#10'asm'#13#10 +
       '  mov eax, 1'#13#10'{$else}'#13#10'begin'#13#10 +
       '  if True then begin end;'#13#10'{$endif}'#13#10'end;'#13#10, '',
-      'asm [mov] [eax,] [1] [end]', 0),
+      'asm [mov] [eax] [,] [1] [end]', 0),
     AsmModeCase('F26: a dead asm, a live Pascal alternative',
       'procedure P;'#13#10'{$ifdef NEVER}'#13#10'asm'#13#10 +
       '  mov eax, 1'#13#10'{$else}'#13#10'begin'#13#10 +
@@ -4484,13 +4484,13 @@ begin
       'function R: Cardinal;'#13#10'asm'#13#10'  {$I inc.inc}'#13#10 +
       'end;'#13#10,
       '  cmp al, "''"'#13#10'  mov eax, 1'#13#10,
-      'asm [cmp] [al,] ["''"] [mov] [eax,] [1] [end]', 0),
+      'asm [cmp] [al] [,] ["''"] [mov] [eax] [,] [1] [end]', 0),
     AsmModeCase('F26: an end in an include closes the includer''s body',
       'function R: Cardinal;'#13#10'asm'#13#10'  {$I inc.inc}'#13#10 +
       'end;'#13#10,
       '  mov eax, 1'#13#10'end;'#13#10'function S: Cardinal;'#13#10 +
       'begin'#13#10'  Result := 2;'#13#10,
-      'asm [mov] [eax,] [1] [end]', 0),
+      'asm [mov] [eax] [,] [1] [end]', 0),
     // dcc: E2280 for both - dead text is scanned as Pascal, and the `{` of
     // `"{"` opens a comment that swallows the $endif. Here: the
     // preprocessor's unterminated conditional, the unterminated asm body (in
@@ -4499,7 +4499,7 @@ begin
       'function R: Cardinal;'#13#10'asm'#13#10'  mov eax, 1'#13#10 +
       '  {$ifdef NEVER} cmp al, "{" {$endif}'#13#10'  mov eax, 2'#13#10 +
       'end;'#13#10'}'#13#10, '',
-      'asm [mov] [eax,] [1]', 6),
+      'asm [mov] [eax] [,] [1]', 6),
     AsmModeCase('F26: a dead asm body is scanned as Pascal',
       '{$ifdef NEVER}'#13#10'function Q: Cardinal;'#13#10'asm'#13#10 +
       '  cmp al, "{"'#13#10'end;'#13#10'{$endif}'#13#10 +

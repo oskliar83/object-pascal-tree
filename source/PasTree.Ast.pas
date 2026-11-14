@@ -113,7 +113,8 @@ type
     nkExceptOn,       // 18.1.2: [name], type, body
     nkFinallyPart,
     nkRaiseStmt,      // 18.3.1: [expr [at-expr]]
-    nkAsmStmt,        // 6.10: opaque BASM token range
+    nkAsmStmt,        // 6.10: opaque BASM token range; children = the
+                      // Pascal names its operands spell (nkIdent/nkMember)
     nkInlineVar,      // 3.1.3: names (nfName), [type], [init]; Aux = 1 when
                       // the last child is the `:=` initializer - the names
                       // alone leave `var X: K` / `var X := K` open

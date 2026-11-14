@@ -422,6 +422,15 @@ of less work, not a gap in following the language; its consequences are in
   preprocessor, as `ParseExpressionText` and a highlighter without a model
   use it - still guesses: an `asm` opened in a conditional branch is closed
   by that branch's `$ELSE`, and a dead `asm` or `end` switches the mode.
+- the Pascal names of an asm body (6.10, TPasParser.ParseAsmBody) are
+  bound, but which words they are is read without the target platform: the
+  64-bit registers (`RAX`, `R8`, `XMM8`...) are taken as reserved for both,
+  so a Pascal name spelled so in Win32 asm is not bound. A name the
+  analysis cannot bind is not reported (dcc says E2003): the words of an
+  instruction are told apart by its shape, not by BASM's grammar. In `A.B`
+  the plain reading of `B` (no member `B` in `A`'s type) finds this unit's
+  scopes, the used units, System and SysInit - not an inherited member of
+  another unit's ancestor.
 
 ## 07-strings.md
 
