@@ -4688,8 +4688,11 @@ begin
             PasNameKey(FModel.UsesList[LJdx].NameFull), True);
     end;
     PM := ProjModel(FProjMid, 'CollectUsesImports');
-    for LIdx := High(PM.UsesList) downto 0 do
+    // The order a bare name searches the used units in (03 sec. 3.3.2).
+    var LOrder := FProj.UsesOrder(FProjMid);
+    for var LK := High(PM.UsesList) downto 0 do
     begin
+      LIdx := TPasSemaProject.UsesAt(LOrder, LK);
       LUid := PM.UsesList[LIdx].UnitId;
       if LUid < 0 then
         Continue;
