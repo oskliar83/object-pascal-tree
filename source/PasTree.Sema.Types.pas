@@ -293,6 +293,23 @@ type
   end;
   PSemaArgConv = ^TSemaArgConv;
 
+  { What dcc compares two candidates of an overloaded call by (6.3.1, the
+    candidates' arguments): per argument the conversion's CLASS (ConvClass)
+    and, within one class, its place (Sub: the argument's score on the
+    candidate's scale, higher better). Cls -1: a conversion the classes are
+    not measured for - CompareArgCodes then leaves the pair to the sum of the
+    scores. Measured False: the candidate's arguments were not all read (an
+    open array, an argument list of a comparison, more than 16 arguments). }
+  TSemaArgCode = record
+    Cls: Integer;
+    Sub: Integer;
+  end;
+  TSemaArgCodes = record
+    Count: Integer;
+    Measured: Boolean;
+    Codes: array[0..15] of TSemaArgCode;
+  end;
+
   { The nodes below an integer operator argument or operand, its operators
     and leaves (OpRangeLeaves), each leaf's range once its typer has read it
     (SetOpRangeLeaf) - what OpRangeOf computes dcc's anonymous subrange of
@@ -619,6 +636,11 @@ type
     // The one conversion rule set over this unit's symbols (a
     // TPasUnitConvView, made by Prepare): the scorers and Assignable ask it.
     FConv: TSemaConvView;
+    // The class ScoreArgRanked found for the argument it scored last
+    // (ConvClass, -1 none) and the classes of the candidate ScoreArgs scored
+    // last: what SelectOverload compares two candidates by (CompareArgCodes).
+    FArgCls: Integer;
+    FCandCodes: TSemaArgCodes;
     function Kind(N: Integer): TPasNodeKind; inline;
     function Child(N: Integer): Integer; inline;
     function Sib(N: Integer): Integer; inline;
@@ -1294,6 +1316,50 @@ function ConvTier(const AArg: TSemaArgConv; AParKind: TSemaConvKind;
   conversion (CRankLossless, CRankLossy; 6.3.1, local/type-conv-2026-11/n2
   Set U: 1,440 calls, none order-dependent). }
 function ConvThreshold(const AArg: TSemaArgConv; AWideExt: Boolean): Integer;
+
+{ The CLASS of one argument's conversion, as dcc weighs it between two
+  candidates of an overloaded call (6.3.1, "Several arguments"), best first:
+  0 the parameter's own type (AFit2 4 or 6: the same type, a character
+  literal for Char - for a string it is class 2), the argument's own kind
+  reached by a conversion (a subrange's base), an integer constant,
+  subrange value or operator for an integer of 32 bits or less holding it;
+  a 64-bit one for Int64, UInt64 and Comp; 1 a class to an ancestor; 2 a
+  character to a string of its width (Char to string or WideString;
+  AnsiChar / PAnsiChar to AnsiString, RawByteString, UTF8String), and those
+  three Ansi strings among each other; 3 another string kind of the same
+  width (string / WideString / a string literal / a PChar to WideString or
+  string, ShortString to or from the Ansi kinds, AnsiString to
+  RawByteString, a character literal to AnsiChar or PChar, a string literal
+  to PChar), a 64-bit integer to Comp; 4 an Ansi string or
+  character to a Unicode string, and every other conversion that loses
+  nothing (the integers, the IEEE reals); 5 to Variant; 6 from Variant, and
+  a record's `class operator Implicit`; 7 a conversion that may lose a
+  value - and any between Currency or Comp and a real. -1: not measured - a pointer, nil, an
+  interface, a procedural value, a set, an array, a class reference.
+  AFit2 / ARank: ArgFitCanonX's fit on the doubled scale and its rank; AArg:
+  the argument as the ranking reads it (AHaveArg False: none); AParKind:
+  the parameter's ParConvKind; AClassUp: a class instance to a class;
+  AWideExt: Extended is wider than Double on the target. }
+function ConvClass(AFit2, ARank: Integer; const AArg: TSemaArgConv;
+  AHaveArg: Boolean; AParKind: TSemaConvKind; AClassUp,
+  AWideExt: Boolean): Integer;
+
+{ dcc's choice between two candidates A and B of one call by their
+  arguments (6.3.1, "Several arguments"), measured on dcc64 37.0: on each
+  argument the two conversions differ by the WORSE one's class when their
+  classes differ, else by their place in the class - a step that counts
+  only below every class step, and below that still in classes 5 to 7
+  (Variant, from Variant, a lossy conversion), where dcc keeps no order
+  between two arguments. The argument of the largest difference decides;
+  when such arguments favour both candidates the call is ambiguous (0). Not
+  a sum: one argument a class better outweighs any number of arguments a
+  class worse - `F(const A: AnsiString; const B, C: WideString)` beside
+  `F(const A, B, C: string)` takes the first for an AnsiString and two
+  strings. +1 A, -1 B, 0 a tie; ADecided False when a differing argument's
+  class is not measured (ConvClass -1), or either side's arguments were
+  not all read - the caller then compares by its sum. }
+function CompareArgCodes(const A, B: TSemaArgCodes;
+  out ADecided: Boolean): Integer;
 
 { The level of a user conversion (`class operator Implicit`) whose built-in
   part takes the argument AArg to the operator's parameter kind AQKind - or,
@@ -4794,6 +4860,187 @@ begin
     Result := ConvRawRank(AArg, cnkWideString, AWideExt)
   else
     Result := ConvRawRank(AArg, cnkVariant, AWideExt);
+end;
+
+function ConvClass(AFit2, ARank: Integer; const AArg: TSemaArgConv;
+  AHaveArg: Boolean; AParKind: TSemaConvKind; AClassUp,
+  AWideExt: Boolean): Integer;
+const
+  CUni = [cnkUString, cnkWideString];
+  CAnsiLong = [cnkAnsiString, cnkCodePage, cnkRawByteString];
+  CInt32 = [cnkShortInt, cnkByte, cnkSmallInt, cnkWord, cnkInteger,
+    cnkCardinal];
+begin
+  if AFit2 >= 4 then
+  begin
+    // A character literal scores a string parameter as its own type, but
+    // dcc weighs it as a Char's conversion to a string.
+    if AHaveArg and (AArg.Kind = cnkCharLit) and (AParKind in CUni) then
+      Exit(2);
+    Exit(0);
+  end;
+  Result := -1;
+  if AFit2 <> 2 then
+    Exit;
+  // A class to an ancestor: RefConvRank's rcClassUp, the nearer the higher.
+  if AClassUp then
+  begin
+    if (ARank >= 0) and (ARank < CRankLossy) then
+      Result := 1;
+    Exit;
+  end;
+  // An Ansi element (AnsiElem) ranks its own AnsiChar below the Ansi strings:
+  // not measured here.
+  if not AHaveArg or (AArg.Kind = cnkNone) or AArg.AnsiElem then
+    Exit;
+  if AArg.Kind = cnkVariant then
+    Exit(6);
+  // A ranked value to a parameter the ranking does not cover: a record's
+  // Implicit (UserConvRank: its lossless tier, or 1 .. 31 through a lossy
+  // built-in part).
+  if AParKind = cnkNone then
+  begin
+    if (ARank >= CRankUser) and (ARank < CRankLossless) then
+      Result := 6
+    else if (ARank > 0) and (ARank < 32) then
+      Result := 7;
+    Exit;
+  end;
+  if AParKind = cnkVariant then
+    Exit(5);
+  // Currency and Comp stand beside the IEEE reals unordered (6.3.1): either
+  // way a conversion between them and a real weighs as one that may lose -
+  // but a 10-byte Extended (AWideExt, dcc32) holds a Currency or a Comp.
+  if (AArg.Kind <> AParKind) and
+     not (AWideExt and (AParKind = cnkExtended)) and
+     (((AArg.Kind in [cnkCurrency, cnkComp]) and
+       (AParKind in [cnkSingle, cnkDouble, cnkExtended, cnkCurrency,
+        cnkComp])) or
+      ((AArg.Kind in [cnkSingle, cnkDouble, cnkExtended]) and
+       (AParKind in [cnkCurrency, cnkComp]))) then
+    Exit(7);
+  if ARank < CRankLossless then
+  begin
+    if ARank >= CRankLossy then
+      Result := 7;
+    Exit;
+  end;
+  // The argument's own kind, reached as a conversion: a subrange's base
+  // (`'A'..'Z'` for Char).
+  if AArg.Kind = AParKind then
+    Exit(0);
+  case AArg.Kind of
+    cnkPChar:
+      if AParKind in CUni then
+        Exit(3);
+    cnkChar, cnkCharLit:
+      if AParKind in CUni then
+        Exit(2)
+      else if (AArg.Kind = cnkCharLit) and
+              (AParKind in [cnkAnsiChar, cnkPChar]) then
+        Exit(3);
+    cnkAnsiChar, cnkPAnsiChar:
+      if AParKind in CAnsiLong then
+        Exit(2)
+      else if AParKind = cnkShortString then
+        Exit(3)
+      else if AParKind in CUni then
+        Exit(4);
+    cnkUString, cnkWideString, cnkStrLit:
+      if AParKind in CUni then
+        Exit(3)
+      else if (AArg.Kind = cnkStrLit) and (AParKind = cnkPChar) then
+        Exit(3);
+    cnkAnsiString, cnkCodePage, cnkRawByteString:
+      if (AArg.Kind = cnkAnsiString) and (AParKind = cnkRawByteString) then
+        Exit(3)
+      else if AParKind in CAnsiLong then
+        Exit(2)
+      else if AParKind = cnkShortString then
+        Exit(3)
+      else if AParKind in CUni then
+        Exit(4);
+    cnkShortString:
+      if AParKind in CAnsiLong then
+        Exit(3)
+      else if AParKind in CUni then
+        Exit(4);
+  end;
+  // A 64-bit integer constant: Int64, UInt64 and Comp holding it.
+  if AArg.Facts.IntConst and not AArg.TypedConst and
+     (AArg.Kind in [cnkInt64, cnkUInt64]) and
+     (AParKind in [cnkInt64, cnkUInt64, cnkComp]) then
+    Exit(0);
+  // A 64-bit integer variable to Comp, its one conversion that loses nothing.
+  if (AArg.Kind in [cnkInt64, cnkUInt64]) and (AParKind = cnkComp) then
+    Exit(3);
+  // An integer constant, a subrange value and an integer operator rank by
+  // their value or range (6.3.1): every integer of 32 bits or less holding
+  // it is their own type.
+  if ((AArg.Facts.IntConst and not AArg.TypedConst) or AArg.SubRange or
+      AArg.OpRange) and (AParKind in CInt32) then
+    Exit(0);
+  Result := 4;
+end;
+
+function CompareArgCodes(const A, B: TSemaArgCodes;
+  out ADecided: Boolean): Integer;
+var
+  LBest, LWin, LStr, LW, LCa, LCb: Integer;
+  LMixed: Boolean;
+begin
+  Result := 0;
+  ADecided := A.Measured and B.Measured and (A.Count = B.Count);
+  if not ADecided then
+    Exit;
+  LBest := 0;
+  LWin := 0;
+  LMixed := False;
+  for var LIdx := 0 to A.Count - 1 do
+  begin
+    LCa := A.Codes[LIdx].Cls;
+    LCb := B.Codes[LIdx].Cls;
+    if (LCa = LCb) and (A.Codes[LIdx].Sub = B.Codes[LIdx].Sub) then
+      Continue;
+    if (LCa < 0) or (LCb < 0) then
+    begin
+      ADecided := False;
+      Exit;
+    end;
+    if LCa <> LCb then
+    begin
+      // The worse conversion's class, above every step within a class.
+      if LCa > LCb then
+        LStr := 10 + LCa
+      else
+        LStr := 10 + LCb;
+      if LCa < LCb then
+        LW := 1
+      else
+        LW := -1;
+    end
+    else
+    begin
+      if LCa >= 5 then
+        LStr := 1
+      else
+        LStr := 2;
+      if A.Codes[LIdx].Sub > B.Codes[LIdx].Sub then
+        LW := 1
+      else
+        LW := -1;
+    end;
+    if LStr > LBest then
+    begin
+      LBest := LStr;
+      LWin := LW;
+      LMixed := False;
+    end
+    else if (LStr = LBest) and (LW <> LWin) then
+      LMixed := True;
+  end;
+  if not LMixed then
+    Result := LWin;
 end;
 
 function ConvRank(const AArg: TSemaArgConv; AParKind: TSemaConvKind;
@@ -8558,6 +8805,8 @@ var
   LArg, LIdx, LScore, LK, LL, LR: Integer;
 begin
   Result := 0;
+  FCandCodes.Count := 0;
+  FCandCodes.Measured := True;
   LArg := CallFirstArg(T, ACall);
   LIdx := 0;
   while (LArg <> NIL_NODE) and (LIdx <= High(AParams)) do
@@ -8569,6 +8818,7 @@ begin
     begin
       // `F(A < B, C > (D))` (16.3.1): the arguments it stands for, each
       // comparison a Boolean of its own with no node to read a shape off.
+      FCandCodes.Measured := False;
       for LK := 0 to M.AmbigArgCount(LArg) - 1 do
       begin
         if LIdx > High(AParams) then
@@ -8585,11 +8835,20 @@ begin
     end
     else
     begin
+      FArgCls := -1;
       LScore := ScoreArg(LArg, M.ExprType[LArg], AParams[LIdx]);
       if LScore < 0 then
         Exit(-1);
       Inc(Result, LScore);
       Inc(LIdx);
+      if FCandCodes.Count <= High(FCandCodes.Codes) then
+      begin
+        FCandCodes.Codes[FCandCodes.Count].Cls := FArgCls;
+        FCandCodes.Codes[FCandCodes.Count].Sub := LScore;
+        Inc(FCandCodes.Count);
+      end
+      else
+        FCandCodes.Measured := False;
     end;
     LArg := Sib(LArg);
   end;
@@ -8754,7 +9013,10 @@ begin
      FConv.OpenStringFit(FConv.Canon(UX(LPt)), FConv.Canon(UX(AAt)),
        sfFixedString in M.Symbols[AParam].Flags, Result,
        LRank) then
+  begin
+    FArgCls := -1;
     Exit(ScaledFit(2 * Result, LRank));
+  end;
   // A `var` / `out` parameter takes its own type alone (ByRefFitRejects).
   if LByRef and ByRefFitRejects(Result, (AAt <> NIL_SYM) and
      (LPt <> NIL_SYM) and (CatOf(AAt) <> tcUnknown) and
@@ -9164,9 +9426,17 @@ begin
   end;
   LParX := UX(APt);
   LArgX := UX(AAt);
-  Result := FConv.ArgFitCanon(LArgX, LParX, FConv.Canon(LArgX),
-    FConv.Canon(LParX), T, LCore, (LCore <> NIL_NODE) and not LClassRef and
-    IsProcDesignator(LCore), LClassRef, LConv, ARank);
+  var LCanonPar := FConv.Canon(LParX);
+  var LCanonArg := FConv.Canon(LArgX);
+  Result := FConv.ArgFitCanon(LArgX, LParX, LCanonArg, LCanonPar, T, LCore,
+    (LCore <> NIL_NODE) and not LClassRef and IsProcDesignator(LCore),
+    LClassRef, LConv, ARank);
+  if LConv = nil then
+    LArgC := Default(TSemaArgConv);
+  FArgCls := ConvClass(2 * Result, ARank, LArgC, LConv <> nil,
+    FConv.ParConvKind(LCanonPar), not LClassRef and
+    (FConv.Cat(LCanonArg) = tcClass) and (FConv.Cat(LCanonPar) = tcClass),
+    FWideExt);
 end;
 
 { ScoreArg for an OPEN-ARRAY parameter whose `array of` definition is ADef:
@@ -9698,6 +9968,9 @@ var
   LParams: TArray<Integer>;
   LP, LIfaceHead, LOwnHead: Integer;
   LTrailing, LAnyOverload: Boolean;
+  LCmp: Integer;
+  LDecided: Boolean;
+  LBestCodes: TSemaArgCodes;
 
   { The helped type's own routine set of AHead's name when AHead heads a
     class or record HELPER's set that says `overload` (15.3.3: the two are
@@ -9790,10 +10063,24 @@ begin
       begin
         LAnyFit := True;
         LScore := ScoreArgs(ACall, LParams);
-        if LScore > LBestScore then
+        // By the arguments' classes first (CompareArgCodes, 6.3.1), by the
+        // sum where they tie or cannot judge - CrossType's ConsiderChain.
+        LCmp := -1;
+        if LScore >= 0 then
+        begin
+          LCmp := 1;
+          if LBestScore >= 0 then
+          begin
+            LCmp := CompareArgCodes(FCandCodes, LBestCodes, LDecided);
+            if LCmp = 0 then
+              LCmp := Ord(LScore > LBestScore) - Ord(LScore < LBestScore);
+          end;
+        end;
+        if LCmp > 0 then
         begin
           LBestScore := LScore;
           LBest := LCand;
+          LBestCodes := FCandCodes;
         end;
       end;
     end;
