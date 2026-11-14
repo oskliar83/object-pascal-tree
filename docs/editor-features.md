@@ -1462,3 +1462,55 @@ tab (a `.dcu`'s generated text) is not formatted.
   filter that raises leaves the generated text, in the tab and the
   analysis alike. `[Format] FormatDcuText=0` turns it off - the text as
   `PasTree.Dcu.Source` prints it; default `1`.
+
+## 15. Unused declarations (`PasTree.Sema.Lint.FindUnusedSymbols`)
+
+Status: IMPLEMENTED (PasTree 0.182.0) - `FindUnusedSymbols(ANav, AMids,
+out ASkips)` with the `TPasUnusedSymbol` row and `TPasUnusedSkips` counts in
+`source/PasTree.Sema.Lint.pas`, its light-mode demand `DemandUnusedSymbols`,
+and `TPasWorkspace.FindUnusedSymbols(AFiles, out ASkips)`; regression-covered
+by `tests/SemaNavSmoke.dpr` (`TestUnusedSymbols`). Not wired into the demo
+yet. The host is pastree-mcp's `lint unused-symbol` (0.53.0), which keeps a
+row only when every analysis of a group holding the unit finds it unused.
+
+A declaration of the units asked about that nothing in the analysis uses:
+types, routines (nested ones too), unit and class variables and constants,
+fields, properties. Locals and parameters are dcc's own hints (H2164,
+H2219). Used is any of:
+
+- a reference by name, as `FindReferences` finds them (one
+  `CollectReferencesOfAll` pass over the declarations not already shown
+  used by a count of their bindings in the own units - more bindings than
+  a declaration's own sites could make);
+- a property redeclared below (`property X;`): every link above it;
+- a bare `inherited;` running it (`BareInheritedTarget`);
+- a form file naming a class (a frame placed on a form);
+- a reference hit that cannot be mapped back to a binding (an include
+  file): every declaration of the name it highlights.
+
+Not weighed, counted in `ASkips`, because reached other than by a name in
+code: published members (and the first section of a TPersistent
+descendant's class), virtual, dynamic, abstract, override and message
+methods, an interface's members, a class method an interface of the class,
+an ancestor or a descendant names (a method reference type in the heritage
+list names `Invoke`), operators, class constructors and destructors,
+constructors of TCustomAttribute descendants (`[MaxLength(10)]`), the for-in
+protocol (`GetEnumerator`, `MoveNext`, `Current`), and generated units
+(`_TLB`, XML data binding, import headers).
+
+Doubts on a row, where the index may be wrong: the name written in a branch
+this configuration does not compile, or - a type - as a whole string
+literal (`FindClass('TFoo')`; a member only as `'TFoo.Bar'`), in the
+files not under `LibraryPaths`; a record's field (the record
+may be read or written whole); another overload of the name in use (the
+index may pick another overload than dcc); the name declared at unit level
+by another unit too (the `uses` order decides which one a unit binds); the
+name written where the analysis bound nothing.
+
+Checked against dcc on the client group (pastree-mcp, 2026-11-14): every
+row that takes a hint marked `deprecated '<tag>'`, the own units rebuilt;
+a W1000 naming the tag is a use the rule missed. The classes of misses the
+first runs found are the exceptions above (attributes, method references,
+for-in) and the doubts on overloads and unit-level namesakes - the last two
+being where PasTree's overload resolution and `uses` order binding differ
+from dcc's.

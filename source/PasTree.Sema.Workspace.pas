@@ -311,6 +311,10 @@ type
       AOptions: TPasLintOptions = []): TArray<TPasUnusedUse>;
     function FindUnreferencedUnits(const AFiles: TArray<string>;
       AOptions: TPasLintOptions = []): TArray<TPasUnreferencedUnit>;
+    // The unused declarations of AFiles (PasTree.Sema.Lint.FindUnusedSymbols)
+    // once the references they are searched for are complete.
+    function FindUnusedSymbols(const AFiles: TArray<string>;
+      out ASkips: TPasUnusedSkips): TArray<TPasUnusedSymbol>;
   end;
 
 implementation
@@ -1327,6 +1331,21 @@ begin
     end);
   Result := PasTree.Sema.Lint.FindUnreferencedUnits(FNav, MidsOf(AFiles),
     AOptions);
+  Finish;
+end;
+
+function TPasWorkspace.FindUnusedSymbols(const AFiles: TArray<string>;
+  out ASkips: TPasUnusedSkips): TArray<TPasUnusedSymbol>;
+var
+  LFiles: TArray<string>;
+begin
+  LFiles := AFiles;
+  Prepare(
+    function(ANav: TPasNavigator): TPasDemand
+    begin
+      Result := DemandUnusedSymbols(ANav, MidsOf(LFiles));
+    end);
+  Result := PasTree.Sema.Lint.FindUnusedSymbols(FNav, MidsOf(AFiles), ASkips);
   Finish;
 end;
 
