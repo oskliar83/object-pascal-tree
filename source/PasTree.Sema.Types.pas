@@ -10010,7 +10010,7 @@ var
       Exit;
     for LScope := 0 to M.Scopes.Count - 1 do
       for var LShadow in M.Scopes[LScope].Shadowing do
-        if LShadow = LHelperScope then
+        if LShadow.Scope = LHelperScope then
         begin
           Result := M.FindLocalNoHelpers(LScope,
             SemaKey(M.Symbols[AHead].NameLower));

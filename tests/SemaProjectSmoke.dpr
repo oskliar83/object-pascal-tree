@@ -11723,6 +11723,128 @@ begin
   end;
 end;
 
+// 15.3.4: the active helper is decided per POSITION - an own helper applies
+// from its declaration on, a later one hides it above it too only from
+// there; above the implementation `uses` only the interface's count; a
+// variable or field of another unit carries the helper active where it is
+// declared, ahead of the referring unit's; and a `with` over a type of the
+// unit whose helper comes from a unit using it (an import cycle) takes that
+// helper's members over an enclosing name (5.7). dcc64 37.0, 2026-11-14,
+// local/probe-fh (UA..UG, Q2, S2, W).
+procedure TestHelperPosition;
+var
+  LDir: string;
+begin
+  LDir := FreshDir('pastree_sema_helppos');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  // Valid code only: no E2003, no E2010.
+  TFile.WriteAllText(TPath.Combine(LDir, 'HpG.pas'),
+    'unit HpG;'#10'interface'#10'type'#10 +
+    '  TV = record F: Integer; function Own: Integer;'#10 +
+    '    function Own2: Integer; end;'#10 +
+    '  TVH1 = record helper for TV function A1: Integer; end;'#10 +
+    'procedure G1;'#10'implementation'#10'var X: Integer;'#10 +
+    'function TVH1.A1: Integer; begin Result := 1; end;'#10 +
+    'function Bump: Integer; begin Result := 1; end;'#10 +
+    'function TV.Own: Integer; begin Result := A1; end;'#10 +
+    'procedure G0; var V: TV; I: Integer;'#10 +
+    'begin X := V.A1; with V do X := A1; with V do I := Bump; end;'#10 +
+    'type'#10 +
+    '  TVH2 = record helper for TV function A2: Integer;'#10 +
+    '    function Bump: string; end;'#10 +
+    'function TVH2.A2: Integer; begin Result := 2; end;'#10 +
+    'function TVH2.Bump: string; begin Result := ''''; end;'#10 +
+    'function TV.Own2: Integer; begin Result := A2; end;'#10 +
+    'procedure G1; var V: TV; S: string;'#10 +
+    'begin X := V.A2; with V do X := A2; with V do S := Bump; end;'#10 +
+    'end.'#10);
+  // Each wrong side once: V.B2 and a bare B2 above TEH2, V.B1 below it.
+  TFile.WriteAllText(TPath.Combine(LDir, 'HpE.pas'),
+    'unit HpE;'#10'interface'#10'type'#10 +
+    '  TE = record F: Integer; function Own: Integer; end;'#10 +
+    '  TEH1 = record helper for TE function B1: Integer; end;'#10 +
+    'implementation'#10'var X: Integer;'#10 +
+    'function TEH1.B1: Integer; begin Result := 1; end;'#10 +
+    'function TE.Own: Integer; begin Result := B2; end;'#10 +
+    'procedure P0; var V: TE; begin X := V.B2; end;'#10 +
+    'type'#10 +
+    '  TEH2 = record helper for TE function B2: Integer; end;'#10 +
+    'function TEH2.B2: Integer; begin Result := 2; end;'#10 +
+    'procedure P1; var V: TE; begin X := V.B1; end;'#10'end.'#10);
+  // A variable carries the helper active where it is declared.
+  TFile.WriteAllText(TPath.Combine(LDir, 'HpT.pas'),
+    'unit HpT;'#10'interface'#10'type'#10 +
+    '  TW = record F: Integer; end;'#10 +
+    '  TWA = record helper for TW function A: Integer; end;'#10 +
+    'var GA: TW;'#10'type'#10 +
+    '  TWB = record helper for TW function B: Integer; end;'#10 +
+    'var GB: TW;'#10'implementation'#10 +
+    'function TWA.A: Integer; begin Result := 1; end;'#10 +
+    'function TWB.B: Integer; begin Result := 2; end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'HpK.pas'),
+    'unit HpK;'#10'interface'#10'uses HpT;'#10'type'#10 +
+    '  TWK = record helper for TW function K: Integer; end;'#10 +
+    'implementation'#10 +
+    'function TWK.K: Integer; begin Result := 3; end;'#10'end.'#10);
+  // Above the implementation `uses`, the interface's helper.
+  TFile.WriteAllText(TPath.Combine(LDir, 'HpO.pas'),
+    'unit HpO;'#10'interface'#10'uses HpT;'#10'type'#10 +
+    '  TWO = record helper for TW const KO = 1; end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'HpI.pas'),
+    'unit HpI;'#10'interface'#10'uses HpT, HpO;'#10 +
+    'const CI = TW.KO;'#10'implementation'#10'uses HpK;'#10 +
+    'var L: TW; X: Integer;'#10'initialization'#10'  X := L.K;'#10'end.'#10);
+  // The import cycle: HpHelp's helper for HpMain's TRec in a with there.
+  TFile.WriteAllText(TPath.Combine(LDir, 'HpMain.pas'),
+    'unit HpMain;'#10'interface'#10'type'#10 +
+    '  TRec = record A: Integer; end;'#10 +
+    'function Bump: Integer;'#10'procedure Go;'#10 +
+    'implementation'#10'uses HpHelp;'#10 +
+    'function Bump: Integer; begin Result := 1; end;'#10 +
+    'procedure Go; var R: TRec; S: string; I: Integer;'#10 +
+    'begin with R do S := Bump; with R do I := A; end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'HpHelp.pas'),
+    'unit HpHelp;'#10'interface'#10'uses HpMain;'#10'type'#10 +
+    '  TRecHelper = record helper for TRec function Bump: string; end;'#10 +
+    'implementation'#10 +
+    'function TRecHelper.Bump: string; begin Result := ''''; end;'#10 +
+    'end.'#10);
+  // GA.A, GB.B and L.K compile; GA.K and GB.A do not.
+  TFile.WriteAllText(TPath.Combine(LDir, 'HpP.dpr'),
+    'program HpP;'#10'uses HpG, HpE, HpT, HpK, HpI, HpMain;'#10 +
+    'var L: TW; X: Integer;'#10'begin'#10 +
+    '  X := GA.A; X := GB.B; X := L.K;'#10 +
+    '  X := GA.K; X := GB.A;'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'HpP.dpr'));
+    Ok('helppos: own helpers apply from their declaration on - in bodies,' +
+      ' bare in the type''s methods, in a with',
+      (DiagCount(ModelByName('hpg'), 'E2003') = 0) and
+      (DiagCount(ModelByName('hpg'), 'E2010') = 0));
+    Ok('helppos: a helper declared below, or hidden above by a later one,' +
+      ' does not apply', DiagCount(ModelByName('hpe'), 'E2003') = 3);
+    Ok('helppos: an interface const sees the interface uses'' helper, the' +
+      ' implementation the implementation uses''',
+      DiagCount(ModelByName('hpi'), 'E2003') = 0);
+    Ok('helppos: a variable carries the helper active where it is declared,' +
+      ' ahead of the program''s',
+      DiagCount(ModelByName('hpp'), 'E2003') = 2);
+    Ok('helppos: a with over a type of the unit takes a helper of a unit' +
+      ' using it over an enclosing name (5.7)',
+      (DiagCount(ModelByName('hpmain'), 'E2010') = 0) and
+      (DiagCount(ModelByName('hpmain'), 'E2003') = 0));
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // A3-17 = E3-24, B2-14, A3-21: one type under two seeded names is one type -
 // an exact overload match across units (Char / WideChar, Integer / LongInt,
 // string / UnicodeString, a Win64 NativeInt / Int64), a helper for PChar is
@@ -22662,6 +22784,7 @@ begin
   TestLateUnitMembers;
   TestAttributeGuidAndPositions;
   TestHelperVisibility;
+  TestHelperPosition;
   TestBuiltinIdentity;
   TestHelperIdentity;
   TestTypeSlotsAndOwners;

@@ -110,8 +110,43 @@ type
     Aliases: TArray<TPasExtRef>;
     HelperMid: Integer;       // model the helper is declared in
     Sym: Integer;             // the helper's own skType symbol
+    // The visible-stream token of the helper's declaration (its nkHelperType
+    // node's first): an own helper applies from there on in its unit
+    // (15.3.4), and a variable of the type declared above it in that unit's
+    // interface carries the helper active before it (15.3.4, the carrier).
+    // The same token Phase 1 joins it from (JoinHelperScopes).
+    DeclTok: Integer;
     Exported: Boolean;
   end;
+
+  // Where one referring unit's helper for one extended type changes - kept
+  // for a type its OWN helpers help (15.3.4): Base is its `uses`' answer
+  // (UnitId -1: none), and from Toks[I] on Exts[I] is, the own helpers in
+  // declaration order.
+  TPasHelperSteps = record
+    Base: TPasExtRef;
+    Toks: TArray<Integer>;
+    Exts: TArray<TPasExtRef>;
+  end;
+
+  // A referring unit's positional index beside FHelperIdx (which answers
+  // for the end of the unit). Both dictionaries nil for most units: Own
+  // only with helpers of its own, Intf only when an implementation `uses`
+  // entry exports one - Intf then holds, for each type such an entry
+  // rewrote, the INTERFACE uses' answer (UnitId -1: none), which is all a
+  // position above ImplTok, the first implementation entry, sees.
+  TPasHelperPos = record
+    Own: TDictionary<Int64, TPasHelperSteps>;
+    Intf: TDictionary<Int64, TPasExtRef>;
+    ImplTok: Integer;
+    // A type of the unit itself has a helper from a unit it uses (an import
+    // cycle through an implementation `uses`): Phase 1 opened its `with`
+    // statements without it (MarkForeignHelperWiths).
+    ForeignOwn: Boolean;
+  end;
+
+  // Which `uses` section, or the unit itself, a helper is published from.
+  TPasHelperSource = (hsIntfUses, hsImplUses, hsOwn);
 
   // The keys of one consumer's four cross-unit maps whose VALUE names the
   // edited unit - collected while the module path decides, applied after its
@@ -719,6 +754,9 @@ type
     // measured 4 ms).
     FModelHelpers: TArray<TArray<TPasHelperReg>>;
     FHelperIdx: TArray<TDictionary<Int64, TPasExtRef>>;   // nil = sees none
+    // ...and where in the referring unit that answer is not yet the one
+    // (15.3.4) - same slots, same lifetime, same writers (PublishHelpersFor).
+    FHelperPos: TArray<TPasHelperPos>;
     // ALL FInstances/FInstKeys access is guarded by TMonitor on FInstances
     // (alive from the constructor to the destructor): the parallel
     // inherited-member pass instantiates generics from heritage clauses
@@ -1214,7 +1252,8 @@ type
       AClassSide: Boolean): Boolean;
     function DccTypeName(const AX: TSemaXType; AOwner: Boolean): string;
     function FindVisibleMemberX(AId, AHere: Integer; const ABase: TSemaXType;
-      const ANameLower: string; out AMemMid, AMemSym, ACtx: Integer): Boolean;
+      const ANameLower: string; out AMemMid, AMemSym, ACtx: Integer;
+      ASiteTok: Integer = -1): Boolean;
     function FindSelfMemberX(AId, ANode, AStruct: Integer;
       const ANameLower: string; out AMemMid, AMemSym, ACtx: Integer): Boolean;
     function StructEncloses(AMid, AOuter, AInner: Integer): Boolean;
@@ -1355,6 +1394,14 @@ type
     procedure RunDeclOver(const AIds: TArray<Integer>);
     procedure RunInheritedOver(const AIds: TArray<Integer>);
     procedure RunWithOver(const AIds: TArray<Integer>);
+    { The `with` statements of unit AId over a value of its own type whose
+      active helper is declared in another unit - one using AId (spec 5.7,
+      15.3.4): Phase 1 opened them without that helper's members, which
+      outrank every enclosing name, so they are listed as unopened
+      (TPasSemaModel.ReopenWith) for the with pass to decide. A unit with no
+      such helper (TPasHelperPos.ForeignOwn) - all but import cycles - pays
+      one test. }
+    procedure MarkForeignHelperWiths(AId: Integer);
     procedure RunCallChecksOver(const AIds: TArray<Integer>);
     procedure RunCrossTypeOver(const AIds: TArray<Integer>);
     { 6.10: the plain reading of an asm operand's `A.B` / `A[...].B` - B a
@@ -1602,21 +1649,28 @@ type
       const AMap: TArray<Integer>);
     // BuildHelperMap's phase-B publisher - a method because the parallel
     // phase-B worker is an anonymous method and cannot capture a nested one.
-    procedure PublishHelper(AMid: Integer; const AReg: TPasHelperReg);
+    procedure PublishHelper(AMid: Integer; const AReg: TPasHelperReg;
+      ASource: TPasHelperSource);
     procedure ClearHelperIdx;
+    procedure ClearHelperPos(AMid: Integer);
     function HelperAncestorX(AMid, ASym: Integer): TSemaXType;
     function IsDistinctTypeDef(AMid, ADef: Integer): Boolean;
     function HelperMemberHit(AFromMid: Integer; const ACur: TSemaXType;
-      const AKey: TSemaKey; out AMemMid, AMemSym: Integer): Boolean;
+      const AKey: TSemaKey; out AMemMid, AMemSym: Integer;
+      ASiteTok: Integer): Boolean;
     { The helper active for ACur's type in the referring unit AFromMid
       (15.3.3): the registry's (FHelperIdx - its own unit's, then its uses',
       last wins), else the last interface-section helper the type's OWN unit
       declares for it, which applies wherever a value of the type is
       reached, used unit or not (dcc64 37.0, local/probe-b28 H7: `GM.E.IsA`
       with UT, declaring TE and its helper, not in the uses; FMX.FontGlyphs
-      .Win's `Style.Slant.IsRegular` without FMX.Graphics). }
+      .Win's `Style.Slant.IsRegular` without FMX.Graphics).
+      ASiteTok is the referring token in AFromMid's visible stream, -1 for
+      none - the end of the unit: an own helper applies from its declaration
+      on, and above the implementation `uses` only the interface's count
+      (15.3.4). }
     function ActiveHelperOf(AFromMid: Integer; const ACur: TSemaXType;
-      out AExt: TPasExtRef): Boolean;
+      out AExt: TPasExtRef; ASiteTok: Integer = -1): Boolean;
     // Cross-model overload selection (CrossType's call typing; XCatOf and
     // XSameType are public, below):
     function SubrangeCatX(AMid, ASym: Integer): TSemaTypeCat;
@@ -2049,7 +2103,7 @@ type
     // wins (13.1.4); -1 consults no helper.
     function DefaultArrayPropX(const AX: TSemaXType;
       out AMid, ASym: Integer; out AOwner: TSemaXType;
-      AFromMid: Integer = -1): Boolean;
+      AFromMid: Integer = -1; ASiteTok: Integer = -1): Boolean;
     { The index-parameter types of the property AMid.ASym, closed over the
       frame AInst - what an index expression is scored against. Nil when a
       parameter is not typed. }
@@ -2359,18 +2413,20 @@ type
       member may be on ANY of them (16 sec. 16.4.1), so each is walked in turn.
       AValueBase: the member is asked of a VALUE of the type (`V.Create`
       with `V: T`), not of the type itself - a lone `constructor` constraint
-      unlocks `T.Create` only (16.4.1; dcc: E2003 on `V.Create`). }
+      unlocks `T.Create` only (16.4.1; dcc: E2003 on `V.Create`).
+      ASiteTok: the referring token in AFromMid, which picks the active
+      helper (ActiveHelperOf); -1 - none - reads the end of the unit. }
     function FindMemberX(AFromMid: Integer; const ABase: TSemaXType;
       const ANameLower: string;
       out AMemMid, AMemSym: Integer; out ACtx: Integer;
       ADepth: Integer = 0; ANoHelpers: Boolean = False;
-      AValueBase: Boolean = False): Boolean; overload;
+      AValueBase: Boolean = False; ASiteTok: Integer = -1): Boolean; overload;
     // The same by key - PasNodeKey over the member-name node costs no string.
     function FindMemberX(AFromMid: Integer; const ABase: TSemaXType;
       const AKey: TSemaKey;
       out AMemMid, AMemSym: Integer; out ACtx: Integer;
       ADepth: Integer = 0; ANoHelpers: Boolean = False;
-      AValueBase: Boolean = False): Boolean; overload;
+      AValueBase: Boolean = False; ASiteTok: Integer = -1): Boolean; overload;
     { A helper's extended type (`class helper for TFoo` names TFoo), as
       ASym of unit AMid declares it; XNil for a type that is no helper. }
     function HelperTargetX(AMid, ASym: Integer): TSemaXType;
@@ -2546,7 +2602,7 @@ type
       contract mirrors FindLocalDeep's. }
     procedure EnumMembersX(AFromMid: Integer; const ABase: TSemaXType;
       const AOnMember: TPasMemberEnumProc; ADepth: Integer = 0;
-      AValueBase: Boolean = False);
+      AValueBase: Boolean = False; ASiteTok: Integer = -1);
     { Width of the default thread pool for every parallel pass, pinned once per
       process. 0 = logical-core width (CPUCount), which is where measurement
       puts the optimum; letting the pool grow costs ~30% of total analysis
@@ -13996,23 +14052,78 @@ begin
 end;
 
 procedure TPasSemaProject.PublishHelper(AMid: Integer;
-  const AReg: TPasHelperReg);
+  const AReg: TPasHelperReg; ASource: TPasHelperSource);
 var
   LExt: TPasExtRef;
   LBSym, LRMid, LRSym: Integer;
 
+  // What the index answers for AKey before this write; UnitId -1: nothing.
+  function Prior(AKey: Int64): TPasExtRef;
+  begin
+    if (FHelperIdx[AMid] = nil) or
+       not FHelperIdx[AMid].TryGetValue(AKey, Result) then
+    begin
+      Result.UnitId := -1;
+      Result.Sym := NIL_SYM;
+    end;
+  end;
+
   procedure Put(AUnit, ASym: Integer);
+  var
+    LKey: Int64;
+    LSteps: TPasHelperSteps;
+    LN: Integer;
   begin
     if (AUnit < 0) or (ASym < 0) then
       Exit;
+    LKey := HelperKey(AUnit, ASym);
+    case ASource of
+      hsImplUses:
+        // The first implementation entry to write the key: what stood
+        // before it is the interface's answer (15.3.4).
+        with FHelperPos[AMid] do
+        begin
+          if Intf = nil then
+            Intf := TDictionary<Int64, TPasExtRef>.Create;
+          if not Intf.ContainsKey(LKey) then
+            Intf.Add(LKey, Prior(LKey));
+        end;
+      hsOwn:
+        // One more step: from the helper's declaration on, it is the one.
+        // Every own helper writes after every `uses` entry, so the first
+        // step's Prior is the uses' answer.
+        with FHelperPos[AMid] do
+        begin
+          if Own = nil then
+            Own := TDictionary<Int64, TPasHelperSteps>.Create;
+          if not Own.TryGetValue(LKey, LSteps) then
+          begin
+            LSteps.Base := Prior(LKey);
+            LSteps.Toks := nil;
+            LSteps.Exts := nil;
+          end;
+          LN := Length(LSteps.Toks);
+          // A helper reaching one key by two routes (an alias and its
+          // builtin) is one step.
+          if (LN = 0) or (LSteps.Exts[LN - 1].UnitId <> LExt.UnitId) or
+             (LSteps.Exts[LN - 1].Sym <> LExt.Sym) then
+          begin
+            LSteps.Toks := LSteps.Toks + [AReg.DeclTok];
+            LSteps.Exts := LSteps.Exts + [LExt];
+            Own.AddOrSetValue(LKey, LSteps);
+          end;
+        end;
+    end;
     if FHelperIdx[AMid] = nil then
       FHelperIdx[AMid] := TDictionary<Int64, TPasExtRef>.Create;
-    FHelperIdx[AMid].AddOrSetValue(HelperKey(AUnit, ASym), LExt);
+    FHelperIdx[AMid].AddOrSetValue(LKey, LExt);
   end;
 
 begin
   LExt.UnitId := AReg.HelperMid;
   LExt.Sym := AReg.Sym;
+  if (ASource <> hsOwn) and (AReg.TargetUnit = AMid) then
+    FHelperPos[AMid].ForeignOwn := True;
   if AReg.TargetInst <> NIL_INST then
     Put(MaxInt, AReg.TargetInst);
     // A concrete type is one identity - but it may ALSO be an alias of a
@@ -14073,6 +14184,7 @@ begin
   LCount := FModels.Count;
   SetLength(FModelHelpers, LCount);
   SetLength(FHelperIdx, LCount);
+  SetLength(FHelperPos, LCount);
   // ---- phase A: collect declarations (parallel; each worker scans its own
   // model's symbols and writes only FModelHelpers[mid] - the same own-slot
   // discipline as every pass; ResolveTypeExpr reads other models' frozen
@@ -14222,6 +14334,7 @@ begin
       end;
       LReg.HelperMid := AMid;
       LReg.Sym := LSym;
+      LReg.DeclTok := LM.Tree.Nodes[LDef].FirstToken;
       LReg.Exported := LExported;
       LRegs := LRegs + [LReg];
     end;
@@ -14232,23 +14345,66 @@ end;
 // later-listed unit beats an earlier one - dcc-verified last-uses-wins), then
 // the referring unit's OWN helpers (nearest; impl-section ones count here).
 // Within one unit, declaration order, later winning.
+//
+// Every write lands in FHelperIdx, the answer at the end of the unit; where
+// that answer does not hold everywhere, FHelperPos says where it changes
+// (15.3.4): an implementation `uses` entry is not seen above it, and an own
+// helper applies from its declaration on - beating any used unit's, even one
+// listed after it (dcc64 37.0, local/probe-park/specfu/E1-24 P2).
 procedure TPasSemaProject.PublishHelpersFor(AMid: Integer);
 var
-  LU, LUid, LI, LCount: Integer;
+  LU, LUid, LI, LCount, LPos: Integer;
+  LUses: TPasUsesRef;
+  LSource: TPasHelperSource;
+  LOrder: TArray<Integer>;
 begin
   LCount := Length(FModelHelpers);
   FreeAndNil(FHelperIdx[AMid]);   // nil = sees none, until PublishHelper says
+  ClearHelperPos(AMid);
   for LU := 0 to High(FModels[AMid].UsesList) do
   begin
-    LUid := FModels[AMid].UsesList[LU].UnitId;
+    LUses := FModels[AMid].UsesList[LU];
+    LUid := LUses.UnitId;
     if (LUid < 0) or (LUid >= LCount) then
       Continue;
+    LSource := hsIntfUses;
+    if LUses.InImpl then
+      LSource := hsImplUses;
     for LI := 0 to High(FModelHelpers[LUid]) do
       if FModelHelpers[LUid][LI].Exported then
-        PublishHelper(AMid, FModelHelpers[LUid][LI]);
+      begin
+        if (LSource = hsImplUses) and (FHelperPos[AMid].ImplTok = MaxInt) and
+           (LUses.NameNode <> NIL_NODE) then
+          FHelperPos[AMid].ImplTok :=
+            FModels[AMid].Tree.Nodes[LUses.NameNode].FirstToken;
+        PublishHelper(AMid, FModelHelpers[LUid][LI], LSource);
+      end;
   end;
-  for LI := 0 to High(FModelHelpers[AMid]) do
-    PublishHelper(AMid, FModelHelpers[AMid][LI]);
+  // The unit's own, in token order - the order the steps are read in. It is
+  // symbol order but for a helper nested in a type, so this sorts at most a
+  // handful of entries that are nearly always in place already.
+  SetLength(LOrder, Length(FModelHelpers[AMid]));
+  for LI := 0 to High(LOrder) do
+  begin
+    LPos := LI;
+    while (LPos > 0) and (FModelHelpers[AMid][LOrder[LPos - 1]].DeclTok >
+      FModelHelpers[AMid][LI].DeclTok) do
+    begin
+      LOrder[LPos] := LOrder[LPos - 1];
+      Dec(LPos);
+    end;
+    LOrder[LPos] := LI;
+  end;
+  for LI in LOrder do
+    PublishHelper(AMid, FModelHelpers[AMid][LI], hsOwn);
+end;
+
+procedure TPasSemaProject.ClearHelperPos(AMid: Integer);
+begin
+  FreeAndNil(FHelperPos[AMid].Own);
+  FreeAndNil(FHelperPos[AMid].Intf);
+  FHelperPos[AMid].ImplTok := MaxInt;
+  FHelperPos[AMid].ForeignOwn := False;
 end;
 
 procedure TPasSemaProject.UpdateHelperMap(const AIds: TArray<Integer>;
@@ -14325,6 +14481,56 @@ procedure TPasSemaProject.UpdateHelperMap(const AIds: TArray<Integer>;
     ADict := LNew;
   end;
 
+  function MappedExt(var AExt: TPasExtRef): Boolean;
+  begin
+    if AExt.UnitId = AId then
+      AExt.Sym := Mapped(AExt.Sym);
+    Result := AExt.Sym <> NIL_SYM;
+  end;
+
+  // ...and in its positional index: the same pairs in the steps' keys, their
+  // Base and their helpers (an own helper of a model that is not redone
+  // keeps its symbol; Base may be the renumbered unit's).
+  procedure RenumberPos(var APos: TPasHelperPos);
+  var
+    LNew: TDictionary<Int64, TPasHelperSteps>;
+    LKeyUnit, LKeySym: Integer;
+    LSteps: TPasHelperSteps;
+  begin
+    RenumberIdx(APos.Intf);
+    if APos.Own = nil then
+      Exit;
+    LNew := TDictionary<Int64, TPasHelperSteps>.Create(APos.Own.Count);
+    for var LPair in APos.Own do
+    begin
+      LKeyUnit := Integer(LPair.Key shr 32);
+      LKeySym := Integer(Cardinal(LPair.Key));
+      if LKeyUnit = AId then
+      begin
+        LKeySym := Mapped(LKeySym);
+        if LKeySym = NIL_SYM then
+          Continue;
+      end;
+      LSteps.Base := LPair.Value.Base;
+      if (LSteps.Base.UnitId >= 0) and not MappedExt(LSteps.Base) then
+        LSteps.Base.UnitId := -1;
+      LSteps.Toks := nil;
+      LSteps.Exts := nil;
+      for var LI := 0 to High(LPair.Value.Exts) do
+      begin
+        var LExt := LPair.Value.Exts[LI];
+        if MappedExt(LExt) then
+        begin
+          LSteps.Toks := LSteps.Toks + [LPair.Value.Toks[LI]];
+          LSteps.Exts := LSteps.Exts + [LExt];
+        end;
+      end;
+      LNew.AddOrSetValue(HelperKey(LKeyUnit, LKeySym), LSteps);
+    end;
+    APos.Own.Free;
+    APos.Own := LNew;
+  end;
+
   function RegsEqual(const A, B: TArray<TPasHelperReg>): Boolean;
   var
     LIdx, LAlias: Integer;
@@ -14381,9 +14587,11 @@ begin
     begin
       SetLength(FModelHelpers, LCount);
       SetLength(FHelperIdx, LCount);
+      SetLength(FHelperPos, LCount);
     end;
   end;
-  if (Length(FModelHelpers) <> LCount) or (Length(FHelperIdx) <> LCount) then
+  if (Length(FModelHelpers) <> LCount) or (Length(FHelperIdx) <> LCount) or
+     (Length(FHelperPos) <> LCount) then
   begin
     BuildHelperMap;
     Exit;
@@ -14399,6 +14607,7 @@ begin
     begin
       RenumberRegs(FModelHelpers[LIdx]);
       RenumberIdx(FHelperIdx[LIdx]);
+      RenumberPos(FHelperPos[LIdx]);
     end;
   // 2. The redone models declare their helpers afresh.
   SetLength(LChanged, LCount);
@@ -14437,6 +14646,9 @@ begin
   for LIdx := 0 to High(FHelperIdx) do
     FHelperIdx[LIdx].Free;
   FHelperIdx := nil;
+  for LIdx := 0 to High(FHelperPos) do
+    ClearHelperPos(LIdx);
+  FHelperPos := nil;
 end;
 
 // The active helper's member scope, consulted at one FindMemberX hop. HOT
@@ -14448,63 +14660,98 @@ end;
 // fires when the walk STARTS at a helper (a helper is never another type's
 // heritage).
 { The unit a member access's base was DECLARED in, when the base is a
-  variable or a field, for the one FindMemberX the cross-type pass runs on
-  it - -1 everywhere else. Spec 15.3.3: with no helper for the type active
-  in the referring unit, a variable or field carries the helper active for
-  it in its declaring unit's interface (and every other base carries none;
-  that half is left lenient - a unit relying on it does not compile). Per
-  thread: the pass runs one worker per core. }
+  variable or a field of ANOTHER unit, and its declaration's token there, for
+  the one FindMemberX the cross-type pass runs on it - none everywhere else.
+  Spec 15.3.4: such a variable or field carries the helper active for its
+  type where it is declared, and that one applies wherever it is reached -
+  ahead of the referring unit's own (dcc64 37.0: a program's own helper for
+  `string` does not reach a `string` variable declared in a unit that sees
+  TStringHelper). Only where it carries none does the referring unit's
+  answer. Every other base carries none (that half is left lenient - a unit
+  relying on it does not compile). Per thread: the pass runs one worker per
+  core. }
 threadvar
   GHelperCarrier: Integer;   // the model id + 1; 0 (a threadvar's start) = none
+  GHelperCarrierTok: Integer;   // the declaration's token + 1; 0 = unknown
 
 function TPasSemaProject.ActiveHelperOf(AFromMid: Integer;
-  const ACur: TSemaXType; out AExt: TPasExtRef): Boolean;
+  const ACur: TSemaXType; out AExt: TPasExtRef; ASiteTok: Integer): Boolean;
 var
-  LOwn: Integer;
+  LCarrier: Integer;
 
-  function Matches(const AReg: TPasHelperReg): Boolean;
-  begin
-    if not AReg.Exported then
-      Exit(False);
-    if (AReg.TargetUnit = ACur.UnitId) and (AReg.TargetSym = ACur.Sym) then
-      Exit(True);
-    for var LA in AReg.Aliases do
-      if (LA.UnitId = ACur.UnitId) and (LA.Sym = ACur.Sym) then
-        Exit(True);
-    Result := (AReg.TargetUnit = NIL_SYM) and (AReg.TargetName <> '') and
-      (FModels[ACur.UnitId].Symbols[ACur.Sym].Kind = skBuiltinType) and
-      (FModels[ACur.UnitId].Symbols[ACur.Sym].NameLower = AReg.TargetName);
-  end;
-
-  // The last interface helper of unit AMid for the type.
-  function DeclaredIn(AMid: Integer): Boolean;
-  begin
-    Result := False;
-    if (AMid < 0) or (AMid > High(FModelHelpers)) then
-      Exit;
-    for var LIdx := High(FModelHelpers[AMid]) downto 0 do
-      if Matches(FModelHelpers[AMid][LIdx]) then
-      begin
-        AExt.UnitId := FModelHelpers[AMid][LIdx].HelperMid;
-        AExt.Sym := FModelHelpers[AMid][LIdx].Sym;
-        Exit(True);
-      end;
-  end;
-
-  // The helper active for the type in the carrier's interface: its own,
-  // then its interface `uses`, the last entry first (15.3.3).
-  function CarrierHelper(ACarrier: Integer): Boolean;
+  // Unit AMid's helper for AKey at token ATok (-1: the end of the unit). One
+  // dictionary probe for a unit with no positional index, or for no token,
+  // which is nearly every lookup. Otherwise (15.3.4) the last own helper
+  // declared at or before ATok, else the `uses`' - the interface's alone
+  // above the first implementation entry. "None" (UnitId -1) is no answer.
+  function Indexed(AMid, ATok: Integer; AKey: Int64): Boolean;
   var
-    LM: TPasSemaModel;
+    LSteps: TPasHelperSteps;
+    LIntf: TPasExtRef;
   begin
-    if DeclaredIn(ACarrier) then
+    if ATok >= 0 then
+      with FHelperPos[AMid] do
+        if (Own <> nil) or (Intf <> nil) then
+        begin
+          if (Own <> nil) and Own.TryGetValue(AKey, LSteps) then
+          begin
+            for var LI := High(LSteps.Toks) downto 0 do
+              if LSteps.Toks[LI] <= ATok then
+              begin
+                AExt := LSteps.Exts[LI];
+                Exit(True);
+              end;
+            AExt := LSteps.Base;
+            Result := AExt.UnitId >= 0;
+          end
+          else
+            Result := (FHelperIdx[AMid] <> nil) and
+              FHelperIdx[AMid].TryGetValue(AKey, AExt);
+          if (Intf <> nil) and (ATok < ImplTok) and
+             Intf.TryGetValue(AKey, LIntf) then
+          begin
+            AExt := LIntf;
+            Result := AExt.UnitId >= 0;
+          end;
+          Exit;
+        end;
+    Result := (FHelperIdx[AMid] <> nil) and
+      FHelperIdx[AMid].TryGetValue(AKey, AExt);
+  end;
+
+  // Unit AMid's helper for ACur's type at ATok: a closed instantiation's own
+  // first (TPasHelperReg.TargetInst), then the type's.
+  function ActiveIn(AMid, ATok: Integer): Boolean;
+  var
+    LOwn: Integer;
+  begin
+    if (ACur.Inst <> NIL_INST) and Indexed(AMid, ATok, HelperInstKey(ACur.Inst))
+    then
       Exit(True);
-    LM := FModels[ACarrier];
-    for var LU := High(LM.UsesList) downto 0 do
-      if not IsImplUsesEntry(LM, LU) and (LM.UsesList[LU].UnitId >= 0) and
-         DeclaredIn(LM.UsesList[LU].UnitId) then
-        Exit(True);
+    if Indexed(AMid, ATok, HelperKey(ACur.UnitId, ACur.Sym)) then
+      Exit(True);
+    // A BUILTIN type has no single identity: every model SEEDS its own
+    // `string`/`Integer`/`Char` symbol (PasTree.Sema.Builtins), so which one
+    // a value carries depends on where its type was READ. `S.Trim` on a local
+    // works because the local's type is this model's seed and Publish indexed
+    // exactly that - but `UpperCase(S).Trim` carries System.SysUtils' seed and
+    // `Give(S).Trim` a third unit's, and both missed. That is the whole
+    // `TStringHelper`/`TCharHelper` bucket of the member flag: the helper is
+    // active, the name is right, and the KEY was a different `string`.
+    //
+    // So canonicalize to the model's own seed and probe once more. Both
+    // guards keep this off the hot path: the retry costs a name lookup, and
+    // it runs only for a builtin that came from ANOTHER model, after the
+    // ordinary probe has already missed.
     Result := False;
+    if (ACur.UnitId <> AMid) and
+       (FModels[ACur.UnitId].Symbols[ACur.Sym].Kind = skBuiltinType) then
+    begin
+      LOwn := FModels[AMid].Resolve(FModels[AMid].SystemScope,
+        FModels[ACur.UnitId].Symbols[ACur.Sym].NameLower);
+      Result := (LOwn <> NIL_SYM) and
+        Indexed(AMid, ATok, HelperKey(AMid, LOwn));
+    end;
   end;
 
   // The type's own unit's last exported helper for it. A unit declares a
@@ -14527,59 +14774,39 @@ var
   end;
 
 begin
-  // A closed instantiation's own helper first (TPasHelperReg.TargetInst).
-  if (ACur.Inst <> NIL_INST) and (AFromMid >= 0) and
-     (AFromMid <= High(FHelperIdx)) and (FHelperIdx[AFromMid] <> nil) and
-     FHelperIdx[AFromMid].TryGetValue(HelperInstKey(ACur.Inst), AExt) then
+  // A variable or a field of another unit: the helper active where it is
+  // declared, ahead of the referring unit's (15.3.4).
+  LCarrier := GHelperCarrier - 1;
+  if (LCarrier >= 0) and (LCarrier <> AFromMid) and
+     (LCarrier <= High(FHelperIdx)) and (GHelperCarrierTok > 0) and
+     ActiveIn(LCarrier, GHelperCarrierTok - 1) then
     Exit(True);
-  if (AFromMid < 0) or (AFromMid > High(FHelperIdx)) or
-     (FHelperIdx[AFromMid] = nil) or
-     not FHelperIdx[AFromMid].TryGetValue(
-       HelperKey(ACur.UnitId, ACur.Sym), AExt) then
-  begin
-    // A BUILTIN type has no single identity: every model SEEDS its own
-    // `string`/`Integer`/`Char` symbol (PasTree.Sema.Builtins), so which one a
-    // value carries depends on where its type was READ. `S.Trim` on a local
-    // works because the local's type is this model's seed and Publish indexed
-    // exactly that - but `UpperCase(S).Trim` carries System.SysUtils' seed and
-    // `Give(S).Trim` a third unit's, and both missed. That is the whole
-    // `TStringHelper`/`TCharHelper` bucket of the member flag: the helper is
-    // active, the name is right, and the KEY was a different `string`.
-    //
-    // So canonicalize to the referring model's own seed and probe once more.
-    // Both guards keep this off the hot path: the retry costs a name lookup,
-    // and it runs only for a builtin that came from ANOTHER model, after the
-    // ordinary probe has already missed.
-    if (AFromMid >= 0) and (AFromMid <= High(FHelperIdx)) and
-       (FHelperIdx[AFromMid] <> nil) and (ACur.UnitId <> AFromMid) and
-       (FModels[ACur.UnitId].Symbols[ACur.Sym].Kind = skBuiltinType) then
-    begin
-      LOwn := FModels[AFromMid].Resolve(FModels[AFromMid].SystemScope,
-        FModels[ACur.UnitId].Symbols[ACur.Sym].NameLower);
-      if (LOwn <> NIL_SYM) and FHelperIdx[AFromMid].TryGetValue(
-           HelperKey(AFromMid, LOwn), AExt) then
-        Exit(True);
-    end;
-    // A variable or a field: the helper of the unit declaring it, not the
-    // type's own unit's (another used unit's helper there wins).
-    if (GHelperCarrier > 0) and (GHelperCarrier <= FModels.Count) and
-       (GHelperCarrier - 1 <> AFromMid) then
-      Exit(CarrierHelper(GHelperCarrier - 1));
-    Exit(OwnUnitHelper);
-  end;
-  Result := True;
+  if (AFromMid >= 0) and (AFromMid <= High(FHelperIdx)) and
+     ActiveIn(AFromMid, ASiteTok) then
+    Exit(True);
+  // A carrier with none, and none in the referring unit: none (the type's
+  // own unit's is not consulted for a variable, as before).
+  if (LCarrier >= 0) and (LCarrier < FModels.Count) and
+     (LCarrier <> AFromMid) then
+    Exit(False);
+  // A type of the referring unit itself has no fallback: its own helpers are
+  // in the index, from where they are declared (15.3.4) - above the first
+  // one, none applies.
+  if ACur.UnitId = AFromMid then
+    Exit(False);
+  Result := OwnUnitHelper;
 end;
 
 function TPasSemaProject.HelperMemberHit(AFromMid: Integer;
   const ACur: TSemaXType; const AKey: TSemaKey;
-  out AMemMid, AMemSym: Integer): Boolean;
+  out AMemMid, AMemSym: Integer; ASiteTok: Integer): Boolean;
 var
   LExt: TPasExtRef;
   LScope, LFound: Integer;
   LAnc: TSemaXType;
 begin
   Result := False;
-  if not ActiveHelperOf(AFromMid, ACur, LExt) then
+  if not ActiveHelperOf(AFromMid, ACur, LExt, ASiteTok) then
     Exit;
   // The active helper, then ITS OWN ANCESTOR helpers: `class helper (X) for T`
   // (15.3) inherits X's members, and since at most one helper is active per
@@ -15021,17 +15248,17 @@ function TPasSemaProject.FindMemberX(AFromMid: Integer;
   const ABase: TSemaXType;
   const ANameLower: string; out AMemMid, AMemSym: Integer;
   out ACtx: Integer; ADepth: Integer; ANoHelpers: Boolean;
-  AValueBase: Boolean): Boolean;
+  AValueBase: Boolean; ASiteTok: Integer): Boolean;
 begin
   Result := FindMemberX(AFromMid, ABase, SemaKey(ANameLower), AMemMid,
-    AMemSym, ACtx, ADepth, ANoHelpers, AValueBase);
+    AMemSym, ACtx, ADepth, ANoHelpers, AValueBase, ASiteTok);
 end;
 
 function TPasSemaProject.FindMemberX(AFromMid: Integer;
   const ABase: TSemaXType;
   const AKey: TSemaKey; out AMemMid, AMemSym: Integer;
   out ACtx: Integer; ADepth: Integer; ANoHelpers: Boolean;
-  AValueBase: Boolean): Boolean;
+  AValueBase: Boolean; ASiteTok: Integer): Boolean;
 var
   LCur, LNext: TSemaXType;
   LM: TPasSemaModel;
@@ -15083,7 +15310,7 @@ begin
         if XValid(LNext) and
            not ((LNext.UnitId = LCur.UnitId) and (LNext.Sym = LCur.Sym)) and
            FindMemberX(AFromMid, LNext, AKey, AMemMid, AMemSym, ACtx,
-             ADepth + 1, ANoHelpers, AValueBase) then
+             ADepth + 1, ANoHelpers, AValueBase, ASiteTok) then
           Exit(True);
       // A lone `constructor` unlocks `T.Create` and nothing else (16.4.1):
       // TObject's Create, no other member of it - and only on the TYPE: a
@@ -15091,7 +15318,7 @@ begin
       if not AValueBase and SemaKeyEquals('create', AKey) then
         for LNext in ConstraintsOfParamX(LCur, {ACtorOnly} True) do
           if FindMemberX(AFromMid, LNext, AKey, AMemMid, AMemSym, ACtx,
-               ADepth + 1, ANoHelpers) then
+               ADepth + 1, ANoHelpers, False, ASiteTok) then
             Exit(True);
       Exit;
     end;
@@ -15109,7 +15336,7 @@ begin
     // helpers are not T's (2.5.1: a distinct type; F50 - TStringHelper.Length
     // answered for a `TEditMask = type string`, where dcc gives E2018).
     if not LDistinct and
-       HelperMemberHit(AFromMid, LCur, AKey, AMemMid, AMemSym) then
+       HelperMemberHit(AFromMid, LCur, AKey, AMemMid, AMemSym, ASiteTok) then
     begin
       ACtx := NIL_INST;
       Exit(True);
@@ -15269,7 +15496,8 @@ begin
           for var LAncIdx := 0 to High(LRefs) - 1 do
             if FindMemberX(AFromMid,
                  ResolveTypeExprNested(LCur.UnitId, LRefs[LAncIdx]), AKey,
-                 AMemMid, AMemSym, ACtx, ADepth + 1, ANoHelpers) then
+                 AMemMid, AMemSym, ACtx, ADepth + 1, ANoHelpers, False,
+                 ASiteTok) then
               Exit(True);
           LNext := ResolveTypeExprNested(LCur.UnitId, LRefs[High(LRefs)]);
         end;
@@ -15293,7 +15521,7 @@ end;
   appear in the enumeration). }
 procedure TPasSemaProject.EnumMembersX(AFromMid: Integer;
   const ABase: TSemaXType; const AOnMember: TPasMemberEnumProc;
-  ADepth: Integer; AValueBase: Boolean);
+  ADepth: Integer; AValueBase: Boolean; ASiteTok: Integer);
 var
   LCur, LNext: TSemaXType;
   LM: TPasSemaModel;
@@ -15318,7 +15546,8 @@ begin
       for LNext in ConstraintsOfParamX(LCur) do
         if XValid(LNext) and
            not ((LNext.UnitId = LCur.UnitId) and (LNext.Sym = LCur.Sym)) then
-          EnumMembersX(AFromMid, LNext, AOnMember, ADepth + 1, AValueBase);
+          EnumMembersX(AFromMid, LNext, AOnMember, ADepth + 1, AValueBase,
+            ASiteTok);
       // A lone `constructor`: TObject's Create only, on the type only, as
       // FindMemberX.
       if not AValueBase then
@@ -15328,7 +15557,7 @@ begin
           begin
             if FModels[AMid].Symbols[ASym].NameLower = 'create' then
               AOnMember(AMid, ASym, ACtx);
-          end, ADepth + 1);
+          end, ADepth + 1, False, ASiteTok);
       Exit;
     end;
     if not (LM.Symbols[LCur.Sym].Kind in [skType, skBuiltinType]) then
@@ -15336,7 +15565,7 @@ begin
     // The active helper chain for this hop's type, before its own members
     // (a helper member HIDES the type's own - first-wins dedup needs them
     // first). The same active helper as HelperMemberHit's (ActiveHelperOf).
-    if not LDistinct and ActiveHelperOf(AFromMid, LCur, LExt) then
+    if not LDistinct and ActiveHelperOf(AFromMid, LCur, LExt, ASiteTok) then
     begin
         for LHop := 1 to 8 do
         begin
@@ -15429,7 +15658,7 @@ begin
           for var LAncIdx := 0 to High(LRefs) - 1 do
             EnumMembersX(AFromMid,
               ResolveTypeExprNested(LCur.UnitId, LRefs[LAncIdx]), AOnMember,
-              ADepth + 1);
+              ADepth + 1, False, ASiteTok);
           LNext := ResolveTypeExprNested(LCur.UnitId, LRefs[High(LRefs)]);
         end;
     else
@@ -18127,12 +18356,13 @@ var
   // The model declaring the member access base ABase when it is a variable
   // or a field - `V` or `R.F` - else -1: the unit whose helper the base
   // carries (spec 15.3.3, ActiveHelperOf).
-  function CarrierOf(ABase: Integer): Integer;
+  function CarrierOf(ABase: Integer; out ADeclTok: Integer): Integer;
   var
-    LNameN, LS: Integer;
+    LNameN, LS, LDecl: Integer;
     LE: TPasExtRef;
   begin
     Result := -1;
+    ADeclTok := -1;
     LNameN := ABase;
     if LM.Tree.Nodes[ABase].Kind = nkMember then
     begin
@@ -18153,7 +18383,14 @@ var
     else if ExtOf(LNameN, LE) and (LE.UnitId >= 0) and
        (LE.UnitId < FModels.Count) and
        (FModels[LE.UnitId].Symbols[LE.Sym].Kind in [skVar, skField]) then
+    begin
       Result := LE.UnitId;
+      // Where it is declared there picks the carrier's helper (15.3.4).
+      LDecl := FModels[Result].Symbols[LE.Sym].DeclNode;
+      if (LDecl <> NIL_NODE) and
+         (LDecl <= High(FModels[Result].Tree.Nodes)) then
+        ADeclTok := FModels[Result].Tree.Nodes[LDecl].FirstToken;
+    end;
   end;
 
   function TargetSym(N: Integer; out AMid, ASym: Integer): Boolean; forward;
@@ -18163,7 +18400,7 @@ var
   function CarriedMember(ABase: Integer; const ABX: TSemaXType;
     ANameN: Integer; out AMemMid, AMemSym, ACtx: Integer): Boolean;
   var
-    LSaved, LVMid, LVSym: Integer;
+    LSaved, LVMid, LVSym, LSavedTok, LTok: Integer;
     LValue: Boolean;
   begin
     // A base of a type parameter's type that is a value, not the parameter
@@ -18174,12 +18411,15 @@ var
       (FModels[LVMid].Symbols[LVSym].Kind in [skVar, skField, skParam,
         skProperty, skConst]);
     LSaved := GHelperCarrier;
-    GHelperCarrier := CarrierOf(ABase) + 1;
+    LSavedTok := GHelperCarrierTok;
+    GHelperCarrier := CarrierOf(ABase, LTok) + 1;
+    GHelperCarrierTok := LTok + 1;
     try
       Result := FindMemberX(AId, ABX, PasNodeKey(LM.Tree, ANameN), AMemMid,
-        AMemSym, ACtx, 0, False, LValue);
+        AMemSym, ACtx, 0, False, LValue, LM.Tree.Nodes[ANameN].FirstToken);
     finally
       GHelperCarrier := LSaved;
+      GHelperCarrierTok := LSavedTok;
     end;
   end;
 
@@ -20310,7 +20550,8 @@ var
             LTX := XAt(LTarget);
             if XValid(LTX) and WithOpensX(LTX) and
                FindMemberX(AId, LTX, LKey, LFMid, LFSym,
-               LFCtx) then
+               LFCtx, 0, False, False,
+               LM.Tree.Nodes[N].FirstToken) then
             begin
               // The target has the name: it is the one the name means.
               if (LFMid = AMid) and (LSymM.Symbols[LFSym].Scope = LOwnScope) then
@@ -20324,7 +20565,8 @@ var
     end;
     LStruct := StructSymOfNode(LM, N);
     if (LStruct <> NIL_SYM) and FindMemberX(AId, XPlain(AId, LStruct), LKey,
-       LFMid, LFSym, LFCtx) and (LFMid = AMid) and
+       LFMid, LFSym, LFCtx, 0, False, False,
+       LM.Tree.Nodes[N].FirstToken) and (LFMid = AMid) and
        (LSymM.Symbols[LFSym].Scope = LOwnScope) then
       Result := LFCtx;
   end;
@@ -20374,7 +20616,8 @@ var
        NestedInGenericX(LDecl))) then
       Exit;
     if FindMemberX(AId, ABX, PasNodeKey(LM.Tree, AName), LFMid, LFSym,
-         LFCtx) and (LFMid = AMid) and
+         LFCtx, 0, False, False, LM.Tree.Nodes[AName].FirstToken) and
+       (LFMid = AMid) and
        (FModels[LFMid].Symbols[LFSym].Scope = LScope) then
       Result := LFCtx;
   end;
@@ -22169,7 +22412,8 @@ var
           if not XValid(LTX) then
             Exit;
           if WithOpensX(LTX) and FindVisibleMemberX(AId,
-               StructSymOfNode(LM, N), LTX, LName, LFMid, LFSym, LFCtx) then
+               StructSymOfNode(LM, N), LTX, LName, LFMid, LFSym, LFCtx,
+               LM.Tree.Nodes[N].FirstToken) then
           begin
             if (LFMid = AMid) and (LFSym = ASym) then
               Result := LTargets[LIdx];
@@ -24373,7 +24617,7 @@ end;
   member is passed over in a descendant of the same unit too. }
 function TPasSemaProject.FindVisibleMemberX(AId, AHere: Integer;
   const ABase: TSemaXType; const ANameLower: string; out AMemMid, AMemSym,
-  ACtx: Integer): Boolean;
+  ACtx: Integer; ASiteTok: Integer): Boolean;
 var
   LBase, LOwnerX: TSemaXType;
   LOwner: Integer;
@@ -24381,7 +24625,8 @@ begin
   LBase := ABase;
   for var LDepth := 1 to 32 do
   begin
-    if not FindMemberX(AId, LBase, ANameLower, AMemMid, AMemSym, ACtx) then
+    if not FindMemberX(AId, LBase, ANameLower, AMemMid, AMemSym, ACtx, 0,
+         False, False, ASiteTok) then
       Exit(False);
     if not MemberHiddenAt(AId, AHere, AMemMid, AMemSym, ABase) then
       Exit(True);
@@ -24437,7 +24682,7 @@ begin
   if not LModel.InMethodHeading(ANode, LModel.MethodScopeOf(ANode)) then
   begin
     Result := FindVisibleMemberX(AId, AStruct, XPlain(AId, AStruct),
-      ANameLower, AMemMid, AMemSym, ACtx);
+      ANameLower, AMemMid, AMemSym, ACtx, LModel.Tree.Nodes[ANode].FirstToken);
     if Result then
       Exit;
   end;
@@ -24452,7 +24697,7 @@ begin
     Exit;
   for var LOuter in OuterStructsOfNode(LModel, ANode, AStruct) do
       if FindVisibleMemberX(AId, AStruct, XPlain(AId, LOuter), ANameLower,
-           AMemMid, AMemSym, ACtx) then
+           AMemMid, AMemSym, ACtx, LModel.Tree.Nodes[ANode].FirstToken) then
       begin
         // dcc's lookup HISTORY (spec 3.3.2, step 5; F42): the unit wrote
         // the name bare BEFORE, outside a nested type's methods, where it
@@ -25364,7 +25609,8 @@ begin
       LBX := ResolveTypeExpr(AId, LBase);
     var LMemMid, LMemSym, LCtx: Integer;
     if XValid(LBX) and FindMemberX(AId, LBX, PasNodeKey(LM.Tree, LName),
-         LMemMid, LMemSym, LCtx) then
+         LMemMid, LMemSym, LCtx, 0, False, False,
+         LM.Tree.Nodes[LName].FirstToken) then
     begin
       AMid := LMemMid;
       ASym := LMemSym;
@@ -26134,7 +26380,8 @@ end;
   `with L[I] do` opened over nothing and every member in the body was a false
   E2003 (~250 across one HTML component library). }
 function TPasSemaProject.DefaultArrayPropX(const AX: TSemaXType;
-  out AMid, ASym: Integer; out AOwner: TSemaXType; AFromMid: Integer): Boolean;
+  out AMid, ASym: Integer; out AOwner: TSemaXType; AFromMid: Integer;
+  ASiteTok: Integer): Boolean;
 var
   LCur, LNext: TSemaXType;
   LM: TPasSemaModel;
@@ -26169,7 +26416,7 @@ begin
     // default property is the type's and wins over the type's own (13.1.4,
     // dcc64 37.0: a class helper's `V[I]: TB ... default` makes `B[0]` a TB
     // past TBase's own default `Items[I]: TA`). A helper's ancestors too.
-    if (AFromMid >= 0) and ActiveHelperOf(AFromMid, LCur, LExt) then
+    if (AFromMid >= 0) and ActiveHelperOf(AFromMid, LCur, LExt, ASiteTok) then
       for var LHop := 1 to 8 do
       begin
         ASym := InScope(LExt.UnitId,
@@ -28910,7 +29157,7 @@ begin
           if XValid(LX) and (LHere = -2) then
             LHere := StructSymOfNode(LM, ANode);
           if XValid(LX) and FindVisibleMemberX(AId, LHere, LX, ANameLower,
-               AUid, ASym, LCtx) then
+               AUid, ASym, LCtx, LM.Tree.Nodes[ANode].FirstToken) then
           begin
             // The member's declared type, closed over the instantiation
             // frame FindMemberX reported - travels back with the hit (see
@@ -29241,7 +29488,8 @@ begin
       if XValid(LObjX) then
         LObjX := PointeeX(CanonTypeX(LObjX));
       if not LBound and XValid(LObjX) and
-         FindMemberX(AId, LObjX, LNameLower, LUid, LSym, LCtx) then
+         FindMemberX(AId, LObjX, LNameLower, LUid, LSym, LCtx, 0, False,
+           False, LModel.Tree.Nodes[LNode].FirstToken) then
       begin
         LPend.Node := LNode;
         LPend.Ext.UnitId := LUid;
@@ -29262,7 +29510,8 @@ begin
       else if LModel.RefMap[LHead] <> NIL_SYM then
         LHeadX := XPlain(AId, LModel.RefMap[LHead]);
       if not LBound and XValid(LHeadX) and
-         FindMemberX(AId, LHeadX, LNameLower, LUid, LSym, LCtx) then
+         FindMemberX(AId, LHeadX, LNameLower, LUid, LSym, LCtx, 0, False,
+           False, LModel.Tree.Nodes[LNode].FirstToken) then
       begin
         LPend.Node := LNode;
         LPend.Ext.UnitId := LUid;
@@ -29287,7 +29536,7 @@ begin
       if (not DirectInStructDecl(LModel, LNode, LStruct) or
           InMethodResolution(LModel, LNode)) and
          FindMemberX(AId, XPlain(AId, LStruct), LNameLower, LUid, LSym,
-           LCtx) then
+           LCtx, 0, False, False, LModel.Tree.Nodes[LNode].FirstToken) then
       begin
         LFound := True;
         Break;
@@ -30082,6 +30331,52 @@ begin
   RunWithOver(IdsUpTo(ACount));
 end;
 
+procedure TPasSemaProject.MarkForeignHelperWiths(AId: Integer);
+var
+  LM: TPasSemaModel;
+  LNode, LTarget, LTok, LHop: Integer;
+  LX: TSemaXType;
+  LExt: TPasExtRef;
+  LForeign: Boolean;
+begin
+  if (AId < 0) or (AId > High(FHelperPos)) or
+     not FHelperPos[AId].ForeignOwn then
+    Exit;
+  LM := FModels[AId];
+  for LNode := 0 to High(LM.Tree.Nodes) do
+  begin
+    if (LM.Tree.Nodes[LNode].Kind <> nkWithStmt) or
+       LM.WithListedUnopened(LNode) then
+      Continue;
+    LTok := LM.Tree.Nodes[LNode].FirstToken;
+    LForeign := False;
+    // Every target but the body (the last child); a target of another
+    // unit's type is listed by Phase 1 already.
+    LTarget := LM.Tree.Nodes[LNode].FirstChild;
+    while not LForeign and (LTarget <> NIL_NODE) and
+          (LM.Tree.Nodes[LTarget].NextSibling <> NIL_NODE) do
+    begin
+      LX := CanonTypeX(WithTargetTypeX(AId, LTarget));
+      // The type and its ancestors of this unit: a helper for any of them
+      // adds members (15.3.3, one per type in the ancestry).
+      for LHop := 1 to 32 do
+      begin
+        if not XValid(LX) or (LX.UnitId <> AId) then
+          Break;
+        if ActiveHelperOf(AId, LX, LExt, LTok) and (LExt.UnitId <> AId) then
+        begin
+          LForeign := True;
+          Break;
+        end;
+        LX := AncestorOfX(LX);
+      end;
+      LTarget := LM.Tree.Nodes[LTarget].NextSibling;
+    end;
+    if LForeign then
+      LM.ReopenWith(LNode);
+  end;
+end;
+
 procedure TPasSemaProject.RunWithOver(const AIds: TArray<Integer>);
 const
   MAX_ROUNDS = 8;
@@ -30092,6 +30387,8 @@ var
   LEmit: Boolean;
   LActive: TArray<Boolean>;
 begin
+  for LS := 0 to High(AIds) do
+    MarkForeignHelperWiths(AIds[LS]);
   SetLength(LPending, Length(AIds));
   SetLength(LUnres, Length(AIds));
   // Which models a round walks. A model's verdicts depend on its OWN
@@ -30525,8 +30822,11 @@ begin
     for LJdx := 0 to High(LSA.Additional) do
       if LSA.Additional[LJdx] <> LSB.Additional[LJdx] then
         Exit(False);
+    // The scope joined, not its token: which helper applies where inside
+    // the unit is the unit's own, redone with it; an importer reads the
+    // registry, never these joins (FindLocalNoHelpers).
     for LJdx := 0 to High(LSA.Shadowing) do
-      if LSA.Shadowing[LJdx] <> LSB.Shadowing[LJdx] then
+      if LSA.Shadowing[LJdx].Scope <> LSB.Shadowing[LJdx].Scope then
         Exit(False);
     if (LSA.Symbols.Count = 0) <> (LSB.Symbols.Count = 0) then
       Exit(False);

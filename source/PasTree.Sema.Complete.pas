@@ -602,6 +602,11 @@ type
     function DesignatorType(ANode, ADepth: Integer): TPasComplTypeRef;
     function MemberOf(const ABase: TPasComplTypeRef; const AKey: string;
       ADepth: Integer): TPasComplTypeRef;
+    { The caret as a token of the project's model of the unit (the helper
+      active there, 15.3.4): the caret's own when completion runs over that
+      model; none (-1, the end of the unit) over an overlay, whose tokens are
+      not the analysis's. }
+    function ProjSiteTok: Integer;
     function MemberSymOf(const ABase: TPasComplTypeRef; const AKey: string;
       ADepth: Integer; out AMid, ASym, ACtx: Integer): Boolean;
     // accessors' shared core (AMid = -1 means the overlay model)
@@ -933,6 +938,9 @@ begin
   FModel := AModel;
   FProj := AProject;
   FProjMid := AProjectMid;
+  // No caret yet: a lookup made before one is set reads every name as the
+  // end of the unit would (TPasSemaModel.ActiveShadow).
+  FCaretVis := -1;
 
   FIsProjectModel := (FProj <> nil) and (FProjMid >= 0) and
     (FProjMid < FProj.ModelCount) and (FProj.Model(FProjMid) = FModel);
@@ -3113,6 +3121,14 @@ end;
   project ancestry (FindMemberX). False when nothing is found - including
   the longer-dotted-unit-name and pending-qualifier shapes, which are
   MemberOf's own business. }
+function TPasCompletion.ProjSiteTok: Integer;
+begin
+  if FIsProjectModel then
+    Result := FCaretVis
+  else
+    Result := -1;
+end;
+
 function TPasCompletion.MemberSymOf(const ABase: TPasComplTypeRef;
   const AKey: string; ADepth: Integer;
   out AMid, ASym, ACtx: Integer): Boolean;
@@ -3153,7 +3169,7 @@ begin
     LScope := FModel.Symbols[LCur.OvSym].MemberScope;
     if LScope <> NIL_SCOPE then
     begin
-      LSym := FModel.FindLocalDeep(LScope, AKey);
+      LSym := FModel.FindLocalDeep(LScope, SemaKey(AKey), 0, FCaretVis);
       // The deep walk follows Phase 1's join into a same-unit ancestor; a
       // GENERIC one's member is reached through the heritage instead, whose
       // frame types its T (`Items[0].` in TObjectList<T: class> =
@@ -3182,7 +3198,8 @@ begin
     Break;
   end;
   if XValid(LCur.X) and (FProj <> nil) then
-    Result := FProj.FindMemberX(FProjMid, LCur.X, AKey, AMid, ASym, ACtx);
+    Result := FProj.FindMemberX(FProjMid, LCur.X, AKey, AMid, ASym, ACtx, 0,
+      False, False, ProjSiteTok);
 end;
 
 // One member hop by NAME, for typing intermediate designator segments
@@ -4345,7 +4362,7 @@ begin
       end, 0,
       // A value of a type parameter has no Create through a lone
       // `constructor` constraint - only the type does (16.4.1).
-      {AValueBase} FValueBase);
+      {AValueBase} FValueBase, ProjSiteTok);
   finally
     FBaseOwnUnit := LSaveOwn;
   end;
@@ -4389,7 +4406,7 @@ begin
               Exit;
             if not FClassSide or ClassSideMember(FModel, ASym) then
               AddSym(-1, ASym, NIL_INST, ABucket);
-          end);
+          end, 0, FCaretVis);
     end;
     LInclude := True;
     LRef := OverlayHeritageRef(AOvSym, 0);
@@ -4912,16 +4929,17 @@ begin
     // binds to (audit A1-19). A method body joins its class's member scope
     // and the outer classes' (innermost last); a struct declaration is its
     // own member scope.
-    LJoins := FModel.Scopes[LScope].Shadowing;
-    for LIdx := High(LJoins) downto 0 do
-      FModel.EnumScopeDeep(LJoins[LIdx], LOnSym, 1);
+    // The helper active at the caret, as the lookup picks it (15.3.4).
+    LIdx := FModel.ActiveShadow(FModel.Scopes[LScope], FCaretVis);
+    if LIdx <> NIL_SCOPE then
+      FModel.EnumScopeDeep(LIdx, LOnSym, 1, FCaretVis);
     for LIdx := 0 to FModel.Scopes[LScope].Symbols.Count - 1 do
       LOnSym(FModel.Scopes[LScope].Symbols[LIdx], LScope);
     CollectInheritedAt(LScope);
     LJoins := FModel.Scopes[LScope].Additional;
     for LIdx := High(LJoins) downto 0 do
     begin
-      FModel.EnumScopeDeep(LJoins[LIdx], LOnSym, 1);
+      FModel.EnumScopeDeep(LJoins[LIdx], LOnSym, 1, FCaretVis);
       CollectInheritedAt(LJoins[LIdx]);
     end;
     LScope := FModel.Scopes[LScope].Parent;

@@ -413,6 +413,14 @@ type
 
     Field order is LAYOUT, as in TSemaSymbol: the byte-sized and Integer
     fields first, then the managed ones. }
+  // One Shadowing join (a helper's member scope on the type it helps) and the
+  // visible-stream token it applies from - the helper's declaration: an own
+  // helper is active from where it is declared on (15.3.4).
+  TSemaShadow = record
+    Scope: Integer;
+    FromToken: Integer;
+  end;
+
   TSemaScope = record
     Kind: TSemaScopeKind;
     // True when Names SHARES its arrays with containers owned
@@ -438,8 +446,10 @@ type
     // needs that order and the spec is explicit about it (15.3.3): a HELPER
     // member hides the extended type's own member of the same name. Everything
     // else joined here - uses, with, ancestors, enums - is a fallback and
-    // belongs in Additional. See JoinScopeShadowing.
-    Shadowing: TArray<Integer>;
+    // belongs in Additional. See JoinScopeShadowing. Every helper of the unit
+    // for the type, in declaration order; ONE answers a lookup - the last
+    // declared at or before the referring token (ActiveShadow).
+    Shadowing: TArray<TSemaShadow>;
     procedure EnsureOwnedContainers;
     function GetSymbols: TSemaSymList; inline;
     // The scope's symbols in declaration order (a view over Names).
@@ -537,7 +547,8 @@ type
     function NewSymbol(AScope: Integer; AKind: TSemaSymbolKind;
       ADeclNode: Integer): Integer;
     function FindByArityDeepK(AScope: Integer; const AKey: TSemaKey;
-      AWantGeneric: Boolean; ADepth: Integer = 0): Integer;
+      AWantGeneric: Boolean; ADepth: Integer = 0;
+      AAtToken: Integer = -1): Integer;
     procedure SnapshotRoutineScopeNames;
     { FindLocal over a scope already in hand: FindLocalDeep and its kin hold
       the pointer for their joins anyway, and FindLocal(AScope) would index
@@ -629,6 +640,9 @@ type
     // (WithUnopened itself keeps its resolution order, which completion
     // reads). Filled by SealWithUnopened at the end of Phase 1.
     WithUnopenedSorted: TArray<Integer>;
+    // Diags[TyperDiagFrom..TyperDiagTo - 1]: what Phase 1's typer added
+    // (TPasSemaTyper.Check), for ReopenWith.
+    TyperDiagFrom, TyperDiagTo: Integer;
     // The expressions (an assignment, or the outermost expression of a
     // statement) the typer withheld a diagnostic over because a name in them
     // is BoundPastStruct: the project's inherited pass may move that name
@@ -764,8 +778,16 @@ type
       Integer;
     procedure JoinScope(AScope, AAdditional: Integer);
     { Joins AShadowing so it is searched BEFORE AScope's own names - the one
-      precedence a plain JoinScope cannot express. See TSemaScope.Shadowing. }
-    procedure JoinScopeShadowing(AScope, AShadowing: Integer);
+      precedence a plain JoinScope cannot express - from token AFromToken on.
+      See TSemaScope.Shadowing. }
+    procedure JoinScopeShadowing(AScope, AShadowing, AFromToken: Integer);
+    { The one Shadowing join of AScope that answers at AAtToken: the last
+      joined at or before it - the helper active there (15.3.3, 15.3.4: an own
+      helper applies from its declaration on, and a later one hides it). No
+      position (AAtToken < 0) is the end of the unit: the last joined.
+      NIL_SCOPE when none applies yet. }
+    function ActiveShadow(AScope: PSemaScope; AAtToken: Integer): Integer;
+      inline;
     // Adds a symbol to the arena (does not register a name). ANameKey, when
     // non-empty, is a PRECOMPUTED PasNameKey(AName) - callers that already
     // built the key for their own lookup pass it to avoid lowering twice.
@@ -810,8 +832,10 @@ type
       chain walk over it hashes nothing. }
     function FindLocal(AScope: Integer; const AKey: TSemaKey): Integer;
       overload; inline;
+    { AAtToken, when not -1, is the referring token: it picks the Shadowing
+      join that answers (ActiveShadow) here and in every join followed. }
     function FindLocalDeep(AScope: Integer; const AKey: TSemaKey;
-      ADepth: Integer = 0): Integer; overload;
+      ADepth: Integer = 0; AAtToken: Integer = -1): Integer; overload;
     function ResolveAt(AScope: Integer; const AKey: TSemaKey;
       AAtToken: Integer): Integer; overload;
     function ResolveByArityAt(AScope: Integer; const AKey: TSemaKey;
@@ -841,9 +865,10 @@ type
       declaration-order list, then Additional joins most-recently-added first
       (recursive). A caller deduplicating by NameLower and keeping the FIRST
       hit therefore reproduces FindLocalDeep's precedence. Does NOT climb
-      Parent - that is the caller's chain walk, same split as the lookups. }
+      Parent - that is the caller's chain walk, same split as the lookups.
+      Of the Shadowing joins only the one active at AAtToken (ActiveShadow). }
     procedure EnumScopeDeep(AScope: Integer; const AOnSym: TPasSymEnumProc;
-      ADepth: Integer = 0);
+      ADepth: Integer = 0; AAtToken: Integer = -1);
     { FindLocalDeep and EnumScopeDeep without AScope's own Shadowing joins.
       A struct member scope's are its unit's helpers (JoinHelperScopes),
       joined for that unit's Phase 1; the project's member walks take the
@@ -1091,11 +1116,24 @@ type
       the end of every analysis entry point, BEFORE any consumer enumerates
       Diags with Length/High. }
     procedure TrimDiags;
+    // How many Diags are filled (Length(Diags) is capacity until TrimDiags).
+    property DiagCount: Integer read FDiagCount;
     { Is a diagnostic already anchored at this CST node? For a pass that can
       reach the same failure twice (the cross-type pass runs per driver path and
       a node can be visited from more than one expression) and wants dcc's one
       report per site. Linear, so only for the error path. }
     function HasDiagAt(ANode: Integer): Boolean;
+    { Lists AWith with the unopened `with` statements after Phase 1 - the
+      project found a target member Phase 1 could not see (a helper of a
+      type of this unit declared in a unit using it, 15.3.4) - and drops
+      what Phase 1's typer said over its body, which TPasSemaTyper.Diag
+      would have withheld had it been listed then: the diagnostics the typer
+      added (TyperDiagFrom..TyperDiagTo) and the expressions it held for a
+      recheck. RecheckWithBodies decides the body again, as for any other
+      unopened one. }
+    procedure ReopenWith(AWith: Integer);
+    // Is AWith itself one of WithUnopened?
+    function WithListedUnopened(AWith: Integer): Boolean;
   end;
 
 { Any name -> its lookup key: lower-cased, leading '&' stripped. `&Foo` and
@@ -2115,9 +2153,28 @@ begin
   Scopes[AScope].Additional := Scopes[AScope].Additional + [AAdditional];
 end;
 
-procedure TPasSemaModel.JoinScopeShadowing(AScope, AShadowing: Integer);
+procedure TPasSemaModel.JoinScopeShadowing(AScope, AShadowing,
+  AFromToken: Integer);
+var
+  LJoin: TSemaShadow;
 begin
-  Scopes[AScope].Shadowing := Scopes[AScope].Shadowing + [AShadowing];
+  LJoin.Scope := AShadowing;
+  LJoin.FromToken := AFromToken;
+  Scopes[AScope].Shadowing := Scopes[AScope].Shadowing + [LJoin];
+end;
+
+function TPasSemaModel.ActiveShadow(AScope: PSemaScope;
+  AAtToken: Integer): Integer;
+var
+  LIdx: Integer;
+begin
+  // Joined in declaration order, so the scan from the end stops at the
+  // nearest helper declared at or before the token - nearly always the first
+  // probe, and the array is empty for all but a handful of scopes.
+  for LIdx := High(AScope.Shadowing) downto 0 do
+    if (AAtToken < 0) or (AScope.Shadowing[LIdx].FromToken <= AAtToken) then
+      Exit(AScope.Shadowing[LIdx].Scope);
+  Result := NIL_SCOPE;
 end;
 
 { Any name -> its lookup key: lower-cased, leading '&' stripped.
@@ -2379,7 +2436,7 @@ begin
 end;
 
 function TPasSemaModel.FindLocalDeep(AScope: Integer;
-  const AKey: TSemaKey; ADepth: Integer): Integer;
+  const AKey: TSemaKey; ADepth, AAtToken: Integer): Integer;
 var
   LScope: PSemaScope;
   LIdx: Integer;
@@ -2407,11 +2464,17 @@ begin
   // scope - every AddScope/JoinScope runs in the model's own Phase 1 or the
   // seed (the PSemaScope rule at TSemaScope).
   LScope := Scopes[AScope];
-  for LIdx := High(LScope.Shadowing) downto 0 do
+  // One helper answers (15.3.3): a hidden one answers no name at all, not
+  // even one the active helper lacks.
+  if LScope.Shadowing <> nil then
   begin
-    Result := FindLocalDeep(LScope.Shadowing[LIdx], AKey, ADepth + 1);
-    if Result <> NIL_SYM then
-      Exit;
+    LIdx := ActiveShadow(LScope, AAtToken);
+    if LIdx <> NIL_SCOPE then
+    begin
+      Result := FindLocalDeep(LIdx, AKey, ADepth + 1, AAtToken);
+      if Result <> NIL_SYM then
+        Exit;
+    end;
   end;
   Result := FindLocalIn(LScope, AKey);
   if Result <> NIL_SYM then
@@ -2421,7 +2484,8 @@ begin
   // own joins are reachable too.
   for LIdx := High(LScope.Additional) downto 0 do
   begin
-    Result := FindLocalDeep(LScope.Additional[LIdx], AKey, ADepth + 1);
+    Result := FindLocalDeep(LScope.Additional[LIdx], AKey, ADepth + 1,
+      AAtToken);
     if Result <> NIL_SYM then
       Exit;
   end;
@@ -2459,7 +2523,7 @@ begin
 end;
 
 procedure TPasSemaModel.EnumScopeDeep(AScope: Integer;
-  const AOnSym: TPasSymEnumProc; ADepth: Integer);
+  const AOnSym: TPasSymEnumProc; ADepth, AAtToken: Integer);
 var
   LJoins: TArray<Integer>;
   LIdx: Integer;
@@ -2469,14 +2533,15 @@ begin
   // graph the cap costs duplicates rather than a hang.
   if ADepth > 16 then
     Exit;
-  LJoins := Scopes[AScope].Shadowing;
-  for LIdx := High(LJoins) downto 0 do
-    EnumScopeDeep(LJoins[LIdx], AOnSym, ADepth + 1);
+  // The active helper only, as FindLocalDeep reads them (15.3.3).
+  LIdx := ActiveShadow(Scopes[AScope], AAtToken);
+  if LIdx <> NIL_SCOPE then
+    EnumScopeDeep(LIdx, AOnSym, ADepth + 1, AAtToken);
   for LIdx := 0 to Scopes[AScope].Symbols.Count - 1 do
     AOnSym(Scopes[AScope].Symbols[LIdx], AScope);
   LJoins := Scopes[AScope].Additional;
   for LIdx := High(LJoins) downto 0 do
-    EnumScopeDeep(LJoins[LIdx], AOnSym, ADepth + 1);
+    EnumScopeDeep(LJoins[LIdx], AOnSym, ADepth + 1, AAtToken);
 end;
 
 function TPasSemaModel.Resolve(AScope: Integer;
@@ -2506,11 +2571,15 @@ var
   LIdx: Integer;
 begin
   LScope := Scopes[AScope];
-  for LIdx := High(LScope.Shadowing) downto 0 do
+  if LScope.Shadowing <> nil then
   begin
-    Result := FindLocalDeep(LScope.Shadowing[LIdx], AKey, 1);
-    if Result <> NIL_SYM then
-      Exit;
+    LIdx := ActiveShadow(LScope, -1);
+    if LIdx <> NIL_SCOPE then
+    begin
+      Result := FindLocalDeep(LIdx, AKey, 1);
+      if Result <> NIL_SYM then
+        Exit;
+    end;
   end;
   Result := FindLocalIn(LScope, AKey);
   if Result <> NIL_SYM then
@@ -2543,7 +2612,8 @@ begin
 end;
 
 function TPasSemaModel.FindByArityDeepK(AScope: Integer;
-  const AKey: TSemaKey; AWantGeneric: Boolean; ADepth: Integer): Integer;
+  const AKey: TSemaKey; AWantGeneric: Boolean;
+  ADepth, AAtToken: Integer): Integer;
 var
   LScope: PSemaScope;
   LIdx, LSym, LDepth: Integer;
@@ -2568,12 +2638,16 @@ begin
   // stayed invisible to the arity-corrected relookup.
   // Through the pointer, as FindLocalDeep (audit C1-06).
   LScope := Scopes[AScope];
-  for LIdx := High(LScope.Shadowing) downto 0 do
+  if LScope.Shadowing <> nil then
   begin
-    Result := FindByArityDeepK(LScope.Shadowing[LIdx], AKey, AWantGeneric,
-      ADepth + 1);
-    if Result <> NIL_SYM then
-      Exit;
+    LIdx := ActiveShadow(LScope, AAtToken);
+    if LIdx <> NIL_SCOPE then
+    begin
+      Result := FindByArityDeepK(LIdx, AKey, AWantGeneric, ADepth + 1,
+        AAtToken);
+      if Result <> NIL_SYM then
+        Exit;
+    end;
   end;
   LSym := FindLocal(AScope, AKey);
   // Same name, same scope: types chain through NextOverload like routines do,
@@ -2590,7 +2664,7 @@ begin
   for LIdx := High(LScope.Additional) downto 0 do
   begin
     Result := FindByArityDeepK(LScope.Additional[LIdx], AKey, AWantGeneric,
-      ADepth + 1);
+      ADepth + 1, AAtToken);
     if Result <> NIL_SYM then
       Exit;
   end;
@@ -2661,7 +2735,7 @@ begin
   LCur := AScope;
   while LCur <> NIL_SCOPE do
   begin
-    Result := FindByArityDeepK(LCur, AKey, AWantGeneric);
+    Result := FindByArityDeepK(LCur, AKey, AWantGeneric, 0, AAtToken);
     if (Result <> NIL_SYM) and VisibleAt(LCur, Result, AAtToken) then
       Exit;
     LCur := Scopes[LCur].Parent;
@@ -2697,7 +2771,9 @@ begin
   LCur := AScope;
   while LCur <> NIL_SCOPE do
   begin
-    Result := FindLocalDeep(LCur, AKey, 0);
+    // The token picks the helper too: a bare name in a method of a type
+    // reaches the helper active where it is written (15.3.4).
+    Result := FindLocalDeep(LCur, AKey, 0, AAtToken);
     if Result <> NIL_SYM then
     begin
       if VisibleAt(LCur, Result, AAtToken) then
@@ -3962,6 +4038,57 @@ begin
     if Diags[LIdx].DeclNode = ANode then
       Exit(True);
   Result := False;
+end;
+
+function TPasSemaModel.WithListedUnopened(AWith: Integer): Boolean;
+begin
+  for var LListed in WithUnopened do
+    if LListed = AWith then
+      Exit(True);
+  Result := False;
+end;
+
+procedure TPasSemaModel.ReopenWith(AWith: Integer);
+var
+  LBody, LIdx, LOut, LTo: Integer;
+  LKeep: TArray<Integer>;
+
+  function InBody(ANode: Integer): Boolean;
+  begin
+    while (ANode <> NIL_NODE) and (ANode >= 0) and
+          (ANode <= High(Tree.Nodes)) do
+    begin
+      if ANode = LBody then
+        Exit(True);
+      ANode := Tree.Nodes[ANode].Parent;
+    end;
+    Result := False;
+  end;
+
+begin
+  LBody := Tree.WithBody(AWith);
+  if LBody = NIL_NODE then
+    Exit;
+  WithUnopened := WithUnopened + [AWith];
+  SealWithUnopened;
+  LOut := TyperDiagFrom;
+  LTo := TyperDiagTo;
+  for LIdx := TyperDiagFrom to FDiagCount - 1 do
+    if (LIdx >= LTo) or not InBody(Diags[LIdx].DeclNode) then
+    begin
+      Diags[LOut] := Diags[LIdx];
+      Inc(LOut);
+    end
+    else
+      Dec(TyperDiagTo);
+  for LIdx := LOut to FDiagCount - 1 do
+    Diags[LIdx] := Default(TSemaDiag);
+  FDiagCount := LOut;
+  LKeep := nil;
+  for LIdx in PastStructRecheck do
+    if not InBody(LIdx) then
+      LKeep := LKeep + [LIdx];
+  PastStructRecheck := LKeep;
 end;
 
 end.
