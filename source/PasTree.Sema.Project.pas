@@ -1406,7 +1406,9 @@ type
       a file of another unit's name by the dotted name's last segment
       (`uses MVCFramework.Serializer.Commons` reaching a `Commons.pas`),
       which dcc would not compile against. A name looked up through that
-      unit got no complete lookup, so an attribute's W1074 is no verdict. }
+      unit got no complete lookup, so no undeclared-name verdict - E2003, an
+      attribute's W1074 - is knowable (UndeclaredReported). Scanned once per
+      model, on the first verdict that asks (AModel.UsesGuess). }
     function UsesLeafGuessed(AModel: TPasSemaModel): Boolean;
     function IgnoredResolutionTarget(AModel: TPasSemaModel; ANode: Integer;
       AId: Integer): Boolean;
@@ -1808,8 +1810,10 @@ type
       the F1027 before it gets that far - which also hides every real typo in
       the unit until the path is fixed. On, the F1027 stays and each name is
       judged against what did load: a name the missing unit declares becomes a
-      false E2003, the price the host's user chose. Only the undeclared-name
-      verdicts move (UndeclaredReported); member, call and visibility checks
+      false E2003, the price the host's user chose. A dotted import found only
+      by its last segment (UsesLeafGuessed) gates the same way and is reported
+      the same way under this switch. Only the undeclared-name verdicts move
+      (UndeclaredReported); member, call and visibility checks
       keep their own AllUsesResolved gate, and $IF evaluation is untouched. }
     property ReportUndeclaredBehindMissingUnits: Boolean
       read FReportBehindMissing write FReportBehindMissing;
@@ -9093,6 +9097,7 @@ begin
   // The unit ids change here, and the search order is read off them.
   LModel.UsesOrder := nil;
   LModel.UsesOrderState := 0;
+  LModel.UsesGuess := 0;   // the ids move: UsesLeafGuessed asks again
   // An include that did not load (not found, recursive, too deep) took its
   // declarations with it, exactly like an unresolved import: its F1026 /
   // E2245 is the defect, the undeclared names after it are not (audit
@@ -10296,22 +10301,36 @@ function TPasSemaProject.UsesLeafGuessed(AModel: TPasSemaModel): Boolean;
 var
   LIdx, LUid: Integer;
   LWritten, LGot: string;
+  LKnown: Boolean;
 begin
+  if AModel.UsesGuess <> 0 then
+    Exit(AModel.UsesGuess = 2);
   Result := False;
+  LKnown := True;
   for LIdx := 0 to High(AModel.UsesList) do
   begin
     LUid := AModel.UsesList[LIdx].UnitId;
     if (LUid < 0) or (LUid >= FModels.Count) or
-       (AModel.UsesList[LIdx].InPath <> '') then
-      Continue;
-    LWritten := LowerCase(AModel.UsesList[LIdx].NameFull);
-    if Pos('.', LWritten) = 0 then
+       (AModel.UsesList[LIdx].InPath <> '') or
+       (Pos('.', AModel.UsesList[LIdx].NameFull) = 0) then
       Continue;
     LGot := FModels[LUid].UnitNameLower;
+    // A unit not resolved yet has no name to compare: answered, not kept.
+    if LGot = '' then
+    begin
+      LKnown := False;
+      Continue;
+    end;
+    LWritten := LowerCase(AModel.UsesList[LIdx].NameFull);
     // The name as written, or a unit scope prefix before it (-NS).
     if (LGot <> LWritten) and not LGot.EndsWith('.' + LWritten) then
-      Exit(True);
+    begin
+      Result := True;
+      Break;
+    end;
   end;
+  if Result or LKnown then
+    AModel.UsesGuess := 1 + Ord(Result);
 end;
 
 function TPasSemaProject.AttrDecidingName(AId, AAttr: Integer): Integer;
@@ -10744,6 +10763,13 @@ var
   LStruct, LAttr: Integer;
   LSilent: Boolean;
 begin
+  // The one gate of every undeclared-name verdict, whichever pass reached it
+  // and whatever it gated on itself (most passes AllUsesResolved alone): a
+  // unit with an import found only by the search's tolerance (UsesLeafGuessed)
+  // had no complete lookup - the E2003 rows behind such an import were names
+  // of the unit dcc would have compiled against.
+  if not UndeclaredReported(AModel) then
+    Exit;
   // A COMPILER-RECOGNIZED attribute name (19.3.3) - `[Ref]`, `[Align(8)]`,
   // `[weak]` and friends - is System's declaration, which an analysis without
   // System cannot bind (see IsMagicAttributeRef), so "undeclared" is a false
@@ -10783,8 +10809,7 @@ begin
   if LSilent then
   begin
     LAttr := AttrOfNameHead(AModel, ANode);
-    if (LAttr <> NIL_NODE) and not AModel.HasDiagAt(LAttr) and
-       not UsesLeafGuessed(AModel) then
+    if (LAttr <> NIL_NODE) and not AModel.HasDiagAt(LAttr) then
       EmitAt(AModel, LAttr, 'W1074', SW1074_UnknownCustomAttribute);
     Exit;
   end;
@@ -23006,13 +23031,17 @@ begin
 end;
 
 { Whether AModel's undeclared names are reported: always when every import
-  and include loaded, and behind a missing one only under
-  ReportUndeclaredBehindMissingUnits. The one gate of the four E2003
-  verdicts - CrossResolve, CrossResolveDecl, CrossResolveInheritedRange and
-  CrossResolveWith. }
+  and include loaded and no dotted import was found by its last segment alone
+  (UsesLeafGuessed), and behind a missing or guessed one only under
+  ReportUndeclaredBehindMissingUnits. The one gate of every undeclared-name
+  verdict: EmitE2003 asks it (E2003 and the W1074 of an undeclared attribute
+  name), and the four bare-name passes - CrossResolve, CrossResolveDecl,
+  CrossResolveInheritedRange and CrossResolveWith - ask it before recording
+  a name as undeclared. }
 function TPasSemaProject.UndeclaredReported(AModel: TPasSemaModel): Boolean;
 begin
-  Result := AModel.AllUsesResolved or FReportBehindMissing;
+  Result := FReportBehindMissing or
+    (AModel.AllUsesResolved and not UsesLeafGuessed(AModel));
 end;
 
 procedure TPasSemaProject.CrossResolve(AId: Integer);

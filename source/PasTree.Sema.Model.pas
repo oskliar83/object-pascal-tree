@@ -606,6 +606,9 @@ type
     UsesByName: TSemaKeyIndex;
     UsesIndexed: Boolean;
     AllUsesResolved: Boolean;       // gates E2003 (set by the project driver): every import and every include loaded
+    // TPasSemaProject.UsesLeafGuessed's answer, asked lazily: 0 not yet asked
+    // (ResolveUses resets it), 1 no, 2 yes.
+    UsesGuess: Byte;
     UnitNameLower: string;          // this unit's own name, lower-cased
     // nkWithStmt nodes whose target member set is NOT fully known intra-unit:
     // the target's type could not be resolved at all, OR it resolved to a
