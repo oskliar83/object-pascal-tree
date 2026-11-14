@@ -3380,6 +3380,7 @@ procedure TPasSemaResolver.JoinHelperScopes;
 var
   LIdx, LScope, LRef, LExtSym: Integer;
   LExtScopes: TArray<Integer>;   // parallel to FPendingHelpers; NIL_SCOPE = skip
+  LOrder: TArray<Integer>;       // FPendingHelpers indexes in token order
   LAny: Boolean;
 
   // The member scope of ASym or of whatever it aliases, resolving each link by
@@ -3450,29 +3451,37 @@ begin
   // Direction 1: T's members now include the helper's, so both a bare
   // reference from inside T's own methods (which join T's member scope) and
   // a qualified T.Member (ResolveNode's nkMember, via FindLocalDeep) find
-  // them. ONE helper per type: at most one is active (15.3.3), the one
-  // declared last, and a name it lacks is the type's own - never an earlier
-  // helper's. Joining every helper let `Q.Baz` reach TQH0.Baz beside the
-  // later TQH1 (dcc: TQ.Baz; local/probe-b28 H3).
+  // them. ONE helper per type answers at a position (15.3.3): the one
+  // declared last BEFORE it (15.3.4 - an own helper below a body does not
+  // apply in it, and above a later helper the earlier one still does), and a
+  // name it lacks is the type's own - never another helper's. So every
+  // helper is joined, each from its declaration's token, and the lookup
+  // picks one (TPasSemaModel.ActiveShadow); with no position, the last.
   // SHADOWING, not an ordinary join: a helper member hides the extended
   // type's own of the same name (15.3.3). Only this unit's Phase 1 reads the
   // join; the project's walks take the active helper from their registry
-  // (TPasSemaModel.FindLocalNoHelpers).
+  // (TPasSemaModel.FindLocalNoHelpers), which keys own helpers by the same
+  // token (TPasHelperReg.DeclTok).
+  // Pending order is collection order, which is the tree's; ActiveShadow
+  // needs token order, so a nested helper collected out of it is placed.
+  SetLength(LOrder, Length(FPendingHelpers));
   for LIdx := 0 to High(FPendingHelpers) do
   begin
-    if LExtScopes[LIdx] = NIL_SCOPE then
-      Continue;
-    var LLast := True;
-    for var LLater := LIdx + 1 to High(FPendingHelpers) do
-      if LExtScopes[LLater] = LExtScopes[LIdx] then
-      begin
-        LLast := False;
-        Break;
-      end;
-    if LLast then
-      FModel.JoinScopeShadowing(LExtScopes[LIdx],
-        FModel.Symbols[FPendingHelpers[LIdx].HelperSym].MemberScope);
+    var LPos := LIdx;
+    while (LPos > 0) and
+          (FTree.Nodes[FPendingHelpers[LOrder[LPos - 1]].Node].FirstToken >
+           FTree.Nodes[FPendingHelpers[LIdx].Node].FirstToken) do
+    begin
+      LOrder[LPos] := LOrder[LPos - 1];
+      Dec(LPos);
+    end;
+    LOrder[LPos] := LIdx;
   end;
+  for LIdx in LOrder do
+    if LExtScopes[LIdx] <> NIL_SCOPE then
+      FModel.JoinScopeShadowing(LExtScopes[LIdx],
+        FModel.Symbols[FPendingHelpers[LIdx].HelperSym].MemberScope,
+        FTree.Nodes[FPendingHelpers[LIdx].Node].FirstToken);
   // Direction 2: the helper's own method BODIES see T's members through the
   // implicit Self. Those bodies are separate routine scopes (a method is
   // implemented outside the type), each tagged by CollectRoutine with the
@@ -3805,7 +3814,8 @@ begin
              (FModel.Symbols[LHead].MemberScope <> NIL_SCOPE) then
             for var LI := 1 to High(LSegs) - 1 do
               FModel.RefMap[LSegs[LI]] := FModel.FindLocalDeep(
-                FModel.Symbols[LHead].MemberScope, NodeKey(LSegs[LI]));
+                FModel.Symbols[LHead].MemberScope, NodeKey(LSegs[LI]), 0,
+                FTree.Nodes[LSegs[LI]].FirstToken);
         end;
       end;
 
@@ -3829,7 +3839,8 @@ begin
           // qualified `TMatrix.Identity` must find exactly like a bare one.
           if LMemScope <> NIL_SCOPE then
           begin
-            var LCc := FModel.FindLocalDeep(LMemScope, NodeKey(LName));
+            var LCc := FModel.FindLocalDeep(LMemScope, NodeKey(LName),
+              0, FTree.Nodes[LName].FirstToken);
             // A class constructor or destructor is never what a name means
             // (15.1.5): `TFoo.Create` past TFoo's private `class constructor
             // Create` to the next overload, unbound when none is left so the
@@ -4699,7 +4710,8 @@ begin
     if (LParent = NIL_NODE) or
        ((KindOf(LParent) <> nkGotoStmt) and
         ((KindOf(LParent) <> nkMember) or (FirstChild(LParent) = ANode))) then
-      if FModel.FindLocalDeep(AWithScope, NodeKey(ANode)) <> NIL_SYM then
+      if FModel.FindLocalDeep(AWithScope, NodeKey(ANode), 0,
+           FTree.Nodes[ANode].FirstToken) <> NIL_SYM then
         FModel.RefMap[ANode] := NIL_SYM;
   end;
   LChild := FirstChild(ANode);
@@ -4921,7 +4933,8 @@ begin
         if LInside and (FModel.Symbols[LSym].Scope <> AWithScope) and
            (FModel.Scopes[FModel.Symbols[LSym].Scope].Kind <> sckWith) then
         begin
-          LMember := FModel.FindLocalDeep(AWithScope, NodeKey(LNode));
+          LMember := FModel.FindLocalDeep(AWithScope, NodeKey(LNode), 0,
+            FTree.Nodes[LNode].FirstToken);
           if LMember <> NIL_SYM then
             FModel.RefMap[LNode] := LMember;
         end;
@@ -5714,11 +5727,13 @@ begin
   CheckBareRaises;    // structural only - see its own header
   CheckCaptures;      // needs RefMap - see its own header
   CheckSlicePositions; // needs RefMap - see its own header
+  FModel.TyperDiagFrom := FModel.DiagCount;
   if not FSkipTyper then
     // The platform reaches the typer for one rule only: a 64-bit ordinal
     // `set of` base is E2001 where a 32-bit one is E2028, and NativeInt is
     // whichever the target makes it.
     TPasSemaTyper.Check(FModel, FPlatform);
+  FModel.TyperDiagTo := FModel.DiagCount;
 end;
 
 end.

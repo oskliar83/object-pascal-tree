@@ -529,14 +529,13 @@ of less work, not a gap in following the language; its consequences are in
   of `C.` (`C: class of TBase` of the unit itself); the project pass binds and
   types them, and refuses the instance ones (E2124 / E2233 / E2076).
 
-### 15.3.3 Helper scope-resolution rule
-- the active helper is decided per unit, not per position: a unit's own
-  helper declared below a routine body already applies in it, and with two
-  helpers for one type in a unit the later one applies above it too (dcc
-  counts only the helpers declared before the position).
-- in a `with` over a record of the unit itself whose helper lives in a unit
-  that uses this one, a helper member named like a declaration of the
-  enclosing scope keeps that declaration.
+### 15.3.4 Where a helper is active
+- completion over an edited buffer (an overlay, not the analysis's own
+  model) reads the helpers of a type of ANOTHER unit as the end of the unit
+  does: an own helper for it declared below the caret is offered there. The
+  overlay's tokens are not the analysis's, so its caret has no position in
+  the registry; a type of the unit itself is the overlay's own and follows
+  the caret.
 
 ## 16-generics.md
 

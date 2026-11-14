@@ -717,7 +717,13 @@ last run: pairs naming the renumbered unit follow the symbol map, the redone
 models recollect their declared helpers, and the index is republished for
 them and - only when a redone model's exported helpers actually differ - for
 their direct importers. `BuildHelperMap` (wholesale, parallel) remains the
-full pipeline's. Measured on the client closure: the `helpers` stage went
+full pipeline's. The positional half of the index (spec 15.3.4: an own
+helper applies from its declaration's token, an implementation `uses`
+entry's below that entry, a variable of another unit carries the helper
+active at its declaration) is republished with it and renumbered with it; a
+helper's token is not part of the "exports differ" test - an importer reads
+only the ORDER of a unit's interface declarations, which the interface
+prefix guard already holds fixed. Measured on the client closure: the `helpers` stage went
 from 141-159 ms to 0-5 ms, the whole pass tail of a one-module run from
 ~155 ms to 3-14 ms. The per-stage split is in `StageTimings` as
 `mp=resolve:N,helpers:N,decl:N,inherited:N,with:N,calls:N,bindx:N,xtype:N;`.
