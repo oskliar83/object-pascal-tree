@@ -9923,7 +9923,10 @@ begin
     Exit(NIL_NODE);
   Result := LCur;
   // Past each unit qualifier, dotted or not: the segment it qualifies.
-  while UnitNameOf(AId, LCur) >= 0 do
+  while (LM.Tree.Nodes[LCur].Parent <> NIL_NODE) and
+        (LM.Tree.Nodes[LM.Tree.Nodes[LCur].Parent].Kind = nkMember) and
+        (LM.Tree.Nodes[LM.Tree.Nodes[LCur].Parent].FirstChild = LCur) and
+        (UnitNameOf(AId, LCur) >= 0) do
   begin
     LParent := LM.Tree.Nodes[LCur].Parent;
     if (LParent = NIL_NODE) or (LM.Tree.Nodes[LParent].Kind <> nkMember) or
@@ -12167,7 +12170,7 @@ begin
     // except a TRUE constant in an interface's first bracket, which is the
     // GUID: `[S]`, and `[GT, S]` after a dropped typed TGUID constant GT
     // (InterfaceGuidBracket). An undeclared one is EmitE2003's W1074.
-    if LM.AllUsesResolved and not UsesLeafGuessed(LM) then
+    if LM.AllUsesResolved then
     begin
       LHead := AttrDecidingName(AId, LNode);
       if LHead <> NIL_NODE then
@@ -12190,7 +12193,8 @@ begin
           if not ((FModels[LKMid].Symbols[LSym].Kind = skConst) and
                   (FModels[LKMid].Symbols[LSym].TypeNode = NIL_NODE) and
                   ((LKind = nkGuid) or InterfaceGuidBracket(LM, LNode))) and
-             not LM.HasDiagAt(LAnchor) then
+             not LM.HasDiagAt(LAnchor) and
+             not UsesLeafGuessed(LM) then
             EmitAt(LM, LAnchor, 'W1074', Format(SW1074_UnknownCustomAttributeName,
               [FModels[LKMid].Symbols[LSym].Name]));
           Continue;
@@ -12271,6 +12275,33 @@ var
     Result := True;
   end;
 
+  // Does a parameter of the heading scope AScope write a type name bound to
+  // a symbol of this unit declared after AAfter?
+  function HeadingNamesLaterType(AScope, AAfter: Integer): Boolean;
+  var
+    LList: TSemaSymList;
+    LI, LType, LBound: Integer;
+  begin
+    Result := False;
+    LList := LM.Scopes[AScope].Symbols;
+    for LI := 0 to LList.Count - 1 do
+    begin
+      if LM.Symbols[LList[LI]].Kind <> skParam then
+        Continue;
+      LType := LM.Symbols[LList[LI]].TypeNode;
+      if (LType = NIL_NODE) or not (LM.Tree.Nodes[LType].Kind in [nkIdent,
+         nkMember]) then
+        Continue;
+      if LM.Tree.Nodes[LType].Kind = nkMember then
+        LType := LM.Tree.LastChild(LType);
+      if LType = NIL_NODE then
+        Continue;
+      LBound := LM.RefMap[LType];
+      if (LBound <> NIL_SYM) and (LM.Symbols[LBound].DeclNode > AAfter) then
+        Exit(True);
+    end;
+  end;
+
   function SameSlotBinding(AImpl, ADecl: Integer): Boolean;
   var
     LMid1, LSym1, LMid2, LSym2: Integer;
@@ -12311,6 +12342,13 @@ begin
     end;
     if (LName = NIL_NODE) or (LChild = NIL_NODE) or
        (LM.Tree.Nodes[LChild].Kind <> nkParams) then
+      Continue;
+    // A heading can name another type than its declaration only through a
+    // name of this unit declared after the struct began: a heading's type
+    // bound in another unit was another unit's at the declaration too (it
+    // sees fewer of this unit's names, and the same `uses`). Most headings
+    // end here, on array reads alone.
+    if not HeadingNamesLaterType(LScope, LM.Symbols[LStruct].DeclNode) then
       Continue;
     LDecl := LM.FindLocal(LM.Symbols[LStruct].MemberScope,
       PasNodeKey(LM.Tree, LName));

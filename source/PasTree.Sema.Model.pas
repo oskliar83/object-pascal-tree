@@ -703,6 +703,11 @@ type
       the qualifier: (member node, name node, unit id) triples. Written by
       CrossResolve, emptied when judged. }
     LateUnitMembers: TArray<Integer>;
+    { 3.3.2: the forward `TFoo = class;` a completing type's symbol came from
+      - symbol -> the forward name's first token (its DeclNode is the
+      completion's). Written by the resolver at the completion; read by
+      ForwardVisibleAt, which once walked the type section per reference. }
+    ForwardTokens: TPasIntMap<Integer>;
     { The names the oracle was asked for that stream - every `Declared(X)`
       and symbol question (`SizeOf(T)`, a const) the first pass could not
       answer, lower-cased, dotted names split into their segments. Empty
@@ -2613,42 +2618,20 @@ end;
   (CollectTypeDecl): the name is there from the forward on, so a reference
   between the two reads the completed type. One above the forward does not
   (3.3.2 point 3, dcc64 37.0): the search goes on outward, to a used unit's
-  TFoo or E2003. The forward is the section's first declaration of the name
-  whose type is a forward struct - found by a walk over the section, which
-  runs only for a reference above a completion. }
+  TFoo or E2003. The forward's token is the resolver's record
+  (ForwardTokens). }
 function TPasSemaModel.ForwardVisibleAt(ASym, AAtToken: Integer): Boolean;
 var
-  LSec, LDecl, LChild: Integer;
+  LSec, LFwd: Integer;
 begin
   Result := False;
-  if not (sfCompletesForward in Symbols[ASym].Flags) then
+  if not (sfCompletesForward in Symbols[ASym].Flags) or
+     not ForwardTokens.TryGetValue(ASym, LFwd) or (AAtToken < LFwd) then
     Exit;
   LSec := Symbols[ASym].DeclNode;
   while (LSec <> NIL_NODE) and (Tree.Nodes[LSec].Kind <> nkTypeSec) do
     LSec := Tree.Nodes[LSec].Parent;
-  if (LSec = NIL_NODE) or (AAtToken < Tree.Nodes[LSec].FirstToken) or
-     (AAtToken > Tree.Nodes[LSec].LastToken) then
-    Exit;
-  LDecl := Tree.Nodes[LSec].FirstChild;
-  while (LDecl <> NIL_NODE) and (Tree.Nodes[LDecl].FirstToken <= AAtToken) do
-  begin
-    if Tree.Nodes[LDecl].Kind = nkTypeDecl then
-    begin
-      LChild := PasSkipAttrGroups(Tree, Tree.Nodes[LDecl].FirstChild);
-      if (LChild <> NIL_NODE) and
-         Tree.NodeTextEquals(LChild, Symbols[ASym].NameLower) then
-      begin
-        LChild := Tree.Nodes[LChild].NextSibling;
-        while LChild <> NIL_NODE do
-        begin
-          if PasIsForwardStruct(Tree, LChild) then
-            Exit(True);
-          LChild := Tree.Nodes[LChild].NextSibling;
-        end;
-      end;
-    end;
-    LDecl := Tree.Nodes[LDecl].NextSibling;
-  end;
+  Result := (LSec <> NIL_NODE) and (AAtToken <= Tree.Nodes[LSec].LastToken);
 end;
 
 function TPasSemaModel.ResolveByArityAt(AScope: Integer;

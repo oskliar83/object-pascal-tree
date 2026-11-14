@@ -1990,6 +1990,10 @@ begin
     // The completing declaration supersedes the forward one (`TFoo = class;`):
     // DeclNode must reach the real definition so ancestor/generic-param walks
     // (TypeDefNode and the project's cross typer) see heritage and params.
+    // The forward's own position is kept for ForwardVisibleAt.
+    if FModel.Symbols[LSym].DeclNode <> NIL_NODE then
+      FModel.ForwardTokens.AddOrSetValue(LSym,
+        FTree.Nodes[FModel.Symbols[LSym].DeclNode].FirstToken);
     FModel.Symbols[LSym].DeclNode := LName;
     // Named from the forward on, not from here (3.3.2, general approach
     // point 3): TPasSemaModel.ForwardVisibleAt.
