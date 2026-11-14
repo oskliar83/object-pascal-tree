@@ -587,6 +587,14 @@ type
     SymTypeX: TPasIntMap<TSemaXType>;            // symbol -> declared type
     ExprTypeX: TPasIntMap<TSemaXType>;           // node -> expression type
     UsesList: TArray<TPasUsesRef>;
+    { The order a bare name searches the used units in: UsesList indices,
+      the WEAKEST first - a search walks it from the end. nil = the written
+      order, the common case. It differs only when the interface section
+      entered an implementation `uses` unit early (03 sec. 3.3.2, step 6).
+      Filled lazily by TPasSemaProject.UsesOrder (UsesOrderState 1 once
+      done, interlocked), reset by ResolveUses. }
+    UsesOrder: TArray<Integer>;
+    UsesOrderState: Integer;
     { Lower-cased `uses` names -> UnitId, each as WRITTEN in the clause -
       never a dotted name's last segment, which dcc does not declare (see
       CollectUsesItem) - first entry wins, the same answer the ascending scan

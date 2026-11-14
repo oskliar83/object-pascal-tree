@@ -3613,6 +3613,146 @@ begin
   end;
 end;
 
+{ An implementation `uses` entry the interface section entered early ranks
+  below the entries it did not (spec 03 sec. 3.3.2, step 6; dcc64 37.0,
+  2026-11-14). UA and UWb both declare `F` (UA's an external routine, as
+  the client group's own Windows-API unit beside Winapi.WinSvc) and `K`;
+  UMid aliases UWb's types. With `uses UA, UWb` in the implementation, the
+  later UWb answers - unless the interface built a type out of one of UWb's
+  types (a class's method result, a typed constant's type), which entered
+  UWb first: then UA. A plain alias or a variable of a named type enters
+  nothing. Two units entered early rank in the order they were first named. }
+procedure TestImplUsesEnteredEarly;
+const
+  UWB =
+    'unit UWb;'#13#10'interface'#13#10 +
+    'type'#13#10 +
+    '  TRecB = record A, B: Integer; end;'#13#10 +
+    '  TProcB = procedure(C: Cardinal); stdcall;'#13#10 +
+    'function F: Integer;'#13#10 +
+    'const K = 2;'#13#10 +
+    'implementation'#13#10 +
+    'function F: Integer; begin Result := 2; end;'#13#10'end.'#13#10;
+  UWC =
+    'unit UWc;'#13#10'interface'#13#10 +
+    'type TRecC = record A: Integer; end;'#13#10 +
+    'function F: Integer;'#13#10 +
+    'const K = 3;'#13#10 +
+    'implementation'#13#10 +
+    'function F: Integer; begin Result := 3; end;'#13#10'end.'#13#10;
+  UA =
+    'unit UA;'#13#10'interface'#13#10 +
+    'function F: Integer; stdcall;'#13#10 +
+    'const K = 1;'#13#10 +
+    'implementation'#13#10 +
+    'function F; external ''probe.dll'' name ''F'';'#13#10'end.'#13#10;
+  UMID =
+    'unit UMid;'#13#10'interface'#13#10'uses UWb, UWc;'#13#10 +
+    'type'#13#10 +
+    '  TRecM = TRecB;'#13#10 +
+    '  TProcM = TProcB;'#13#10 +
+    '  TRecMC = TRecC;'#13#10 +
+    'implementation'#13#10'end.'#13#10;
+  // Line 10: `  X := F + K;` - F at column 8, K at column 12.
+  BODY =
+    'var X: Integer;'#13#10 +                                // 7
+    'procedure Run;'#13#10 +                                 // 8
+    'begin'#13#10 +                                          // 9
+    '  X := F + K;'#13#10 +                                  // 10
+    'end;'#13#10 +                                           // 11
+    'end.'#13#10;
+  PGM =
+    'program PEe;'#13#10 +
+    'uses UE1, UE2, UE3, UE4, UE5, UE6;'#13#10'begin'#13#10'end.'#13#10;
+var
+  LDir: string;
+  LProj: TPasSemaProject;
+
+  procedure WriteUnit(const AName, ADecl, AImplUses: string);
+  begin
+    TFile.WriteAllText(TPath.Combine(LDir, AName + '.pas'),
+      'unit ' + AName + ';'#13#10 +                          // 1
+      'interface'#13#10 +                                    // 2
+      'uses UMid;'#13#10 +                                   // 3
+      ADecl + #13#10 +                                       // 4
+      'implementation'#13#10 +                               // 5
+      'uses ' + AImplUses + ';'#13#10 +                      // 6
+      BODY);
+  end;
+
+  // The unit the name at line 10, column ACol of AUnit binds to.
+  function BoundAt(const AUnit: string; ACol: Integer): string;
+  var
+    LMid: Integer;
+    LM: TPasSemaModel;
+    LFile: string;
+    LLine, LCol: Integer;
+    LExt: TPasExtRef;
+  begin
+    Result := '?';
+    LMid := LProj.ModelIdOf(TPath.Combine(LDir, AUnit + '.pas'));
+    if LMid < 0 then
+      Exit;
+    LM := LProj.Model(LMid);
+    for var LNode := 0 to High(LM.Tree.Nodes) do
+    begin
+      if (LM.Tree.Nodes[LNode].Kind <> nkIdent) or
+         not LProj.NodeSite(LMid, LNode, LFile, LLine, LCol) or
+         (LLine <> 10) or (LCol <> ACol) then
+        Continue;
+      if LM.ExtRefMap.TryGetValue(LNode, LExt) then
+        Exit(ChangeFileExt(ExtractFileName(LProj.ModelFile(LExt.UnitId)), ''));
+      Exit('');
+    end;
+  end;
+
+  procedure Expect(const AUnit, AWhat, AWant: string);
+  begin
+    Ok('impl-uses-early: ' + AUnit + ' ' + AWhat + ': F is ' + AWant + '''s',
+      SameText(BoundAt(AUnit, 8), AWant));
+    Ok('impl-uses-early: ' + AUnit + ' ' + AWhat + ': K is ' + AWant + '''s',
+      SameText(BoundAt(AUnit, 12), AWant));
+  end;
+
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_impl_uses_early');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UWb.pas'), UWB);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UWc.pas'), UWC);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UA.pas'), UA);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UMid.pas'), UMID);
+  // The client group's shape: a class method returning a procedural type.
+  WriteUnit('UE1', 'type TX = class function G: TProcM; end;', 'UA, UWb');
+  // Nothing in the interface: the written order.
+  WriteUnit('UE2', 'const Z = 0;', 'UA, UWb');
+  // A variable of a named type enters nothing.
+  WriteUnit('UE3', 'var V: TRecM;', 'UA, UWb');
+  // A typed constant's type does.
+  WriteUnit('UE4', 'const C: TRecM = (A: 1; B: 2);', 'UA, UWb');
+  // A plain alias enters nothing.
+  WriteUnit('UE5', 'type TRecN = TRecM;', 'UA, UWb');
+  // UWc named before UWb: UWc entered first, UWb outranks it.
+  WriteUnit('UE6', 'type TR = record C: TRecMC; B: TRecM; end;', 'UWb, UWc');
+  TFile.WriteAllText(TPath.Combine(LDir, 'PEe.dpr'), PGM);
+  LProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    Ok('impl-uses-early: PEe analyzed',
+      LProj.AnalyzeProject(TPath.Combine(LDir, 'PEe.dpr')) >= 0);
+    Expect('UE1', 'class method result', 'UA');
+    Expect('UE2', 'no type built', 'UWb');
+    Expect('UE3', 'var of a named type', 'UWb');
+    Expect('UE4', 'typed constant', 'UA');
+    Expect('UE5', 'plain alias', 'UWb');
+    Expect('UE6', 'two entered early', 'UWb');
+  finally
+    LProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 { A member a method cannot see is passed over by the bare-name lookup, which
   goes on up the ancestry and then to the unit (F38 of the parser-fidelity
   plan). PasTree took an ancestor's private member of another unit -
@@ -21878,6 +22018,7 @@ begin
   TestGuidClauseNames;
   TestNestedSameNamedAncestor;
   TestInterfaceSkipsImplUses;
+  TestImplUsesEnteredEarly;
   TestInheritedVisibility;
   TestInheritedBeatsUnitLevel;
   TestWithBodySelfMember;

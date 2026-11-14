@@ -697,6 +697,8 @@ type
     // reproduced via SemaProjectSmoke's UnitE fixture.
     // A plain object locked with TMonitor, like FInternalLock.
     FSystemUnitLock: TObject;
+    // Guards the lazy fill of a model's UsesOrder (see UsesOrder).
+    FUsesOrderLock: TObject;
     // Phase 3c: cross-model typing.
     FInstances: TList<TSemaInstance>;
     FInstKeys: TDictionary<TSemaInstance, Integer>;
@@ -2122,6 +2124,23 @@ type
     // entries are not visible there (F35).
     function FindInUses(AId: Integer; const ANameLower: string;
       out AUnit, ASym: Integer; AIntfOnly: Boolean = False): Boolean;
+    { The order unit AId's bare names search its used units in (03 sec.
+      3.3.2, step 6): UsesList indices, the weakest first, nil for the
+      written order. dcc searches the used units in the reverse of the order
+      they ENTERED the unit's import table, and a unit enters at its `uses`
+      entry - or earlier, when the interface section builds a type out of
+      one of its types (a class's field or method parameter, a record's
+      field, an array's element, a pointer's target, a typed constant's
+      type, through another unit's alias). An implementation `uses` entry
+      naming a unit entered so keeps that early place: every implementation
+      entry not entered early outranks it, the interface entries do not.
+      Every walk of UsesList that stands for a bare-name search goes by it
+      (UsesAt). }
+    function UsesOrder(AId: Integer): TArray<Integer>;
+    function ComputeUsesOrder(AId: Integer): TArray<Integer>;
+    { The UsesList index at position AK of an order UsesOrder gave. }
+    class function UsesAt(const AOrder: TArray<Integer>; AK: Integer): Integer;
+      static; inline;
     { The UsesList entry AIdx of AModel is in the implementation's `uses`. }
     function IsImplUsesEntry(AModel: TPasSemaModel; AIdx: Integer): Boolean;
     { ANode lies in AModel's interface section (not in a program, a package,
@@ -3431,6 +3450,7 @@ begin
   FSysInitUnitResolved := False;
   FSysInitUnitReady := False;
   FSystemUnitLock := TObject.Create;
+  FUsesOrderLock := TObject.Create;
   FEscalationPercent := 40;
 end;
 
@@ -3445,6 +3465,7 @@ begin
   FDefineSide.Free;
   FByUnitName.Free;
   FSystemUnitLock.Free;
+  FUsesOrderLock.Free;
   FHostPins.Free;
   FLightExempt.Free;
   FPromoted.Free;
@@ -3873,8 +3894,10 @@ begin
   // interface's FIRST join (TPasSemaResolver.Run), so skipping it hides
   // nothing another join would have answered.
   var LKey := SemaKey(ANameLower);
-  for LIdx := High(LM.UsesList) downto 0 do   // last uses wins, like resolution
+  var LOrder := UsesOrder(AMid);
+  for var LK := High(LM.UsesList) downto 0 do   // the search order, like resolution
   begin
+    LIdx := UsesAt(LOrder, LK);
     LUid := LM.UsesList[LIdx].UnitId;
     if LUid < 0 then
       Continue;
@@ -5162,10 +5185,11 @@ begin
       Exit(True);
     end;
   end;
+  var LOrder := UsesOrder(AMid);
   for LIdx := High(LM.UsesList) downto -1 do
   begin
     if LIdx >= 0 then
-      LUid := LM.UsesList[LIdx].UnitId
+      LUid := LM.UsesList[UsesAt(LOrder, LIdx)].UnitId
     else
       LUid := EnsureSystemUnit;
     if (LUid < 0) or (FModels[LUid].InterfaceScope = NIL_SCOPE) then
@@ -9062,6 +9086,9 @@ var
 begin
   LModel := FModels[AId];
   LModel.AllUsesResolved := True;
+  // The unit ids change here, and the search order is read off them.
+  LModel.UsesOrder := nil;
+  LModel.UsesOrderState := 0;
   // An include that did not load (not found, recursive, too deep) took its
   // declarations with it, exactly like an unresolved import: its F1026 /
   // E2245 is the defect, the undeclared names after it are not (audit
@@ -9150,6 +9177,371 @@ begin
   Result := -1;
 end;
 
+class function TPasSemaProject.UsesAt(const AOrder: TArray<Integer>;
+  AK: Integer): Integer;
+begin
+  if AOrder = nil then
+    Result := AK
+  else
+    Result := AOrder[AK];
+end;
+
+function TPasSemaProject.UsesOrder(AId: Integer): TArray<Integer>;
+var
+  LM: TPasSemaModel;
+begin
+  LM := FModels[AId];
+  if TInterlocked.CompareExchange(LM.UsesOrderState, 0, 0) = 1 then
+    Exit(LM.UsesOrder);
+  // The fill reads other models' symbols and maps only, never this lock or
+  // a lookup that would ask for an order: no re-entry.
+  TMonitor.Enter(FUsesOrderLock);
+  try
+    if LM.UsesOrderState <> 1 then
+    begin
+      LM.UsesOrder := ComputeUsesOrder(AId);
+      TInterlocked.Exchange(LM.UsesOrderState, 1);
+    end;
+    Result := LM.UsesOrder;
+  finally
+    TMonitor.Exit(FUsesOrderLock);
+  end;
+end;
+
+{ dcc64 37.0, probed 2026-11-14 (03 sec. 3.3.2, step 6): with uA and WinB
+  both declaring `F` and `K`, and uMid's interface `TRecM = TRecB` (WinB's
+  record), a unit whose interface uses uMid and whose implementation uses
+  `uA, WinB` binds WinB's - unless its interface declares, say, `TX = class
+  F: TRecM; end`: then uA's. The interface section entered WinB into the
+  unit's import table before the implementation `uses` was read, and the
+  used units are searched in the reverse of that order. What enters a unit:
+  a type reference inside a type the interface DECLARES - a class's,
+  record's or object's members (fields, method and property signatures, a
+  nested type), an ancestor, an array's element, a pointer's target, a set's
+  base, `class of`, a procedural type's signature, a generic instantiation,
+  a `type T` copy - inside a typed constant's type, or inside a variable's
+  type written inline (`var V: array of TRecM`). What does not: a plain
+  alias (`TRecN = TRecM`), a variable of a named type (`var V: TRecM`), a
+  unit-level routine's heading, an interface type's methods. The unit
+  entered is the one DECLARING the type reached through plain aliases (the
+  record's WinB, not the alias's uMid), and it enters at the first such
+  reference; it becomes no more visible than before (`WinB.K` with WinB
+  unlisted stays E2003) - only an implementation entry naming it ranks
+  differently. }
+function TPasSemaProject.ComputeUsesOrder(AId: Integer): TArray<Integer>;
+var
+  LM: TPasSemaModel;
+  LT: TPasTree;
+  LEarly: TList<Integer>;   // UsesList indices entered early, in that order
+  LImpl: TList<Integer>;    // the unit ids of the implementation entries
+  LSec, LDecl, LDef, LCount, LIdx: Integer;
+
+  // AMid's interface view of a name: its interface `uses`, the last entry
+  // first (F35). The unit's own declarations are not asked - the resolver
+  // bound those (RefMap).
+  function IntfLookup(AMid: Integer; const AKey: TSemaKey;
+    out AUnit, ASym: Integer): Boolean;
+  var
+    LUM: TPasSemaModel;
+    LK, LUid, LS: Integer;
+  begin
+    Result := False;
+    if AKey.Len = 0 then
+      Exit;
+    LUM := FModels[AMid];
+    for LK := High(LUM.UsesList) downto 0 do
+    begin
+      LUid := LUM.UsesList[LK].UnitId;
+      if (LUid < 0) or (LUid = AMid) or LUM.UsesList[LK].InImpl or
+         (FModels[LUid].InterfaceScope = NIL_SCOPE) then
+        Continue;
+      LS := FModels[LUid].ResolveSkipSeed(FModels[LUid].InterfaceScope, AKey);
+      if LS <> NIL_SYM then
+      begin
+        AUnit := LUid;
+        ASym := LS;
+        Exit(True);
+      end;
+    end;
+  end;
+
+  function DottedText(AMid, ANode: Integer): string;
+  var
+    LTr: TPasTree;
+    LBase: string;
+  begin
+    Result := '';
+    LTr := FModels[AMid].Tree;
+    if ANode = NIL_NODE then
+      Exit;
+    case LTr.Nodes[ANode].Kind of
+      nkIdent:
+        Result := LTr.NodeNameLower(ANode);
+      nkMember:
+        begin
+          LBase := DottedText(AMid, LTr.Nodes[ANode].FirstChild);
+          if LBase <> '' then
+            Result := LBase + '.' + LTr.NodeNameLower(LTr.LastChild(ANode));
+        end;
+    end;
+  end;
+
+  // The unit an interface `uses` entry of AMid spelled AText names; -1.
+  function IntfUsesUnitNamed(AMid: Integer; const AText: string): Integer;
+  var
+    LUM: TPasSemaModel;
+    LK: Integer;
+  begin
+    Result := -1;
+    if AText = '' then
+      Exit;
+    LUM := FModels[AMid];
+    for LK := 0 to High(LUM.UsesList) do
+      if not LUM.UsesList[LK].InImpl and
+         PasSameName(LUM.UsesList[LK].NameFull, AText) then
+        Exit(LUM.UsesList[LK].UnitId);
+  end;
+
+  // What the type reference ANode of AMid (a name, or Unit.Name) binds: the
+  // resolver's binding of a name of the unit's own, else the interface view
+  // by name.
+  function RefTarget(AMid, ANode: Integer; out AUnit, ASym: Integer): Boolean;
+  var
+    LRM: TPasSemaModel;
+    LName, LUid, LS: Integer;
+  begin
+    Result := False;
+    LRM := FModels[AMid];
+    LName := ANode;
+    if LRM.Tree.Nodes[ANode].Kind = nkMember then
+      LName := LRM.Tree.LastChild(ANode);
+    if LName = NIL_NODE then
+      Exit;
+    if (LName <= High(LRM.RefMap)) and (LRM.RefMap[LName] <> NIL_SYM) then
+    begin
+      AUnit := AMid;
+      ASym := LRM.RefMap[LName];
+      Exit(True);
+    end;
+    // Not ExtRefMap: the cross pass is writing it, on other threads, while
+    // this order is asked for (a TPasIntMap read during a write was an
+    // ERangeError, Vcl.Imaging.GIFImg). RefMap is a fixed array; the rest
+    // goes by name.
+    if LRM.Demoted then
+      Exit;   // no token layer to read a name from
+    if LRM.Tree.Nodes[ANode].Kind = nkIdent then
+      Exit(IntfLookup(AMid, PasNodeKey(LRM.Tree, ANode), AUnit, ASym));
+    LUid := IntfUsesUnitNamed(AMid,
+      DottedText(AMid, LRM.Tree.Nodes[ANode].FirstChild));
+    if (LUid < 0) or (FModels[LUid].InterfaceScope = NIL_SCOPE) then
+      Exit;
+    LS := FModels[LUid].ResolveSkipSeed(FModels[LUid].InterfaceScope,
+      PasNodeKey(LRM.Tree, LName));
+    if LS = NIL_SYM then
+      Exit;
+    AUnit := LUid;
+    ASym := LS;
+    Result := True;
+  end;
+
+  // The unit declaring the type ASym of AUnit is, through plain aliases.
+  function OwnerUnit(AUnit, ASym: Integer): Integer;
+  var
+    LOM: TPasSemaModel;
+    LStep, LTDef, LU2, LS2: Integer;
+  begin
+    for LStep := 1 to 32 do
+    begin
+      LOM := FModels[AUnit];
+      if (ASym = NIL_SYM) or (LOM.Symbols[ASym].Kind <> skType) then
+        Break;
+      LTDef := TypeDefNodeIn(LOM, ASym);
+      if (LTDef = NIL_NODE) or
+         not (LOM.Tree.Nodes[LTDef].Kind in [nkIdent, nkMember]) or
+         IsDistinctTypeDef(AUnit, LTDef) then
+        Break;
+      if not RefTarget(AUnit, LTDef, LU2, LS2) or
+         ((LU2 = AUnit) and (LS2 = ASym)) then
+        Break;
+      AUnit := LU2;
+      ASym := LS2;
+    end;
+    Result := AUnit;
+  end;
+
+  procedure Note(ANode: Integer);
+  var
+    LU, LS, LOwner, LK: Integer;
+  begin
+    if not RefTarget(AId, ANode, LU, LS) or (LU = AId) or
+       (FModels[LU].Symbols[LS].Kind <> skType) then
+      Exit;
+    LOwner := OwnerUnit(LU, LS);
+    if (LOwner = AId) or not LImpl.Contains(LOwner) then
+      Exit;
+    for LK := 0 to High(LM.UsesList) do
+      if (LM.UsesList[LK].UnitId = LOwner) and LM.UsesList[LK].InImpl then
+      begin
+        if not LEarly.Contains(LK) then
+          LEarly.Add(LK);
+        Break;
+      end;
+  end;
+
+  procedure Walk(ANode: Integer);
+  var
+    LC: Integer;
+  begin
+    if ANode = NIL_NODE then
+      Exit;
+    case LT.Nodes[ANode].Kind of
+      nkIdent:
+        if not (nfName in LT.Nodes[ANode].Flags) then
+          Note(ANode);
+      nkMember:
+        begin
+          if IntfUsesUnitNamed(AId,
+             DottedText(AId, LT.Nodes[ANode].FirstChild)) >= 0 then
+            Note(ANode)
+          else
+            Walk(LT.Nodes[ANode].FirstChild);   // TOuter.TInner: the outer type
+          Exit;
+        end;
+      nkAttrGroup, nkInterfaceType:
+        Exit;
+    end;
+    LC := LT.Nodes[ANode].FirstChild;
+    // A declaration whose name is not marked nfName (a nested type or
+    // constant, a property, an enum value, a generic parameter): its name
+    // is no reference.
+    if LT.Nodes[ANode].Kind in [nkTypeDecl, nkConstDecl, nkPropertyDecl,
+       nkEnumValue, nkGenericParam] then
+    begin
+      LC := PasSkipAttrGroups(LT, LC);
+      if (LC <> NIL_NODE) and (LT.Nodes[LC].Kind = nkIdent) then
+        LC := LT.Nodes[LC].NextSibling;
+    end;
+    while LC <> NIL_NODE do
+    begin
+      Walk(LC);
+      LC := LT.Nodes[LC].NextSibling;
+    end;
+  end;
+
+  // The parts of declaration ADecl after its name(s): the first one, and
+  // ACount, how many there are - attributes, generic parameter lists and
+  // hints not counted. A type's or a constant's name is its first ident (not
+  // marked nfName), a variable's names are marked.
+  function DeclPart(ADecl: Integer; out ACount: Integer): Integer;
+  var
+    LC: Integer;
+  begin
+    Result := NIL_NODE;
+    ACount := 0;
+    LC := PasSkipAttrGroups(LT, LT.Nodes[ADecl].FirstChild);
+    if (LC <> NIL_NODE) and (LT.Nodes[ADecl].Kind <> nkVarDecl) and
+       (LT.Nodes[LC].Kind = nkIdent) then
+      LC := LT.Nodes[LC].NextSibling;
+    while LC <> NIL_NODE do
+    begin
+      if not (nfName in LT.Nodes[LC].Flags) and
+         not (LT.Nodes[LC].Kind in [nkAttrGroup, nkGenericParams,
+           nkDirective]) then
+      begin
+        if ACount = 0 then
+          Result := LC;
+        Inc(ACount);
+      end;
+      LC := LT.Nodes[LC].NextSibling;
+    end;
+  end;
+
+begin
+  Result := nil;
+  LM := FModels[AId];
+  LT := LM.Tree;
+  if (LM.InterfaceScope = NIL_SCOPE) or LM.Demoted or
+     (Length(LT.Nodes) = 0) then
+    Exit;
+  LImpl := TList<Integer>.Create;
+  LEarly := TList<Integer>.Create;
+  try
+    for LIdx := 0 to High(LM.UsesList) do
+      if (LM.UsesList[LIdx].UnitId >= 0) and LM.UsesList[LIdx].InImpl then
+        LImpl.Add(LM.UsesList[LIdx].UnitId);
+    if LImpl.Count = 0 then
+      Exit;
+    LSec := LT.Nodes[0].FirstChild;
+    while (LSec <> NIL_NODE) and (LT.Nodes[LSec].Kind <> nkInterfaceSec) do
+      LSec := LT.Nodes[LSec].NextSibling;
+    if LSec = NIL_NODE then
+      Exit;
+    LSec := LT.Nodes[LSec].FirstChild;
+    while LSec <> NIL_NODE do
+    begin
+      if LT.Nodes[LSec].Kind in [nkTypeSec, nkConstSec, nkVarSec] then
+      begin
+        LDecl := LT.Nodes[LSec].FirstChild;
+        while LDecl <> NIL_NODE do
+        begin
+          case LT.Nodes[LDecl].Kind of
+            nkTypeDecl:
+              begin
+                LDef := DeclPart(LDecl, LCount);
+                if (LDef <> NIL_NODE) and ((LT.Nodes[LDecl].Aux = 1) or
+                   not (LT.Nodes[LDef].Kind in [nkIdent, nkMember,
+                     nkInterfaceType])) then
+                  Walk(LDef);
+              end;
+            nkConstDecl:
+              begin
+                // name [: type] = value: a type only when two parts follow
+                LDef := DeclPart(LDecl, LCount);
+                if LCount >= 2 then
+                  Walk(LDef);
+              end;
+            nkVarDecl:
+              begin
+                LDef := DeclPart(LDecl, LCount);
+                if (LDef <> NIL_NODE) and
+                   not (LT.Nodes[LDef].Kind in [nkIdent, nkMember]) then
+                  Walk(LDef);
+              end;
+          end;
+          LDecl := LT.Nodes[LDecl].NextSibling;
+        end;
+      end;
+      LSec := LT.Nodes[LSec].NextSibling;
+    end;
+    if LEarly.Count = 0 then
+      Exit;
+    // The interface entries, the implementation entries entered early in
+    // that order, then the rest of the implementation entries as written.
+    SetLength(Result, Length(LM.UsesList));
+    LCount := 0;
+    for LIdx := 0 to High(LM.UsesList) do
+      if not LM.UsesList[LIdx].InImpl then
+      begin
+        Result[LCount] := LIdx;
+        Inc(LCount);
+      end;
+    for LIdx in LEarly do
+    begin
+      Result[LCount] := LIdx;
+      Inc(LCount);
+    end;
+    for LIdx := 0 to High(LM.UsesList) do
+      if LM.UsesList[LIdx].InImpl and not LEarly.Contains(LIdx) then
+      begin
+        Result[LCount] := LIdx;
+        Inc(LCount);
+      end;
+  finally
+    LEarly.Free;
+    LImpl.Free;
+  end;
+end;
+
 function TPasSemaProject.FindInUses(AId: Integer; const ANameLower: string;
   out AUnit, ASym: Integer; AIntfOnly: Boolean): Boolean;
 var
@@ -9162,8 +9554,14 @@ begin
   // join: skip that lookup per unit (ResolveSkipSeed).
   var LSeeded := (LModel.SystemScope = NIL_SCOPE) or
     (LModel.FindLocalDeep(LModel.SystemScope, LKey, 0) <> NIL_SYM);
-  for LIdx := High(LModel.UsesList) downto 0 do
+  // The interface's view keeps the written order: only implementation
+  // entries move (UsesOrder).
+  var LOrder: TArray<Integer> := nil;
+  if not AIntfOnly then
+    LOrder := UsesOrder(AId);
+  for var LK := High(LModel.UsesList) downto 0 do
   begin
+    LIdx := UsesAt(LOrder, LK);
     LUid := LModel.UsesList[LIdx].UnitId;
     if (LUid < 0) or (AIntfOnly and IsImplUsesEntry(LModel, LIdx)) then
       Continue;
@@ -9228,8 +9626,12 @@ begin
   // The interface section sees its own `uses` only (F35).
   var LIntf := InInterfaceSection(LModel, ANode);
   var LKey := SemaKey(ANameLower);   // once, not per used unit (C1-18)
-  for var LIdx := High(LModel.UsesList) downto 0 do
+  var LOrder: TArray<Integer> := nil;
+  if not LIntf then
+    LOrder := UsesOrder(AId);
+  for var LK := High(LModel.UsesList) downto 0 do
   begin
+    var LIdx := UsesAt(LOrder, LK);
     LUid := LModel.UsesList[LIdx].UnitId;
     if (LUid < 0) or (LUid = AId) or
        (LIntf and IsImplUsesEntry(LModel, LIdx)) then
@@ -9471,8 +9873,10 @@ begin
   Result := False;
   LModel := FModels[AId];
   var LKey := SemaKey(ANameLower);   // once, not per used unit (C1-18)
-  for LIdx := High(LModel.UsesList) downto 0 do
+  var LOrder := UsesOrder(AId);
+  for var LK := High(LModel.UsesList) downto 0 do
   begin
+    LIdx := UsesAt(LOrder, LK);
     LUid := LModel.UsesList[LIdx].UnitId;
     if LUid < 0 then
       Continue;
@@ -17694,6 +18098,7 @@ var
   var
     LOverload: Boolean;
     LIdx, LFrom, LUid, LS, LSysUid, LSysInitUid: Integer;
+    LOrder: TArray<Integer>;
 
     procedure Add(AMid, ASym: Integer);
     var
@@ -17741,12 +18146,14 @@ var
       // one's), the ones before it are searched next.
       LSysUid := EnsureSystemUnit;
       LSysInitUid := EnsureSysInitUnit;
+      // Positions in the search order (UsesOrder), not in the clause.
+      LOrder := UsesOrder(AId);
       LFrom := High(LM.UsesList);
       if AHeadMid <> AId then
       begin
         LFrom := -1;
         for LIdx := High(LM.UsesList) downto 0 do
-          if LM.UsesList[LIdx].UnitId = AHeadMid then
+          if LM.UsesList[UsesAt(LOrder, LIdx)].UnitId = AHeadMid then
           begin
             LFrom := LIdx - 1;
             Break;
@@ -17754,7 +18161,7 @@ var
       end;
       for LIdx := LFrom downto 0 do
       begin
-        LUid := LM.UsesList[LIdx].UnitId;
+        LUid := LM.UsesList[UsesAt(LOrder, LIdx)].UnitId;
         if (LUid < 0) or (LUid = AHeadMid) or (LUid = LSysUid) or
            (LUid = LSysInitUid) or
            (FModels[LUid].InterfaceScope = NIL_SCOPE) then
