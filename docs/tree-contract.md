@@ -48,6 +48,7 @@ the flags mean. The expression and statement kinds read as follows (`c0`,
 | nkRepeatStmt | `repeat c0 until c1` |
 | nkWithStmt | `with c0, ... do` last child |
 | nkGotoStmt, nkLabeledStmt | `goto c0`; `c0 : c1` - the label c0 is an nkIdent, or an nkIntLit for a numeric one (a name label is bound by the resolver, a numeric one is not) |
+| nkAsmStmt | `asm` BASM text `end`, not parsed; its children are the Pascal names the operands spell, in no grammar of their own - each an nkIdent, or an nkMember chain for a dotted one, whose FirstToken is the `.` or `].` before the name (see 3 and TPasParser.ParseAsmBody) |
 | nkTryStmt | `try c0` then nkFinallyPart (`finally c0`) or nkExceptPart (`except` handlers, then the `else` block if any, or a catch-all block - `except else S` is that block too, 18.1.1), `end` |
 | nkExceptOn | `on [c0 :] type do statement` - three children: the name first |
 | nkRaiseStmt | `raise [c0 [at c1]]` |
@@ -133,7 +134,8 @@ A few facts live in one token by design, read by a documented rule:
   exception: `V.AsType<T>=5` lexes `>=` as one token that is both the `>`
   closing the type arguments and the `=` operator - the type arguments then
   end one token before it and own no `>`;
-- the RANGE of nkAsmStmt: opaque by design, printed as written.
+- the RANGE of nkAsmStmt: opaque by design, printed as written - the names
+  under it (see 1) are found in it, not parsed from a grammar.
 
 Nothing else. A consumer that reads another token - a separator, a keyword
 beside a node - is reading what the tree should say; where it had to, the

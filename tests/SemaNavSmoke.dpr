@@ -2648,6 +2648,172 @@ begin
   end;
 end;
 
+{ 6.10: the Pascal names of a BASM body are bound like any reference - what
+  dcc binds there is a use (dcc32 / dcc64 37.0, 2026-11-14: a deprecated
+  symbol named in an operand gives W1000). A method called from its class's
+  asm (`CALL Internal`, the third-party shape that was reported unused), a
+  member chain after `].`, a VMTOFFSET target, another unit's names; a
+  mnemonic and a register are no names even where a variable is spelled the
+  same, while the same spelling in an operand is the variable. A name
+  nothing declares is no E2003 here. }
+function DiagCount(AModel: TPasSemaModel; const ACode: string): Integer;
+  forward;
+
+procedure TestAsmNames;
+const
+  ASM_B =
+    'unit AsmB;'#13#10 +
+    'interface'#13#10 +
+    'type'#13#10 +
+    '  TUFoo = class'#13#10 +
+    '    FU: Integer;'#13#10 +
+    '  end;'#13#10 +
+    'var'#13#10 +
+    '  UVar: Integer;'#13#10 +
+    'procedure UProc;'#13#10 +
+    'implementation'#13#10 +
+    'procedure UProc; begin end;'#13#10 +
+    'end.'#13#10;
+  ASM_A =
+    'unit AsmA;'#13#10 +                                          // 1
+    'interface'#13#10 +
+    'uses AsmB;'#13#10 +
+    'type'#13#10 +
+    '  TFoo = class'#13#10 +                                      // 5
+    '  strict protected'#13#10 +
+    '    FStack: Integer;'#13#10 +
+    '    procedure Internal(A: Pointer);'#13#10 +
+    '    procedure Handler; virtual;'#13#10 +
+    '  public'#13#10 +                                            // 10
+    '    procedure Stub;'#13#10 +
+    '  end;'#13#10 +
+    '  TRec = record X, Y: Integer; end;'#13#10 +
+    'var'#13#10 +
+    '  GVar, NOP, EBX: Integer;'#13#10 +                          // 15
+    'implementation'#13#10 +
+    'procedure TFoo.Internal(A: Pointer); begin end;'#13#10 +
+    'procedure TFoo.Handler; begin end;'#13#10 +
+    'procedure Glob; begin end;'#13#10 +
+    'procedure TFoo.Stub;'#13#10 +                                // 20
+    'asm'#13#10 +
+    '  CALL Internal'#13#10 +
+    '  MOV ECX,[ECX].TFoo.FStack'#13#10 +
+    '  JMP DWORD PTR [EAX] + VMTOFFSET TFoo.Handler'#13#10 +
+    '  MOV EAX,[EDX].TRec.Y'#13#10 +                              // 25
+    '  MOV EAX,GVar; CALL Glob'#13#10 +
+    '  NOP'#13#10 +
+    '  MOV EAX,EBX'#13#10 +
+    '  MOV EAX,NOP'#13#10 +
+    '  CALL UProc'#13#10 +                                        // 30
+    '  MOV EAX,[EDX].TUFoo.FU'#13#10 +
+    '  MOV EAX,UVar'#13#10 +
+    '@@L: MOV EAX,Undeclared'#13#10 +
+    'end;'#13#10 +
+    'type'#13#10 +                                               // 35
+    '  TBlk = record'#13#10 +
+    '    Next: Pointer;'#13#10 +
+    '    Digits: array[0..3] of Byte;'#13#10 +
+    '  end;'#13#10 +
+    'var'#13#10 +                                                // 40
+    '  Next: Pointer;'#13#10 +
+    '  GBlk: TBlk;'#13#10 +
+    'procedure Q;'#13#10 +
+    'asm'#13#10 +
+    '  MOV EDX,TBlk[ECX].Next'#13#10 +                          // 45
+    '  MOV EDX,[ECX].Next'#13#10 +
+    '  MOV AL,GBlk.Digits.Byte'#13#10 +
+    '  JMP System.@LStrClr'#13#10 +
+    '  MOV EAX,GVar.Next'#13#10 +
+    '  MOV EAX,GBlk.Digits[ECX].TBlk.Next'#13#10 +                // 50
+    '  MOV EAX,TBlk([EDX]).Next'#13#10 +
+    'end;'#13#10 +
+    'end.'#13#10;
+var
+  LDir: string;
+  LProj: TPasSemaProject;
+  LNav: TPasNavigator;
+  LMid: Integer;
+  LRows: TArray<TPasUnusedSymbol>;
+  LSkips: TPasUnusedSkips;
+
+  // The declaration the name at (ALine, ACol) of AsmA binds: 'file:line', or
+  // '' when nothing is there or nothing binds.
+  function DeclOf(ALine, ACol: Integer): string;
+  var
+    LIdent: TPasNavIdent;
+    LTarget: TPasNavTarget;
+  begin
+    Result := '';
+    if LNav.IdentAt(LMid, ALine, ACol, LIdent) and
+       LNav.ResolveDecl(LMid, LIdent.Node, LTarget) then
+      Result := TPath.GetFileNameWithoutExtension(LTarget.FilePath) + ':' +
+        IntToStr(LTarget.Line);
+  end;
+
+  function Row(const AName: string): Integer;
+  begin
+    for var LI := 0 to High(LRows) do
+      if SameText(LRows[LI].Name, AName) then
+        Exit(LI);
+    Result := -1;
+  end;
+
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_asm_names');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'AsmA.pas'), ASM_A);
+  TFile.WriteAllText(TPath.Combine(LDir, 'AsmB.pas'), ASM_B);
+  LProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  LNav := nil;
+  try
+    LProj.AnalyzeDirectory(LDir);
+    LNav := TPasNavigator.Create(LProj);
+    LMid := LProj.ModelIdOf(TPath.Combine(LDir, 'AsmA.pas'));
+    Ok('asm names: CALL a method of the class (Self''s scope)',
+      DeclOf(22, 8) = 'AsmA:8');
+    Ok('asm names: a chain after `].` - the type, then its field',
+      (DeclOf(23, 17) = 'AsmA:5') and (DeclOf(23, 22) = 'AsmA:7'));
+    Ok('asm names: VMTOFFSET T.M', DeclOf(24, 40) = 'AsmA:9');
+    Ok('asm names: a record''s field', DeclOf(25, 22) = 'AsmA:13');
+    Ok('asm names: after a `;` the next word is a mnemonic again',
+      (DeclOf(26, 11) = 'AsmA:15') and (DeclOf(26, 22) = 'AsmA:19') and
+      (DeclOf(26, 17) = ''));
+    Ok('asm names: a mnemonic and a register are no names',
+      (DeclOf(27, 3) = '') and (DeclOf(28, 11) = ''));
+    Ok('asm names: the mnemonic''s spelling in an operand is the variable',
+      DeclOf(29, 11) = 'AsmA:15');
+    Ok('asm names: another unit''s routine, type, field and variable',
+      (DeclOf(30, 8) = 'AsmB:9') and (DeclOf(31, 17) = 'AsmB:4') and
+      (DeclOf(31, 23) = 'AsmB:5') and (DeclOf(32, 11) = 'AsmB:8'));
+    Ok('asm names: Type[reg].Field is the type''s field, [reg].Name a name in scope',
+      (DeclOf(45, 11) = 'AsmA:36') and (DeclOf(45, 21) = 'AsmA:37') and
+      (DeclOf(46, 17) = 'AsmA:41') and (DeclOf(51, 23) = 'AsmA:37'));
+    Ok('asm names: a size after the dot ends the name; System.@Magic is none',
+      (DeclOf(47, 10) = 'AsmA:42') and (DeclOf(47, 15) = 'AsmA:38') and
+      (DeclOf(47, 22) = '') and (DeclOf(48, 7) = ''));
+    Ok('asm names: A.B with no member B in A''s type is the name B',
+      (DeclOf(49, 11) = 'AsmA:15') and (DeclOf(49, 16) = 'AsmA:41') and
+      (DeclOf(50, 16) = 'AsmA:38') and (DeclOf(50, 28) = 'AsmA:36') and
+      (DeclOf(50, 33) = 'AsmA:37'));
+    Ok('asm names: an undeclared name is no E2003',
+      DiagCount(LProj.Model(LMid), 'E2003') = 0);
+    LRows := FindUnusedSymbols(LNav, [LMid], LSkips);
+    Ok('asm names: used in asm, not unused',
+      (Row('TFoo.Internal') < 0) and (Row('TFoo.FStack') < 0) and
+      (Row('Glob') < 0) and (Row('GVar') < 0) and (Row('NOP') < 0) and
+      (Row('TRec.Y') < 0));
+    Ok('asm names: a register''s spelling is not a use of the variable',
+      Row('EBX') >= 0);
+  finally
+    LNav.Free;
+    LProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 function DiagCount(AModel: TPasSemaModel; const ACode: string): Integer;
 var
   LIdx: Integer;
@@ -7317,6 +7483,7 @@ begin
   TestUnitIdentity;
   TestUnusedUses;
   TestUnusedSymbols;
+  TestAsmNames;
   TestUnreferencedUnits;
   TestLintGlobalInit;
   TestLintLight;

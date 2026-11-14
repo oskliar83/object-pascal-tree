@@ -11,7 +11,9 @@ unit PasTree.Lexer;
   - Reserved words (B.4.1) become dedicated kinds; &-escaped words are
     always tkIdentifier (B.3).
   - asm...end switches to BASM mode (spec 6.10): body text is emitted as
-    opaque tkAsmChunk tokens, BUT comments and directives inside asm are
+    opaque tkAsmChunk tokens - each word (`@@Label`, `$FF`, `EAX`, `TFoo`)
+    one, each run of punctuation between them another, so the parser can
+    pick out the Pascal names - BUT comments and directives inside asm are
     still lexed normally so conditional compilation keeps working. Where
     an asm body ends depends on which branches are live, and Tokenize
     cannot know: it guesses - an `asm` opened inside a conditional branch
@@ -109,8 +111,8 @@ type
       before any branch is decided. Resume continues AStream at its token
       AIndex: the tokens before it are kept (the caret rule reads them
       back), and so are the diagnostics that start before it. Each Step lexes
-      what starts at the current position - one token, or an asm chunk and
-      the `end` closing it - in BASM mode when AInAsm, as Pascal otherwise,
+      what starts at the current position - one token (an asm chunk, or the
+      `end` closing the body) in BASM mode when AInAsm, as Pascal otherwise,
       and appends it; Count and Token read what is there. Finish adds the
       EOF sentinel (and, with AUnterminatedAsm, the diagnostic for an asm
       block the file ends in) and returns the stream: new arrays, AStream's
@@ -476,8 +478,8 @@ begin
   Emit(tkEndOfFile, FPos);
 end;
 
-// What starts at FPos, in the current mode: one token, or (BASM) an asm
-// chunk and the `end` that closes it.
+// What starts at FPos, in the current mode: one token - in BASM, an asm
+// chunk or the `end` that closes the body.
 procedure TPasLexer.LexOne;
 var
   LCh: Char;
@@ -1070,40 +1072,49 @@ begin
         Exit;
       end;
   end;
-  // Opaque BASM chunk: consume until whitespace/comment/string/`end`.
+  // Opaque BASM chunks, of two shapes. A WORD - a run of identifier
+  // characters, with the `@`s of a local label (`@@Exit`, `@Result`) and the
+  // `$` of a hex number in front - is a chunk of its own, so that the parser
+  // can tell the Pascal names an operand spells (`CALL Foo`,
+  // `[EAX].TFoo.FBar`; spec 6.10) from the rest. Everything else up to the
+  // next word, whitespace, comment or string is one punctuation chunk.
   LStart := FPos;
+  if (LCh = '@') or (LCh = '$') or IsIdentChar(LCh) then
+  begin
+    while (FPos < FLen) and ((FBase[FPos] = '@') or (FBase[FPos] = '$')) do
+      Inc(FPos);
+    LWordStart := FPos;
+    while (FPos < FLen) and IsIdentChar(FBase[FPos]) do
+      Inc(FPos);
+    // The closing `end`: a whole word, never a label's - BASM labels may be
+    // named END (`JS @@END` / `@@END:`, Vcl.Graphics.pas).
+    if (LWordStart = LStart) and (FPos - LStart = 3) and
+       ((LCh = 'e') or (LCh = 'E')) and
+       ((FBase[LStart + 1] = 'n') or (FBase[LStart + 1] = 'N')) and
+       ((FBase[LStart + 2] = 'd') or (FBase[LStart + 2] = 'D')) then
+    begin
+      Emit(tkEnd, LStart);
+      FInAsm := False;
+      Exit;
+    end;
+    Emit(tkAsmChunk, LStart);
+    Exit;
+  end;
   while FPos < FLen do
   begin
     LCh := FBase[FPos];
-    if IsWhitespace(LCh) or (LCh = '''') or (LCh = '"') or (LCh = '{') then
+    if IsWhitespace(LCh) or (LCh = '''') or (LCh = '"') or (LCh = '{') or
+       (LCh = '@') or (LCh = '$') or IsIdentChar(LCh) then
       Break;
     if (LCh = '/') and (CharAt(FPos + 1) = '/') then
       Break;
     if (LCh = '(') and (CharAt(FPos + 1) = '*') then
       Break;
-    if ((LCh = 'e') or (LCh = 'E')) and not IsIdentChar(CharAt(FPos - 1)) and
-       (CharAt(FPos - 1) <> '@') then
-    begin
-      // NB: '@' exclusion - BASM labels may be named END: `JS @@END` /
-      // `@@END:` (Vcl.Graphics.pas) must not close the asm block.
-      // Possible closing `end` at a word boundary.
-      LWordStart := FPos;
-      if ((CharAt(LWordStart + 1) = 'n') or (CharAt(LWordStart + 1) = 'N')) and
-         ((CharAt(LWordStart + 2) = 'd') or (CharAt(LWordStart + 2) = 'D')) and
-         not IsIdentChar(CharAt(LWordStart + 3)) then
-      begin
-        if FPos > LStart then
-          Emit(tkAsmChunk, LStart);
-        FPos := LWordStart + 3;
-        Emit(tkEnd, LWordStart);
-        FInAsm := False;
-        Exit;
-      end;
-    end;
     Inc(FPos);
   end;
-  if FPos > LStart then
-    Emit(tkAsmChunk, LStart);
+  if FPos = LStart then
+    Inc(FPos);   // a lone `/` or `(` the tests above stopped at: progress
+  Emit(tkAsmChunk, LStart);
   // EOF inside the block is Run's to report - see there.
 end;
 

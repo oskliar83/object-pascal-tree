@@ -302,6 +302,13 @@ type
       every use is behind a test that has already failed to parse the state as
       what the grammar expected. }
     function TokenStartsLine(AVisIndex: Integer): Boolean;
+    { Is there a line break (or a file boundary) between visible token
+      AVisIndex and the one before it? }
+    function LineBreakBefore(AVisIndex: Integer): Boolean;
+    { 6.10: at `asm`, through the chunks of the body up to (not past) the
+      `end` closing it, adopting into AAsm the Pascal names its operands
+      spell - see the implementation. }
+    procedure ParseAsmBody(AAsm: Integer);
     { An identifier that starts its line and is followed by `=` or `:` - the
       head of the NEXT declaration, seen from inside an unfinished one. }
     function AtLineDeclHead: Boolean;
@@ -2026,9 +2033,7 @@ begin
       begin
         // 6.10: opaque BASM token range up to the matching end.
         LNode := FB.AddNode(nkAsmStmt, NIL_NODE, FPos);
-        Next;
-        while not (CurKind in [tkEnd, tkEndOfFile]) do
-          Next;
+        ParseAsmBody(LNode);
         Expect(tkEnd, '"end"');
         FB.SetLast(LNode, FPos - 1);
         Exit(LNode);
@@ -3524,6 +3529,267 @@ begin
   Result := False;
 end;
 
+{ A BASM reserved word (6.10): a register, an operand size, an expression
+  operator or a data directive. In an operand it always wins over a Pascal
+  name of the same spelling - `var EBX: Integer` beside `MOV EAX,EBX` reads
+  the register, `type DWORD = ...` beside `DWORD PTR [EDX]` is the size
+  (dcc32 / dcc64 37.0, 2026-11-14). The 64-bit registers are reserved only
+  for dcc64 - dcc32 binds a Pascal `RAX` or `R8` - and are taken here for
+  both: the parser does not know the target, and a Pascal name spelled like
+  a register in Win32 asm is the rarer loss. }
+function IsBasmReserved(const AWord: string): Boolean;
+const
+  WORDS: array[0..71] of string = (
+    'AH', 'AL', 'AX', 'BH', 'BL', 'BP', 'BX', 'CH', 'CL', 'CX', 'DH', 'DI',
+    'DL', 'DX', 'SI', 'SP', 'EAX', 'EBX', 'ECX', 'EDX', 'ESI', 'EDI', 'EBP',
+    'ESP', 'CS', 'DS', 'ES', 'FS', 'GS', 'SS', 'ST', 'RAX', 'RBX', 'RCX',
+    'RDX', 'RSI', 'RDI', 'RBP', 'RSP', 'RIP', 'SIL', 'DIL', 'SPL', 'BPL',
+    'BYTE', 'WORD', 'DWORD', 'QWORD', 'TBYTE', 'FWORD', 'DQWORD', 'OWORD',
+    'PTR', 'OFFSET', 'TYPE', 'HIGH', 'LOW', 'SMALL', 'LARGE', 'VMTOFFSET',
+    'DMTINDEX', 'AND', 'OR', 'XOR', 'NOT', 'MOD', 'SHL', 'SHR', 'DB', 'DW',
+    'DD', 'DQ');
+var
+  LUp: string;
+  LNum: Integer;
+
+  // AUp is APrefix and then a decimal number up to AMax, in LNum.
+  function Numbered(const AUp, APrefix: string; AMax: Integer): Boolean;
+  var
+    LIdx: Integer;
+  begin
+    Result := False;
+    if (Length(AUp) <= Length(APrefix)) or
+       (Length(AUp) > Length(APrefix) + 2) or
+       not AUp.StartsWith(APrefix) then
+      Exit;
+    LNum := 0;
+    for LIdx := Length(APrefix) + 1 to Length(AUp) do
+    begin
+      if not CharInSet(AUp[LIdx], ['0'..'9']) then
+        Exit;
+      LNum := LNum * 10 + Ord(AUp[LIdx]) - Ord('0');
+    end;
+    Result := LNum <= AMax;
+  end;
+
+begin
+  LUp := UpperCase(AWord);
+  for var LWord in WORDS do
+    if LWord = LUp then
+      Exit(True);
+  if Numbered(LUp, 'XMM', 31) or Numbered(LUp, 'YMM', 31) or
+     Numbered(LUp, 'ZMM', 31) or Numbered(LUp, 'MM', 7) or
+     Numbered(LUp, 'K', 7) or Numbered(LUp, 'DR', 7) then
+    Exit(True);
+  if Numbered(LUp, 'CR', 8) and (LNum in [0..4, 8]) then
+    Exit(True);
+  // R8 .. R15, and their D / W / B halves.
+  if CharInSet(LUp[Length(LUp)], ['D', 'W', 'B']) then
+    LUp := Copy(LUp, 1, Length(LUp) - 1);
+  Result := Numbered(LUp, 'R', 15) and (LNum >= 8);
+end;
+
+{ A BASM instruction prefix: the word after it is still the mnemonic. }
+function IsBasmPrefix(const AWord: string): Boolean;
+begin
+  Result := SameText(AWord, 'LOCK') or SameText(AWord, 'REP') or
+    SameText(AWord, 'REPE') or SameText(AWord, 'REPNE') or
+    SameText(AWord, 'REPZ') or SameText(AWord, 'REPNZ');
+end;
+
+function TPasParser.LineBreakBefore(AVisIndex: Integer): Boolean;
+var
+  LA, LB: TPasVisibleToken;
+  LSrc: string;
+  LFrom, LTo: Integer;
+begin
+  if (AVisIndex <= 0) or (AVisIndex > FLast) then
+    Exit(True);
+  LA := FSrc.Visible[AVisIndex - 1];
+  LB := FSrc.Visible[AVisIndex];
+  if LA.FileId <> LB.FileId then
+    Exit(True);
+  LSrc := FSrc.Files[LB.FileId].Source;
+  LFrom := FSrc.Files[LA.FileId].Tokens[LA.TokenIndex].EndPos;
+  LTo := FSrc.Files[LB.FileId].Tokens[LB.TokenIndex].Start;
+  for var LIdx := LFrom to LTo - 1 do
+    if CharInSet(LSrc[LIdx + 1], [#10, #13]) then
+      Exit(True);
+  Result := False;
+end;
+
+{ 6.10. A BASM body stays opaque - no instruction is parsed - but the
+  Pascal names its operands spell are in the tree, each an nkIdent child of
+  the nkAsmStmt or, dotted, an nkMember chain (`TFoo.FBar`, `U.TFoo.M`), so
+  the analysis binds them like any other reference: what dcc binds there is
+  a use (`CALL InternalHandler` in a method calls Self's method; dcc32 /
+  dcc64 37.0, 2026-11-14). Which words those are, by dcc's rules:
+  - the first word of an instruction - after a line break or a `;` - is the
+    mnemonic, never a name (`NOP` beside a variable NOP), and the one after
+    a prefix (`LOCK`, `REP`...) too; a word there followed by `:` is a label
+    (`L1:` - a Pascal `label`, a name);
+  - in an operand, a reserved word (IsBasmReserved) and a Pascal reserved
+    word are not names; neither is a word starting with `@` (a local label,
+    `@Result`), `$` or a digit (a number);
+  - a word right after a lone `.` continues the name before it
+    (`TFoo.FBar`), and so does one after a bracket group or a cast that
+    follows it (`TBlock[ECX].FNext`, `TBlock([EBX]).FNext` - FNext is
+    TBlock's field); after `[EAX].` or `+`
+    it is a name of its own (`[EAX].TFoo.FBar` - TFoo looked up in scope).
+    A reserved word after the dot ends the name (`Digits.Byte`, an operand
+    size); an `@` word drops it (`System.@LStrClr`, a compiler routine). }
+procedure TPasParser.ParseAsmBody(AAsm: Integer);
+var
+  LAtStart, LDot, LHolding: Boolean;
+  LWords, LHeld: TArray<Integer>;   // visible indexes of a name's words
+  LDepth: Integer;
+  LText: string;
+
+  // A name: its first word, then each later word as the member of the
+  // name before it - the dot (or `].`) is the token before that word.
+  procedure Emit(const AWords: TArray<Integer>);
+  var
+    LNode, LMember: Integer;
+  begin
+    if AWords = nil then
+      Exit;
+    LNode := FB.AddNode(nkIdent, NIL_NODE, AWords[0]);
+    for var LIdx := 1 to High(AWords) do
+    begin
+      LMember := FB.AddNode(nkMember, NIL_NODE, AWords[LIdx] - 1);
+      FB.Adopt(LMember, LNode);
+      FB.Adopt(LMember, FB.AddNode(nkIdent, NIL_NODE, AWords[LIdx]));
+      FB.SetLast(LMember, AWords[LIdx]);
+      LNode := LMember;
+    end;
+    FB.Adopt(AAsm, LNode);
+  end;
+
+  procedure FlushChain;
+  begin
+    Emit(LWords);
+    LWords := nil;
+    LDot := False;
+  end;
+
+  procedure DropHeld;
+  begin
+    Emit(LHeld);
+    LHeld := nil;
+    LHolding := False;
+  end;
+
+  function IsName(const AWord: string): Boolean;
+  begin
+    Result := PasIsIdentStart(AWord[1]) and not IsBasmReserved(AWord) and
+      (KeywordKind(PChar(AWord), Length(AWord)) = tkIdentifier);
+  end;
+
+begin
+  Next;   // past `asm`
+  LAtStart := True;
+  LDot := False;
+  LHolding := False;
+  LWords := nil;
+  LHeld := nil;
+  LDepth := 0;
+  while not (CurKind in [tkEnd, tkEndOfFile]) do
+  begin
+    if LineBreakBefore(FPos) then
+    begin
+      FlushChain;
+      DropHeld;
+      LAtStart := True;
+    end;
+    if CurKind <> tkAsmChunk then
+    begin
+      FlushChain;
+      DropHeld;
+    end
+    else
+    begin
+      LText := CurText;
+      if (LText <> '') and (CharInSet(LText[1], ['@', '$']) or
+         PasIsIdentChar(LText[1])) then
+      begin
+        if LDot then
+        begin
+          LDot := False;
+          if LText[1] = '@' then
+            LWords := nil
+          else if IsName(LText) then
+            LWords := LWords + [FPos]
+          else
+            FlushChain;
+        end
+        else
+        begin
+          FlushChain;
+          if LAtStart then
+          begin
+            if (PeekKind(1) = tkAsmChunk) and
+               FSrc.VisibleText(FPos + 1).StartsWith(':') and
+               not LineBreakBefore(FPos + 1) then
+            begin
+              // A label: `L1:` - a Pascal one is a name; `@@L1:` is not.
+              if IsName(LText) then
+                Emit([FPos]);
+            end
+            else if not IsBasmPrefix(LText) then
+              LAtStart := False;
+          end
+          else if IsName(LText) then
+            LWords := [FPos];
+        end;
+      end
+      else
+      begin
+        if (LWords <> nil) and (LText = '.') and not LDot then
+          LDot := True
+        else if (LWords <> nil) and not LHolding and
+          (LText.StartsWith('[') or LText.StartsWith('(')) then
+        begin
+          // `TBlock[ECX].FNext`: the name waits for the group to close.
+          LHeld := LWords;
+          LWords := nil;
+          LDot := False;
+          LHolding := True;
+          LDepth := 0;
+        end
+        else
+          FlushChain;
+        if LHolding then
+        begin
+          for var LCh in LText do
+            if CharInSet(LCh, ['[', '(']) then
+              Inc(LDepth)
+            else if CharInSet(LCh, [']', ')']) then
+              Dec(LDepth);
+          if LDepth <= 0 then
+            if LText.EndsWith('].') or LText.EndsWith(').') then
+            begin
+              LWords := LHeld;
+              LHeld := nil;
+              LHolding := False;
+              LDot := True;
+            end
+            else
+              DropHeld;
+        end;
+        if Pos(';', LText) > 0 then
+        begin
+          FlushChain;
+          DropHeld;
+          LAtStart := True;
+        end;
+      end;
+    end;
+    Next;
+  end;
+  FlushChain;
+  DropHeld;
+end;
+
 function TPasParser.TokenStartsLine(AVisIndex: Integer): Boolean;
 var
   LVis: TPasVisibleToken;
@@ -3948,9 +4214,7 @@ begin
   if CurKind = tkAsm then
   begin
     LBlock := FB.AddNode(nkAsmStmt, NIL_NODE, FPos);
-    Next;
-    while not (CurKind in [tkEnd, tkEndOfFile]) do
-      Next;
+    ParseAsmBody(LBlock);
     Expect(tkEnd, '"end"');
     FB.SetLast(LBlock, FPos - 1);
     FB.Adopt(Result, LBlock);

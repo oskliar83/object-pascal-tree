@@ -152,7 +152,8 @@ type
     { The identifier token at AOffset: the covering one, else the identifier
       ending exactly at AOffset - a caret right after a name (`Foo|;`, the
       End key, a double-click's end) means that name, in every editor and
-      for a conditional symbol here. -1 when neither is an identifier. }
+      for a conditional symbol here. A word of an asm body counts as an
+      identifier (6.10). -1 when neither is an identifier. }
     function IdentTokenAt(AOffset: Integer): Integer;
   end;
 
@@ -969,9 +970,19 @@ begin
 end;
 
 function TPasTokenStream.IdentTokenAt(AOffset: Integer): Integer;
+
+  // An identifier - or a word of an asm body that can be a Pascal name
+  // (6.10: the parser makes a node of those an operand spells).
+  function IsName(AIdx: Integer): Boolean;
+  begin
+    Result := (Tokens[AIdx].Kind = tkIdentifier) or
+      ((Tokens[AIdx].Kind = tkAsmChunk) and (Tokens[AIdx].Len > 0) and
+       PasIsIdentStart(Source[Tokens[AIdx].Start + 1]));
+  end;
+
 begin
   Result := RawTokenAt(AOffset);
-  if (Result >= 0) and (Tokens[Result].Kind = tkIdentifier) then
+  if (Result >= 0) and IsName(Result) then
     Exit;
   if Result < 0 then
   begin
@@ -983,7 +994,7 @@ begin
   end
   else
     Dec(Result);
-  if (Result < 0) or (Tokens[Result].Kind <> tkIdentifier) or
+  if (Result < 0) or not IsName(Result) or
      (Tokens[Result].EndPos <> AOffset) then
     Result := -1;
 end;
