@@ -17652,6 +17652,12 @@ var
   // read once for all of a call's candidates, like LArrArg.
   LArgConvCore: Integer;
   LArgConv: TSemaArgConv;
+  // The arguments' conversion classes of the candidate ScoreCandidate scored
+  // last (LCandCodes) and of the best one so far (LBestCodes), and the class
+  // ArgScore found for the argument it scored (LArgCls; ConvClass, -1 none):
+  // what ConsiderChain compares two candidates by (CompareArgCodes, 6.3.1).
+  LCandCodes, LBestCodes: TSemaArgCodes;
+  LArgCls: Integer;
   // The argument node ProcArgScore read last, the routine it names (LDesigSym
   // NIL_SYM: none) and whether one of that routine's overloads can be called
   // with no argument (LDesigBare), whether its type is procedural
@@ -18954,6 +18960,10 @@ var
          (XCatOf(LCanonParX) <> tcUnknown) and not OpenX(LParX) and
          not OpenX(LArgX)) then
         Exit(-1);
+      LArgCls := ConvClass(2 * LFit, LRank, LArgConv, LConv <> nil,
+        ParConvKindX(LCanonParX), not LClassRef and
+        (XCatOf(LCanonArgX) = tcClass) and (XCatOf(LCanonParX) = tcClass),
+        FConv.WideExt);
       Result := ScaledFit(2 * LFit, LRank);
     end;
 
@@ -18973,6 +18983,8 @@ var
     // `F(1, 2,)` fits `F(A: Integer; B: Integer = 0)` (audit B3-32). An
     // nkAmbiguous argument nothing has decided yet leaves no count to judge:
     // no candidate is chosen over it (16.3.1).
+    LCandCodes.Count := 0;
+    LCandCodes.Measured := False;
     LArgs := CallArgCount(LM, ACall, LTrailing);
     if LArgs < 0 then
       Exit(-1);
@@ -18981,6 +18993,7 @@ var
     if not (LVariadic or TPasSemaTyper.ArityFits(LArgs, LReq, LTot,
        LTrailing)) then
       Exit(-1);
+    LCandCodes.Measured := not LVariadic;
     Result := 0;
     // The parameters straight off the candidate's param scope, in XParamSyms'
     // order and filter: an array per candidate, with its free, was 1.1% of a
@@ -19004,6 +19017,7 @@ var
       begin
         // `F(A < B, C > (D))` (16.3.1): the arguments it stands for, a
         // comparison a Boolean with no node of its own.
+        LCandCodes.Measured := False;
         for LK := 0 to LM.AmbigArgCount(LArg) - 1 do
         begin
           if LPos >= LPCount then
@@ -19032,12 +19046,21 @@ var
       else
       begin
         LParX := ParamFitTypeX(AMid, LPList[LPos], ACtx, LOpenArr, LOfConst);
+        LArgCls := -1;
         LS := ArgScore(LArg, GetX(LArg), LParX, LOpenArr, LOfConst,
           ParamIsByRef(LPM, LPList[LPos]),
           ParamIsUntyped(LPM, LPList[LPos]));
         if LS < 0 then
           Exit(-1);
         Inc(Result, LS);
+        if LCandCodes.Count <= High(LCandCodes.Codes) then
+        begin
+          LCandCodes.Codes[LCandCodes.Count].Cls := LArgCls;
+          LCandCodes.Codes[LCandCodes.Count].Sub := LS;
+          Inc(LCandCodes.Count);
+        end
+        else
+          LCandCodes.Measured := False;
         NextParam;
       end;
       LArg := LM.Tree.Nodes[LArg].NextSibling;
@@ -19134,8 +19157,8 @@ var
     // TBase.Get in the descendant's empty frame, so its T stayed open).
     procedure ConsiderChain(AMid, AHead, AFrame: Integer);
     var
-      LCand, LScore, LIdx: Integer;
-      LDup: Boolean;
+      LCand, LScore, LIdx, LCmp: Integer;
+      LDup, LDecided: Boolean;
       LRef: TPasExtRef;
     begin
       LCand := AHead;
@@ -19185,8 +19208,21 @@ var
             LScore := -1   // an instance method, reached through the TYPE
           else
             LScore := ScoreCandidate(ACall, AMid, LCand, AFrame);
-          if (LScore >= 0) and (LScore > LBestScore) then
+          // Against the best so far: by the arguments' classes first, the
+          // one argument of the largest difference (CompareArgCodes, 6.3.1);
+          // by the sum of the scores where that leaves a tie or cannot judge.
+          LCmp := 1;
+          if LScore < 0 then
+            LCmp := -1
+          else if LBestScore >= 0 then
           begin
+            LCmp := CompareArgCodes(LCandCodes, LBestCodes, LDecided);
+            if LCmp = 0 then
+              LCmp := Ord(LScore > LBestScore) - Ord(LScore < LBestScore);
+          end;
+          if LCmp > 0 then
+          begin
+            LBestCodes := LCandCodes;
             LBestScore := LScore;
             ABestMid := AMid;
             ABestSym := LCand;
@@ -19195,7 +19231,7 @@ var
             LSelTie0 := LRef;
             LSelTieN := 1;
           end
-          else if (LScore >= 0) and (LScore = LBestScore) then
+          else if LCmp = 0 then
           begin
             if not SameResult(ABestMid, ABestSym, AMid, LCand) then
               AAmbiguous := True;
@@ -19609,14 +19645,56 @@ var
     end;
   end;
 
+  { Is N, an nkIdent or nkMember, written where a routine's name can only be
+    CALLED (6.6.1) - the same rule as the three positions above, which the
+    resolver met first: the whole of a call statement (`Format;`,
+    `State.DrawReversibleLineCore;`), an operand of an operator other than
+    `@` (`C.M + H`, `H = 0` - dcc compares the results), or the value of an
+    assignment whose target is typed and not procedural (`Result :=
+    TFoo.Create;`). A procedural target selects by its signature instead
+    (`P := G` with `P: procedure(A: Integer)` takes `G(A: Integer)`), and an
+    untyped target is left as it was. dcc64 37.0, 2026-11-14
+    (local/ovl-probe P7). An argument is not here: its parameter's type is
+    known only once the outer call has chosen. }
+  function IsCallOnlyPosition(N: Integer): Boolean;
+  var
+    LParent, LTarget: Integer;
+    LTX: TSemaXType;
+  begin
+    Result := False;
+    LParent := LM.Tree.Nodes[N].Parent;
+    if LParent = NIL_NODE then
+      Exit;
+    case LM.Tree.Nodes[LParent].Kind of
+      nkExprStmt:
+        Result := LM.Tree.Nodes[LParent].FirstChild = N;
+      nkBinaryOp:
+        Result := True;
+      nkUnaryOp:
+        Result := (LM.Tree.Nodes[LParent].Aux >= 0) and
+          (LM.Tree.Nodes[LParent].Aux <= High(LM.Tree.Source.Visible)) and
+          (LM.Tree.Source.VisibleKind(LM.Tree.Nodes[LParent].Aux) <> tkAt);
+      nkAssign:
+        begin
+          LTarget := LM.Tree.Nodes[LParent].FirstChild;
+          if (LTarget = NIL_NODE) or (LTarget = N) or
+             (LM.Tree.Nodes[N].NextSibling <> NIL_NODE) then
+            Exit;
+          LTX := GetX(LTarget);
+          Result := XValid(LTX) and (XCatOf(CanonTypeX(LTX)) <> tcProc);
+        end;
+    end;
+  end;
+
   { The positions where a bare routine name is a VALUE and so means its
     parameterless overload (6.6.1): a qualifier, an inline initializer, a
-    `with` target. One test for the three re-points below (audit D2-16: it was
-    written three times, and one copy once lacked it). }
+    `with` target, a call-only position. One test for the three re-points
+    below (audit D2-16: it was written three times, and one copy once lacked
+    it). }
   function IsValuePosition(N: Integer): Boolean;
   begin
     Result := IsValueQualifier(N) or IsInlineInitializer(N) or
-      IsWithTarget(N);
+      IsWithTarget(N) or IsCallOnlyPosition(N);
   end;
 
   { The member twin of PreferParamlessOverload: N is an nkMember whose name

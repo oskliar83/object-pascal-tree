@@ -1850,6 +1850,32 @@ begin
       HasCallTyped(LName, 'TRW') and not HasCallTyped(LName, 'TRA'));
   GModel.Free;
 
+  // 6.3.1, several arguments: the argument of the largest difference decides
+  // by the worse conversion's class, not a sum of the arguments' scores -
+  // two AnsiStrings outweigh a character literal's Char, one Ansi-to-Unicode
+  // step two string-to-WideString steps (dcc64 37.0, 2026-11-14,
+  // local/ovl-probe P8, P10). The intra-unit typer, as CrossType.
+  Analyze(
+    'unit U;'#10'interface'#10'type'#10 +
+    '  TRA = record A: Integer; end;'#10'  TRW = record W: Integer; end;'#10 +
+    'function R3(const A, B: string; C: Char): TRA; overload;'#10 +
+    'function R3(const A, B: AnsiString; C: AnsiChar): TRW; overload;'#10 +
+    'function T4(const A, B, C: string): TRA; overload;'#10 +
+    'function T4(const A: AnsiString; const B, C: WideString): TRW; overload;'#10 +
+    'implementation'#10 +
+    'function R3(const A, B: string; C: Char): TRA; begin end;'#10 +
+    'function R3(const A, B: AnsiString; C: AnsiChar): TRW; begin end;'#10 +
+    'function T4(const A, B, C: string): TRA; begin end;'#10 +
+    'function T4(const A: AnsiString; const B, C: WideString): TRW; begin end;'#10 +
+    'procedure Test;'#10'var A: AnsiString; U: string; K: Integer;'#10 +
+    'begin'#10'  K := R3(A, A, '' '').W;'#10'  K := T4(A, U, U).W;'#10 +
+    'end;'#10'end.'#10);
+  Ok('several arguments by the worse class: R3(A, A, '' '') and T4(A, U, U)' +
+    ' take the Ansi overloads',
+    HasCallTyped('R3', 'TRW') and not HasCallTyped('R3', 'TRA') and
+    HasCallTyped('T4', 'TRW') and not HasCallTyped('T4', 'TRA'));
+  GModel.Free;
+
   Analyze(SRC_ASSIGN);
   Ok('char literal in parentheses / inline if, nil to an Implicit record:' +
     ' only the operator-less record is E2010', DiagCount('E2010') = 1);

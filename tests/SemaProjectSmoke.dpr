@@ -12354,6 +12354,172 @@ begin
   end;
 end;
 
+// What each reference spelled ARefText in AModel binds, in node order: the
+// routine's parameter count (`p0`, `p1`, ...) and, for a function, its result
+// type's name (`p3:ansistring`); `-` for a reference that binds nothing.
+function BoundRoutines(AModel: TPasSemaModel; const ARefText: string): string;
+var
+  LExt: TPasExtRef;
+  LMid, LSym, LCount: Integer;
+  LM: TPasSemaModel;
+begin
+  Result := '';
+  for var LNode := 0 to High(AModel.RefMap) do
+    if (AModel.Tree.Nodes[LNode].Kind = nkIdent) and
+       SameText(AModel.Tree.NodeText(LNode), ARefText) then
+    begin
+      LMid := -1;
+      LSym := AModel.RefMap[LNode];
+      if LSym <> NIL_SYM then
+        LMid := MidByName(AModel.UnitNameLower)
+      else if AModel.ExtRefMap.TryGetValue(LNode, LExt) then
+      begin
+        LMid := LExt.UnitId;
+        LSym := LExt.Sym;
+      end;
+      if Result <> '' then
+        Result := Result + ' ';
+      if (LMid < 0) or (LSym = NIL_SYM) then
+      begin
+        Result := Result + '-';
+        Continue;
+      end;
+      LM := GProj.Model(LMid);
+      if LM.Symbols[LSym].DeclNode = LNode then
+      begin
+        SetLength(Result, Length(Result) - 1);
+        Continue;
+      end;
+      LCount := 0;
+      if LM.Symbols[LSym].MemberScope <> NIL_SCOPE then
+        for var LP in LM.Scopes[LM.Symbols[LSym].MemberScope].Symbols do
+          if LM.Symbols[LP].Kind = skParam then
+            Inc(LCount);
+      Result := Result + 'p' + IntToStr(LCount);
+      if LM.Symbols[LSym].TypeSym <> NIL_SYM then
+        Result := Result + ':' + LM.Symbols[LM.Symbols[LSym].TypeSym].NameLower;
+    end;
+end;
+
+{ Two rules of 6.3.1 / 6.6.1 a call's binding hangs on (dcc64 37.0,
+  2026-11-14, local/ovl-probe P7, P10 and the grid). A routine's bare name
+  where it can only be CALLED - a call statement (`G;`, `C.M;`, `TC.L;`),
+  an operand (`C.F + H`, `H = 0`), the value of an assignment to a
+  non-procedural target (`I := H`, `C := TC.Create`) - is its parameterless
+  overload wherever that is declared; a procedural target selects by its
+  signature (`P := G` stays G(A: Integer)). And between two candidates the
+  argument of the largest difference decides, by the worse conversion's
+  class, not a sum: R3(A, K, ' ') for two AnsiStrings and a character
+  literal takes the AnsiString overload (a Char literal's Char is no match
+  for two Ansi-to-Unicode conversions), R3(A, U, ' ') the string one (a
+  Unicode-to-Ansi loss outweighs both), R3(A, 'abc', 'x') the string one (a
+  string literal to AnsiString may lose characters), T4(A, U, U) the
+  WideString one (one Ansi-to-Unicode step outweighs two string to
+  WideString steps). Before: every bare name bound the first overload, R2,
+  R3(A, K, ' ') and T4 the other candidate. }
+procedure TestCallPositionOverloads;
+var
+  LDir: string;
+begin
+  LDir := FreshDir('pastree_sema_callovl');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10 +
+    'type TObject = class constructor Create; end;'#10 +
+    'implementation'#10'constructor TObject.Create; begin end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'CoA.pas'),
+    'unit CoA;'#10'interface'#10'type'#10 +
+    '  TC = class'#10'  protected'#10 +
+    '    procedure M(Y: Integer); overload;'#10'  public'#10 +
+    '    procedure M; overload;'#10 +
+    '    class procedure L(const A: string; const B: string = ''''); overload;'#10 +
+    '    class procedure L; overload;'#10 +
+    '    constructor Create(A: Integer); overload;'#10 +
+    '    constructor Create; overload;'#10 +
+    '    function F(Y: Integer): Integer; overload;'#10 +
+    '    function F: Integer; overload;'#10'  end;'#10 +
+    '  TPI = procedure(A: Integer);'#10 +
+    'procedure G(A: Integer); overload;'#10 +
+    'procedure G; overload;'#10 +
+    'function H(A: Integer): Integer; overload;'#10 +
+    'function H: Integer; overload;'#10 +
+    'function R3(const A, B: string; C: Char): string; overload;'#10 +
+    'function R3(const A, B: AnsiString; C: AnsiChar): AnsiString; overload;'#10 +
+    'function R2(const A: string; C: Char): string; overload;'#10 +
+    'function R2(const A: AnsiString; C: AnsiChar): AnsiString; overload;'#10 +
+    'function T4(const A, B, C: string): string; overload;'#10 +
+    'function T4(const A: AnsiString; const B, C: WideString): WideString; overload;'#10 +
+    'implementation'#10 +
+    'procedure TC.M(Y: Integer); begin end;'#10 +
+    'procedure TC.M; begin end;'#10 +
+    'class procedure TC.L(const A: string; const B: string = ''''); begin end;'#10 +
+    'class procedure TC.L; begin end;'#10 +
+    'constructor TC.Create(A: Integer); begin end;'#10 +
+    'constructor TC.Create; begin end;'#10 +
+    'function TC.F(Y: Integer): Integer; begin Result := 1; end;'#10 +
+    'function TC.F: Integer; begin Result := 0; end;'#10 +
+    'procedure G(A: Integer); begin end;'#10 +
+    'procedure G; begin end;'#10 +
+    'function H(A: Integer): Integer; begin Result := 1; end;'#10 +
+    'function H: Integer; begin Result := 0; end;'#10 +
+    'function R3(const A, B: string; C: Char): string; begin end;'#10 +
+    'function R3(const A, B: AnsiString; C: AnsiChar): AnsiString; begin end;'#10 +
+    'function R2(const A: string; C: Char): string; begin end;'#10 +
+    'function R2(const A: AnsiString; C: AnsiChar): AnsiString; begin end;'#10 +
+    'function T4(const A, B, C: string): string; begin end;'#10 +
+    'function T4(const A: AnsiString; const B, C: WideString): WideString; begin end;'#10 +
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'CoP.dpr'),
+    'program CoP;'#10'uses CoA;'#10 +
+    'const K: AnsiString = ''xyz'';'#10 +
+    'var C: TC; I: Integer; P: TPI; A: AnsiString; U, S: string; W: WideString;'#10 +
+    'begin'#10 +
+    '  C := TC.Create;'#10 +
+    '  G;'#10 +
+    '  C.M;'#10 +
+    '  TC.L;'#10 +
+    '  I := H;'#10 +
+    '  I := C.F + H;'#10 +
+    '  if H = 0 then G;'#10 +
+    '  P := G;'#10 +
+    '  S := R3(A, K, '' '');'#10 +
+    '  S := R3(A, U, '' '');'#10 +
+    '  S := R3(A, ''abc'', ''x'');'#10 +
+    '  S := R2(A, '' '');'#10 +
+    '  W := T4(A, U, U);'#10 +
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'CoP.dpr'));
+    var LP := ModelByName('cop');
+    Ok('callovl: a paren-less constructor in an assignment is Create [' +
+      BoundRoutines(LP, 'Create') + ']', BoundRoutines(LP, 'Create') = 'p0');
+    Ok('callovl: G as a statement twice, as a procedural value G(A) [' +
+      BoundRoutines(LP, 'G') + ']', BoundRoutines(LP, 'G') = 'p0 p0 p1');
+    Ok('callovl: C.M; is M [' + BoundRoutines(LP, 'M') + ']',
+      BoundRoutines(LP, 'M') = 'p0');
+    Ok('callovl: TC.L; is L [' + BoundRoutines(LP, 'L') + ']',
+      BoundRoutines(LP, 'L') = 'p0');
+    Ok('callovl: H assigned, an operand, compared [' +
+      BoundRoutines(LP, 'H') + ']',
+      BoundRoutines(LP, 'H') = 'p0:integer p0:integer p0:integer');
+    Ok('callovl: C.F as an operand [' + BoundRoutines(LP, 'F') + ']',
+      BoundRoutines(LP, 'F') = 'p0:integer');
+    Ok('callovl: R3 by the worse class, not a sum [' +
+      BoundRoutines(LP, 'R3') + ']', BoundRoutines(LP, 'R3') =
+      'p3:ansistring p3:string p3:string');
+    Ok('callovl: R2(A, '' '') takes the AnsiString overload [' +
+      BoundRoutines(LP, 'R2') + ']', BoundRoutines(LP, 'R2') =
+      'p2:ansistring');
+    Ok('callovl: T4(A, U, U): one class 4 step outweighs two class 3 [' +
+      BoundRoutines(LP, 'T4') + ']', BoundRoutines(LP, 'T4') =
+      'p3:widestring');
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // dcc's ranking of number and string conversions (ConvRank, spec 6.3.1;
 // local/type-conv-2026-11/n1): each pair declares the overload dcc does NOT
 // pick first, and only the picked one's result has `.W` - a wrong binding is
@@ -22062,6 +22228,7 @@ begin
   TestOneScorer;
   TestOverloadSets;
   TestValueOverloads;
+  TestCallPositionOverloads;
   TestConvRanking;
   TestImplicitRanking;
   TestRefConvRanking;
