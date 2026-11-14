@@ -12003,10 +12003,17 @@ var
     LDm: TPasSemaModel;
     LFirst, LCand, LArity, LOwner, LAMid, LASym, LACtx: Integer;
     LSig, LCandSig: string;
-    LFirstSig: Boolean;
+    LFirstSig, LAnyCons: Boolean;
   begin
     LDm := FModels[AMid];
     if LDm.Symbols[ASym].Scope = NIL_SCOPE then
+      Exit;
+    // The bound overload without a constraint meets them: it is one of the
+    // candidates below, so nothing would be said - skip the lookups.
+    LAnyCons := False;
+    for var LGroup in GenericParamConstraints(AMid, ASym) do
+      LAnyCons := LAnyCons or (Length(LGroup) > 0);
+    if not LAnyCons then
       Exit;
     LOwner := LDm.Scopes[LDm.Symbols[ASym].Scope].StructSym;
     if (LOwner <> NIL_SYM) and FindMemberX(AId,
@@ -17209,6 +17216,8 @@ var
   // Index nodes whose comma list ran from an array into a default property
   // (pass mode) - CheckAssigns' E2016 (13.1.4).
   LCommaStruct: TArray<Integer>;
+  // HasWith's answer: 0 not looked yet, 1 no `with` in the unit, 2 some.
+  LWithSeen: Byte;
   // The candidates the last SelectCallTarget found best alike with a fit
   // above no evidence (ConsiderChain), the best first - CheckTies' note.
   LSelTie0, LSelTie1: TPasExtRef;
@@ -20407,6 +20416,9 @@ var
                     // untyped over the set's head (12.1.2). A constructor's
                     // inherited call is a call on Self: no value.
                     if (LM.Tree.Nodes[LBase].Kind = nkIdent) and
+                       (LM.Tree.Nodes[N].Parent <> NIL_NODE) and
+                       (LM.Tree.Nodes[LM.Tree.Nodes[N].Parent].Kind in
+                         [nkInherited, nkMember, nkCall, nkIndex]) and
                        IsInheritedHead(LBase) then
                       if IsConstructorSym(LBestMid, LBestSym) then
                         SetXAt(LBase, XNil)
@@ -21309,6 +21321,23 @@ var
 
   function IsValueOnly(AAssign, B: Integer): Boolean; forward;
 
+  // Does the unit hold a `with` at all? Asked for every bare field written,
+  // answered once per walk.
+  function HasWith: Boolean;
+  begin
+    if LWithSeen = 0 then
+    begin
+      LWithSeen := 1;
+      for var LN := 0 to High(LM.Tree.Nodes) do
+        if LM.Tree.Nodes[LN].Kind = nkWithStmt then
+        begin
+          LWithSeen := 2;
+          Break;
+        end;
+    end;
+    Result := LWithSeen = 2;
+  end;
+
   // The field AMid.ASym that the designator N names lies in a value: the
   // base it is selected from (an nkMember's left side, a bare name's with
   // target) is a record value that is no variable.
@@ -21321,7 +21350,10 @@ var
       nkMember:
         LBase := LM.Tree.Nodes[N].FirstChild;
       nkIdent:
-        LBase := WithTargetOf(N, AMid, ASym);
+        if HasWith then
+          LBase := WithTargetOf(N, AMid, ASym)
+        else
+          Exit;   // no with in the unit: a bare field is Self's
     else
       Exit;
     end;
@@ -21332,55 +21364,61 @@ var
   // Is the designator B, of a type ValueTyped accepts, a value rather than
   // a variable - see the block comment above.
   function IsValueOnly(AAssign, B: Integer): Boolean;
-  var
-    LCallee, LArg, LBase, LMid, LSym: Integer;
-    LBx: TSemaXType;
-  begin
-    Result := False;
-    if Unreliable(AAssign, B, GetX(B)) then
-      Exit;
-    case LM.Tree.Nodes[B].Kind of
-      nkParen:
-        Result := True;
-      nkCall:
-        begin
-          LCallee := LM.Tree.Nodes[B].FirstChild;
-          if LCallee = NIL_NODE then
-            Exit;
-          if IsTypeDesignator(LCallee) then
+
+    function Shape: Boolean;
+    var
+      LCallee, LArg, LBase, LMid, LSym: Integer;
+      LBx: TSemaXType;
+    begin
+      Result := False;
+      case LM.Tree.Nodes[B].Kind of
+        nkParen:
+          Result := True;
+        nkCall:
           begin
-            // A cast: of a variable, the variable.
-            LArg := LM.Tree.Nodes[LCallee].NextSibling;
-            Result := (LArg <> NIL_NODE) and
-              (LM.Tree.Nodes[LArg].NextSibling = NIL_NODE) and
-              IsValueOnly(AAssign, LArg);
-          end
-          else
-            Result := True;   // a call's result
-        end;
-      nkIdent, nkMember:
-        if TargetSym(B, LMid, LSym) then
-          case FModels[LMid].Symbols[LSym].Kind of
-            skRoutine, skProperty:
-              Result := True;   // a paren-less call's result, a property's value
-            skField:
-              Result := FieldOfValue(AAssign, B, LMid, LSym);
+            LCallee := LM.Tree.Nodes[B].FirstChild;
+            if LCallee = NIL_NODE then
+              Exit;
+            if IsTypeDesignator(LCallee) then
+            begin
+              // A cast: of a variable, the variable.
+              LArg := LM.Tree.Nodes[LCallee].NextSibling;
+              Result := (LArg <> NIL_NODE) and
+                (LM.Tree.Nodes[LArg].NextSibling = NIL_NODE) and
+                IsValueOnly(AAssign, LArg);
+            end
+            else
+              Result := True;   // a call's result
           end;
-      nkIndex:
-        begin
-          LBase := LM.Tree.Nodes[B].FirstChild;
-          if LBase = NIL_NODE then
-            Exit;
-          if IsArrayPropertyDesignator(LBase) then
-            Exit(True);
-          if StaticArrayAt(LBase) then
-            Exit(IsValueOnly(AAssign, LBase));
-          // Indexing a struct is its default array property's value.
-          LBx := CanonTypeX(GetX(LBase));
-          Result := XValid(LBx) and
-            (XCatOf(LBx) in [tcClass, tcInterface, tcRecord]);
-        end;
+        nkIdent, nkMember:
+          if TargetSym(B, LMid, LSym) then
+            case FModels[LMid].Symbols[LSym].Kind of
+              skRoutine, skProperty:
+                Result := True;   // a paren-less call's result, a property's value
+              skField:
+                Result := FieldOfValue(AAssign, B, LMid, LSym);
+            end;
+        nkIndex:
+          begin
+            LBase := LM.Tree.Nodes[B].FirstChild;
+            if LBase = NIL_NODE then
+              Exit;
+            if IsArrayPropertyDesignator(LBase) then
+              Exit(True);
+            if StaticArrayAt(LBase) then
+              Exit(IsValueOnly(AAssign, LBase));
+            // Indexing a struct is its default array property's value.
+            LBx := CanonTypeX(GetX(LBase));
+            Result := XValid(LBx) and
+              (XCatOf(LBx) in [tcClass, tcInterface, tcRecord]);
+          end;
+      end;
     end;
+
+  begin
+    // The shape first - most bases are variables, and the reliability test
+    // reads more than the shape does.
+    Result := Shape and not Unreliable(AAssign, B, GetX(B));
   end;
 
   // E2064 at an assignment AAssign whose target ADst is a part of a value.
@@ -21404,8 +21442,8 @@ var
         begin
           LBase := LM.Tree.Nodes[ADst].FirstChild;
           LHit := (LBase <> NIL_NODE) and
-            not IsArrayPropertyDesignator(LBase) and StaticArrayAt(LBase) and
-            IsValueOnly(AAssign, LBase);
+            not IsArrayPropertyDesignator(LBase) and
+            IsValueOnly(AAssign, LBase) and StaticArrayAt(LBase);
         end;
     end;
     if LHit and not InUntypedWith(AAssign) then
@@ -21426,10 +21464,14 @@ var
     LDm: TPasSemaModel;
     LBx: TSemaXType;
   begin
-    if IsTypeDesignator(ABase) then
+    // The base's type first: nearly every base is no class reference, and
+    // its type is at hand where IsTypeDesignator reads the binding maps.
+    LBx := GetX(ABase);
+    if not XValid(LBx) then
       Exit;
-    LBx := CanonTypeX(GetX(ABase));
-    if not XValid(LBx) or (XCatOf(LBx) <> tcClassOf) then
+    LBx := CanonTypeX(LBx);
+    if not XValid(LBx) or (XCatOf(LBx) <> tcClassOf) or
+       IsTypeDesignator(ABase) then
       Exit;
     if not TargetSym(ANameNode, LMid, LSym) then
       Exit;
@@ -21524,12 +21566,6 @@ var
     identity, alias groups included); an open type parameter, a class or
     record identity and an inherited redeclaration's accessors are not. }
   procedure CheckAccessors(ADecl: Integer);
-  var
-    LChild, LName, LProp, LArr, LMid, LSym, LAlt, LCount, LAcc: Integer;
-    LHasIndex, LWrite: Boolean;
-    LPropX: TSemaXType;
-    LParams: TArray<Integer>;
-    LDm: TPasSemaModel;
 
     // Two types dcc would not take for one another, as far as is certain.
     function Differ(const A, B: TSemaXType): Boolean;
@@ -21555,6 +21591,63 @@ var
         not XSameType(LA, LB);
     end;
 
+    // One accessor AAcc (a `read` / `write` specifier's name) against the
+    // property: E2008 where its kind, parameter count or type differs.
+    procedure CheckOne(AAcc, AProp: Integer; AWrite, AHasIndex: Boolean;
+      var APropX: TSemaXType; var AArr: Integer);
+    var
+      LMid, LSym, LScope, LCount, LLast: Integer;
+      LDm: TPasSemaModel;
+    begin
+      if not (LM.Tree.Nodes[AAcc].Kind in [nkIdent, nkMember]) or
+         not TargetSym(AAcc, LMid, LSym) or
+         (FModels[LMid].Symbols[LSym].Kind <> skRoutine) then
+        Exit;   // a field, or nothing bound: the common case, cheapest first
+      LDm := FModels[LMid];
+      // Overloaded - another declaration of the name in its scope chained to
+      // it, before or after: dcc refuses one beside an `index` (E2271) yet
+      // picks among an array property's by signature - not judged here.
+      if (LDm.Symbols[LSym].NextOverload <> NIL_SYM) or
+         (sfOverload in LDm.Symbols[LSym].Flags) or LM.HasDiagAt(AAcc) then
+        Exit;
+      // The parameters: their count, and the last one (a setter's value).
+      LCount := 0;
+      LLast := NIL_SYM;
+      LScope := LDm.Symbols[LSym].MemberScope;
+      if LScope <> NIL_SCOPE then
+        for var LI := 0 to LDm.Scopes[LScope].Symbols.Count - 1 do
+          if LDm.Symbols[LDm.Scopes[LScope].Symbols[LI]].Kind = skParam then
+          begin
+            Inc(LCount);
+            LLast := LDm.Scopes[LScope].Symbols[LI];
+          end;
+      if AArr < 0 then
+        AArr := PropertyParamCount(AId, AProp);
+      if LCount <> AArr + Ord(AHasIndex) + Ord(AWrite) then
+      begin
+        EmitAt(LM, AAcc, 'E2008', SE2008_IncompatibleTypes);
+        Exit;
+      end;
+      // A getter is a function, a setter a procedure.
+      if (not AWrite and (LDm.RoutineHead(LSym) = rhProcedure)) or
+         (AWrite and (LDm.RoutineHead(LSym) = rhFunction)) then
+      begin
+        EmitAt(LM, AAcc, 'E2008', SE2008_IncompatibleTypes);
+        Exit;
+      end;
+      if not XValid(APropX) then
+        APropX := SymDeclTypeX(AId, AProp);
+      if (not AWrite and Differ(SymDeclTypeX(LMid, LSym), APropX)) or
+         (AWrite and Differ(SymDeclTypeX(LMid, LLast), APropX)) then
+        EmitAt(LM, AAcc, 'E2008', SE2008_IncompatibleTypes);
+    end;
+
+  var
+    LChild, LName, LProp, LArr, LN: Integer;
+    LAccs: array[0..3] of Integer;
+    LWrites: array[0..3] of Boolean;
+    LHasIndex, LIsWrite, LIsAcc: Boolean;
+    LPropX: TSemaXType;
   begin
     LName := LM.Tree.Nodes[ADecl].FirstChild;
     while (LName <> NIL_NODE) and (LM.Tree.Nodes[LName].Kind <> nkIdent) do
@@ -21565,71 +21658,40 @@ var
     if (LProp = NIL_SYM) or (LM.Symbols[LProp].Kind <> skProperty) or
        (LM.Symbols[LProp].TypeNode = NIL_NODE) then
       Exit;   // a bare redeclaration: its accessors are its ancestor's
-    LPropX := SymDeclTypeX(AId, LProp);
-    LArr := PropertyParamCount(AId, LProp);
+    // One pass over the specifiers, each word read once; the accessors kept
+    // in source order (an `index` may stand after them).
     LHasIndex := False;
-    LChild := LM.Tree.Nodes[ADecl].FirstChild;
-    while LChild <> NIL_NODE do
-    begin
-      if (LM.Tree.Nodes[LChild].Kind = nkPropSpec) and
-         LM.Tree.NodeTextEquals(LChild, 'index') then
-        LHasIndex := True;
-      LChild := LM.Tree.Nodes[LChild].NextSibling;
-    end;
+    LN := 0;
     LChild := LM.Tree.Nodes[ADecl].FirstChild;
     while LChild <> NIL_NODE do
     begin
       if LM.Tree.Nodes[LChild].Kind = nkPropSpec then
       begin
-        LWrite := LM.Tree.NodeTextEquals(LChild, 'write');
-        LAcc := LM.Tree.Nodes[LChild].FirstChild;
-        if (LWrite or LM.Tree.NodeTextEquals(LChild, 'read')) and
-           (LAcc <> NIL_NODE) and
-           (LM.Tree.Nodes[LAcc].Kind in [nkIdent, nkMember]) and
-           TargetSym(LAcc, LMid, LSym) and
-           (FModels[LMid].Symbols[LSym].Kind = skRoutine) and
-           not LM.HasDiagAt(LAcc) then
+        LIsAcc := True;
+        LIsWrite := False;
+        if not LM.Tree.NodeTextEquals(LChild, 'read') then
+          if LM.Tree.NodeTextEquals(LChild, 'write') then
+            LIsWrite := True
+          else
+          begin
+            LIsAcc := False;
+            if LM.Tree.NodeTextEquals(LChild, 'index') then
+              LHasIndex := True;
+          end;
+        if LIsAcc and (LN <= 3) and
+           (LM.Tree.Nodes[LChild].FirstChild <> NIL_NODE) then
         begin
-          LDm := FModels[LMid];
-          // Overloaded: no signature picks among them (E2271).
-          LCount := 0;
-          if LDm.Symbols[LSym].Scope <> NIL_SCOPE then
-          begin
-            LAlt := LDm.FindLocalNoHelpers(LDm.Symbols[LSym].Scope,
-              SemaKey(LDm.Symbols[LSym].NameLower));
-            while LAlt <> NIL_SYM do
-            begin
-              if LDm.Symbols[LAlt].Kind = skRoutine then
-                Inc(LCount);
-              LAlt := LDm.Symbols[LAlt].NextOverload;
-            end;
-          end;
-          // Overloaded: dcc refuses one beside an `index` (E2271) yet picks
-          // among an array property's by signature - not judged here.
-          if LCount = 1 then
-          begin
-            LParams := nil;
-            if LDm.Symbols[LSym].MemberScope <> NIL_SCOPE then
-              for var LI := 0 to
-                LDm.Scopes[LDm.Symbols[LSym].MemberScope].Symbols.Count - 1 do
-              begin
-                LAlt := LDm.Scopes[LDm.Symbols[LSym].MemberScope].Symbols[LI];
-                if LDm.Symbols[LAlt].Kind = skParam then
-                  LParams := LParams + [LAlt];
-              end;
-            // A getter is a function, a setter a procedure.
-            if (not LWrite and (LDm.RoutineHead(LSym) = rhProcedure)) or
-               (LWrite and (LDm.RoutineHead(LSym) = rhFunction)) or
-               (Length(LParams) <> LArr + Ord(LHasIndex) + Ord(LWrite)) or
-               (not LWrite and Differ(SymDeclTypeX(LMid, LSym), LPropX)) or
-               (LWrite and Differ(SymDeclTypeX(LMid,
-                 LParams[High(LParams)]), LPropX)) then
-              EmitAt(LM, LAcc, 'E2008', SE2008_IncompatibleTypes);
-          end;
+          LAccs[LN] := LM.Tree.Nodes[LChild].FirstChild;
+          LWrites[LN] := LIsWrite;
+          Inc(LN);
         end;
       end;
       LChild := LM.Tree.Nodes[LChild].NextSibling;
     end;
+    LPropX := XNil;   // read only when an accessor's types are compared
+    LArr := -1;       // likewise the index-parameter count
+    for var LI := 0 to LN - 1 do
+      CheckOne(LAccs[LI], LProp, LWrites[LI], LHasIndex, LPropX, LArr);
   end;
 
   // E2018 at a with target of no struct type (5.7, WithOpensX). Judged on a
@@ -21940,6 +22002,7 @@ var
 begin
   LM := FModels[AId];
   LProbe := AProbe;
+  LWithSeen := 0;
   LSpineSkip := NIL_NODE;
   LFallback := nil;
   LArrArgCore := NIL_NODE;

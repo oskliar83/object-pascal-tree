@@ -94,6 +94,9 @@ type
     FSkipTyper: Boolean;   // see Analyze
     // The filled prefix of FModel.WithUnopened while ResolveWithStmts runs.
     FWithUnopenedCount: Integer;
+    // Does the tree hold an `inherited` at all (InheritedNameSym)? 0 not
+    // looked yet, 1 no, 2 yes - asked of every unbound name, answered once.
+    FInheritedSeen: Byte;
     // The routine declarations an implementation header has completed, by
     // symbol (CompletionOf): a declaration is completed once, so a second
     // header of the name is another overload.
@@ -4232,6 +4235,18 @@ var
   LUp, LParent, LScope, LAnc: Integer;
 begin
   Result := NIL_SYM;
+  if FInheritedSeen = 0 then
+  begin
+    FInheritedSeen := 1;
+    for var LN := 0 to High(FTree.Nodes) do
+      if FTree.Nodes[LN].Kind = nkInherited then
+      begin
+        FInheritedSeen := 2;
+        Break;
+      end;
+  end;
+  if FInheritedSeen = 1 then
+    Exit;
   // The name is the leftmost leaf under the nkInherited.
   LUp := ANode;
   LParent := FTree.Nodes[LUp].Parent;
