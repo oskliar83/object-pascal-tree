@@ -125,6 +125,8 @@ const
   SE2034_TooManyActualParams  = 'E2034 Too many actual parameters';
   SE2035_NotEnoughActualParams = 'E2035 Not enough actual parameters';
   SE2026_ConstantExpected = 'E2026 Constant expression expected';
+  // The attribute class's name as declared, unquoted (dcc64 37.0).
+  SE2289_UnresolvedCustomAttribute = 'E2289 Unresolved custom attribute: %s';
   // A trailing comma in a call (`F(1,)`) with a parameter still due: dcc's
   // syntax wording, from the arity check - the parser accepts the comma
   // (6.2.5, it compiles when the last parameter has a default).

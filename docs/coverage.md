@@ -595,11 +595,19 @@ of less work, not a gap in following the language; its consequences are in
   that are no expression are parse errors. `[C < 1]` reads as type arguments.
   The same reading looks up no name in `[C + 1]`, so its W1074 names nothing
   where dcc's names `'C'`, and `[TA + 1]` is W1074 where dcc reports E2029.
-- a `Result:` attribute before anything but a function is not reported: dcc
-  carries it to the next function of the member list and reports E2289 only
-  where the list ends without one (one E2289 per compile), and PasTree
-  reports no E2289 at all. An expression before the colon (`[1: Tag]`, W1074
-  for dcc) is a parse error.
+- E2289 for a group dcc cannot place is reported where the walk is read
+  exactly: a `Result:` attribute on a parameter, in a class's or an
+  interface's member list with no function before its `end`, before a
+  procedure, constructor or destructor with a body, on a class's type
+  declaration; a plain group with nothing after it before a class's `end`.
+  Not read, so silent: a nested type section on the way (a class there ends
+  the walk at its own `end`), a record's list (the walk goes on past its
+  `end`), a `var` section's end, a group dangling before `implementation`,
+  a routine's `begin` or a section word at unit level, and the other
+  positions (generic parameters, enumeration values, variant parts, local
+  variables). dcc reports the first E2289 of a compile alone; every one is
+  reported here. An expression before the colon (`[1: Tag]`, W1074 for dcc)
+  is a parse error.
 - an attribute's arguments are checked against its constructors (E2010,
   E2034, E2035, E2250, E2026) only where every part is read reliably: a
   record, Variant, procedural, array, untyped, `var` or `out` parameter in

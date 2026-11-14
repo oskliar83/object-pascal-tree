@@ -11254,6 +11254,116 @@ begin
   end;
 end;
 
+{ Spec 19.3.2 (dcc64 37.0, 2026-11-14, local/fu-attrs R1-R10, Pa*, Pb*, Pd,
+  Q1-Q6): a group dcc cannot place is E2289 where its walk ends. A
+  `Result:` attribute lands on the next function of a class's or an
+  interface's list, across procedures, constructors, fields, properties,
+  visibility words and nested const sections, else E2289 at the struct's
+  `end`; on a parameter at once, at the declaration's last name; before a
+  procedure with a body at the token after it; on a class's type
+  declaration inside its members. A plain group with nothing after it in a
+  class is E2289 at the `end`. Not read, so silent: a nested type section on
+  the way, a record. An attribute that did not resolve is its own error. }
+procedure TestAttributeE2289;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_attre2289');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class constructor Create; end;'#10 +
+    '  IInterface = interface end;'#10 +
+    '  TCustomAttribute = class(TObject) end;'#10 +
+    'implementation'#10'constructor TObject.Create; begin end;'#10 +
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'RT.dpr'),
+    'program RT;'#10 +                                   // 1
+    'type'#10 +                                          // 2
+    '  TagAttribute = class(TCustomAttribute) end;'#10 + // 3
+    '  OtherAttribute = class(TCustomAttribute) end;'#10 + // 4
+    '  T1 = class'#10 +                                  // 5
+    '    [Result: Tag] procedure P1;'#10 +               // 6
+    '    [Result: Tag] FX: Integer;'#10 +                // 7
+    '  private'#10 +                                     // 8
+    '    const K = 1;'#10 +                              // 9
+    '  public'#10 +                                      // 10
+    '    [Result: Tag] constructor Create;'#10 +         // 11
+    '    class function F1: Integer;'#10 +               // 12 takes all
+    '  end;'#10 +                                        // 13
+    '  T2 = class'#10 +                                  // 14
+    '    FQ: Integer;'#10 +                              // 15
+    '    [Result: Tag] procedure P2;'#10 +               // 16
+    '    property Q: Integer read FQ;'#10 +              // 17
+    '  end;'#10 +                                        // 18 E2289
+    '  I3 = interface'#10 +                              // 19
+    '    [Result: Tag] procedure P3;'#10 +               // 20
+    '  end;'#10 +                                        // 21 E2289
+    '  T4 = class'#10 +                                  // 22
+    '    procedure P4;'#10 +                             // 23
+    '    [Other, Tag]'#10 +                              // 24
+    '  end;'#10 +                                        // 25 E2289 x2
+    '  T5 = class'#10 +                                  // 26
+    '    [Tag] procedure P5;'#10 +                       // 27
+    '    [Result: Tag] function F5: Integer;'#10 +       // 28
+    '    [Tag] const C5 = 1;'#10 +                       // 29
+    '    procedure P5b;'#10 +                            // 30 takes it
+    '  end;'#10 +                                        // 31
+    '  [Result: Tag] TZ = class'#10 +                    // 32
+    '    X: Integer;'#10 +                               // 33
+    '  end;'#10 +                                        // 34 E2289
+    '  T6 = class'#10 +                                  // 35
+    '    [Result: Tag] procedure P6;'#10 +               // 36
+    '  public type'#10 +                                 // 37
+    '    TIn = class X: Integer; end;'#10 +              // 38
+    '  end;'#10 +                                        // 39 not read
+    '  TR = record'#10 +                                 // 40
+    '    [Result: Tag] X: Integer;'#10 +                 // 41
+    '  end;'#10 +                                        // 42 not read
+    'procedure T1.P1; begin end;'#10 +                   // 43
+    'constructor T1.Create; begin end;'#10 +             // 44
+    'class function T1.F1: Integer; begin Result := 0; end;'#10 + // 45
+    'procedure T2.P2; begin end;'#10 +                   // 46
+    'procedure T4.P4; begin end;'#10 +                   // 47
+    'procedure T5.P5; begin end;'#10 +                   // 48
+    'function T5.F5: Integer; begin Result := 0; end;'#10 + // 49
+    'procedure T5.P5b; begin end;'#10 +                  // 50
+    'procedure T6.P6; begin end;'#10 +                   // 51
+    '[Result: Tag] procedure P('#10 +                    // 52
+    '  [Result: Tag] A,'#10 +                            // 53
+    '  B: Integer);'#10 +                                // 54 E2289 (B)
+    'begin'#10 +                                         // 55
+    'end;'#10 +                                          // 56
+    'function F([Result: Tag] C: Integer): Integer;'#10 + // 57 E2289 (P's), (C)
+    'begin'#10 +                                         // 58
+    '  Result := 0;'#10 +                                // 59
+    'end;'#10 +                                          // 60
+    '[Result: TObject] procedure Q; begin end;'#10 +     // 61 E2010 alone
+    '[Result: Tag] function G: Integer; begin Result := 0; end;'#10 + // 62
+    '[Result: Zork] procedure Q2; begin end;'#10 +       // 63 W1074 alone
+    'begin'#10 +                                         // 64
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'RT.dpr'));
+    LM := ModelByName('rt');
+    Ok('attre2289: E2289 where each walk ends [' + DiagSites(LM, 'E2289') +
+      ']', DiagSites(LM, 'E2289') =
+      '18:3 21:3 25:3 25:3 34:3 54:3 57:1 57:26');
+    Ok('attre2289: ...naming the class as declared',
+      DiagHasText(LM, 'E2289', 'Unresolved custom attribute: TagAttribute') and
+      DiagHasText(LM, 'E2289', 'Unresolved custom attribute: OtherAttribute'));
+    Ok('attre2289: an unresolved one is its own error alone [' +
+      DiagSites(LM, 'E2010') + '/' + DiagSites(LM, 'W1074') + ']',
+      (DiagSites(LM, 'E2010') = '61:10') and
+      (DiagSites(LM, 'W1074') = '63:2') and (Length(LM.Diags) = 10));
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 { Spec 19.3.2 (dcc64 37.0, 2026-11-14, local/fu-attrs P1-P7): an attribute
   with its arguments is a call of its class's Create. One candidate: the
   arguments converted left to right, the first that does not is E2010 at it,
@@ -22465,6 +22575,7 @@ begin
   TestAttributeSuffixFirst;
   TestAttributeW1074;
   TestAttributeCtorArgs;
+  TestAttributeE2289;
   TestAttributeW1074LeafGuess;
   TestE2003LeafGuess;
   TestAttributeImplHeaderParam;
