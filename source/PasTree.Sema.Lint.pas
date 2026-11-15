@@ -147,6 +147,25 @@ function DemandLint(ANav: TPasNavigator; const AMids: TArray<Integer>;
   fields, properties. A routine's locals and parameters are not: dcc hints
   them itself (H2164, H2219).
 
+  A declaration every use of which sits in rows - in their bodies, their
+  declarations (a property's `read GetX`, a field's type), or its own body
+  (recursion) - is a row too (uhOnlyByUnused, By naming them): removed
+  with them it is missed by nothing. A field or a unit or class variable
+  whose every other use is the target of a plain `:=` (`FX := ...`,
+  `Self.FX := ...`) is a row (uhOnlyWritten, Writes listing the
+  assignments): nothing reads what it holds, and the assignments go with
+  it - not an `absolute` one (a write of it writes another), not a
+  record's field (the record is read whole). Both are
+  decided together, to a fixed point (a type used only by a field only
+  written is one; two routines calling only each other are two), over the
+  declarations weighed - a use in one not weighed (another unit's in
+  CheckUnusedSymbols, a virtual method) keeps it. A use the index cannot
+  place (an include file, a bare `inherited`, a form) keeps it too, and a
+  declaration bound more than 16 times is taken as used unsearched. Doubts
+  of their own: an assignment whose value code computes - a call, a
+  property (removing it drops that), an interface reference held (it
+  keeps the object alive), a row using it that has a doubt.
+
   What is reached other than by name is not weighed, and counted
   (TPasUnusedSkip): published members, which form files and RTTI find by
   name - in a class that streams (a TPersistent descendant) the unnamed
@@ -192,6 +211,13 @@ type
     usReplacesLibrary);
   TPasUnusedSkips = array[TPasUnusedSkip] of Integer;
 
+  // Why a row is one (TPasUnusedSymbol.How).
+  TPasUnusedHow = (
+    uhUnused,        // nothing uses it
+    uhOnlyByUnused,  // used only by rows (By) - or by itself: dead with them
+    uhOnlyWritten);  // a field or variable only assigned (Writes), any other
+                     // use by rows (By): nothing reads what it holds
+
   TPasUnusedSymbol = record
     UnitId, Sym: Integer;     // the declaration, in ANav's project
     FileName: string;         // the file it is written in (an include too)
@@ -201,6 +227,9 @@ type
     Head: TPasRoutineHead;    // a routine's; rhNone else
     RecordField: Boolean;
     Doubts: TArray<string>;   // one sentence each; empty when none
+    How: TPasUnusedHow;
+    By: TArray<string>;       // the rows using it, qualified ('' for itself)
+    Writes: TArray<string>;   // uhOnlyWritten: the assignments, 'File.pas:12'
   end;
 
 // The unused declarations of the units AMids, by file, line and column.
@@ -234,7 +263,9 @@ type
 // FindUnusedSymbols for the declarations ATargets alone, one verdict each in
 // their order: "is this one dead?" without the rows of its whole unit. The
 // same rule - the overloads beside a routine asked about are weighed too, so
-// the doubt "another overload is used" means what it means in a whole run.
+// the doubt "another overload is used" means what it means in a whole run,
+// and so are the declarations its uses sit in, and theirs, up to 4 rounds
+// and 300 declarations: one used only by a dead property's getter is a row.
 function CheckUnusedSymbols(ANav: TPasNavigator;
   const ATargets: TArray<TPasExtRef>): TArray<TPasUnusedCheck>;
 
@@ -2273,7 +2304,21 @@ end;
 
 { ---- unused declarations ---- }
 
+const
+  // A candidate bound more often is taken as used, its references not
+  // searched (its declaration sites are up to 3 of them).
+  UNUSED_MAX_SEARCHED = 16;
+
 type
+  // One use of a candidate a reference search found (TUnusedLint.FUses).
+  TUnusedSite = record
+    Users: TArray<Int64>;  // the declarations it sits in; nil: none (a
+                           // program's block, initialization) - a live use
+    Write: Boolean;        // the target of a plain `:=`
+    Call: Boolean;         // Write: the value assigned is computed by a call
+    At: string;            // 'File.pas:12'
+  end;
+
   TUnusedLint = class
   private
     FNav: TPasNavigator;
@@ -2296,7 +2341,22 @@ type
     FSkipOf: TDictionary<Int64, TPasUnusedSkip>;
     // The unit names under the library trees, and a file of each (lazy).
     FLibUnits: TDictionary<string, string>;
+    // Used other than by a reference hit placed in a declaration: never a
+    // row of Derive. FUses: a candidate's hits, each placed.
+    FHard: TDictionary<Int64, Boolean>;
+    FUses: TObjectDictionary<Int64, TList<TUnusedSite>>;
+    FImplSym: TDictionary<Int64, Int64>;  // a routine node -> its symbol
+    FSearched: TDictionary<Int64, Boolean>;  // the candidates Search asked about
+    procedure Hard(AKey: Int64);
+    function UsersOf(LM: TPasSemaModel; AMid, ANode: Integer): TArray<Int64>;
+    function PlainWrite(LM: TPasSemaModel; AMid, ANode: Integer;
+      out ACall: Boolean): Boolean;
+    function MayBeOnlyWritten(AKey: Int64): Boolean;
+    procedure Derive(ARows: Boolean);
+    procedure InheritDoubts;
+    function UnknownUsers: TArray<TPasExtRef>;
     procedure Restrict(const ATargets: TArray<TPasExtRef>);
+    procedure Extend(const AMore: TArray<TPasExtRef>);
     class function K(AMid, ASym: Integer): Int64; static; inline;
     function VisPos(LM: TPasSemaModel; AVis: Integer; out AFileId, ALine,
       ACol: Integer): Boolean;
@@ -2323,6 +2383,7 @@ type
     procedure Collect(AMid: Integer);
     function DeclaredAt(AMid, ANode: Integer; out ASym: Integer): Boolean;
     procedure MarkBound(AMid: Integer);
+    procedure MarkUnbound(AMid: Integer; ANames: TDictionary<string, Boolean>);
     procedure Search;
     procedure MarkHelpers;
     function UsedOverload(AMid, ASym: Integer): Boolean;
@@ -2350,11 +2411,19 @@ begin
     [doOwnsValues]);
   FEnumOf := TDictionary<Int64, Int64>.Create;
   FDirNames := TDictionary<string, Boolean>.Create;
+  FHard := TDictionary<Int64, Boolean>.Create;
+  FUses := TObjectDictionary<Int64, TList<TUnusedSite>>.Create([doOwnsValues]);
+  FImplSym := TDictionary<Int64, Int64>.Create;
+  FSearched := TDictionary<Int64, Boolean>.Create;
   FillChar(FSkips, SizeOf(FSkips), 0);
 end;
 
 destructor TUnusedLint.Destroy;
 begin
+  FSearched.Free;
+  FImplSym.Free;
+  FUses.Free;
+  FHard.Free;
   FSkipOf.Free;
   FOnly.Free;
   FDirNames.Free;
@@ -2375,6 +2444,12 @@ end;
 class function TUnusedLint.K(AMid, ASym: Integer): Int64;
 begin
   Result := (Int64(AMid) shl 32) or Cardinal(ASym);
+end;
+
+procedure TUnusedLint.Hard(AKey: Int64);
+begin
+  FUsed.AddOrSetValue(AKey, True);
+  FHard.AddOrSetValue(AKey, True);
 end;
 
 function TUnusedLint.VisPos(LM: TPasSemaModel; AVis: Integer; out AFileId,
@@ -2411,7 +2486,7 @@ begin
   Result := False;
 end;
 
-// Is AClass, or an ancestor, the class named ANameLower?
+// Is AClass, or an ancestor, the class named ANameLower
 function TUnusedLint.DescendsFrom(AClass: TSemaXType;
   const ANameLower: string): Boolean;
 begin
@@ -2732,7 +2807,7 @@ begin
             Break;
           LBMid := LPMid;
           LBSym := LPSym;
-          FUsed.AddOrSetValue(K(LBMid, LBSym), True);
+          Hard(K(LBMid, LBSym));
         end;
         if FUsed.ContainsKey(K(LC.UnitId, LC.Sym)) then
           Break;
@@ -2786,7 +2861,7 @@ begin
       Exit(True);
 end;
 
-// Is type ASym of LM a class or record helper?
+// Is type ASym of LM a class or record helper
 function TUnusedLint.IsHelperType(LM: TPasSemaModel; ASym: Integer): Boolean;
 var
   LDef: Integer;
@@ -2894,6 +2969,10 @@ begin
   begin
     if (FOnly <> nil) and not FOnly.ContainsKey(K(AMid, LSym)) then
       Continue;
+    // Collected or skipped already (a unit asked about again, Extend).
+    if FCount.ContainsKey(K(AMid, LSym)) or ((FSkipOf <> nil) and
+       FSkipOf.ContainsKey(K(AMid, LSym))) then
+      Continue;
     LS := LM.Symbols[LSym];
     // A value of a named enum (TypeSym, 2.2.4) named in code is a use of its
     // type (MarkBound): `Ord(grpError)` needs TGroups (E2003 without it).
@@ -2983,7 +3062,7 @@ begin
     if ((LS.Kind = skProperty) and DelegatesInterface(LM, LSym)) or
        ((LKind in [sckUnit, sckImplementation]) and
        FDirNames.ContainsKey(LS.NameLower)) then
-      FUsed.AddOrSetValue(K(AMid, LSym), True);
+      Hard(K(AMid, LSym));
   end;
 end;
 
@@ -3023,7 +3102,7 @@ begin
     if (LM.Tree.Nodes[LI].Kind = nkInherited) and
        (LM.Tree.Nodes[LI].FirstChild = NIL_NODE) and
        FProj.BareInheritedTarget(AMid, LI, LBMid, LBSym, LCtx) then
-      FUsed.AddOrSetValue(K(LBMid, LBSym), True);
+      Hard(K(LBMid, LBSym));
   // The bindings, counted: a declaration bound more often than its own
   // sites could make it (its declaration, implementation header, forward)
   // is used, and Search does not ask for its references.
@@ -3036,12 +3115,12 @@ begin
       FCount[K(AMid, LM.RefMap[LI])] := LN + 1
     else if FEnumOf.TryGetValue(K(AMid, LM.RefMap[LI]), LEnum) and
       (LM.Symbols[LM.RefMap[LI]].DeclNode <> LI) then
-      FUsed.AddOrSetValue(LEnum, True);
+      Hard(LEnum);
   for var LP in LM.ExtRefMap do
     if FCount.TryGetValue(K(LP.Value.UnitId, LP.Value.Sym), LN) then
       FCount[K(LP.Value.UnitId, LP.Value.Sym)] := LN + 1
     else if FEnumOf.TryGetValue(K(LP.Value.UnitId, LP.Value.Sym), LEnum) then
-      FUsed.AddOrSetValue(LEnum, True);
+      Hard(LEnum);
   // A property redeclared below (`property X;`, a published one too) needs
   // every link above it: removing one breaks the redeclaration (E2003).
   for var LSym := 0 to LM.SymCount - 1 do
@@ -3056,10 +3135,23 @@ begin
         Break;
       LBMid := LN;
       LBSym := LCtx;
-      if not FUsed.TryAdd(K(LBMid, LBSym), True) then
+      if not FHard.TryAdd(K(LBMid, LBSym), True) then
         Break;   // the rest of the chain is marked already
+      FUsed.AddOrSetValue(K(LBMid, LBSym), True);
     end;
   end;
+  MarkUnbound(AMid, FCandNames);
+end;
+
+procedure TUnusedLint.MarkUnbound(AMid: Integer;
+  ANames: TDictionary<string, Boolean>);
+var
+  LM: TPasSemaModel;
+  LN: Integer;
+begin
+  if not FProj.EnsureHydrated(AMid) then
+    Exit;
+  LM := FProj.Model(AMid);
   // A name the analysis bound to nothing, where a candidate's name is
   // written: what dcc binds there is not known here (a doubt on the row).
   // Keyed by name and qualifier (UnboundKey): `X.Name` with X bound to a
@@ -3077,7 +3169,7 @@ begin
        LM.ExtRefMap.ContainsKey(LI) then
       Continue;
     var LName := LM.Tree.NodeNameLower(LI);
-    if not FCandNames.ContainsKey(LName) or DeclaredAt(AMid, LI, LN) then
+    if not ANames.ContainsKey(LName) or DeclaredAt(AMid, LI, LN) then
       Continue;
     var LQual := '';
     var LP := LM.Tree.Nodes[LI].Parent;
@@ -3119,14 +3211,22 @@ var
   LM: TPasSemaModel;
   LByName: TDictionary<string, Boolean>;
   LMid, LNode, LBMid, LBSym, LPMid, LPSym: Integer;
+  LNew: TDictionary<Int64, Boolean>;
 begin
   MarkRepublished;
+  // The candidates not searched yet: all of them, but in CheckUnusedSymbols'
+  // later rounds (Extend) only the ones a round added.
+  LNew := TDictionary<Int64, Boolean>.Create;
+  for var LC in FCands do
+    if FSearched.TryAdd(K(LC.UnitId, LC.Sym), True) then
+      LNew.Add(K(LC.UnitId, LC.Sym), True);
   LRefs := nil;
   for var LC in FCands do
-    if FUsed.ContainsKey(K(LC.UnitId, LC.Sym)) then
+    if not LNew.ContainsKey(K(LC.UnitId, LC.Sym)) or
+       FUsed.ContainsKey(K(LC.UnitId, LC.Sym)) then
       Continue
-    else if FCount[K(LC.UnitId, LC.Sym)] > 3 then
-      FUsed.AddOrSetValue(K(LC.UnitId, LC.Sym), True)
+    else if FCount[K(LC.UnitId, LC.Sym)] > UNUSED_MAX_SEARCHED then
+      Hard(K(LC.UnitId, LC.Sym))
     else
     begin
       LExt.UnitId := LC.UnitId;
@@ -3172,9 +3272,12 @@ begin
         LBSym := LExt.Sym;
       end
       else if DeclaredAt(LMid, LNode, LBSym) then
+      begin
         // A descendant's `property X;` is a declaration naming the
         // ancestor's: the property it declares, and every link up.
-        LBMid := LMid
+        LBMid := LMid;
+        Hard(K(LBMid, LBSym));
+      end
       else
       begin
         LByName.AddOrSetValue(LowerCase(Copy(LH.Snippet, LH.HiFrom + 1,
@@ -3182,6 +3285,22 @@ begin
         Continue;
       end;
       FUsed.AddOrSetValue(K(LBMid, LBSym), True);
+      // Placed: the declarations it sits in, and whether it is assigned.
+      if FCount.ContainsKey(K(LBMid, LBSym)) and
+         not FHard.ContainsKey(K(LBMid, LBSym)) then
+      begin
+        var LSites: TList<TUnusedSite>;
+        if not FUses.TryGetValue(K(LBMid, LBSym), LSites) then
+        begin
+          LSites := TList<TUnusedSite>.Create;
+          FUses.Add(K(LBMid, LBSym), LSites);
+        end;
+        var LSite := Default(TUnusedSite);
+        LSite.Users := UsersOf(LM, LMid, LNode);
+        LSite.Write := PlainWrite(LM, LMid, LNode, LSite.Call);
+        LSite.At := Format('%s:%d', [ExtractFileName(LH.FilePath), LH.Line]);
+        LSites.Add(LSite);
+      end;
       for var LDepth := 1 to 64 do
       begin
         if (FProj.Model(LBMid).Symbols[LBSym].Kind <> skProperty) or
@@ -3189,13 +3308,13 @@ begin
           Break;
         LBMid := LPMid;
         LBSym := LPSym;
-        FUsed.AddOrSetValue(K(LBMid, LBSym), True);
+        Hard(K(LBMid, LBSym));
       end;
     end;
     for var LC in FCands do
       if LByName.ContainsKey(FProj.Model(LC.UnitId).Symbols[LC.Sym].NameLower)
       then
-        FUsed.AddOrSetValue(K(LC.UnitId, LC.Sym), True);
+        Hard(K(LC.UnitId, LC.Sym));
   finally
     LByName.Free;
     LHits.Free;
@@ -3209,7 +3328,8 @@ begin
   // fails when the form is created.
   for var LC in FCands do
   begin
-    if FUsed.ContainsKey(K(LC.UnitId, LC.Sym)) then
+    if not LNew.ContainsKey(K(LC.UnitId, LC.Sym)) or
+       FUsed.ContainsKey(K(LC.UnitId, LC.Sym)) then
       Continue;
     var LCM := FProj.Model(LC.UnitId);
     if ((LC.Kind = skType) and (LCM.Symbols[LC.Sym].TypeCat = tcClass)) or
@@ -3220,8 +3340,9 @@ begin
        (LCM.Symbols[LCM.Scopes[LCM.Symbols[LC.Sym].Scope].StructSym].TypeCat =
        tcClass)) then
       if Length(FNav.FindFormSites(LC.UnitId, LC.Sym)) > 0 then
-        FUsed.AddOrSetValue(K(LC.UnitId, LC.Sym), True);
+        Hard(K(LC.UnitId, LC.Sym));
   end;
+  LNew.Free;
 end;
 
 // A class or record helper applies without being named: a call to a member
@@ -3244,7 +3365,7 @@ begin
     for var LIdx := 0 to LM.Scopes[LScope].Symbols.Count - 1 do
       if FUsed.ContainsKey(K(LC.UnitId, LM.Scopes[LScope].Symbols[LIdx])) then
       begin
-        FUsed.AddOrSetValue(K(LC.UnitId, LC.Sym), True);
+        Hard(K(LC.UnitId, LC.Sym));
         Break;
       end;
   end;
@@ -3500,6 +3621,394 @@ begin
   end;
 end;
 
+// The declarations the use ANode sits in: the innermost routine (a nested
+// one, a method's implementation - its declared symbol), or the property,
+// field, variable, constant or type whose declaration holds it (`read
+// GetX`, a field's type; every name of `FA, FB: TX`). A routine's locals
+// are passed through to the routine. nil: in none (a program's block,
+// initialization, a routine not placed) - a live use.
+function TUnusedLint.UsersOf(LM: TPasSemaModel; AMid, ANode: Integer):
+  TArray<Int64>;
+var
+  LN, LC, LName, LSym, LFi, LLine, LCol, LTMid, LTSym: Integer;
+  LExt: TPasExtRef;
+  LLocal: Boolean;
+  LKey: Int64;
+  LTName: string;
+begin
+  Result := nil;
+  LN := LM.Tree.Nodes[ANode].Parent;
+  while LN <> NIL_NODE do
+  begin
+    case LM.Tree.Nodes[LN].Kind of
+      nkRoutine:
+        begin
+          LName := NIL_NODE;
+          LC := LM.Tree.Nodes[LN].FirstChild;
+          while LC <> NIL_NODE do
+          begin
+            if (LM.Tree.Nodes[LC].Kind = nkIdent) and
+               (nfName in LM.Tree.Nodes[LC].Flags) then
+              LName := LC
+            else if not (LM.Tree.Nodes[LC].Kind in [nkGenericParams,
+              nkAttrGroup]) then
+              Break;
+            LC := LM.Tree.Nodes[LC].NextSibling;
+          end;
+          if LName = NIL_NODE then
+            Exit(nil);
+          if DeclaredAt(AMid, LName, LSym) then
+            Exit(TArray<Int64>.Create(K(AMid, LSym)));
+          if (LName < Length(LM.RefMap)) and (LM.RefMap[LName] <> NIL_SYM) then
+            Exit(TArray<Int64>.Create(K(AMid, LM.RefMap[LName])));
+          if LM.ExtRefMap.TryGetValue(LName, LExt) then
+            Exit(TArray<Int64>.Create(K(LExt.UnitId, LExt.Sym)));
+          // A method's implementation header binds its name to nothing: the
+          // navigator pairs it with the declaration (Find References from
+          // the header). Once per routine.
+          if not FImplSym.TryGetValue(K(AMid, LN), LKey) then
+          begin
+            LKey := -1;
+            if VisPos(LM, LM.Tree.NodeLeftmostVis(LName), LFi, LLine, LCol)
+               and FNav.SymbolAtFile(AMid, LM.Tree.Source.FileNames[LFi],
+               LLine, LCol, LTMid, LTSym, LTName) then
+              LKey := K(LTMid, LTSym);
+            FImplSym.Add(K(AMid, LN), LKey);
+          end;
+          if LKey = -1 then
+            Exit(nil);
+          Exit(TArray<Int64>.Create(LKey));
+        end;
+      nkPropertyDecl, nkVarDecl, nkConstDecl, nkTypeDecl:
+        begin
+          LLocal := False;
+          LC := LM.Tree.Nodes[LN].FirstChild;
+          while LC <> NIL_NODE do
+          begin
+            if DeclaredAt(AMid, LC, LSym) then
+            begin
+              var LScope := LM.Symbols[LSym].Scope;
+              if (LScope >= 0) and (LScope < LM.Scopes.Count) and
+                 (LM.Scopes[LScope].Kind = sckRoutine) then
+                LLocal := True
+              else
+                Result := Result + [K(AMid, LSym)];
+            end;
+            LC := LM.Tree.Nodes[LC].NextSibling;
+          end;
+          if LLocal then
+            Result := nil
+          else if Result <> nil then
+            Exit;
+        end;
+      nkInterfaceSec, nkImplementationSec, nkInitSec, nkFinalSec, nkUnit,
+      nkProgram, nkLibrary, nkPackage:
+        Exit(nil);
+    end;
+    LN := LM.Tree.Nodes[LN].Parent;
+  end;
+end;
+
+// Is the use ANode the target of a plain `:=` - `FX :=`, `Self.FX :=`,
+// `Obj.FX :=`? ACall: the value assigned is not Plain - code runs to
+// compute it (`TFoo.Create`, `GetX`, a property).
+function TUnusedLint.PlainWrite(LM: TPasSemaModel; AMid, ANode: Integer;
+  out ACall: Boolean): Boolean;
+var
+  LCur, LP, LRhs: Integer;
+  LExt: TPasExtRef;
+
+  // A value no code runs to compute: a literal, nil, a variable, field,
+  // constant, parameter or enum value, and operators over them. A call, a
+  // property (its getter), a cast or a name bound to nothing is not.
+  function Plain(ANo: Integer): Boolean;
+  var
+    LC, LBMid, LBSym: Integer;
+  begin
+    LBMid := -1;
+    LBSym := NIL_SYM;
+    if (ANo < Length(LM.RefMap)) and (LM.RefMap[ANo] <> NIL_SYM) then
+    begin
+      LBMid := AMid;
+      LBSym := LM.RefMap[ANo];
+    end
+    else if LM.ExtRefMap.TryGetValue(ANo, LExt) then
+    begin
+      LBMid := LExt.UnitId;
+      LBSym := LExt.Sym;
+    end;
+    case LM.Tree.Nodes[ANo].Kind of
+      nkIntLit, nkRealLit, nkStrLit, nkNilLit, nkCaretChar:
+        Exit(True);
+      nkIdent:
+        Exit((LBMid >= 0) and FProj.EnsureHydrated(LBMid) and
+          (FProj.Model(LBMid).Symbols[LBSym].Kind in [skVar, skConst, skField,
+          skParam, skEnumValue]));
+      nkUnaryOp, nkBinaryOp, nkParen, nkSetCtor, nkRange, nkInlineIf,
+      nkMember, nkIndex, nkDeref:
+        begin
+          if LBMid >= 0 then
+            Exit(False);   // brackets bound: a default array property
+          LC := LM.Tree.Nodes[ANo].FirstChild;
+          while LC <> NIL_NODE do
+          begin
+            if not Plain(LC) then
+              Exit(False);
+            LC := LM.Tree.Nodes[LC].NextSibling;
+          end;
+          Exit(True);
+        end;
+    end;
+    Result := False;
+  end;
+
+begin
+  Result := False;
+  ACall := False;
+  if LM.Tree.Nodes[ANode].Kind <> nkIdent then
+    Exit;
+  LCur := ANode;
+  LP := LM.Tree.Nodes[LCur].Parent;
+  // The member's name, its last child: `X.FX`.
+  if (LP <> NIL_NODE) and (LM.Tree.Nodes[LP].Kind = nkMember) and
+     (LM.Tree.Nodes[LP].FirstChild <> LCur) and
+     (LM.Tree.Nodes[LCur].NextSibling = NIL_NODE) then
+  begin
+    LCur := LP;
+    LP := LM.Tree.Nodes[LCur].Parent;
+  end;
+  if (LP = NIL_NODE) or (LM.Tree.Nodes[LP].Kind <> nkAssign) or
+     (LM.Tree.Nodes[LP].FirstChild <> LCur) then
+    Exit;
+  Result := True;
+  LRhs := LM.Tree.Nodes[LCur].NextSibling;
+  ACall := (LRhs <> NIL_NODE) and not Plain(LRhs);
+end;
+
+// A field, or a unit or class variable, not `absolute` (its writes write
+// another): what may be a row for being only written.
+function TUnusedLint.MayBeOnlyWritten(AKey: Int64): Boolean;
+var
+  LM: TPasSemaModel;
+  LSym, LDecl: Integer;
+begin
+  LM := FProj.Model(Integer(AKey shr 32));
+  LSym := Integer(Cardinal(AKey and $FFFFFFFF));
+  Result := LM.Symbols[LSym].Kind in [skField, skVar];
+  if not Result then
+    Exit;
+  // A record's field: the record is read whole (passed, copied, written to
+  // a stream), and what the field holds with it.
+  var LScope := LM.Symbols[LSym].Scope;
+  if (LScope >= 0) and (LScope < LM.Scopes.Count) and
+     (LM.Scopes[LScope].Kind = sckStruct) and
+     (LM.Scopes[LScope].StructSym <> NIL_SYM) and
+     (LM.Symbols[LM.Scopes[LScope].StructSym].TypeCat = tcRecord) then
+    Exit(False);
+  LDecl := LM.Tree.Nodes[LM.Symbols[LSym].DeclNode].Parent;
+  Result := (LDecl = NIL_NODE) or (LM.Tree.Nodes[LDecl].Kind <> nkVarDecl) or
+    (LM.Tree.Nodes[LDecl].Aux <> 1);
+end;
+
+// The rows made by the rows (TPasUnusedHow): the candidates used only
+// through placed hits, each kept while every use of it sits in rows, in
+// itself or in the others kept, or - a field or variable - assigns it.
+// A greatest fixed point: two routines calling only each other are two.
+// FUnused is made afresh - the candidates nothing uses, then these; ARows:
+// the rows' How, By, Writes and doubts set too (once, at the end).
+procedure TUnusedLint.Derive(ARows: Boolean);
+var
+  LKept: TDictionary<Int64, Boolean>;
+  LChanged, LOk, LDead: Boolean;
+  LIdx: Integer;
+  LC: TPasUnusedSymbol;
+  LBy: TDictionary<Int64, Boolean>;
+  LWrites: TArray<string>;
+
+  function DeadUser(AUser, AOf: Int64): Boolean;
+  begin
+    Result := (AUser = AOf) or FUnused.ContainsKey(AUser) or
+      LKept.ContainsKey(AUser);
+  end;
+
+begin
+  FUnused.Clear;
+  for var LR in FCands do
+    if not FUsed.ContainsKey(K(LR.UnitId, LR.Sym)) then
+      FUnused.AddOrSetValue(K(LR.UnitId, LR.Sym), True);
+  LKept := TDictionary<Int64, Boolean>.Create;
+  LBy := TDictionary<Int64, Boolean>.Create;
+  try
+    for var LP in FUses do
+      if FUsed.ContainsKey(LP.Key) and not FHard.ContainsKey(LP.Key) and
+         not FUnused.ContainsKey(LP.Key) then
+        LKept.Add(LP.Key, True);
+    repeat
+      LChanged := False;
+      for var LKey in LKept.Keys.ToArray do
+      begin
+        LOk := True;
+        for var LSite in FUses[LKey] do
+        begin
+          LDead := LSite.Users <> nil;
+          for var LU in LSite.Users do
+            if not DeadUser(LU, LKey) then
+            begin
+              LDead := False;
+              Break;
+            end;
+          if not LDead and not (LSite.Write and MayBeOnlyWritten(LKey)) then
+          begin
+            LOk := False;
+            Break;
+          end;
+        end;
+        if not LOk then
+        begin
+          LKept.Remove(LKey);
+          LChanged := True;
+        end;
+      end;
+    until not LChanged;
+    for var LKey in LKept.Keys do
+      FUnused.AddOrSetValue(LKey, True);
+    if not ARows or (LKept.Count = 0) then
+      Exit;
+    for LIdx := 0 to FCands.Count - 1 do
+    begin
+      LC := FCands[LIdx];
+      var LKey := K(LC.UnitId, LC.Sym);
+      if not LKept.ContainsKey(LKey) then
+        Continue;
+      LBy.Clear;
+      LWrites := nil;
+      LC.How := uhOnlyByUnused;
+      for var LSite in FUses[LKey] do
+      begin
+        LDead := LSite.Users <> nil;
+        for var LU in LSite.Users do
+          if not DeadUser(LU, LKey) then
+            LDead := False;
+        if LDead then
+        begin
+          for var LU in LSite.Users do
+            if LBy.TryAdd(LU, True) then
+              if LU = LKey then
+                LC.By := LC.By + ['']
+              else
+                LC.By := LC.By + [QualifiedName(FProj.Model(Integer(LU shr 32)),
+                  Integer(Cardinal(LU and $FFFFFFFF)))];
+        end
+        else
+        begin
+          LC.How := uhOnlyWritten;
+          LWrites := LWrites + [LSite.At];
+          if LSite.Call then
+            LC.Doubts := LC.Doubts + [Format('the value assigned at %s is '
+              + 'computed by code (a call, a property) - removing the '
+              + 'assignment drops it', [LSite.At])];
+        end;
+      end;
+      LC.Writes := LWrites;
+      if LC.How = uhOnlyWritten then
+      begin
+        var LX := FProj.CanonTypeX(FProj.DeclTypeX(LC.UnitId, LC.Sym));
+        if XValid(LX) and FProj.EnsureHydrated(LX.UnitId) and
+           (FProj.Model(LX.UnitId).Symbols[LX.Sym].TypeCat = tcInterface) then
+          LC.Doubts := LC.Doubts + ['it holds an interface reference - '
+            + 'assigning it keeps the object alive until it is cleared'];
+      end;
+      FCands[LIdx] := LC;
+    end;
+  finally
+    LBy.Free;
+    LKept.Free;
+  end;
+end;
+
+// A row made by rows is as sure as they are: a doubt of one using it is one
+// of its own.
+procedure TUnusedLint.InheritDoubts;
+var
+  LDoubted: TDictionary<string, Boolean>;
+  LC: TPasUnusedSymbol;
+begin
+  LDoubted := TDictionary<string, Boolean>.Create;
+  try
+    for var LR in FCands do
+      if LR.Doubts <> nil then
+        LDoubted.AddOrSetValue(LR.Name, True);
+    for var LIdx := 0 to FCands.Count - 1 do
+    begin
+      LC := FCands[LIdx];
+      for var LB in LC.By do
+        if (LB <> '') and LDoubted.ContainsKey(LB) then
+        begin
+          LC.Doubts := LC.Doubts + [Format('%s, which uses it, has a doubt of '
+            + 'its own', [LB])];
+          Break;
+        end;
+      FCands[LIdx] := LC;
+    end;
+  finally
+    LDoubted.Free;
+  end;
+end;
+
+// The declarations the uses of a used candidate sit in that were not
+// weighed (not in FOnly): what CheckUnusedSymbols adds for the next round.
+function TUnusedLint.UnknownUsers: TArray<TPasExtRef>;
+var
+  LSeen: TDictionary<Int64, Boolean>;
+  LExt: TPasExtRef;
+
+  // Live whatever the declarations not weighed yet turn out to be: a use
+  // in no declaration, or in one weighed and settled live - used another
+  // way than by placed hits, not weighed (virtual, published), or not a
+  // candidate - that is no assignment it may be only written by. Its users
+  // need no next round (a call chain up to a live handler stops there).
+  function LiveNow(AKey: Int64; ASites: TList<TUnusedSite>): Boolean;
+  begin
+    for var LSite in ASites do
+    begin
+      if LSite.Write and MayBeOnlyWritten(AKey) then
+        Continue;
+      if LSite.Users = nil then
+        Exit(True);
+      for var LU in LSite.Users do
+        if (LU <> AKey) and FOnly.ContainsKey(LU) and
+           (FHard.ContainsKey(LU) or FSkipOf.ContainsKey(LU) or
+           not FCount.ContainsKey(LU)) then
+          Exit(True);
+    end;
+    Result := False;
+  end;
+
+begin
+  Result := nil;
+  if FOnly = nil then
+    Exit;
+  LSeen := TDictionary<Int64, Boolean>.Create;
+  try
+    for var LP in FUses do
+    begin
+      if FHard.ContainsKey(LP.Key) or FUnused.ContainsKey(LP.Key) or
+         LiveNow(LP.Key, LP.Value) then
+        Continue;
+      for var LSite in LP.Value do
+        for var LU in LSite.Users do
+          if not FOnly.ContainsKey(LU) and LSeen.TryAdd(LU, True) then
+          begin
+            LExt.UnitId := Integer(LU shr 32);
+            LExt.Sym := Integer(Cardinal(LU and $FFFFFFFF));
+            Result := Result + [LExt];
+          end;
+    end;
+  finally
+    LSeen.Free;
+  end;
+end;
+
 // Restricted to ATargets and the overloads beside each: the doubt "another
 // overload of it is used" asks whether a sibling is a row, so the siblings
 // are weighed too.
@@ -3532,38 +4041,103 @@ begin
   end;
 end;
 
-// The candidates of AMids collected and searched, the rows left in FCands
-// (and FUnused) with their doubts.
-procedure RunUnusedLint(ALint: TUnusedLint; ANav: TPasNavigator;
+// The declarations AMore weighed too, in a later round of
+// CheckUnusedSymbols: collected (once each), the new names' unbound places
+// scanned for their doubts, their references searched (only theirs - the
+// group-wide marks are a whole run's already), and FUnused made afresh. Not
+// counted: each is searched.
+procedure TUnusedLint.Extend(const AMore: TArray<TPasExtRef>);
+var
+  LOldNames, LNames: TDictionary<string, Boolean>;
+  LMids: TArray<Integer>;
+begin
+  LOldNames := TDictionary<string, Boolean>.Create;
+  LNames := TDictionary<string, Boolean>.Create;
+  try
+    for var LName in FCandNames.Keys do
+      LOldNames.Add(LName, True);
+    LMids := nil;
+    for var LT in AMore do
+    begin
+      if (LT.UnitId < 0) or (LT.UnitId >= FProj.ModelCount) or
+         not FProj.EnsureHydrated(LT.UnitId) or (LT.Sym < 0) or
+         (LT.Sym >= FProj.Model(LT.UnitId).SymCount) then
+        Continue;
+      FOnly.AddOrSetValue(K(LT.UnitId, LT.Sym), True);
+      var LNew := True;
+      for var LMid in LMids do
+        if LMid = LT.UnitId then
+          LNew := False;
+      if LNew then
+        LMids := LMids + [LT.UnitId];
+    end;
+    for var LMid in LMids do
+      Collect(LMid);
+    for var LName in FCandNames.Keys do
+      if not LOldNames.ContainsKey(LName) then
+        LNames.Add(LName, True);
+    if LNames.Count > 0 then
+      for var LMid := 0 to FProj.ModelCount - 1 do
+        if not FProj.IsLight(LMid) and
+           not FNav.IsUnderLibraryPath(FProj.ModelFile(LMid)) then
+          MarkUnbound(LMid, LNames);
+  finally
+    LNames.Free;
+    LOldNames.Free;
+  end;
+  Search;
+  MarkHelpers;
+  Derive(False);
+end;
+
+// The candidates of AMids collected, the group-wide marks made, their
+// references searched and FUnused made (RunUnusedLint's first half).
+procedure GatherUnused(ALint: TUnusedLint; ANav: TPasNavigator;
   const AMids: TArray<Integer>);
+begin
+  ALint.CollectIfaceNames;
+  for var LMid in AMids do
+    if (LMid >= 0) and (LMid < ANav.Project.ModelCount) then
+      ALint.Collect(LMid);
+  for var LMid := 0 to ANav.Project.ModelCount - 1 do
+    if not ANav.Project.IsLight(LMid) and
+       not ANav.IsUnderLibraryPath(ANav.Project.ModelFile(LMid)) then
+      ALint.MarkBound(LMid);
+  ALint.Search;
+  ALint.MarkHelpers;
+  ALint.Derive(False);
+end;
+
+// The rows left in FCands (and FUnused) with their How and doubts.
+procedure FinishUnused(ALint: TUnusedLint);
 var
   LKept: TList<TPasUnusedSymbol>;
 begin
   LKept := TList<TPasUnusedSymbol>.Create;
   try
-    ALint.CollectIfaceNames;
-    for var LMid in AMids do
-      if (LMid >= 0) and (LMid < ANav.Project.ModelCount) then
-        ALint.Collect(LMid);
-    for var LMid := 0 to ANav.Project.ModelCount - 1 do
-      if not ANav.Project.IsLight(LMid) and
-         not ANav.IsUnderLibraryPath(ANav.Project.ModelFile(LMid)) then
-        ALint.MarkBound(LMid);
-    ALint.Search;
-    ALint.MarkHelpers;
+    ALint.Derive(True);
     for var LC in ALint.FCands do
-      if not ALint.FUsed.ContainsKey(TUnusedLint.K(LC.UnitId, LC.Sym)) then
-      begin
+      if ALint.FUnused.ContainsKey(TUnusedLint.K(LC.UnitId, LC.Sym)) then
         LKept.Add(LC);
-        ALint.FUnused.AddOrSetValue(TUnusedLint.K(LC.UnitId, LC.Sym), True);
-      end;
     ALint.FCands.Clear;
     ALint.FCands.AddRange(LKept);
     if ALint.FCands.Count > 0 then
+    begin
       ALint.AddDoubts;
+      ALint.InheritDoubts;
+    end;
   finally
     LKept.Free;
   end;
+end;
+
+// The candidates of AMids collected and searched, the rows left in FCands
+// (and FUnused) with their doubts.
+procedure RunUnusedLint(ALint: TUnusedLint; ANav: TPasNavigator;
+  const AMids: TArray<Integer>);
+begin
+  GatherUnused(ALint, ANav, AMids);
+  FinishUnused(ALint);
 end;
 
 // The references the candidates of AMids are searched for.
@@ -3644,12 +4218,25 @@ var
   LLint: TUnusedLint;
   LKey: Int64;
   LSkip: TPasUnusedSkip;
+  LAll, LMore: TArray<TPasExtRef>;
 begin
   SetLength(Result, Length(ATargets));
+  // The declarations the targets' uses sit in are weighed too, and theirs,
+  // round by round: a getter is dead when its property is.
+  LAll := ATargets;
   LLint := TUnusedLint.Create(ANav);
   try
-    LLint.Restrict(ATargets);
-    RunUnusedLint(LLint, ANav, TargetMids(ATargets));
+    LLint.Restrict(LAll);
+    GatherUnused(LLint, ANav, TargetMids(LAll));
+    for var LRound := 2 to 4 do
+    begin
+      LMore := LLint.UnknownUsers;
+      if (LMore = nil) or (Length(LAll) + Length(LMore) > 300) then
+        Break;
+      LAll := LAll + LMore;
+      LLint.Extend(LMore);
+    end;
+    FinishUnused(LLint);
     for var LI := 0 to High(ATargets) do
     begin
       Result[LI].Target := ATargets[LI];
