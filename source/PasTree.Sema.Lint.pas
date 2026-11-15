@@ -139,7 +139,10 @@ function DemandLint(ANav: TPasNavigator; const AMids: TArray<Integer>;
   no reference by name (FindReferences' rule - a property counts the
   references of its redeclaration chain, so a descendant's `property X;`
   keeps the ancestor's), no bare `inherited;` running it, no form file
-  naming it (a frame's class placed on a form). Kinds weighed: types,
+  naming it (a frame's class placed on a form; a handler `OnClick = M` or a
+  component `object X: TC` of the class's form, TPasFormBinder's rules),
+  and for a class or record helper, which applies without being named, no
+  member of it used. Kinds weighed: types,
   routines (nested ones too), unit and class variables and constants,
   fields, properties. A routine's locals and parameters are not: dcc hints
   them itself (H2164, H2219).
@@ -154,7 +157,12 @@ function DemandLint(ANav: TPasNavigator; const AMids: TArray<Integer>;
   Invoke); operators; class constructors and destructors; the constructors
   of a TCustomAttribute descendant, which `[Name(...)]` calls; the for-in
   protocol (GetEnumerator, MoveNext, Current); generated units (`_TLB`, the
-  IDE's import headers). A false "unused" costs a deleted declaration that
+  IDE's import headers); a unit that replaces a library unit of the same
+  name (a patched Vcl.Menus: a unit found under ANav.LibraryPaths or the
+  installed $(BDS)\source by that name, at another path) - the library's
+  .dcu files were compiled against the original interface, so removing
+  anything from it breaks units the analysis does not see (F2051, F2613).
+  A false "unused" costs a deleted declaration that
   was in use, so the exceptions are the rule. A reference hit that cannot
   be mapped back to what it binds (an include file) keeps every candidate of
   its name.
@@ -170,12 +178,18 @@ function DemandLint(ANav: TPasNavigator; const AMids: TArray<Integer>;
   name written where the analysis bound nothing (what dcc binds there is
   not known). Each
   of the last two is a binding of the index's that dcc made otherwise on a
-  4,000-unit group. One analysis, one configuration: pastree-mcp's `lint
+  4,000-unit group. A helper none of whose members is used, and each such
+  member: a call the index bound to the helped type's own member may run
+  the helper's (27 of 27 such helpers were in use on a 4,000-unit group). A
+  member of a class's unnamed first section whose ancestry the index could
+  not follow to TPersistent, in a unit with a form file: published if the
+  class streams, and the form may bind it by name at run time. One analysis, one configuration: pastree-mcp's `lint
   unused-symbol` keeps a row only when every analysis of a group holding
   the unit finds it unused. }
 type
   TPasUnusedSkip = (usPublished, usDispatch, usInterface, usImplements,
-    usOperator, usClassCtor, usAttribute, usForIn, usGenerated);
+    usOperator, usClassCtor, usAttribute, usForIn, usGenerated,
+    usReplacesLibrary);
   TPasUnusedSkips = array[TPasUnusedSkip] of Integer;
 
   TPasUnusedSymbol = record
@@ -2273,11 +2287,15 @@ type
     FUnused: TDictionary<Int64, Boolean>;      // the rows, once known
     FIfaceNames: TDictionary<string, Boolean>;  // every interface's members
     FClassIface: TObjectDictionary<Int64, TDictionary<string, Boolean>>;
+    FEnumOf: TDictionary<Int64, Int64>;  // an enum value -> its enum type
+    FDirNames: TDictionary<string, Boolean>;  // Collect's unit, DirectiveNames
     FSkips: TPasUnusedSkips;
     // CheckUnusedSymbols: the declarations collected (nil: every one of a
     // unit), and why each one not weighed was skipped.
     FOnly: TDictionary<Int64, Boolean>;
     FSkipOf: TDictionary<Int64, TPasUnusedSkip>;
+    // The unit names under the library trees, and a file of each (lazy).
+    FLibUnits: TDictionary<string, string>;
     procedure Restrict(const ATargets: TArray<TPasExtRef>);
     class function K(AMid, ASym: Integer): Int64; static; inline;
     function VisPos(LM: TPasSemaModel; AVis: Integer; out AFileId, ALine,
@@ -2293,11 +2311,20 @@ type
       Boolean>;
     function QualifiedName(LM: TPasSemaModel; ASym: Integer): string;
     function Generated(LM: TPasSemaModel; const AFile: string): Boolean;
+    function DelegatesInterface(LM: TPasSemaModel; ASym: Integer): Boolean;
+    procedure DirectiveNames(LM: TPasSemaModel;
+      ANames: TDictionary<string, Boolean>);
+    procedure MarkRepublished;
+    function ReplacesLibrary(AMid: Integer): Boolean;
+    function IsHelperType(LM: TPasSemaModel; ASym: Integer): Boolean;
+    function HelperOwner(LM: TPasSemaModel; ASym: Integer): Integer;
+    function FormFileOf(AMid: Integer): string;
     procedure CollectIfaceNames;
     procedure Collect(AMid: Integer);
     function DeclaredAt(AMid, ANode: Integer; out ASym: Integer): Boolean;
     procedure MarkBound(AMid: Integer);
     procedure Search;
+    procedure MarkHelpers;
     function UsedOverload(AMid, ASym: Integer): Boolean;
     procedure AddDoubts;
   public
@@ -2321,6 +2348,8 @@ begin
   FIfaceNames := TDictionary<string, Boolean>.Create;
   FClassIface := TObjectDictionary<Int64, TDictionary<string, Boolean>>.Create(
     [doOwnsValues]);
+  FEnumOf := TDictionary<Int64, Int64>.Create;
+  FDirNames := TDictionary<string, Boolean>.Create;
   FillChar(FSkips, SizeOf(FSkips), 0);
 end;
 
@@ -2328,6 +2357,9 @@ destructor TUnusedLint.Destroy;
 begin
   FSkipOf.Free;
   FOnly.Free;
+  FDirNames.Free;
+  FEnumOf.Free;
+  FLibUnits.Free;
   FClassIface.Free;
   FUnused.Free;
   FUnbound.Free;
@@ -2576,6 +2608,220 @@ begin
     end;
 end;
 
+// A property with an `implements` specifier (14.4.1): its value supplies
+// the class's methods of that interface, a use no name in code makes -
+// dcc32 37.0 says E2291 for the interface's methods once it is gone.
+function TUnusedLint.DelegatesInterface(LM: TPasSemaModel;
+  ASym: Integer): Boolean;
+var
+  LNode, LChild: Integer;
+begin
+  Result := False;
+  LNode := LM.Symbols[ASym].DeclNode;
+  while (LNode <> NIL_NODE) and (LM.Tree.Nodes[LNode].Kind <> nkPropertyDecl) do
+    LNode := LM.Tree.Nodes[LNode].Parent;
+  if LNode = NIL_NODE then
+    Exit;
+  LChild := LM.Tree.Nodes[LNode].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    if (LM.Tree.Nodes[LChild].Kind = nkPropSpec) and
+       LM.Tree.NodeTextEquals(LChild, 'implements') then
+      Exit(True);
+    LChild := LM.Tree.Nodes[LChild].NextSibling;
+  end;
+end;
+
+// The names the EXTERNALSYM and NODEFINE directives of a model's files
+// spell, folded: dcc binds each name (dcc32 37.0: E2003 once X is gone, or
+// E2240 "$EXTERNALSYM and $NODEFINE not allowed for 'X'; only global
+// symbols" when what is left of that name is no global), so the name is a
+// use. The preprocessor
+// drops both directives as C++ header trivia, so the text is read here; a
+// directive in a branch not compiled counts too - a row kept, never a
+// wrong deletion.
+procedure TUnusedLint.DirectiveNames(LM: TPasSemaModel;
+  ANames: TDictionary<string, Boolean>);
+var
+  LText, LWord: string;
+  LI, LJ, LLen: Integer;
+begin
+  for var LFi := 0 to High(LM.Tree.Source.Files) do
+  begin
+    LText := LM.Tree.Source.Files[LFi].Source;
+    LLen := Length(LText);
+    LI := Pos('$', LText);
+    while LI > 0 do
+    begin
+      // A directive opens with a brace or a parenthesis-star, then the
+      // dollar sign and the word with no space between.
+      if ((LI > 1) and (LText[LI - 1] = '{')) or ((LI > 2) and
+         (LText[LI - 1] = '*') and (LText[LI - 2] = '(')) then
+      begin
+        LJ := LI + 1;
+        while (LJ <= LLen) and CharInSet(LText[LJ], ['A'..'Z', 'a'..'z']) do
+          Inc(LJ);
+        LWord := UpperCase(Copy(LText, LI + 1, LJ - LI - 1));
+        if (LWord = 'EXTERNALSYM') or (LWord = 'NODEFINE') then
+        begin
+          while (LJ <= LLen) and CharInSet(LText[LJ], [' ', #9, #10, #13]) do
+            Inc(LJ);
+          LI := LJ;
+          while (LJ <= LLen) and (LText[LJ].IsLetterOrDigit or
+            (LText[LJ] = '_')) do
+            Inc(LJ);
+          if LJ > LI then
+            ANames.AddOrSetValue(PasFoldName(Copy(LText, LI, LJ - LI)), True);
+        end;
+      end;
+      LI := Pos('$', LText, LI + 1);
+    end;
+  end;
+end;
+
+// A property a descendant redeclares - a bare `property X;`, usually
+// republishing it - is used: removing it breaks the redeclaration (dcc32
+// 37.0: E2147 "Property 'X' does not exist in base class"). MarkBound sees
+// the redeclarations of the units it walks; this asks every descendant of
+// the candidate's class, wherever it is - a library unit, a light one -
+// which MarkBound does not walk. One FindDescendants per class.
+procedure TUnusedLint.MarkRepublished;
+var
+  LM, LDM: TPasSemaModel;
+  LKids: TDictionary<Int64, TArray<TPasDescendantHit>>;
+  LHits: TArray<TPasDescendantHit>;
+  LOwner, LScope, LP, LBMid, LBSym, LPMid, LPSym: Integer;
+begin
+  LKids := TDictionary<Int64, TArray<TPasDescendantHit>>.Create;
+  try
+    for var LC in FCands do
+    begin
+      if (LC.Kind <> skProperty) or FUsed.ContainsKey(K(LC.UnitId, LC.Sym)) then
+        Continue;
+      LM := FProj.Model(LC.UnitId);
+      LScope := LM.Symbols[LC.Sym].Scope;
+      if (LScope = NIL_SCOPE) or (LScope >= LM.Scopes.Count) or
+         (LM.Scopes[LScope].Kind <> sckStruct) then
+        Continue;
+      LOwner := LM.Scopes[LScope].StructSym;
+      if LOwner = NIL_SYM then
+        Continue;
+      if not LKids.TryGetValue(K(LC.UnitId, LOwner), LHits) then
+      begin
+        LHits := FNav.FindDescendants(LC.UnitId, LOwner);
+        LKids.Add(K(LC.UnitId, LOwner), LHits);
+      end;
+      for var LD in LHits do
+      begin
+        if (LD.Kind <> pdkDescendant) or not FProj.EnsureHydrated(LD.UnitId) then
+          Continue;
+        LDM := FProj.Model(LD.UnitId);
+        LScope := LDM.Symbols[LD.Sym].MemberScope;
+        if (LScope = NIL_SCOPE) or (LScope >= LDM.Scopes.Count) then
+          Continue;
+        LP := LDM.FindLocal(LScope, LM.Symbols[LC.Sym].NameLower);
+        if (LP = NIL_SYM) or (LDM.Symbols[LP].Kind <> skProperty) then
+          Continue;
+        // Every link up from the redeclaration: a link between is needed
+        // as much as the candidate.
+        LBMid := LD.UnitId;
+        LBSym := LP;
+        for var LDepth := 1 to 64 do
+        begin
+          if not FProj.PropertyRedeclPrev(LBMid, LBSym, LPMid, LPSym) then
+            Break;
+          LBMid := LPMid;
+          LBSym := LPSym;
+          FUsed.AddOrSetValue(K(LBMid, LBSym), True);
+        end;
+        if FUsed.ContainsKey(K(LC.UnitId, LC.Sym)) then
+          Break;
+      end;
+    end;
+  finally
+    LKids.Free;
+  end;
+end;
+
+// Does unit AMid take the place of a library unit of its name - one under
+// the library trees (ANav.LibraryPaths, the installed $(BDS)\source) at
+// another path, a patched Vcl.Menus? Every library .dcu that uses it was
+// compiled against the original's interface: deleting a declaration of the
+// copy fails in units the analysis never reads (F2051, F2613), whether the
+// copy itself uses it or not.
+function TUnusedLint.ReplacesLibrary(AMid: Integer): Boolean;
+var
+  LTrees: TArray<string>;
+  LBds, LFiles, LOwn: string;
+begin
+  if FLibUnits = nil then
+  begin
+    FLibUnits := TDictionary<string, string>.Create;
+    LTrees := FNav.LibraryPaths;
+    LBds := GetEnvironmentVariable('BDS');
+    if (LBds <> '') and TDirectory.Exists(TPath.Combine(LBds, 'source')) then
+      LTrees := LTrees + [TPath.Combine(LBds, 'source')];
+    for var LTree in LTrees do
+      try
+        if TDirectory.Exists(LTree) then
+          for var LFile in TDirectory.GetFiles(LTree, '*.pas',
+            TSearchOption.soAllDirectories) do
+          begin
+            var LKey := PasFoldName(TPath.GetFileNameWithoutExtension(LFile));
+            if FLibUnits.TryGetValue(LKey, LFiles) then
+              FLibUnits[LKey] := LFiles + '|' + LFile
+            else
+              FLibUnits.Add(LKey, LFile);
+          end;
+      except
+        on Exception do;   // an unreadable tree names no unit
+      end;
+  end;
+  Result := False;
+  if not FLibUnits.TryGetValue(FProj.Model(AMid).UnitNameLower, LFiles) then
+    Exit;
+  LOwn := TPath.GetFullPath(FProj.ModelFile(AMid));
+  for var LFile in LFiles.Split(['|']) do
+    if not SameText(TPath.GetFullPath(LFile), LOwn) then
+      Exit(True);
+end;
+
+// Is type ASym of LM a class or record helper?
+function TUnusedLint.IsHelperType(LM: TPasSemaModel; ASym: Integer): Boolean;
+var
+  LDef: Integer;
+begin
+  LDef := TPasSemaProject.TypeDefNodeIn(LM, ASym);
+  Result := (LDef <> NIL_NODE) and (LM.Tree.Nodes[LDef].Kind = nkHelperType);
+end;
+
+// The helper member ASym of LM is declared in, or NIL_SYM.
+function TUnusedLint.HelperOwner(LM: TPasSemaModel; ASym: Integer): Integer;
+var
+  LScope: Integer;
+begin
+  Result := NIL_SYM;
+  LScope := LM.Symbols[ASym].Scope;
+  if (LScope < 0) or (LScope >= LM.Scopes.Count) or
+     (LM.Scopes[LScope].Kind <> sckStruct) or
+     (LM.Scopes[LScope].StructSym = NIL_SYM) then
+    Exit;
+  if IsHelperType(LM, LM.Scopes[LScope].StructSym) then
+    Result := LM.Scopes[LScope].StructSym;
+end;
+
+// The form file beside unit AMid (.dfm, .fmx), or ''.
+function TUnusedLint.FormFileOf(AMid: Integer): string;
+begin
+  for var LExt in ['.dfm', '.fmx'] do
+  begin
+    Result := ChangeFileExt(FProj.ModelFile(AMid), LExt);
+    if FileExists(Result) then
+      Exit;
+  end;
+  Result := '';
+end;
+
 // The method names of every interface the analysis declares: a cheap no
 // before InterfaceNamesOf's walk of a class's hierarchy.
 procedure TUnusedLint.CollectIfaceNames;
@@ -2633,11 +2879,26 @@ begin
           FSkipOf.AddOrSetValue(K(AMid, LSym), usGenerated);
     Exit;
   end;
+  if ReplacesLibrary(AMid) then
+  begin
+    Inc(FSkips[usReplacesLibrary]);
+    if FOnly <> nil then
+      for LSym := 0 to LM.SymCount - 1 do
+        if FOnly.ContainsKey(K(AMid, LSym)) then
+          FSkipOf.AddOrSetValue(K(AMid, LSym), usReplacesLibrary);
+    Exit;
+  end;
+  FDirNames.Clear;
+  DirectiveNames(LM, FDirNames);
   for LSym := 0 to LM.SymCount - 1 do
   begin
     if (FOnly <> nil) and not FOnly.ContainsKey(K(AMid, LSym)) then
       Continue;
     LS := LM.Symbols[LSym];
+    // A value of a named enum (TypeSym, 2.2.4) named in code is a use of its
+    // type (MarkBound): `Ord(grpError)` needs TGroups (E2003 without it).
+    if (LS.Kind = skEnumValue) and (LS.TypeSym <> NIL_SYM) then
+      FEnumOf.AddOrSetValue(K(AMid, LSym), K(AMid, LS.TypeSym));
     if (LS.DeclNode = NIL_NODE) or
        (LS.Flags * [sfBuiltin, sfCompletesForward] <> []) or
        not (LS.Kind in [skType, skVar, skConst, skField, skRoutine,
@@ -2717,6 +2978,12 @@ begin
     FCands.Add(LC);
     FCount.AddOrSetValue(K(AMid, LSym), 0);
     FCandNames.AddOrSetValue(LS.NameLower, True);
+    // Used without a name in code: a property delegating an interface, a
+    // global an EXTERNALSYM / NODEFINE directive names.
+    if ((LS.Kind = skProperty) and DelegatesInterface(LM, LSym)) or
+       ((LKind in [sckUnit, sckImplementation]) and
+       FDirNames.ContainsKey(LS.NameLower)) then
+      FUsed.AddOrSetValue(K(AMid, LSym), True);
   end;
 end;
 
@@ -2747,6 +3014,7 @@ procedure TUnusedLint.MarkBound(AMid: Integer);
 var
   LM: TPasSemaModel;
   LBMid, LBSym, LCtx, LN: Integer;
+  LEnum: Int64;
 begin
   if not FProj.EnsureHydrated(AMid) then
     Exit;
@@ -2759,13 +3027,21 @@ begin
   // The bindings, counted: a declaration bound more often than its own
   // sites could make it (its declaration, implementation header, forward)
   // is used, and Search does not ask for its references.
+  // A binding of an enum value (FEnumOf) other than its own declaration
+  // marks the enum type.
   for var LI := 0 to High(LM.RefMap) do
-    if (LM.RefMap[LI] <> NIL_SYM) and FCount.TryGetValue(K(AMid,
-       LM.RefMap[LI]), LN) then
-      FCount[K(AMid, LM.RefMap[LI])] := LN + 1;
+    if LM.RefMap[LI] = NIL_SYM then
+      Continue
+    else if FCount.TryGetValue(K(AMid, LM.RefMap[LI]), LN) then
+      FCount[K(AMid, LM.RefMap[LI])] := LN + 1
+    else if FEnumOf.TryGetValue(K(AMid, LM.RefMap[LI]), LEnum) and
+      (LM.Symbols[LM.RefMap[LI]].DeclNode <> LI) then
+      FUsed.AddOrSetValue(LEnum, True);
   for var LP in LM.ExtRefMap do
     if FCount.TryGetValue(K(LP.Value.UnitId, LP.Value.Sym), LN) then
-      FCount[K(LP.Value.UnitId, LP.Value.Sym)] := LN + 1;
+      FCount[K(LP.Value.UnitId, LP.Value.Sym)] := LN + 1
+    else if FEnumOf.TryGetValue(K(LP.Value.UnitId, LP.Value.Sym), LEnum) then
+      FUsed.AddOrSetValue(LEnum, True);
   // A property redeclared below (`property X;`, a published one too) needs
   // every link above it: removing one breaks the redeclaration (E2003).
   for var LSym := 0 to LM.SymCount - 1 do
@@ -2844,6 +3120,7 @@ var
   LByName: TDictionary<string, Boolean>;
   LMid, LNode, LBMid, LBSym, LPMid, LPSym: Integer;
 begin
+  MarkRepublished;
   LRefs := nil;
   for var LC in FCands do
     if FUsed.ContainsKey(K(LC.UnitId, LC.Sym)) then
@@ -2923,12 +3200,54 @@ begin
     LByName.Free;
     LHits.Free;
   end;
-  // A class a form file names - a frame placed on a form, a module.
+  // A class a form file names - a frame placed on a form, a module - and a
+  // member of a class's unnamed first section one binds: a handler
+  // (`OnClick = M`), a component (`object X: TC`). Such a member is
+  // published, and not weighed, when the class is seen to stream; when its
+  // ancestry is not followed to TPersistent the form still binds it by name
+  // (TReader: MethodAddress, FieldAddress), and deleting it compiles and
+  // fails when the form is created.
   for var LC in FCands do
-    if not FUsed.ContainsKey(K(LC.UnitId, LC.Sym)) and (LC.Kind = skType) and
-       (FProj.Model(LC.UnitId).Symbols[LC.Sym].TypeCat = tcClass) and
-       (Length(FNav.FindFormSites(LC.UnitId, LC.Sym)) > 0) then
-      FUsed.AddOrSetValue(K(LC.UnitId, LC.Sym), True);
+  begin
+    if FUsed.ContainsKey(K(LC.UnitId, LC.Sym)) then
+      Continue;
+    var LCM := FProj.Model(LC.UnitId);
+    if ((LC.Kind = skType) and (LCM.Symbols[LC.Sym].TypeCat = tcClass)) or
+       ((LC.Kind in [skRoutine, skField]) and
+       (LCM.Symbols[LC.Sym].Visibility = svDefault) and
+       (LCM.Scopes[LCM.Symbols[LC.Sym].Scope].Kind = sckStruct) and
+       (LCM.Scopes[LCM.Symbols[LC.Sym].Scope].StructSym <> NIL_SYM) and
+       (LCM.Symbols[LCM.Scopes[LCM.Symbols[LC.Sym].Scope].StructSym].TypeCat =
+       tcClass)) then
+      if Length(FNav.FindFormSites(LC.UnitId, LC.Sym)) > 0 then
+        FUsed.AddOrSetValue(K(LC.UnitId, LC.Sym), True);
+  end;
+end;
+
+// A class or record helper applies without being named: a call to a member
+// it adds is its use. One of its members used marks it used.
+procedure TUnusedLint.MarkHelpers;
+var
+  LM: TPasSemaModel;
+  LScope: Integer;
+begin
+  for var LC in FCands do
+  begin
+    if (LC.Kind <> skType) or FUsed.ContainsKey(K(LC.UnitId, LC.Sym)) then
+      Continue;
+    LM := FProj.Model(LC.UnitId);
+    if not IsHelperType(LM, LC.Sym) then
+      Continue;
+    LScope := LM.Symbols[LC.Sym].MemberScope;
+    if (LScope = NIL_SCOPE) or (LScope >= LM.Scopes.Count) then
+      Continue;
+    for var LIdx := 0 to LM.Scopes[LScope].Symbols.Count - 1 do
+      if FUsed.ContainsKey(K(LC.UnitId, LM.Scopes[LScope].Symbols[LIdx])) then
+      begin
+        FUsed.AddOrSetValue(K(LC.UnitId, LC.Sym), True);
+        Break;
+      end;
+  end;
 end;
 
 // Is another overload of routine (AMid, ASym) - in its scope, by name -
@@ -3137,6 +3456,40 @@ begin
               FProj.Model(LC.UnitId).Symbols[LC.Sym].Name])];
             Break;
           end;
+      // A helper no member of which is used, and such a member: a call
+      // to a member it adds is its only use, and the index may have bound
+      // one to the helped type's own member (overloads, an access the
+      // helper widens) - 27 of 27 such helpers were in use on a 4,000-unit
+      // group.
+      LM := FProj.Model(LC.UnitId);
+      if (LC.Kind = skType) and IsHelperType(LM, LC.Sym) then
+        LC.Doubts := LC.Doubts + ['a helper applies without being named - '
+          + 'no use of a member it adds was found, but a call the index bound '
+          + 'to the helped type may run one']
+      else if HelperOwner(LM, LC.Sym) <> NIL_SYM then
+      begin
+        if FUnused.ContainsKey(K(LC.UnitId, HelperOwner(LM, LC.Sym))) then
+          LC.Doubts := LC.Doubts + [Format('a member of the helper %s, no '
+            + 'member of which is used - a call the index bound to the helped '
+            + 'type may run it', [LM.Symbols[HelperOwner(LM, LC.Sym)].Name])];
+      end
+      // The unnamed first section of a class not seen to stream, in a unit
+      // with a form file: published if it streams after all (the ancestry
+      // the index could not follow), and the form binds by name at run time.
+      else if (LC.Kind in [skRoutine, skField, skProperty]) and
+        (LM.Symbols[LC.Sym].Visibility = svDefault) and
+        (LM.Scopes[LM.Symbols[LC.Sym].Scope].Kind = sckStruct) and
+        (LM.Scopes[LM.Symbols[LC.Sym].Scope].StructSym <> NIL_SYM) and
+        (LM.Symbols[LM.Scopes[LM.Symbols[LC.Sym].Scope].StructSym].TypeCat =
+        tcClass) then
+      begin
+        LFile := FormFileOf(LC.UnitId);
+        if LFile <> '' then
+          LC.Doubts := LC.Doubts + [Format('in the unnamed first section of '
+            + 'a class the index did not follow to TPersistent, in a unit with '
+            + 'a form file (%s) - published if the class streams, and a form '
+            + 'may bind it by name at run time', [ExtractFileName(LFile)])];
+      end;
       FCands[LIdx] := LC;
     end;
   finally
@@ -3197,6 +3550,7 @@ begin
          not ANav.IsUnderLibraryPath(ANav.Project.ModelFile(LMid)) then
         ALint.MarkBound(LMid);
     ALint.Search;
+    ALint.MarkHelpers;
     for var LC in ALint.FCands do
       if not ALint.FUsed.ContainsKey(TUnusedLint.K(LC.UnitId, LC.Sym)) then
       begin

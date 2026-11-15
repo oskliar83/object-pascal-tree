@@ -2473,6 +2473,151 @@ begin
   end;
 end;
 
+// FindUnusedSymbols: what is used without being named in code. A helper is
+// used when a member it adds is (TBoxHelper, TIntHelper through Extra and
+// Twice); one with no member used is a row with a doubt, and so is each of
+// its members (TIdleHelper, TIdleHelper.Never). A member of the unnamed first
+// section of a class whose ancestry the index cannot follow (TFrm's ancestor
+// is undeclared) is used when its unit's form file binds it - a handler
+// (Button1Click), a component (Button1); one the form does not bind is a row
+// with a doubt (Unbound, Spare), a private one a plain row (Priv). A unit by
+// the name of one under LibraryPaths (UnusedLib) is not weighed at all.
+procedure TestUnusedSymbolsImplicit;
+const
+  UNUSED_H =
+    'unit UnusedH;'#13#10 +
+    'interface'#13#10 +
+    'type'#13#10 +
+    '  TBox = class'#13#10 +
+    '    procedure Plain;'#13#10 +
+    '  end;'#13#10 +
+    '  TOther = class end;'#13#10 +
+    '  TBoxHelper = class helper for TBox'#13#10 +
+    '    procedure Extra;'#13#10 +
+    '  end;'#13#10 +
+    '  TIdleHelper = class helper for TOther'#13#10 +
+    '    procedure Never;'#13#10 +
+    '  end;'#13#10 +
+    '  TIntHelper = record helper for Integer'#13#10 +
+    '    function Twice: Integer;'#13#10 +
+    '  end;'#13#10 +
+    'procedure Run(B: TBox; I: Integer);'#13#10 +
+    'implementation'#13#10 +
+    'procedure TBox.Plain; begin end;'#13#10 +
+    'procedure TBoxHelper.Extra; begin Plain; end;'#13#10 +
+    'procedure TIdleHelper.Never; begin end;'#13#10 +
+    'function TIntHelper.Twice: Integer; begin Result := Self * 2; end;'#13#10 +
+    'procedure Run(B: TBox; I: Integer);'#13#10 +
+    'begin'#13#10 +
+    '  B.Extra;'#13#10 +
+    '  if I.Twice = 0 then Exit;'#13#10 +
+    'end;'#13#10 +
+    'initialization'#13#10 +
+    '  Run(nil, 0);'#13#10 +
+    'end.'#13#10;
+  UNUSED_F =
+    'unit UnusedF;'#13#10 +
+    'interface'#13#10 +
+    'type'#13#10 +
+    '  TButtonX = class end;'#13#10 +
+    '  TFrm = class(TMissingBase)'#13#10 +
+    '    Button1: TButtonX;'#13#10 +
+    '    Spare: Integer;'#13#10 +
+    '    procedure Button1Click(Sender: TObject);'#13#10 +
+    '    procedure Unbound(Sender: TObject);'#13#10 +
+    '  private'#13#10 +
+    '    procedure Priv;'#13#10 +
+    '  end;'#13#10 +
+    'implementation'#13#10 +
+    'procedure TFrm.Button1Click(Sender: TObject); begin end;'#13#10 +
+    'procedure TFrm.Unbound(Sender: TObject); begin end;'#13#10 +
+    'procedure TFrm.Priv; begin end;'#13#10 +
+    'end.'#13#10;
+  UNUSED_F_DFM =
+    'object Frm: TFrm'#13#10 +
+    '  Left = 0'#13#10 +
+    '  object Button1: TButtonX'#13#10 +
+    '    OnClick = Button1Click'#13#10 +
+    '  end'#13#10 +
+    'end'#13#10;
+  UNUSED_LIB =
+    'unit UnusedLib;'#13#10 +
+    'interface'#13#10 +
+    'procedure Patched;'#13#10 +
+    'implementation'#13#10 +
+    'procedure Patched; begin end;'#13#10 +
+    'end.'#13#10;
+var
+  LDir, LLibDir: string;
+  LProj: TPasSemaProject;
+  LNav: TPasNavigator;
+  LRows: TArray<TPasUnusedSymbol>;
+  LSkips: TPasUnusedSkips;
+  LNames: string;
+
+  function Row(const AName: string): Integer;
+  begin
+    for var LI := 0 to High(LRows) do
+      if SameText(LRows[LI].Name, AName) then
+        Exit(LI);
+    Result := -1;
+  end;
+
+  function Doubted(const AName: string): Boolean;
+  begin
+    Result := (Row(AName) >= 0) and (LRows[Row(AName)].Doubts <> nil);
+  end;
+
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_unused_implicit');
+  LLibDir := TPath.Combine(TPath.GetTempPath, 'pastree_unused_implicit_lib');
+  for var LD in [LDir, LLibDir] do
+  begin
+    if TDirectory.Exists(LD) then
+      TDirectory.Delete(LD, True);
+    TDirectory.CreateDirectory(LD);
+  end;
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnusedH.pas'), UNUSED_H);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnusedF.pas'), UNUSED_F);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnusedF.dfm'), UNUSED_F_DFM);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnusedLib.pas'), UNUSED_LIB);
+  TFile.WriteAllText(TPath.Combine(LLibDir, 'UnusedLib.pas'), UNUSED_LIB);
+  LProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  LNav := nil;
+  try
+    LProj.AnalyzeDirectory(LDir);
+    LNav := TPasNavigator.Create(LProj);
+    LNav.LibraryPaths := [LLibDir];
+    LRows := FindUnusedSymbols(LNav,
+      [LProj.ModelIdOf(TPath.Combine(LDir, 'UnusedH.pas')),
+       LProj.ModelIdOf(TPath.Combine(LDir, 'UnusedF.pas')),
+       LProj.ModelIdOf(TPath.Combine(LDir, 'UnusedLib.pas'))], LSkips);
+    LNames := '';
+    for var LR in LRows do
+      LNames := LNames + LR.Name + ' ';
+    Ok('unused implicit: a helper with a member used is used (' + LNames + ')',
+      (Row('TBoxHelper') < 0) and (Row('TBoxHelper.Extra') < 0) and
+      (Row('TIntHelper') < 0) and (Row('TIntHelper.Twice') < 0));
+    Ok('unused implicit: an unused helper and its member - rows with a doubt',
+      Doubted('TIdleHelper') and Doubted('TIdleHelper.Never'));
+    Ok('unused implicit: the form binds a handler and a component (' + LNames +
+      ')', (Row('TFrm') < 0) and (Row('TFrm.Button1Click') < 0) and
+      (Row('TFrm.Button1') < 0));
+    Ok('unused implicit: the first section the form does not bind - a doubt',
+      Doubted('TFrm.Unbound') and Doubted('TFrm.Spare'));
+    Ok('unused implicit: a private member - a plain row',
+      (Row('TFrm.Priv') >= 0) and not Doubted('TFrm.Priv'));
+    Ok('unused implicit: a unit replacing a library one is not weighed',
+      (Row('Patched') < 0) and (LSkips[usReplacesLibrary] = 1));
+  finally
+    LNav.Free;
+    LProj.Free;
+    for var LD in [LDir, LLibDir] do
+      if TDirectory.Exists(LD) then
+        TDirectory.Delete(LD, True);
+  end;
+end;
+
 // FindUnusedSymbols (PasTree.Sema.Lint). Used another way than by a name
 // in code, so not rows: TBase.Count (a descendant redeclares it), TBase.Hidden
 // (a descendant's bare inherited), TBase.Draw (an interface a descendant
@@ -2696,6 +2841,137 @@ begin
     Ok('unused symbols, checked: one overload alone keeps the doubt',
       (Length(LChecks) = 1) and (LChecks[0].Verdict = uvUnused) and
       (LChecks[0].Row.Doubts <> nil));
+  finally
+    LNav.Free;
+    LProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
+// FindUnusedSymbols: four uses no name in code makes, each a dcc error once
+// the declaration is gone (dcc32 37.0). A bare `property Delay;` in a
+// descendant republishes TBaseTree.Delay (E2147 without it) - the descendant
+// in another unit, under a library path in the second pass; a property
+// that `implements` an interface supplies the class's methods (E2291); a
+// constant an EXTERNALSYM or NODEFINE directive names (E2003 / E2240); an
+// enumeration type whose values are named, never the type (E2003). Rows,
+// the same shapes used by nothing: TBaseTree.Lone, TOwner.Other, cPlain,
+// TNeverEnum.
+procedure TestUnusedSymbolsMissedUses;
+const
+  UNUSED_B =
+    'unit UnusedB;'#13#10 +
+    'interface'#13#10 +
+    'type'#13#10 +
+    '  TBaseTree = class'#13#10 +
+    '  private'#13#10 +
+    '    FDelay: Integer;'#13#10 +
+    '  protected'#13#10 +
+    '    property Delay: Integer read FDelay write FDelay;'#13#10 +
+    '    property Lone: Integer read FDelay;'#13#10 +
+    '  end;'#13#10 +
+    '  IHas = interface'#13#10 +
+    '    procedure Ping;'#13#10 +
+    '  end;'#13#10 +
+    '  TInnerBase = class end;'#13#10 +
+    '  TOwner = class(TInnerBase, IHas)'#13#10 +
+    '  private'#13#10 +
+    '    FInner: IHas;'#13#10 +
+    '    FOther: Integer;'#13#10 +
+    '  public'#13#10 +
+    '    property Inner: IHas read FInner implements IHas;'#13#10 +
+    '    property Other: Integer read FOther;'#13#10 +
+    '  end;'#13#10 +
+    '  TGroups = (grpNone, grpError);'#13#10 +
+    '  TNeverEnum = (neA, neB);'#13#10 +
+    'const'#13#10 +
+    '  cExt = 1;'#13#10 +
+    '  {$EXTERNALSYM cExt}'#13#10 +
+    '  cNoDef = 2;'#13#10 +
+    '  {$nodefine cNoDef ''cnodef''}'#13#10 +
+    '  cPlain = 3;'#13#10 +
+    'var'#13#10 +
+    '  GOwner: TOwner;'#13#10 +
+    'procedure UseAll;'#13#10 +
+    'implementation'#13#10 +
+    'procedure UseAll;'#13#10 +
+    'begin'#13#10 +
+    '  if (GOwner = nil) and (Ord(grpError) = 1) then Exit;'#13#10 +
+    'end;'#13#10 +
+    'initialization'#13#10 +
+    '  UseAll;'#13#10 +
+    'end.'#13#10;
+  UNUSED_C =
+    'unit UnusedC;'#13#10 +
+    'interface'#13#10 +
+    'uses UnusedB;'#13#10 +
+    'type'#13#10 +
+    '  TTree = class(TBaseTree)'#13#10 +
+    '  published'#13#10 +
+    '    property Delay;'#13#10 +
+    '  end;'#13#10 +
+    'implementation'#13#10 +
+    'end.'#13#10;
+var
+  LDir, LLib: string;
+  LProj: TPasSemaProject;
+  LNav: TPasNavigator;
+  LRows: TArray<TPasUnusedSymbol>;
+  LSkips: TPasUnusedSkips;
+  LNames, LPass: string;
+
+  function Row(const AName: string): Integer;
+  begin
+    for var LI := 0 to High(LRows) do
+      if SameText(LRows[LI].Name, AName) then
+        Exit(LI);
+    Result := -1;
+  end;
+
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_unused_missed');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  LLib := TPath.Combine(LDir, 'lib');
+  TDirectory.CreateDirectory(LLib);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnusedB.pas'), UNUSED_B);
+  TFile.WriteAllText(TPath.Combine(LLib, 'UnusedC.pas'), UNUSED_C);
+  LProj := TPasSemaProject.Create(pfWin32, [LDir, LLib], []);
+  LNav := nil;
+  try
+    LProj.AnalyzeDirectory(LDir);
+    LNav := TPasNavigator.Create(LProj);
+    for var LLibPass := False to True do
+    begin
+      LPass := '';
+      if LLibPass then
+      begin
+        LNav.LibraryPaths := [LLib];
+        LPass := ', the descendant under a library path';
+      end;
+      LRows := FindUnusedSymbols(LNav,
+        [LProj.ModelIdOf(TPath.Combine(LDir, 'UnusedB.pas'))], LSkips);
+      LNames := '';
+      for var LR in LRows do
+        LNames := LNames + LR.Name + ' ';
+      Ok('unused symbols, missed uses' + LPass + ': the rows (' + LNames + ')',
+        (Row('TBaseTree.Lone') >= 0) and (Row('TOwner.Other') >= 0) and
+        (Row('cPlain') >= 0) and (Row('TNeverEnum') >= 0));
+      Ok('unused symbols, missed uses' + LPass +
+        ': a property a descendant republishes is used (' + LNames + ')',
+        Row('TBaseTree.Delay') < 0);
+      Ok('unused symbols, missed uses' + LPass +
+        ': a property that implements an interface is used, and its field (' +
+        LNames + ')', (Row('TOwner.Inner') < 0) and
+        (Row('TOwner.FInner') < 0));
+      Ok('unused symbols, missed uses' + LPass +
+        ': a constant an EXTERNALSYM / NODEFINE names is used (' + LNames +
+        ')', (Row('cExt') < 0) and (Row('cNoDef') < 0));
+      Ok('unused symbols, missed uses' + LPass +
+        ': an enumeration type whose value is named is used (' + LNames +
+        ')', Row('TGroups') < 0);
+    end;
   finally
     LNav.Free;
     LProj.Free;
@@ -7539,6 +7815,8 @@ begin
   TestUnitIdentity;
   TestUnusedUses;
   TestUnusedSymbols;
+  TestUnusedSymbolsMissedUses;
+  TestUnusedSymbolsImplicit;
   TestAsmNames;
   TestUnreferencedUnits;
   TestLintGlobalInit;
