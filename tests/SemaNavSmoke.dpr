@@ -2583,6 +2583,7 @@ var
   LRows: TArray<TPasUnusedSymbol>;
   LSkips: TPasUnusedSkips;
   LNames: string;
+  LChecks: TArray<TPasUnusedCheck>;
 
   function Row(const AName: string): Integer;
   begin
@@ -2590,6 +2591,29 @@ var
       if SameText(LRows[LI].Name, AName) then
         Exit(LI);
     Result := -1;
+  end;
+
+  // The ANth (0-based) symbol of UnusedA named AName of kind AKind.
+  function SymOf(const AName: string; AKind: TSemaSymbolKind;
+    ANth: Integer = 0): TPasExtRef;
+  var
+    LM: TPasSemaModel;
+  begin
+    Result.UnitId := LProj.ModelIdOf(TPath.Combine(LDir, 'UnusedA.pas'));
+    Result.Sym := -1;
+    LM := LProj.Model(Result.UnitId);
+    for var LI := 0 to LM.SymCount - 1 do
+      if (LM.Symbols[LI].NameLower = LowerCase(AName)) and
+         (LM.Symbols[LI].Kind = AKind) and (LM.Symbols[LI].DeclNode <>
+         NIL_NODE) and not (sfCompletesForward in LM.Symbols[LI].Flags) then
+      begin
+        if ANth = 0 then
+        begin
+          Result.Sym := LI;
+          Exit;
+        end;
+        Dec(ANth);
+      end;
   end;
 
 begin
@@ -2640,6 +2664,38 @@ begin
     Ok('unused symbols: a row is its name''s place',
       (Row('NeverProc') >= 0) and (LRows[Row('NeverProc')].Line = 53) and
       (LRows[Row('NeverProc')].Col = 11));
+    // CheckUnusedSymbols: a verdict per declaration asked about, the same
+    // rule - an unused one with its row, a used one, a skipped one with
+    // why, a local the rule does not weigh; the unused overload keeps its
+    // doubt with only the overloads asked about.
+    LChecks := CheckUnusedSymbols(LNav, [SymOf('Spare', skRoutine),
+      SymOf('UsedProc', skRoutine), SymOf('Run', skRoutine),
+      SymOf('L', skVar), SymOf('Ov', skRoutine, 1), SymOf('Ov', skRoutine),
+      SymOf('TNever', skType), SymOf('Draw', skRoutine, 1)]);
+    Ok('unused symbols, checked: one verdict per target, in order',
+      (Length(LChecks) = 8) and (LChecks[1].Target.Sym = SymOf('UsedProc',
+      skRoutine).Sym));
+    Ok('unused symbols, checked: unused with its row',
+      (LChecks[0].Verdict = uvUnused) and
+      SameText(LChecks[0].Row.Name, 'TBase.Spare') and
+      (LChecks[0].Row.Doubts = nil));
+    Ok('unused symbols, checked: used',
+      LChecks[1].Verdict = uvUsed);
+    Ok('unused symbols, checked: virtual - skipped, why',
+      (LChecks[2].Verdict = uvSkipped) and (LChecks[2].Skip = usDispatch));
+    Ok('unused symbols, checked: a local is not weighed',
+      LChecks[3].Verdict = uvNotCovered);
+    Ok('unused symbols, checked: the overloads - one unused with the doubt, one used',
+      (LChecks[4].Verdict = uvUnused) and (LChecks[4].Row.Line = 57) and
+      (LChecks[4].Row.Doubts <> nil) and (LChecks[5].Verdict = uvUsed));
+    Ok('unused symbols, checked: a type with its doubt; an interface''s name - skipped',
+      (LChecks[6].Verdict = uvUnused) and (LChecks[6].Row.Doubts <> nil) and
+      (LChecks[7].Verdict = uvSkipped) and (LChecks[7].Skip = usImplements));
+    // Only one overload asked about: the doubt is still there.
+    LChecks := CheckUnusedSymbols(LNav, [SymOf('Ov', skRoutine, 1)]);
+    Ok('unused symbols, checked: one overload alone keeps the doubt',
+      (Length(LChecks) = 1) and (LChecks[0].Verdict = uvUnused) and
+      (LChecks[0].Row.Doubts <> nil));
   finally
     LNav.Free;
     LProj.Free;

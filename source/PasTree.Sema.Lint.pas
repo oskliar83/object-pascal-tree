@@ -200,6 +200,34 @@ function FindUnusedSymbols(ANav: TPasNavigator; const AMids: TArray<Integer>;
 function DemandUnusedSymbols(ANav: TPasNavigator;
   const AMids: TArray<Integer>): TPasDemand;
 
+type
+  // The verdict on one declaration asked about (CheckUnusedSymbols).
+  TPasUnusedVerdict = (
+    uvUnused,       // a row: Row holds it, its doubts with it
+    uvUsed,         // used by name, a bare inherited, a redeclaration or a form
+    uvSkipped,      // reached another way, not weighed: Skip says how
+    uvNotCovered,   // not a declaration the rule weighs: a local, a
+                    // parameter, an enum value, a unit, a label
+    uvNotFound);    // TPasWorkspace.CheckUnusedSymbols: the key is no
+                    // declaration of this analysis
+  TPasUnusedCheck = record
+    Target: TPasExtRef;
+    Verdict: TPasUnusedVerdict;
+    Skip: TPasUnusedSkip;     // uvSkipped
+    Row: TPasUnusedSymbol;    // uvUnused
+  end;
+
+// FindUnusedSymbols for the declarations ATargets alone, one verdict each in
+// their order: "is this one dead?" without the rows of its whole unit. The
+// same rule - the overloads beside a routine asked about are weighed too, so
+// the doubt "another overload is used" means what it means in a whole run.
+function CheckUnusedSymbols(ANav: TPasNavigator;
+  const ATargets: TArray<TPasExtRef>): TArray<TPasUnusedCheck>;
+
+// CheckUnusedSymbols' demand in light mode.
+function DemandCheckUnusedSymbols(ANav: TPasNavigator;
+  const ATargets: TArray<TPasExtRef>): TPasDemand;
+
 implementation
 
 uses
@@ -2246,6 +2274,11 @@ type
     FIfaceNames: TDictionary<string, Boolean>;  // every interface's members
     FClassIface: TObjectDictionary<Int64, TDictionary<string, Boolean>>;
     FSkips: TPasUnusedSkips;
+    // CheckUnusedSymbols: the declarations collected (nil: every one of a
+    // unit), and why each one not weighed was skipped.
+    FOnly: TDictionary<Int64, Boolean>;
+    FSkipOf: TDictionary<Int64, TPasUnusedSkip>;
+    procedure Restrict(const ATargets: TArray<TPasExtRef>);
     class function K(AMid, ASym: Integer): Int64; static; inline;
     function VisPos(LM: TPasSemaModel; AVis: Integer; out AFileId, ALine,
       ACol: Integer): Boolean;
@@ -2293,6 +2326,8 @@ end;
 
 destructor TUnusedLint.Destroy;
 begin
+  FSkipOf.Free;
+  FOnly.Free;
   FClassIface.Free;
   FUnused.Free;
   FUnbound.Free;
@@ -2573,7 +2608,7 @@ var
   LM: TPasSemaModel;
   LS: TSemaSymbol;
   LKind: TSemaScopeKind;
-  LOwner, LNode, LFi, LLine, LCol, LTFi, LTLine, LTCol: Integer;
+  LOwner, LNode, LFi, LLine, LCol, LTFi, LTLine, LTCol, LSym: Integer;
   LC: TPasUnusedSymbol;
   LSkip: Boolean;
 
@@ -2581,6 +2616,8 @@ var
   begin
     Inc(FSkips[AWhy]);
     LSkip := True;
+    if FSkipOf <> nil then
+      FSkipOf.AddOrSetValue(K(AMid, LSym), AWhy);
   end;
 
 begin
@@ -2590,10 +2627,16 @@ begin
   if Generated(LM, FProj.ModelFile(AMid)) then
   begin
     Inc(FSkips[usGenerated]);
+    if FOnly <> nil then
+      for LSym := 0 to LM.SymCount - 1 do
+        if FOnly.ContainsKey(K(AMid, LSym)) then
+          FSkipOf.AddOrSetValue(K(AMid, LSym), usGenerated);
     Exit;
   end;
-  for var LSym := 0 to LM.SymCount - 1 do
+  for LSym := 0 to LM.SymCount - 1 do
   begin
+    if (FOnly <> nil) and not FOnly.ContainsKey(K(AMid, LSym)) then
+      Continue;
     LS := LM.Symbols[LSym];
     if (LS.DeclNode = NIL_NODE) or
        (LS.Flags * [sfBuiltin, sfCompletesForward] <> []) or
@@ -3104,38 +3147,117 @@ begin
   end;
 end;
 
+// Restricted to ATargets and the overloads beside each: the doubt "another
+// overload of it is used" asks whether a sibling is a row, so the siblings
+// are weighed too.
+procedure TUnusedLint.Restrict(const ATargets: TArray<TPasExtRef>);
+var
+  LM: TPasSemaModel;
+  LS: Integer;
+begin
+  FOnly := TDictionary<Int64, Boolean>.Create;
+  FSkipOf := TDictionary<Int64, TPasUnusedSkip>.Create;
+  for var LT in ATargets do
+  begin
+    if (LT.UnitId < 0) or (LT.UnitId >= FProj.ModelCount) or
+       not FProj.EnsureHydrated(LT.UnitId) then
+      Continue;
+    LM := FProj.Model(LT.UnitId);
+    if (LT.Sym < 0) or (LT.Sym >= LM.SymCount) then
+      Continue;
+    FOnly.AddOrSetValue(K(LT.UnitId, LT.Sym), True);
+    if (LM.Symbols[LT.Sym].Kind <> skRoutine) or
+       (LM.Symbols[LT.Sym].Scope < 0) then
+      Continue;
+    LS := LM.FindLocal(LM.Symbols[LT.Sym].Scope, LM.Symbols[LT.Sym].NameLower);
+    while LS <> NIL_SYM do
+    begin
+      if LM.Symbols[LS].Kind = skRoutine then
+        FOnly.AddOrSetValue(K(LT.UnitId, LS), True);
+      LS := LM.Symbols[LS].NextOverload;
+    end;
+  end;
+end;
+
+// The candidates of AMids collected and searched, the rows left in FCands
+// (and FUnused) with their doubts.
+procedure RunUnusedLint(ALint: TUnusedLint; ANav: TPasNavigator;
+  const AMids: TArray<Integer>);
+var
+  LKept: TList<TPasUnusedSymbol>;
+begin
+  LKept := TList<TPasUnusedSymbol>.Create;
+  try
+    ALint.CollectIfaceNames;
+    for var LMid in AMids do
+      if (LMid >= 0) and (LMid < ANav.Project.ModelCount) then
+        ALint.Collect(LMid);
+    for var LMid := 0 to ANav.Project.ModelCount - 1 do
+      if not ANav.Project.IsLight(LMid) and
+         not ANav.IsUnderLibraryPath(ANav.Project.ModelFile(LMid)) then
+        ALint.MarkBound(LMid);
+    ALint.Search;
+    for var LC in ALint.FCands do
+      if not ALint.FUsed.ContainsKey(TUnusedLint.K(LC.UnitId, LC.Sym)) then
+      begin
+        LKept.Add(LC);
+        ALint.FUnused.AddOrSetValue(TUnusedLint.K(LC.UnitId, LC.Sym), True);
+      end;
+    ALint.FCands.Clear;
+    ALint.FCands.AddRange(LKept);
+    if ALint.FCands.Count > 0 then
+      ALint.AddDoubts;
+  finally
+    LKept.Free;
+  end;
+end;
+
+// The references the candidates of AMids are searched for.
+function UnusedLintDemand(ALint: TUnusedLint; ANav: TPasNavigator;
+  const AMids: TArray<Integer>): TPasDemand;
+var
+  LRefs: TArray<TPasExtRef>;
+  LExt: TPasExtRef;
+begin
+  ALint.CollectIfaceNames;
+  for var LMid in AMids do
+    if (LMid >= 0) and (LMid < ANav.Project.ModelCount) then
+      ALint.Collect(LMid);
+  LRefs := nil;
+  for var LC in ALint.FCands do
+  begin
+    LExt.UnitId := LC.UnitId;
+    LExt.Sym := LC.Sym;
+    LRefs := LRefs + [LExt];
+  end;
+  Result := ANav.DemandReferencesOfAll(LRefs);
+end;
+
+function TargetMids(const ATargets: TArray<TPasExtRef>): TArray<Integer>;
+begin
+  Result := nil;
+  for var LT in ATargets do
+  begin
+    var LNew := True;
+    for var LMid in Result do
+      if LMid = LT.UnitId then
+        LNew := False;
+    if LNew then
+      Result := Result + [LT.UnitId];
+  end;
+end;
+
 function FindUnusedSymbols(ANav: TPasNavigator; const AMids: TArray<Integer>;
   out ASkips: TPasUnusedSkips): TArray<TPasUnusedSymbol>;
 var
   LLint: TUnusedLint;
-  LKept: TList<TPasUnusedSymbol>;
 begin
   LLint := TUnusedLint.Create(ANav);
-  LKept := TList<TPasUnusedSymbol>.Create;
   try
-    LLint.CollectIfaceNames;
-    for var LMid in AMids do
-      if (LMid >= 0) and (LMid < ANav.Project.ModelCount) then
-        LLint.Collect(LMid);
-    for var LMid := 0 to ANav.Project.ModelCount - 1 do
-      if not ANav.Project.IsLight(LMid) and
-         not ANav.IsUnderLibraryPath(ANav.Project.ModelFile(LMid)) then
-        LLint.MarkBound(LMid);
-    LLint.Search;
-    for var LC in LLint.FCands do
-      if not LLint.FUsed.ContainsKey(TUnusedLint.K(LC.UnitId, LC.Sym)) then
-      begin
-        LKept.Add(LC);
-        LLint.FUnused.AddOrSetValue(TUnusedLint.K(LC.UnitId, LC.Sym), True);
-      end;
-    LLint.FCands.Clear;
-    LLint.FCands.AddRange(LKept);
-    if LLint.FCands.Count > 0 then
-      LLint.AddDoubts;
+    RunUnusedLint(LLint, ANav, AMids);
     Result := LLint.FCands.ToArray;
     ASkips := LLint.FSkips;
   finally
-    LKept.Free;
     LLint.Free;
   end;
   TArray.Sort<TPasUnusedSymbol>(Result, TComparer<TPasUnusedSymbol>.Construct(
@@ -3153,23 +3275,64 @@ function DemandUnusedSymbols(ANav: TPasNavigator;
   const AMids: TArray<Integer>): TPasDemand;
 var
   LLint: TUnusedLint;
-  LRefs: TArray<TPasExtRef>;
-  LExt: TPasExtRef;
 begin
   LLint := TUnusedLint.Create(ANav);
   try
-    LLint.CollectIfaceNames;
-    for var LMid in AMids do
-      if (LMid >= 0) and (LMid < ANav.Project.ModelCount) then
-        LLint.Collect(LMid);
-    LRefs := nil;
-    for var LC in LLint.FCands do
+    Result := UnusedLintDemand(LLint, ANav, AMids);
+  finally
+    LLint.Free;
+  end;
+end;
+
+function CheckUnusedSymbols(ANav: TPasNavigator;
+  const ATargets: TArray<TPasExtRef>): TArray<TPasUnusedCheck>;
+var
+  LLint: TUnusedLint;
+  LKey: Int64;
+  LSkip: TPasUnusedSkip;
+begin
+  SetLength(Result, Length(ATargets));
+  LLint := TUnusedLint.Create(ANav);
+  try
+    LLint.Restrict(ATargets);
+    RunUnusedLint(LLint, ANav, TargetMids(ATargets));
+    for var LI := 0 to High(ATargets) do
     begin
-      LExt.UnitId := LC.UnitId;
-      LExt.Sym := LC.Sym;
-      LRefs := LRefs + [LExt];
+      Result[LI].Target := ATargets[LI];
+      LKey := TUnusedLint.K(ATargets[LI].UnitId, ATargets[LI].Sym);
+      if LLint.FUnused.ContainsKey(LKey) then
+      begin
+        Result[LI].Verdict := uvUnused;
+        for var LC in LLint.FCands do
+          if (LC.UnitId = ATargets[LI].UnitId) and
+             (LC.Sym = ATargets[LI].Sym) then
+            Result[LI].Row := LC;
+      end
+      else if LLint.FSkipOf.TryGetValue(LKey, LSkip) then
+      begin
+        Result[LI].Verdict := uvSkipped;
+        Result[LI].Skip := LSkip;
+      end
+      // A candidate (bindings counted) not left a row.
+      else if LLint.FCount.ContainsKey(LKey) then
+        Result[LI].Verdict := uvUsed
+      else
+        Result[LI].Verdict := uvNotCovered;
     end;
-    Result := ANav.DemandReferencesOfAll(LRefs);
+  finally
+    LLint.Free;
+  end;
+end;
+
+function DemandCheckUnusedSymbols(ANav: TPasNavigator;
+  const ATargets: TArray<TPasExtRef>): TPasDemand;
+var
+  LLint: TUnusedLint;
+begin
+  LLint := TUnusedLint.Create(ANav);
+  try
+    LLint.Restrict(ATargets);
+    Result := UnusedLintDemand(LLint, ANav, TargetMids(ATargets));
   finally
     LLint.Free;
   end;
