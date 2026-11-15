@@ -1473,6 +1473,20 @@ by `tests/SemaNavSmoke.dpr` (`TestUnusedSymbols`). Not wired into the demo
 yet. The host is pastree-mcp's `lint unused-symbol` (0.53.0), which keeps a
 row only when every analysis of a group holding the unit finds it unused.
 
+`CheckUnusedSymbols(ANav, ATargets)` (PasTree 0.194.0; its demand
+`DemandCheckUnusedSymbols`, and `TPasWorkspace.CheckUnusedSymbols(AKeys)` by
+`TPasSymbolKey`) asks the same of named declarations alone - "is this one
+dead?" without the rows of its whole unit - and answers each with a verdict
+(`TPasUnusedCheck`): `uvUnused` with its row and doubts, `uvUsed`,
+`uvSkipped` with the `TPasUnusedSkip` it falls under (virtual, interface,
+published...), `uvNotCovered` for what the rule does not weigh (a local, a
+parameter, an enum value), `uvNotFound` for a workspace key that resolves to
+nothing. Only the targets' units are collected, restricted to the targets and
+the overloads beside each: the doubt "another overload is used" asks whether
+a sibling is a row itself, so the siblings are weighed too. The whole-group
+passes (bare `inherited`, bindings counted, names bound to nothing, the doubt
+scan) are the same as a whole run's.
+
 A declaration of the units asked about that nothing in the analysis uses:
 types, routines (nested ones too), unit and class variables and constants,
 fields, properties. Locals and parameters are dcc's own hints (H2164,

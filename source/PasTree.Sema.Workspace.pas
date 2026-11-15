@@ -315,6 +315,11 @@ type
     // once the references they are searched for are complete.
     function FindUnusedSymbols(const AFiles: TArray<string>;
       out ASkips: TPasUnusedSkips): TArray<TPasUnusedSymbol>;
+    // The verdict on each declaration AKeys names, in their order
+    // (PasTree.Sema.Lint.CheckUnusedSymbols); uvNotFound for a key that
+    // resolves to nothing here.
+    function CheckUnusedSymbols(
+      const AKeys: TArray<TPasSymbolKey>): TArray<TPasUnusedCheck>;
   end;
 
 implementation
@@ -1346,6 +1351,61 @@ begin
       Result := DemandUnusedSymbols(ANav, MidsOf(LFiles));
     end);
   Result := PasTree.Sema.Lint.FindUnusedSymbols(FNav, MidsOf(AFiles), ASkips);
+  Finish;
+end;
+
+function TPasWorkspace.CheckUnusedSymbols(
+  const AKeys: TArray<TPasSymbolKey>): TArray<TPasUnusedCheck>;
+var
+  LKeys: TArray<TPasSymbolKey>;
+  LRefs: TArray<TPasExtRef>;
+  LAt: TArray<Integer>;
+  LChecks: TArray<TPasUnusedCheck>;
+  LExt: TPasExtRef;
+begin
+  LKeys := AKeys;
+  Prepare(
+    function(ANav: TPasNavigator): TPasDemand
+    var
+      LM, LS: Integer;
+      LR: TArray<TPasExtRef>;
+      LX: TPasExtRef;
+    begin
+      Result := Default(TPasDemand);
+      LR := nil;
+      for var LK in LKeys do
+        if LK.Valid and LK.Resolve(ANav.Project, LM, LS) then
+        begin
+          LX.UnitId := LM;
+          LX.Sym := LS;
+          LR := LR + [LX];
+        end
+        else if LK.Valid then
+          Result := PasMergeDemand(Result, ANav.DemandFilePath(LK.MainFile));
+      if LR <> nil then
+        Result := PasMergeDemand(Result, DemandCheckUnusedSymbols(ANav, LR));
+    end);
+  SetLength(Result, Length(AKeys));
+  LRefs := nil;
+  LAt := nil;
+  for var LI := 0 to High(AKeys) do
+  begin
+    Result[LI] := Default(TPasUnusedCheck);
+    Result[LI].Target.UnitId := -1;
+    Result[LI].Target.Sym := -1;
+    Result[LI].Verdict := uvNotFound;
+    if AKeys[LI].Valid and Sym(AKeys[LI], LExt.UnitId, LExt.Sym) then
+    begin
+      LRefs := LRefs + [LExt];
+      LAt := LAt + [LI];
+    end;
+  end;
+  if LRefs <> nil then
+  begin
+    LChecks := PasTree.Sema.Lint.CheckUnusedSymbols(FNav, LRefs);
+    for var LI := 0 to High(LChecks) do
+      Result[LAt[LI]] := LChecks[LI];
+  end;
   Finish;
 end;
 
