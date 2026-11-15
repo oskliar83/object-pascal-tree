@@ -1469,7 +1469,8 @@ Status: IMPLEMENTED (PasTree 0.182.0) - `FindUnusedSymbols(ANav, AMids,
 out ASkips)` with the `TPasUnusedSymbol` row and `TPasUnusedSkips` counts in
 `source/PasTree.Sema.Lint.pas`, its light-mode demand `DemandUnusedSymbols`,
 and `TPasWorkspace.FindUnusedSymbols(AFiles, out ASkips)`; regression-covered
-by `tests/SemaNavSmoke.dpr` (`TestUnusedSymbols`). Not wired into the demo
+by `tests/SemaNavSmoke.dpr` (`TestUnusedSymbols`,
+`TestUnusedSymbolsMissedUses`). Not wired into the demo
 yet. The host is pastree-mcp's `lint unused-symbol` (0.53.0), which keeps a
 row only when every analysis of a group holding the unit finds it unused.
 
@@ -1496,9 +1497,24 @@ H2219). Used is any of:
   `CollectReferencesOfAll` pass over the declarations not already shown
   used by a count of their bindings in the own units - more bindings than
   a declaration's own sites could make);
-- a property redeclared below (`property X;`): every link above it;
+- a property redeclared below (`property X;`): every link above it -
+  whichever unit the descendant is in, a library or light one too (each
+  candidate property's class is asked for its descendants; E2147 without
+  it);
+- a property with an `implements` specifier (14.4.1): it supplies the
+  class's methods of that interface (E2291 without it);
+- a global an `EXTERNALSYM` or `NODEFINE` directive of its unit names
+  (E2003 without it, E2240 where a non-global of the name is left) - read
+  from the text, a branch not compiled included;
+- an enumeration type one of whose values is bound (`Ord(grpError)` needs
+  its type: E2003 without it);
 - a bare `inherited;` running it (`BareInheritedTarget`);
-- a form file naming a class (a frame placed on a form);
+- a form file naming a class (a frame placed on a form), or binding a member
+  of a class's unnamed first section - a handler (`OnClick = M`), a
+  component (`object X: TC`), by `TPasFormBinder`'s rules - which counts
+  even where the class is not seen to descend from TPersistent;
+- for a class or record helper, which applies without being named: a
+  member of it used;
 - a reference hit that cannot be mapped back to a binding (an include
   file): every declaration of the name it highlights.
 
@@ -1510,7 +1526,12 @@ an ancestor or a descendant names (a method reference type in the heritage
 list names `Invoke`), operators, class constructors and destructors,
 constructors of TCustomAttribute descendants (`[MaxLength(10)]`), the for-in
 protocol (`GetEnumerator`, `MoveNext`, `Current`), and generated units
-(`_TLB`, XML data binding, import headers).
+(`_TLB`, XML data binding, import headers), and a unit that replaces a
+library unit of its name (`usReplacesLibrary`: a unit by that name under
+`LibraryPaths` or the installed `$(BDS)source`, at another path - a patched
+`Vcl.Menus`): the library's `.dcu` files were compiled against the
+original interface, so removing anything from the copy breaks units the
+analysis never reads (F2051, F2613).
 
 Doubts on a row, where the index may be wrong: the name written in a branch
 this configuration does not compile, or - a type - as a whole string
@@ -1519,7 +1540,12 @@ files not under `LibraryPaths`; a record's field (the record
 may be read or written whole); another overload of the name in use (the
 index may pick another overload than dcc); the name declared at unit level
 by another unit too (the `uses` order decides which one a unit binds); the
-name written where the analysis bound nothing.
+name written where the analysis bound nothing; a helper none of whose
+members is used, and each member of it (a call the index bound to the
+helped type may run the helper's - all 27 helpers a first run reported on
+the client group were in use); a member of the unnamed first section of a
+class not followed to TPersistent, in a unit with a form file (published
+if the class streams, and bound by name at run time).
 
 Checked against dcc on the client group (pastree-mcp, 2026-11-14): every
 row that takes a hint marked `deprecated '<tag>'`, the own units rebuilt;
