@@ -2849,6 +2849,178 @@ begin
   end;
 end;
 
+// The rows made by rows (TPasUnusedHow): a getter of an unused property, a
+// field only an unused method uses and the type only that field uses (and
+// the interface only a field only written uses), two methods calling only
+// each other, one calling only itself - uhOnlyByUnused; fields and a
+// variable only assigned - uhOnlyWritten, by a call and of an interface
+// with a doubt each. Not rows: a field read by live code, a variable an
+// `absolute` one aliases (writing the alias writes it), the alias. Asked
+// of one declaration, the declarations its uses sit in are weighed round
+// by round (THelperType: FDeadOnly, then DeadUser).
+procedure TestUnusedSymbolsDerived;
+const
+  UNUSED_B =
+    'unit UnusedB;'#13#10 +
+    'interface'#13#10 +
+    'type'#13#10 +
+    '  IHolder = interface end;'#13#10 +
+    '  THelperType = class end;'#13#10 +
+    '  TOwner = class'#13#10 +
+    '  private'#13#10 +
+    '    FIndex: Integer;'#13#10 +
+    '    FMade: TObject;'#13#10 +
+    '    FIntf: IHolder;'#13#10 +
+    '    FRead: Integer;'#13#10 +
+    '    FDeadOnly: THelperType;'#13#10 +
+    '    function GetItem: Integer;'#13#10 +
+    '    procedure DeadUser;'#13#10 +
+    '    procedure PingA;'#13#10 +
+    '    procedure PingB;'#13#10 +
+    '    procedure Rec;'#13#10 +
+    '    function Live: Integer;'#13#10 +
+    '  public'#13#10 +
+    '    procedure Run;'#13#10 +
+    '    property Item: Integer read GetItem;'#13#10 +
+    '  end;'#13#10 +
+    'var'#13#10 +
+    '  GOwner: TOwner;'#13#10 +
+    '  GOnlySet: Integer;'#13#10 +
+    '  GAliased: Integer;'#13#10 +
+    '  GAlias: Integer absolute GAliased;'#13#10 +
+    'implementation'#13#10 +
+    'function TOwner.GetItem: Integer; begin Result := FRead; end;'#13#10 +
+    'procedure TOwner.DeadUser; begin FDeadOnly := nil; FIndex := 2; end;'#13#10 +
+    'procedure TOwner.PingA; begin PingB; end;'#13#10 +
+    'procedure TOwner.PingB; begin PingA; end;'#13#10 +
+    'procedure TOwner.Rec; begin Rec; end;'#13#10 +
+    'function TOwner.Live: Integer; begin Result := FRead; end;'#13#10 +
+    'procedure TOwner.Run;'#13#10 +
+    'begin'#13#10 +
+    '  Self.FIndex := 1;'#13#10 +
+    '  FMade := TObject.Create;'#13#10 +
+    '  FIntf := nil;'#13#10 +
+    '  FRead := Live;'#13#10 +
+    '  GOnlySet := 3;'#13#10 +
+    '  GAlias := 4;'#13#10 +
+    'end;'#13#10 +
+    'initialization'#13#10 +
+    '  GOwner.Run;'#13#10 +
+    'end.'#13#10;
+var
+  LDir: string;
+  LProj: TPasSemaProject;
+  LNav: TPasNavigator;
+  LRows: TArray<TPasUnusedSymbol>;
+  LSkips: TPasUnusedSkips;
+  LNames: string;
+  LChecks: TArray<TPasUnusedCheck>;
+
+  function Row(const AName: string): Integer;
+  begin
+    for var LI := 0 to High(LRows) do
+      if SameText(LRows[LI].Name, AName) then
+        Exit(LI);
+    Result := -1;
+  end;
+
+  function Is_(const AName: string; AHow: TPasUnusedHow): Boolean;
+  begin
+    Result := (Row(AName) >= 0) and (LRows[Row(AName)].How = AHow);
+  end;
+
+  function By(const AName, AUser: string): Boolean;
+  begin
+    Result := False;
+    if Row(AName) >= 0 then
+      for var LB in LRows[Row(AName)].By do
+        if SameText(LB, AUser) then
+          Exit(True);
+  end;
+
+  function SymOf(const AName: string; AKind: TSemaSymbolKind): TPasExtRef;
+  var
+    LM: TPasSemaModel;
+  begin
+    Result.UnitId := LProj.ModelIdOf(TPath.Combine(LDir, 'UnusedB.pas'));
+    Result.Sym := -1;
+    LM := LProj.Model(Result.UnitId);
+    for var LI := 0 to LM.SymCount - 1 do
+      if (LM.Symbols[LI].NameLower = LowerCase(AName)) and
+         (LM.Symbols[LI].Kind = AKind) and (LM.Symbols[LI].DeclNode <>
+         NIL_NODE) and not (sfCompletesForward in LM.Symbols[LI].Flags) then
+      begin
+        Result.Sym := LI;
+        Exit;
+      end;
+  end;
+
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_unused_derived');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnusedB.pas'), UNUSED_B);
+  LProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  LNav := nil;
+  try
+    LProj.AnalyzeDirectory(LDir);
+    LNav := TPasNavigator.Create(LProj);
+    LRows := FindUnusedSymbols(LNav,
+      [LProj.ModelIdOf(TPath.Combine(LDir, 'UnusedB.pas'))], LSkips);
+    LNames := '';
+    for var LR in LRows do
+      LNames := LNames + LR.Name + '/' + IntToStr(Ord(LR.How)) + ' ';
+    Ok('unused derived: the rows nothing uses (' + LNames + ')',
+      Is_('TOwner.DeadUser', uhUnused) and Is_('TOwner.Item', uhUnused));
+    Ok('unused derived: used only by rows, with them (' + LNames + ')',
+      Is_('TOwner.GetItem', uhOnlyByUnused) and
+      By('TOwner.GetItem', 'TOwner.Item') and
+      Is_('TOwner.FDeadOnly', uhOnlyByUnused) and
+      By('TOwner.FDeadOnly', 'TOwner.DeadUser') and
+      Is_('THelperType', uhOnlyByUnused) and
+      By('THelperType', 'TOwner.FDeadOnly') and
+      Is_('IHolder', uhOnlyByUnused) and
+      Is_('TOwner.PingA', uhOnlyByUnused) and
+      Is_('TOwner.PingB', uhOnlyByUnused) and
+      Is_('TOwner.Rec', uhOnlyByUnused) and By('TOwner.Rec', ''));
+    Ok('unused derived: only written (' + LNames + ')',
+      Is_('TOwner.FIndex', uhOnlyWritten) and
+      (Length(LRows[Row('TOwner.FIndex')].Writes) = 1) and
+      By('TOwner.FIndex', 'TOwner.DeadUser') and
+      (LRows[Row('TOwner.FIndex')].Doubts = nil) and
+      Is_('TOwner.FMade', uhOnlyWritten) and
+      (LRows[Row('TOwner.FMade')].Doubts <> nil) and
+      Is_('TOwner.FIntf', uhOnlyWritten) and
+      (LRows[Row('TOwner.FIntf')].Doubts <> nil) and
+      Is_('GOnlySet', uhOnlyWritten));
+    Ok('unused derived: not rows - read live, an alias and what it aliases (' +
+      LNames + ')',
+      (Row('TOwner.FRead') < 0) and (Row('TOwner.Live') < 0) and
+      (Row('TOwner.Run') < 0) and (Row('GAlias') < 0) and
+      (Row('GAliased') < 0) and (Row('GOwner') < 0) and (Row('TOwner') < 0));
+    // One asked alone: the declarations its uses sit in, round by round.
+    LChecks := CheckUnusedSymbols(LNav, [SymOf('GetItem', skRoutine),
+      SymOf('THelperType', skType), SymOf('FIndex', skField),
+      SymOf('FRead', skField), SymOf('PingA', skRoutine)]);
+    Ok('unused derived, checked: a getter of an unused property',
+      (LChecks[0].Verdict = uvUnused) and
+      (LChecks[0].Row.How = uhOnlyByUnused));
+    Ok('unused derived, checked: three rounds down',
+      (LChecks[1].Verdict = uvUnused) and
+      (LChecks[1].Row.How = uhOnlyByUnused));
+    Ok('unused derived, checked: only written; read; a cycle',
+      (LChecks[2].Verdict = uvUnused) and
+      (LChecks[2].Row.How = uhOnlyWritten) and
+      (LChecks[3].Verdict = uvUsed) and (LChecks[4].Verdict = uvUnused));
+  finally
+    LNav.Free;
+    LProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // FindUnusedSymbols: four uses no name in code makes, each a dcc error once
 // the declaration is gone (dcc32 37.0). A bare `property Delay;` in a
 // descendant republishes TBaseTree.Delay (E2147 without it) - the descendant
@@ -3059,6 +3231,9 @@ const
     '  MOV EAX,GBlk.Digits[ECX].TBlk.Next'#13#10 +                // 50
     '  MOV EAX,TBlk([EDX]).Next'#13#10 +
     'end;'#13#10 +
+    // Stub used: what its asm names is used by live code.
+    'initialization'#13#10 +
+    '  TFoo(nil).Stub;'#13#10 +
     'end.'#13#10;
 var
   LDir: string;
@@ -7815,6 +7990,7 @@ begin
   TestUnitIdentity;
   TestUnusedUses;
   TestUnusedSymbols;
+  TestUnusedSymbolsDerived;
   TestUnusedSymbolsMissedUses;
   TestUnusedSymbolsImplicit;
   TestAsmNames;

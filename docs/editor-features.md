@@ -1488,6 +1488,22 @@ a sibling is a row itself, so the siblings are weighed too. The whole-group
 passes (bare `inherited`, bindings counted, names bound to nothing, the doubt
 scan) are the same as a whole run's.
 
+The rows rows make (PasTree 0.196.0, `TPasUnusedSymbol.How`): a declaration
+every use of which sits in rows - in their bodies, in their declarations (a
+property's `read GetX`, a field's type), or in its own body - is a row,
+`uhOnlyByUnused`, with `By` naming those rows ('' for itself); a field or a
+unit or class variable whose every other use is the target of a plain `:=`
+is a row, `uhOnlyWritten`, with `Writes` listing the assignments - not a
+record's field (the record is read whole) nor an `absolute` one. Both are
+decided together, a greatest fixed point over the declarations weighed (two
+routines calling only each other are two rows); a use the index cannot place
+(an include file, a bare `inherited`, a form) or one in a declaration not
+weighed keeps the declaration. Their doubts: an assignment whose value code
+computes, an interface reference held, a row using it with a doubt.
+`CheckUnusedSymbols` weighs the declarations the targets' uses sit in too,
+round by round (4 rounds, 300 declarations), so a getter asked alone finds
+its unused property. Covered by `TestUnusedSymbolsDerived`.
+
 A declaration of the units asked about that nothing in the analysis uses:
 types, routines (nested ones too), unit and class variables and constants,
 fields, properties. Locals and parameters are dcc's own hints (H2164,
