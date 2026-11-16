@@ -2593,6 +2593,10 @@ type
     FClassIface: TObjectDictionary<Int64, TDictionary<string, Boolean>>;
     FEnumOf: TDictionary<Int64, Int64>;  // an enum value -> its enum type
     FDirNames: TDictionary<string, Boolean>;  // Collect's unit, DirectiveNames
+    // A `$IF` name no unit-level declaration answers (the last segment of a
+    // dotted one, `{$IF TFoo.CLevel > 1}`): MarkIfNamed, by name.
+    FIfNames: TDictionary<string, Boolean>;
+    FStreams: TDictionary<Int64, Boolean>;  // Streams' answers, per class
     FSkips: TPasUnusedSkips;
     // CheckUnusedSymbols: the declarations collected (nil: every one of a
     // unit), and why each one not weighed was skipped.
@@ -2645,6 +2649,10 @@ type
     function DescendsFrom(AClass: TSemaXType; const ANameLower: string):
       Boolean;
     function Streams(AClass: TSemaXType): Boolean;
+    function TypeInfoOn(const AClass: TSemaXType): Boolean;
+    procedure MarkDelegates(AMid: Integer);
+    procedure MarkIfNames(AMid: Integer);
+    procedure MarkIfNamed;
     function AncestryKnown(AClass: TSemaXType): Boolean;
     function NamesAncestor(const AClass: TSemaXType): Boolean;
     function IsStructType(const AX: TSemaXType; AKind: TPasNodeKind): Boolean;
@@ -2693,6 +2701,8 @@ begin
     [doOwnsValues]);
   FEnumOf := TDictionary<Int64, Int64>.Create;
   FDirNames := TDictionary<string, Boolean>.Create;
+  FIfNames := TDictionary<string, Boolean>.Create;
+  FStreams := TDictionary<Int64, Boolean>.Create;
   FHard := TDictionary<Int64, Boolean>.Create;
   FUses := TObjectDictionary<Int64, TList<TUnusedSite>>.Create([doOwnsValues]);
   FImplSym := TDictionary<Int64, Int64>.Create;
@@ -2714,6 +2724,8 @@ begin
   FSkipOf.Free;
   FOnly.Free;
   FDirNames.Free;
+  FIfNames.Free;
+  FStreams.Free;
   FEnumOf.Free;
   FLibUnits.Free;
   FClassIface.Free;
@@ -2789,11 +2801,73 @@ begin
   Result := False;
 end;
 
-// A TPersistent descendant: compiled {$M+}, its unnamed first section is
-// published - a form's components and handlers.
+// A TPersistent descendant, or a descendant of any class declared under
+// `$M+` / `$TYPEINFO ON`: its unnamed first section is published - a form's
+// components and handlers, a method MethodAddress('Ping') finds (dcc32 37.0:
+// deleting it compiles, and the lookup returns nil).
 function TUnusedLint.Streams(AClass: TSemaXType): Boolean;
+var
+  LKey: Int64;
 begin
+  LKey := K(AClass.UnitId, AClass.Sym);
+  if FStreams.TryGetValue(LKey, Result) then
+    Exit;
   Result := DescendsFrom(AClass, 'tpersistent');
+  for var LDepth := 1 to 64 do
+  begin
+    if Result or not XValid(AClass) then
+      Break;
+    Result := TypeInfoOn(AClass);
+    AClass := FProj.CanonTypeX(FProj.AncestorOfX(AClass));
+  end;
+  FStreams.Add(LKey, Result);
+end;
+
+// Was class AClass declared under `$M+` (`$TYPEINFO ON`)? The option state
+// at its declaration: the last option directive before it (OptionRefs, kept
+// when the text is demoted). One in another file - an include - is taken
+// as before it when it leaves M on: a row kept, never a wrong deletion. A
+// library class is TPersistent's (Streams); a unit no directive turns M on
+// in, the usual one, answers at once.
+function TUnusedLint.TypeInfoOn(const AClass: TSemaXType): Boolean;
+var
+  LM: TPasSemaModel;
+  LAny: Boolean;
+  LVis, LFile, LTok, LOff: Integer;
+begin
+  Result := False;
+  if (AClass.UnitId < 0) or (AClass.UnitId >= FProj.ModelCount) then
+    Exit;
+  LM := FProj.Model(AClass.UnitId);
+  LAny := False;
+  for var LR in LM.Tree.Source.OptionRefs do
+    if LR.State.Switches['M'] then
+    begin
+      LAny := True;
+      Break;
+    end;
+  if not LAny or FNav.IsUnderLibraryPath(FProj.ModelFile(AClass.UnitId)) then
+    Exit;
+  if not FProj.EnsureHydrated(AClass.UnitId) then
+    Exit(True);
+  LVis := LM.Tree.NodeLeftmostVis(LM.Symbols[AClass.Sym].DeclNode);
+  if (LVis < 0) or (LVis > High(LM.Tree.Source.Visible)) then
+    Exit(True);
+  LFile := LM.Tree.Source.Visible[LVis].FileId;
+  LTok := LM.Tree.Source.Visible[LVis].TokenIndex;
+  if (LFile < 0) or (LFile > High(LM.Tree.Source.Files)) or (LTok < 0) or
+     (LTok > High(LM.Tree.Source.Files[LFile].Tokens)) then
+    Exit(True);
+  LOff := LM.Tree.Source.Files[LFile].Tokens[LTok].Start;
+  for var LR in LM.Tree.Source.OptionRefs do
+    if LR.FileId = LFile then
+    begin
+      if LR.Start >= LOff then
+        Break;
+      Result := LR.State.Switches['M'];
+    end
+    else if LR.State.Switches['M'] then
+      Result := True;
 end;
 
 // Was AClass's ancestry followed all the way to TObject? Then Streams'
@@ -3048,6 +3122,150 @@ begin
        LM.Tree.NodeTextEquals(LChild, 'implements') then
       Exit(True);
     LChild := LM.Tree.Nodes[LChild].NextSibling;
+  end;
+end;
+
+// A property of model AMid delegating an interface to a class-typed value
+// (`property Saver: TSaver read FSaver implements ISave`, 14.4.1): the
+// methods of that class and its ancestors named like a method of the
+// interface (or an ancestor of it) implement it for the owner - a use no
+// name in code makes (dcc32 37.0: E2291 once TSaver.Save is gone). An
+// interface-typed value's methods are its implementing class's, which
+// lists the interface (usImplements).
+procedure TUnusedLint.MarkDelegates(AMid: Integer);
+var
+  LM, LCM: TPasSemaModel;
+  LNode, LSpec, LChild, LScope: Integer;
+  LX, LT: TSemaXType;
+  LNames: TDictionary<string, Boolean>;
+begin
+  LM := FProj.Model(AMid);
+  LNames := nil;
+  try
+    for var LSym := 0 to LM.SymCount - 1 do
+    begin
+      if (LM.Symbols[LSym].Kind <> skProperty) or
+         (LM.Symbols[LSym].DeclNode = NIL_NODE) or
+         not DelegatesInterface(LM, LSym) then
+        Continue;
+      LT := FProj.CanonTypeX(FProj.SymDeclTypeX(AMid, LSym));
+      if not IsStructType(LT, nkClassType) then
+        Continue;
+      LNode := LM.Symbols[LSym].DeclNode;
+      while (LNode <> NIL_NODE) and
+            (LM.Tree.Nodes[LNode].Kind <> nkPropertyDecl) do
+        LNode := LM.Tree.Nodes[LNode].Parent;
+      if LNode = NIL_NODE then
+        Continue;
+      if LNames = nil then
+        LNames := TDictionary<string, Boolean>.Create
+      else
+        LNames.Clear;
+      LSpec := LM.Tree.Nodes[LNode].FirstChild;
+      while LSpec <> NIL_NODE do
+      begin
+        if (LM.Tree.Nodes[LSpec].Kind = nkPropSpec) and
+           LM.Tree.NodeTextEquals(LSpec, 'implements') then
+        begin
+          LChild := LM.Tree.Nodes[LSpec].FirstChild;
+          while LChild <> NIL_NODE do
+          begin
+            LX := FProj.CanonTypeX(FProj.ResolveTypeExpr(AMid, LChild));
+            for var LUp := 1 to 64 do
+            begin
+              if not IsStructType(LX, nkInterfaceType) then
+                Break;
+              LCM := FProj.Model(LX.UnitId);
+              LScope := LCM.Symbols[LX.Sym].MemberScope;
+              if (LScope <> NIL_SCOPE) and (LScope < LCM.Scopes.Count) then
+                for var LIdx := 0 to LCM.Scopes[LScope].Symbols.Count - 1 do
+                  LNames.AddOrSetValue(LCM.Symbols[LCM.Scopes[LScope].
+                    Symbols[LIdx]].NameLower, True);
+              LX := FProj.CanonTypeX(FProj.AncestorOfX(LX));
+            end;
+            LChild := LM.Tree.Nodes[LChild].NextSibling;
+          end;
+        end;
+        LSpec := LM.Tree.Nodes[LSpec].NextSibling;
+      end;
+      if LNames.Count = 0 then
+        Continue;
+      for var LUp := 1 to 64 do
+      begin
+        if not IsStructType(LT, nkClassType) then
+          Break;
+        LCM := FProj.Model(LT.UnitId);
+        LScope := LCM.Symbols[LT.Sym].MemberScope;
+        if (LScope <> NIL_SCOPE) and (LScope < LCM.Scopes.Count) then
+          for var LIdx := 0 to LCM.Scopes[LScope].Symbols.Count - 1 do
+          begin
+            var LMem := LCM.Scopes[LScope].Symbols[LIdx];
+            if (LCM.Symbols[LMem].Kind = skRoutine) and
+               LNames.ContainsKey(LCM.Symbols[LMem].NameLower) then
+              Hard(K(LT.UnitId, LMem));
+          end;
+        LT := FProj.CanonTypeX(FProj.AncestorOfX(LT));
+      end;
+    end;
+  finally
+    LNames.Free;
+  end;
+end;
+
+// The names the `$IF` / `$ELSEIF` expressions of model AMid read
+// (IfNameRefs: a constant, `Declared(X)`'s argument - not a conditional
+// symbol) are uses of what they denote: deleting `CLevel` of
+// `{$IF CLevel < 2}`, or TProbe of `{$IF Declared(TProbe)}`, still compiles
+// (dcc32 37.0 takes an unreadable `$IF` comparison as True, a bare unknown
+// name and Declared() of it as False) - the other branch. Resolved as the
+// unit's code sees the name (IfNameTarget); one no unit-level declaration
+// answers - a dotted name's last segment - kept by name for MarkIfNamed. A
+// directive in a branch not compiled counts too, as DirectiveNames'.
+procedure TUnusedLint.MarkIfNames(AMid: Integer);
+var
+  LM: TPasSemaModel;
+  LSeen: TDictionary<string, Boolean>;
+  LTMid, LTSym: Integer;
+  LName: string;
+begin
+  LM := FProj.Model(AMid);
+  if LM.Tree.Source.IfNameRefs = nil then
+    Exit;
+  LSeen := TDictionary<string, Boolean>.Create;
+  try
+    for var LR in LM.Tree.Source.IfNameRefs do
+    begin
+      LName := PasFoldName(LR.Name);
+      if not LSeen.TryAdd(LName, True) then
+        Continue;
+      if FNav.IfNameTarget(AMid, LName, LTMid, LTSym) then
+        Hard(K(LTMid, LTSym))
+      else
+        FIfNames.AddOrSetValue(LName, True);
+    end;
+  finally
+    LSeen.Free;
+  end;
+end;
+
+// A member named by a `$IF` name MarkIfNames could not resolve - its last
+// segment, `{$IF TFoo.CLevel > 1}` - is used: a row kept, never a wrong
+// deletion.
+procedure TUnusedLint.MarkIfNamed;
+var
+  LM: TPasSemaModel;
+  LScope: Integer;
+begin
+  if FIfNames.Count = 0 then
+    Exit;
+  for var LC in FCands do
+  begin
+    LM := FProj.Model(LC.UnitId);
+    LScope := LM.Symbols[LC.Sym].Scope;
+    if (LScope >= 0) and (LScope < LM.Scopes.Count) and
+       (LM.Scopes[LScope].Kind = sckStruct) and
+       FIfNames.ContainsKey(LM.Symbols[LC.Sym].NameLower) then
+      Hard(K(LC.UnitId, LC.Sym));
   end;
 end;
 
@@ -3370,10 +3588,15 @@ begin
         HasDirective(LM, LNode, 'abstract') or HasDirective(LM, LNode,
         'message'))) then
         Skip(usDispatch)
-      else if (LM.RoutineHead(LSym) in [rhConstructor, rhDestructor]) and
-        (LNode <> NIL_NODE) and VisPos(LM, LM.Tree.NodeLeftmostVis(LNode),
-        LTFi, LTLine, LTCol) and SameText(Copy(LM.Tree.Source.Files[LTFi].
-        LineText(LTLine), LTCol, 6), 'class ') then
+      // A class constructor or destructor runs at the unit's initialization
+      // and finalization, never named. The declaration in the class starts
+      // at `constructor` (the `class` word is the routine node's Aux,
+      // IsClassCtorDtor); a body without one in the class at `class`.
+      else if LM.IsClassCtorDtor(LSym) or ((LM.RoutineHead(LSym) in
+        [rhConstructor, rhDestructor]) and (LNode <> NIL_NODE) and
+        VisPos(LM, LM.Tree.NodeLeftmostVis(LNode), LTFi, LTLine, LTCol) and
+        SameText(Copy(LM.Tree.Source.Files[LTFi].LineText(LTLine), LTCol, 6),
+        'class ')) then
         Skip(usClassCtor)
       // `[MaxLength(10)]` runs MaxLengthAttribute.Create: an attribute's
       // constructor is called by the attribute, which names the class.
@@ -3441,6 +3664,8 @@ begin
   if not FProj.EnsureHydrated(AMid) then
     Exit;
   LM := FProj.Model(AMid);
+  MarkDelegates(AMid);
+  MarkIfNames(AMid);
   for var LI := 0 to High(LM.Tree.Nodes) do
     if (LM.Tree.Nodes[LI].Kind = nkInherited) and
        (LM.Tree.Nodes[LI].FirstChild = NIL_NODE) and
@@ -4227,8 +4452,16 @@ begin
       // A type looked up by its name (FindClass('TFoo'), 'Unit.TFoo'); a
       // member only by its qualified one ('TFoo.Bar'): a member found by name
       // through RTTI is published, and not weighed.
+      // A method too by its bare name - extended RTTI's GetMethod('Run'),
+      // which every public method answers (dcc32 37.0: deleting it compiles,
+      // and the lookup returns nil); not a free routine, which no RTTI lists.
+      LM := FProj.Model(LC.UnitId);
       if ((LC.Kind = skType) and LStrings.TryGetValue('#' + LWord, LAt)) or
-         LStrings.TryGetValue(LOwnerName + '.' + LWord, LAt) then
+         LStrings.TryGetValue(LOwnerName + '.' + LWord, LAt) or
+         ((LC.Kind = skRoutine) and (LOwnerSym >= 0) and
+         (LM.Scopes[LOwnerSym].Kind = sckStruct) and
+         (LM.Symbols[LC.Sym].Visibility in [svDefault, svPublic]) and
+         LStrings.TryGetValue('#' + LWord, LAt)) then
         LC.Doubts := LC.Doubts + [Format('a string literal spells it (%s) - '
           + 'a lookup by name?', [LAt])];
       if LC.RecordField then
@@ -4798,6 +5031,7 @@ begin
     end;
     for var LMid in LMids do
       Collect(LMid);
+    MarkIfNamed;
     // Their uses as the index binds them, as MarkBound counts the first
     // round's: what Search compares its placed hits with.
     var LFresh := TDictionary<Int64, Boolean>.Create;
@@ -4860,6 +5094,7 @@ begin
     if not ANav.Project.IsLight(LMid) and
        not ANav.IsUnderLibraryPath(ANav.Project.ModelFile(LMid)) then
       ALint.MarkBound(LMid);
+  ALint.MarkIfNamed;
   ALint.PlaceInherited;
   ALint.Search;
   ALint.MarkHelpers;

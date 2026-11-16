@@ -1005,6 +1005,12 @@ type
       a name, resolved or not. }
     function IfNameAt(AMid, ALine, ACol: Integer; out AName: string;
       out AStart, ALen, ATMid, ASym: Integer): Boolean;
+    { The declaration a `$IF`/`$ELSEIF` name AName of model AMid denotes, as
+      IfNameAt resolves it (ASym = NIL_SYM, False, when nothing is called
+      that). The model is not hydrated: its symbols and scopes stay when its
+      text is demoted. }
+    function IfNameTarget(AMid: Integer; const AName: string; out ATMid,
+      ASym: Integer): Boolean;
     { Every mention of the conditional symbol AName across every loaded model
       (case-insensitive, as dcc compares them), sorted by file/line/col. The
       `$DEFINE`/`$UNDEF` sites are IN the list - each is a reference, and a
@@ -3677,9 +3683,7 @@ function TPasNavigator.IfNameAt(AMid, ALine, ACol: Integer; out AName: string;
 var
   LM: TPasSemaModel;
   LTS: TPasTokenStream;
-  LOffset, LIdx, LScope, LS: Integer;
-  LLower: string;
-  LKind: TSemaScopeKind;
+  LOffset, LIdx: Integer;
 begin
   Result := False;
   AName := '';
@@ -3707,6 +3711,20 @@ begin
       end;
   if not Result then
     Exit;
+  IfNameTarget(AMid, AName, ATMid, ASym);
+end;
+
+function TPasNavigator.IfNameTarget(AMid: Integer; const AName: string;
+  out ATMid, ASym: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LScope, LS: Integer;
+  LLower: string;
+  LKind: TSemaScopeKind;
+begin
+  ATMid := -1;
+  ASym := NIL_SYM;
+  LM := FProj.Model(AMid);
   LLower := PasFoldName(AName);
   // The unit's own declarations: its unit scope, then its implementation
   // scope. A hit there that is a seed (the unit scope joins System) is not
@@ -3720,12 +3738,12 @@ begin
         begin
           ATMid := AMid;
           ASym := LS;
-          Exit;
+          Exit(True);
         end;
         Break;
       end;
   if FProj.ResolveRealDecl(AMid, LLower, ATMid, ASym) then
-    Exit;
+    Exit(True);
   ATMid := -1;
   ASym := NIL_SYM;
   if LM.SystemScope <> NIL_SCOPE then
@@ -3737,6 +3755,7 @@ begin
       ASym := LS;
     end;
   end;
+  Result := ASym <> NIL_SYM;
 end;
 
 { A shared include (a project-wide defines .inc, jedi.inc) is preprocessed
