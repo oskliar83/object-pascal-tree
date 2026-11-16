@@ -71,21 +71,21 @@ S022	S022A.pas	7	TDesc.Spare	row	row
 S023	S023A.pas	10	TJob.DoRun	used	none	
 S023	S023A.pas	11	TJob.Run	row	none	the clause maps IRun.Run to DoRun: the same-named method is not the implementation
 # S024 an interface method nobody calls
-S024	S024A.pas	11	TBox.Erase	used	none	implements IShape.Erase: dcc refuses the class without it
-S024	S024A.pas	7	IShape.Erase	row	none	no call through the interface: the method and its one implementation go together
+S024	S024A.pas	11	TBox.Erase	row	row	implements IShape.Erase, a row: deleted with it, the program compiles and runs (dcc 37.0)
+S024	S024A.pas	7	IShape.Erase	row	row	no call through the interface: the method and its one implementation go together
 # S025 an interface used only by an unused routine's parameter
 S025	S025A.pas	7	Report	row	row	
 S025	S025A.pas	4	ILog	row	row	only Report, a row, names it
-S025	S025A.pas	5	ILog.Write	row	none	
+S025	S025A.pas	5	ILog.Write	row	in-row	
 # S026 implements through a class-typed property
 S026	S026A.pas	17	TDoc.Saver	used	none	
 S026	S026A.pas	9	TSaver.Save	used	none	implements ISave.Save for TDoc through the delegating property: never named
 # S027 an interface queried only through Supports
 S027	S027A.pas	10	TPage.Print	used	none	
 # S028 an interface a class lists but nobody queries
-S028	S028A.pas	9	TWorker.Idle	used	none	implements IIdle.Idle
+S028	S028A.pas	9	TWorker.Idle	row	row	implements IIdle.Idle, a row: deleted with it, the program compiles and runs (dcc 37.0)
 S028	S028A.pas	4	IIdle	row	none	listed by TWorker, never queried nor held - deleting it from the list too still compiles and runs
-S028	S028A.pas	6	IIdle.Idle	row	none	
+S028	S028A.pas	6	IIdle.Idle	row	row	
 # S029 an interface method called through a descendant interface
 S029	S029A.pas	6	IBase.Ping	used	none	
 # S030 an event handler assigned to a method pointer
@@ -407,3 +407,11 @@ S147	S147A.pas	6	TConn.Create	row	row?
 S148	S148A.pas	5	TPair2	used	none	
 # S149 a parameterless method called with empty parentheses through a method pointer variable
 S149	S149A.pas	5	TWorker.Ready	used	none	
+# S150 an interface property nobody reads, its accessors, and a method resolution clause
+S150	S150A.pas	8	IStore.MoreStuff	row	row	
+S150	S150A.pas	6	IStore.GetMoreStuff	row	row	read only by the property MoreStuff, a row
+S150	S150A.pas	7	IStore.SetMoreStuff	row	row	written only by the property MoreStuff, a row
+S150	S150A.pas	9	IStore.Load	row	row	
+S150	S150A.pas	13	TStore.GetMoreStuff	row	row	implements IStore.GetMoreStuff, a row
+S150	S150A.pas	14	TStore.SetMoreStuff	row	row	implements IStore.SetMoreStuff, a row
+S150	S150A.pas	16	TStore.LoadIt	row	row	implements IStore.Load through the clause IStore.Load = LoadIt, a row

@@ -3222,8 +3222,7 @@ begin
       (Row('NeverProc') >= 0) and (Row('DeadProc') >= 0) and
       (Row('TextProc') >= 0));
     Ok('unused symbols: used another way, not rows (' + LNames + ')',
-      (Row('TBase.Count') < 0) and
-      (Row('TBase.Draw') < 0) and (Row('TBase.Run') < 0) and
+      (Row('TBase.Count') < 0) and (Row('TBase.Run') < 0) and
       (Row('TFuncImpl.Invoke') < 0) and (Row('TPlainForm.Click') < 0) and
       (Row('MarkAttribute.Create') < 0) and
       (Row('TList.GetEnumerator') < 0) and (Row('TEnum.MoveNext') < 0) and
@@ -3235,9 +3234,14 @@ begin
       (Row('TBase.Hidden') >= 0) and
       (LRows[Row('TBase.Hidden')].How = uhOnlyByUnused));
     Ok('unused symbols: the skips counted', (LSkips[usDispatch] = 1) and
-      (LSkips[usImplements] = 2) and (LSkips[usPublished] = 1) and
+      (LSkips[usImplements] = 1) and (LSkips[usPublished] = 1) and
       (LSkips[usAttribute] = 1) and (LSkips[usForIn] = 2) and
-      (LSkips[usInterface] = 1));
+      (LSkips[usInterface] = 0));
+    // IShape.Draw: no call names it - a row, and TBase.Draw, which
+    // implements it for TDerived, a row made by it.
+    Ok('unused symbols: an interface method and its implementation',
+      (Row('IShape.Draw') >= 0) and (Row('TBase.Draw') >= 0) and
+      (LRows[Row('TBase.Draw')].How = uhOnlyByUnused));
     Ok('unused symbols: doubts - a dead branch, a type named by a string (a routine is not), a record field',
       (Row('DeadProc') >= 0) and (LRows[Row('DeadProc')].Doubts <> nil) and
       (Row('TextProc') >= 0) and (LRows[Row('TextProc')].Doubts = nil) and
@@ -3269,14 +3273,15 @@ begin
       LChecks[1].Verdict = uvUsed);
     Ok('unused symbols, checked: virtual - skipped, why',
       (LChecks[2].Verdict = uvSkipped) and (LChecks[2].Skip = usDispatch));
-    Ok('unused symbols, checked: a local is not weighed',
-      LChecks[3].Verdict = uvNotCovered);
+    Ok('unused symbols, checked: a local never read is unused',
+      (LChecks[3].Verdict = uvUnused) and (LChecks[3].Row.How = uhUnused) and
+      SameText(LChecks[3].Row.Name, 'UsedProc.L'));
     Ok('unused symbols, checked: the overloads - one unused with the doubt, one used',
       (LChecks[4].Verdict = uvUnused) and (LChecks[4].Row.Line = 57) and
       (LChecks[4].Row.Doubts <> nil) and (LChecks[5].Verdict = uvUsed));
-    Ok('unused symbols, checked: a type with its doubt; an interface''s name - skipped',
+    Ok('unused symbols, checked: a type with its doubt; an unused interface method''s implementation',
       (LChecks[6].Verdict = uvUnused) and (LChecks[6].Row.Doubts <> nil) and
-      (LChecks[7].Verdict = uvSkipped) and (LChecks[7].Skip = usImplements));
+      (LChecks[7].Verdict = uvUnused));
     // Only one overload asked about: the doubt is still there.
     LChecks := CheckUnusedSymbols(LNav, [SymOf('Ov', skRoutine, 1)]);
     Ok('unused symbols, checked: one overload alone keeps the doubt',
@@ -3386,6 +3391,387 @@ begin
       (Find(LRows, 'TDoubtful.FX') >= 0) and
       (LRows[Find(LRows, 'TDoubtful.FX')].Doubts = nil) and
       (Find(LRows, 'TLive.FDead') >= 0) and (Length(LInRow) = 3));
+  finally
+    LNav.Free;
+    LProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
+{ FindUnusedSymbols on interface members (0.204.0). Weighed by name: a
+  member no reference names is a row (IStore.MoreStuff, IStore.Spare,
+  IStore.Load), its accessors rows made by it; one called through a
+  descendant interface is used (IStore.Save through IStore2). The class
+  method implementing a row is a row made by it (TStore.GetMoreStuff by
+  IStore.GetMoreStuff; LoadIt through a method resolution clause), one
+  called directly stays used (TStore.Spare). Not weighed: a dispinterface's
+  members. Doubts: an IDispatch descendant's member (a Variant call spelling
+  it named), a COM-shaped interface's (a GUID and stdcall). The empty case:
+  an interface all of whose members are used gives no row. Asked alone,
+  TStore.GetMoreStuff is unused too (its interface method weighed in a
+  later round). }
+procedure TestUnusedSymbolsInterface;
+const
+  UINTF =
+    'unit UIntf;'#13#10 +
+    'interface'#13#10 +
+    'type'#13#10 +
+    '  IDispatch = interface end;'#13#10 +
+    '  IStore = interface'#13#10 +
+    '    [''{B1A5F0A0-0000-4000-8000-000000000003}'']'#13#10 +
+    '    function GetMoreStuff: Integer;'#13#10 +
+    '    procedure SetMoreStuff(V: Integer);'#13#10 +
+    '    property MoreStuff: Integer read GetMoreStuff write SetMoreStuff;'#13#10 +
+    '    procedure Save;'#13#10 +
+    '    procedure Load;'#13#10 +
+    '    procedure Spare;'#13#10 +
+    '  end;'#13#10 +
+    '  IStore2 = interface(IStore)'#13#10 +
+    '    procedure Flush;'#13#10 +
+    '  end;'#13#10 +
+    '  IAllUsed = interface'#13#10 +
+    '    procedure Touch;'#13#10 +
+    '  end;'#13#10 +
+    '  IDisp = dispinterface'#13#10 +
+    '    [''{B1A5F0A0-0000-4000-8000-000000000001}'']'#13#10 +
+    '    procedure Ping; dispid 1;'#13#10 +
+    '  end;'#13#10 +
+    '  IAuto = interface(IDispatch)'#13#10 +
+    '    procedure Run;'#13#10 +
+    '    procedure Walk;'#13#10 +
+    '  end;'#13#10 +
+    '  IOutside = interface'#13#10 +
+    '    [''{B1A5F0A0-0000-4000-8000-000000000004}'']'#13#10 +
+    '    procedure First;'#13#10 +
+    '    procedure Second;'#13#10 +
+    '  end;'#13#10 +
+    '  ICom = interface'#13#10 +
+    '    [''{B1A5F0A0-0000-4000-8000-000000000002}'']'#13#10 +
+    '    procedure Notify; stdcall;'#13#10 +
+    '  end;'#13#10 +
+    '  TStore = class(TObject, IStore2, IAllUsed)'#13#10 +
+    '    function GetMoreStuff: Integer;'#13#10 +
+    '    procedure SetMoreStuff(V: Integer);'#13#10 +
+    '    procedure Save;'#13#10 +
+    '    procedure IStore.Load = LoadIt;'#13#10 +
+    '    procedure LoadIt;'#13#10 +
+    '    procedure Spare;'#13#10 +
+    '    procedure Flush;'#13#10 +
+    '    procedure Touch;'#13#10 +
+    '  end;'#13#10 +
+    'var'#13#10 +
+    '  GS: IStore2;'#13#10 +
+    '  GA: IAllUsed;'#13#10 +
+    '  GObj: TStore;'#13#10 +
+    '  GAuto: IAuto;'#13#10 +
+    '  GCom: ICom;'#13#10 +
+    '  GDisp: IDisp;'#13#10 +
+    '  GOut: IOutside;'#13#10 +
+    '  GV: Variant;'#13#10 +
+    'implementation'#13#10 +
+    'function TStore.GetMoreStuff: Integer; begin Result := 0; end;'#13#10 +
+    'procedure TStore.SetMoreStuff(V: Integer); begin end;'#13#10 +
+    'procedure TStore.Save; begin end;'#13#10 +
+    'procedure TStore.LoadIt; begin end;'#13#10 +
+    'procedure TStore.Spare; begin end;'#13#10 +
+    'procedure TStore.Flush; begin end;'#13#10 +
+    'procedure TStore.Touch; begin end;'#13#10 +
+    'initialization'#13#10 +
+    '  GObj := TStore.Create;'#13#10 +
+    '  GS := GObj; GS.Save; GS.Flush; GObj.Spare;'#13#10 +
+    '  GA := GObj; GA.Touch;'#13#10 +
+    '  if GOut <> nil then GOut.Second;'#13#10 +
+    '  if (GAuto <> nil) and (GCom <> nil) and (GDisp <> nil) then GV.Run;'#13#10 +
+    'end.'#13#10;
+var
+  LDir: string;
+  LProj: TPasSemaProject;
+  LNav: TPasNavigator;
+  LRows: TArray<TPasUnusedSymbol>;
+  LSkips: TPasUnusedSkips;
+  LNames: string;
+  LChecks: TArray<TPasUnusedCheck>;
+  LTarget: TPasExtRef;
+
+  function Row(const AName: string): Integer;
+  begin
+    for var LI := 0 to High(LRows) do
+      if SameText(LRows[LI].Name, AName) then
+        Exit(LI);
+    Result := -1;
+  end;
+
+  function By(const AName, AUser: string): Boolean;
+  begin
+    Result := (Row(AName) >= 0) and
+      (LRows[Row(AName)].How = uhOnlyByUnused) and
+      (Length(LRows[Row(AName)].By) = 1) and
+      SameText(LRows[Row(AName)].By[0], AUser);
+  end;
+
+  function DoubtHas(const AName, AText: string): Boolean;
+  begin
+    Result := False;
+    if Row(AName) >= 0 then
+      for var LD in LRows[Row(AName)].Doubts do
+        if ContainsText(LD, AText) then
+          Exit(True);
+  end;
+
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_unused_intf');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UIntf.pas'), UINTF);
+  LProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  LNav := nil;
+  try
+    LProj.AnalyzeDirectory(LDir);
+    LNav := TPasNavigator.Create(LProj);
+    LRows := FindUnusedSymbols(LNav,
+      [LProj.ModelIdOf(TPath.Combine(LDir, 'UIntf.pas'))], LSkips);
+    LNames := '';
+    for var LR in LRows do
+    begin
+      LNames := LNames + LR.Name;
+      for var LB in LR.By do
+        LNames := LNames + ' <' + LB + '>';
+      for var LD in LR.Doubts do
+        LNames := LNames + ' [' + LD + ']';
+      LNames := LNames + '; ';
+    end;
+    Ok('unused interface members: the rows (' + LNames + ')',
+      (Row('IStore.MoreStuff') >= 0) and
+      (LRows[Row('IStore.MoreStuff')].How = uhUnused) and
+      By('IStore.GetMoreStuff', 'IStore.MoreStuff') and
+      By('IStore.SetMoreStuff', 'IStore.MoreStuff') and
+      (Row('IStore.Spare') >= 0) and (Row('IStore.Load') >= 0) and
+      (Row('IStore.Save') < 0) and (Row('IStore2.Flush') < 0));
+    Ok('unused interface members: an implementing method goes with its '
+      + 'interface method (' + LNames + ')',
+      By('TStore.GetMoreStuff', 'IStore.GetMoreStuff') and
+      By('TStore.SetMoreStuff', 'IStore.SetMoreStuff') and
+      By('TStore.LoadIt', 'IStore.Load') and (Row('TStore.Save') < 0) and
+      (Row('TStore.Flush') < 0) and (Row('TStore.Spare') < 0));
+    Ok('unused interface members: all used - no row (' + LNames + ')',
+      (Row('IAllUsed.Touch') < 0) and (Row('TStore.Touch') < 0) and
+      (Row('IAllUsed') < 0));
+    Ok('unused interface members: a dispinterface not weighed (' + LNames +
+      ')', (Row('IDisp.Ping') < 0) and (LSkips[usInterface] = 1));
+    Ok('unused interface members: late binding doubts (' + LNames + ')',
+      DoubtHas('IAuto.Run', 'Variant spells it') and
+      DoubtHas('IAuto.Walk', 'IDispatch descendant') and
+      DoubtHas('ICom.Notify', 'COM interface') and
+      DoubtHas('IOutside.First', 'no class of the analysis') and
+      (Row('IOutside.Second') < 0) and
+      (LRows[Row('IStore.Spare')].Doubts = nil));
+    LTarget.UnitId := LProj.ModelIdOf(TPath.Combine(LDir, 'UIntf.pas'));
+    LTarget.Sym := -1;
+    var LM := LProj.Model(LTarget.UnitId);
+    for var LI := 0 to LM.SymCount - 1 do
+      if (LM.Symbols[LI].NameLower = 'getmorestuff') and
+         (LM.Symbols[LI].Kind = skRoutine) and
+         (LM.Symbols[LI].Scope >= 0) and
+         (LM.Scopes[LM.Symbols[LI].Scope].Kind = sckStruct) and
+         (LM.Symbols[LM.Scopes[LM.Symbols[LI].Scope].StructSym].NameLower =
+         'tstore') then
+        LTarget.Sym := LI;
+    LChecks := CheckUnusedSymbols(LNav, [LTarget]);
+    Ok('unused interface members: checked alone, the implementing method is '
+      + 'unused', (Length(LChecks) = 1) and (LChecks[0].Verdict = uvUnused));
+  finally
+    LNav.Free;
+    LProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
+{ CheckUnusedSymbols on parameters and locals (0.204.0). Unused: a value
+  parameter read nowhere (TWork.Run.ADead), one only assigned
+  (TWork.Assign.AValue, uhOnlyWritten), a chain - SnippetRowFor.ACommand
+  passed only into RowTag.ACommand, read nowhere (uhOnlyByUnused) - a local
+  only assigned, one never named, an inline one. Used: a read one, one
+  passed into a parameter that is read (SnippetRowFor.AKeep), a var one
+  assigned (the caller sees it). Not weighed: a virtual method's, a
+  published one's, a method whose address is taken. An overload's has a
+  doubt. FindUnusedSymbols lists them only with the option, and not those
+  of a routine that is a row. }
+procedure TestUnusedSymbolsParams;
+const
+  UPARAMS =
+    'unit UParams;'#13#10 +
+    'interface'#13#10 +
+    'type'#13#10 +
+    '  TBase = class'#13#10 +
+    '    procedure Virt(A: Integer); virtual;'#13#10 +
+    '  end;'#13#10 +
+    '  THandler = procedure(Sender: TObject) of object;'#13#10 +
+    '  TForm = class'#13#10 +
+    '  published'#13#10 +
+    '    procedure Click(AClickSender: TObject);'#13#10 +
+    '  end;'#13#10 +
+    '  TWork = class'#13#10 +
+    '  public'#13#10 +
+    '    procedure Run(AUsed, ADead: Integer);'#13#10 +
+    '    procedure Handler(AHandSender: TObject);'#13#10 +
+    '    procedure Assign(AValue: Integer);'#13#10 +
+    '  end;'#13#10 +
+    'function SnippetRowFor(ACommand: string; AKeep: Integer): Integer;'#13#10 +
+    'function RowTag(ACommand: string; N: Integer): Integer;'#13#10 +
+    'procedure ByVar(var AOut: Integer);'#13#10 +
+    'procedure Ov(AOv: Integer); overload;'#13#10 +
+    'procedure Ov(const S: string); overload;'#13#10 +
+    'procedure DeadRoutine(X: Integer);'#13#10 +
+    'implementation'#13#10 +
+    'procedure TBase.Virt(A: Integer); begin end;'#13#10 +
+    'procedure TForm.Click(AClickSender: TObject); begin end;'#13#10 +
+    'procedure TWork.Run(AUsed, ADead: Integer);'#13#10 +
+    'var LOnlyWritten, LRead, LNever: Integer;'#13#10 +
+    'begin'#13#10 +
+    '  LOnlyWritten := AUsed;'#13#10 +
+    '  LRead := 1;'#13#10 +
+    '  var LInline := 5;'#13#10 +
+    '  if LRead > 0 then Exit;'#13#10 +
+    'end;'#13#10 +
+    'procedure TWork.Handler(AHandSender: TObject); begin end;'#13#10 +
+    'procedure TWork.Assign(AValue: Integer); begin AValue := 1; end;'#13#10 +
+    'function RowTag(ACommand: string; N: Integer): Integer;'#13#10 +
+    'begin Result := N; end;'#13#10 +
+    'function SnippetRowFor(ACommand: string; AKeep: Integer): Integer;'#13#10 +
+    'begin Result := RowTag(ACommand, AKeep); end;'#13#10 +
+    'procedure ByVar(var AOut: Integer); begin AOut := 1; end;'#13#10 +
+    'procedure Ov(AOv: Integer); begin end;'#13#10 +
+    'procedure Ov(const S: string); begin if S = '''' then Exit; end;'#13#10 +
+    'procedure DeadRoutine(X: Integer); begin end;'#13#10 +
+    'var'#13#10 +
+    '  GH: THandler;'#13#10 +
+    '  GW: TWork;'#13#10 +
+    '  GN: Integer;'#13#10 +
+    'initialization'#13#10 +
+    '  GW := TWork.Create;'#13#10 +
+    '  GW.Run(1, 2);'#13#10 +
+    '  GH := GW.Handler;'#13#10 +
+    '  GW.Assign(3);'#13#10 +
+    '  GN := SnippetRowFor(''x'', 1);'#13#10 +
+    '  ByVar(GN);'#13#10 +
+    '  Ov(GN); Ov(''s'');'#13#10 +
+    '  if Assigned(GH) and (GN > 0) then GW.Free;'#13#10 +
+    'end.'#13#10;
+var
+  LDir: string;
+  LProj: TPasSemaProject;
+  LNav: TPasNavigator;
+  LMid: Integer;
+  LChecks: TArray<TPasUnusedCheck>;
+  LRows, LInRow: TArray<TPasUnusedSymbol>;
+  LSkips: TPasUnusedSkips;
+  LNames: string;
+
+  function SymOf(const AName: string): TPasExtRef;
+  var
+    LM: TPasSemaModel;
+  begin
+    Result.UnitId := LMid;
+    Result.Sym := -1;
+    LM := LProj.Model(LMid);
+    for var LI := 0 to LM.SymCount - 1 do
+      if (LM.Symbols[LI].NameLower = LowerCase(AName)) and
+         (LM.Symbols[LI].Kind in [skParam, skVar]) and
+         (LM.Symbols[LI].DeclNode <> NIL_NODE) then
+      begin
+        Result.Sym := LI;
+        Exit;
+      end;
+  end;
+
+  function Verdict(AIdx: Integer): string;
+  begin
+    Result := Format('%d/%d %s', [Ord(LChecks[AIdx].Verdict),
+      Ord(LChecks[AIdx].Skip), LChecks[AIdx].Row.Name]);
+    for var LB in LChecks[AIdx].Row.By do
+      Result := Result + ' <' + LB + '>';
+    for var LD in LChecks[AIdx].Row.Doubts do
+      Result := Result + ' [' + LD + ']';
+  end;
+
+  function Row(const AName: string): Integer;
+  begin
+    for var LI := 0 to High(LRows) do
+      if SameText(LRows[LI].Name, AName) then
+        Exit(LI);
+    Result := -1;
+  end;
+
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_unused_params');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UParams.pas'), UPARAMS);
+  LProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  LNav := nil;
+  try
+    LProj.AnalyzeDirectory(LDir);
+    LNav := TPasNavigator.Create(LProj);
+    LMid := LProj.ModelIdOf(TPath.Combine(LDir, 'UParams.pas'));
+    LChecks := CheckUnusedSymbols(LNav, [SymOf('ADead'), SymOf('AUsed'),
+      SymOf('AValue'), SymOf('ACommand'), SymOf('AKeep'), SymOf('AOut'),
+      SymOf('A'), SymOf('AClickSender'), SymOf('LOnlyWritten'), SymOf('LRead'),
+      SymOf('LNever'), SymOf('LInline'), SymOf('N')]);
+    LNames := '';
+    for var LI := 0 to High(LChecks) do
+      LNames := LNames + Verdict(LI) + '; ';
+    Ok('unused params: a parameter read nowhere, one read (' + LNames + ')',
+      (LChecks[0].Verdict = uvUnused) and (LChecks[0].Row.How = uhUnused) and
+      SameText(LChecks[0].Row.Name, 'TWork.Run.ADead') and
+      (LChecks[1].Verdict = uvUsed));
+    Ok('unused params: only assigned (' + LNames + ')',
+      (LChecks[2].Verdict = uvUnused) and
+      (LChecks[2].Row.How = uhOnlyWritten) and
+      (Length(LChecks[2].Row.Writes) = 1));
+    Ok('unused params: passed only into a dead parameter - a chain (' +
+      LNames + ')', (LChecks[3].Verdict = uvUnused) and
+      (LChecks[3].Row.How = uhOnlyByUnused) and
+      (Length(LChecks[3].Row.By) = 1) and
+      SameText(LChecks[3].Row.By[0], 'RowTag.ACommand') and
+      (LChecks[4].Verdict = uvUsed) and (LChecks[12].Verdict = uvUsed));
+    Ok('unused params: a var parameter assigned is used (' + LNames + ')',
+      LChecks[5].Verdict = uvUsed);
+    Ok('unused params: a virtual method''s not weighed (' + LNames + ')',
+      (LChecks[6].Verdict = uvSkipped) and (LChecks[6].Skip = usDispatch));
+    Ok('unused params: a published method''s not weighed (' + LNames + ')',
+      (LChecks[7].Verdict = uvSkipped) and (LChecks[7].Skip = usPublished));
+    Ok('unused params: locals - only assigned, read, never named, inline ('
+      + LNames + ')', (LChecks[8].Verdict = uvUnused) and
+      (LChecks[8].Row.How = uhOnlyWritten) and
+      SameText(LChecks[8].Row.Name, 'TWork.Run.LOnlyWritten') and
+      (LChecks[9].Verdict = uvUsed) and (LChecks[10].Verdict = uvUnused) and
+      (LChecks[10].Row.How = uhUnused) and (LChecks[11].Verdict = uvUnused));
+    // The method whose address is taken (GH := GW.Handler), and an
+    // overload's parameter with its doubt.
+    LChecks := CheckUnusedSymbols(LNav, [SymOf('AHandSender'),
+      SymOf('AOv')]);
+    LNames := Verdict(0) + '; ' + Verdict(1);
+    Ok('unused params: an address taken - not weighed; an overload''s - a '
+      + 'doubt (' + LNames + ')', (LChecks[0].Verdict = uvSkipped) and
+      (LChecks[0].Skip = usSignature) and (LChecks[1].Verdict = uvUnused) and
+      (LChecks[1].Row.Doubts <> nil));
+    LRows := FindUnusedSymbols(LNav, [LMid], LSkips, LInRow);
+    Ok('unused params: no parameter rows by default',
+      Row('TWork.Run.ADead') < 0);
+    LRows := FindUnusedSymbols(LNav, [LMid], [uoParams, uoLocals], LSkips,
+      LInRow);
+    LNames := '';
+    for var LR in LRows do
+      LNames := LNames + LR.Name + ' ';
+    Ok('unused params: with the option, rows - none of a dead routine (' +
+      LNames + ')', (Row('TWork.Run.ADead') >= 0) and
+      (Row('RowTag.ACommand') >= 0) and (Row('TWork.Run.LNever') >= 0) and
+      (Row('DeadRoutine') >= 0) and (Row('DeadRoutine.X') < 0) and
+      (Row('TWork.Run.AUsed') < 0) and (Row('TBase.Virt.A') < 0));
   finally
     LNav.Free;
     LProj.Free;
@@ -8716,6 +9102,8 @@ begin
   TestUnusedSymbolsDerived;
   TestUnusedSymbolsInRowType;
   TestUnusedSymbolsPackage;
+  TestUnusedSymbolsInterface;
+  TestUnusedSymbolsParams;
   TestUnusedSymbolsMissedUses;
   TestUnusedSymbolsImplicit;
   TestUnusedSymbolsLight;
