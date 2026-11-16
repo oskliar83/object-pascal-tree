@@ -1565,9 +1565,10 @@ row only when every analysis of a group holding the unit finds it unused.
 dead?" without the rows of its whole unit - and answers each with a verdict
 (`TPasUnusedCheck`): `uvUnused` with its row and doubts, `uvUsed`,
 `uvSkipped` with the `TPasUnusedSkip` it falls under (virtual, interface,
-published...), `uvNotCovered` for what the rule does not weigh (a local, a
-parameter, an enum value), `uvNotFound` for a workspace key that resolves to
-nothing. Only the targets' units are collected, restricted to the targets and
+published...), `uvNotCovered` for what the rule does not weigh (an enum
+value, a procedural type's or an array property's parameter), `uvNotFound`
+for a workspace key that resolves to nothing. A parameter or a local has a
+rule of its own (PasTree 0.204.0, sec. 15.2). Only the targets' units are collected, restricted to the targets and
 the overloads beside each: the doubt "another overload is used" asks whether
 a sibling is a row itself, so the siblings are weighed too. The whole-group
 passes (bare `inherited`, bindings counted, names bound to nothing, the doubt
@@ -1603,8 +1604,9 @@ its unused property. Covered by `TestUnusedSymbolsDerived`.
 
 A declaration of the units asked about that nothing in the analysis uses:
 types, routines (nested ones too), unit and class variables and constants,
-fields, properties. Locals and parameters are dcc's own hints (H2164,
-H2219). Used is any of:
+fields, properties, and the methods and properties of an interface (sec.
+15.1). Locals and parameters are not rows of a whole run unless asked for
+(sec. 15.2). Used is any of:
 
 - a reference by name, as `FindReferences` finds them (one
   `CollectReferencesOfAll` pass over the declarations not already shown
@@ -1646,12 +1648,13 @@ code: published members (and the first section of a TPersistent
 descendant's class, or of a descendant of a class declared under `$M+` /
 `$TYPEINFO ON` - `MethodAddress('Ping')` finds it), virtual, dynamic,
 abstract, override and message
-methods, an interface's members, a class method an interface of the class,
-an ancestor or a descendant names (a method reference type in the heritage
-list names `Invoke`), operators, class constructors and destructors,
+methods, a dispinterface's members, a class method a library interface of
+the class, an ancestor or a descendant names (a method reference type in
+the heritage list names `Invoke`) - one only own interfaces name is
+weighed (sec. 15.1) - operators, class constructors and destructors,
 constructors of TCustomAttribute descendants (`[MaxLength(10)]`), the for-in
 protocol (`GetEnumerator`, `MoveNext`, `Current`), and generated units
-(`_TLB`, XML data binding, import headers), and a unit that replaces a
+(`_TLB`, XML data binding, import headers, a remoting framework's interface unit - "was automatically generated" in its first 40 lines, PasTree 0.204.0), and a unit that replaces a
 library unit of its name (`usReplacesLibrary`: a unit by that name under
 `LibraryPaths` or the installed `$(BDS)source`, at another path - a patched
 `Vcl.Menus`): the library's `.dcu` files were compiled against the
@@ -1761,3 +1764,115 @@ typer of each class, and that is no read-only step. The client group:
 1.5 s), the same rows. `NotSearched` counts only the library bodies the
 demand would have asked for (`AWithin`): it said "library implementations
 not searched: 204 units" of units that cannot name an own declaration.
+
+### 15.1 Interface members (PasTree 0.204.0)
+
+An interface's methods and properties are weighed like a class's. A member
+is reached by its name only - through the interface or a descendant of it
+(a call through `IStore2` binds `IStore.Save`), a generic constraint, a
+property's accessor - apart from late binding. A member no reference names
+is a row; an interface property's accessors are rows made by it. A
+`procedure IFoo.Bar = DoBar;` clause is no use of `IFoo.Bar` (the clause goes
+with it); it is `DoBar`'s use, placed in `IFoo.Bar`.
+
+A class method an own interface names (dcc pairs a class's method with each
+method of that name of the interfaces it, an ancestor or a descendant lists,
+14.2) is used while one of those interface methods is: a use placed in each
+of them, so the method is a row made by them (`By` naming `IFoo.Bar`) when
+they all are rows, and stays used when it is also called directly or one of
+them is not weighed here (another unit not asked about). One a library
+interface names (`IInterface._AddRef`, `IComparer<T>.Compare`) or a method
+reference type's `Invoke` is still not weighed (`usImplements`): library code
+calls it. Proven by dcc on the scenario corpus: the interface method and its
+implementations deleted together, the program compiles and runs (S024,
+S028, S150 - an interface property with its accessors and a method
+resolution clause).
+
+Late binding, decided per interface:
+
+- a `dispinterface`: its members are called by DISPID through a Variant -
+  not weighed (`usInterface`);
+- a type library unit (`_TLB`) is not weighed at all (`usGenerated`);
+- an `IDispatch` descendant: a doubt on each member - a late-bound call (a
+  Variant, a script, another program through COM) runs it by its name; the
+  doubt names the place when a call through a Variant in the project spells
+  it (`V.Run`, collected where the analysis binds nothing on a Variant);
+- an `IInvokable` descendant, or one declared under `$M+`: a doubt - RTTI
+  lists its methods, and a SOAP server, `TVirtualInterface` or an RTTI
+  `Invoke` runs one by its name;
+- a GUID and a member declared `stdcall` or `safecall`: a doubt - a COM
+  interface, which a caller outside the analysis (the OS, another module)
+  runs by slot; removing a member shifts the slots after it.
+- a GUID and no class of the analysis implementing it (or a descendant of
+  it): its object comes from outside - the IDE, another module - by
+  `Supports` or `QueryInterface`, laid out by slot: a doubt. On
+  pastree-lsp the IDE plugin redeclares two of the IDE's own interfaces;
+  removing `IDocModule.GetDocModule` compiles, and `AddModuleHandler`, the
+  one it calls, then runs the IDE's `GetDocModule`.
+
+The doubts go down to the implementing methods as any doubt goes down a
+chain of rows made by rows.
+
+On the client group (project scope, pastree-mcp): 5,758 rows -> 8,342 (2,208
+-> 4,087 with a doubt, 3,550 -> 4,255 without); 12,596 interface members
+and 9,010 methods an interface names had not been weighed, 252 methods a
+library interface names still are not. Most new rows sit in the central
+interfaces unit, whose interfaces descend from an `IInvokable` one and so
+carry the RTTI doubt; ten rows with no doubt, checked by `references`, have
+no use. The time is the same (33 s -> 34 s first, the library made full;
+6.4 s -> 7.4 s again). On pastree-lsp: 41 -> 50 rows, the nine new ones the
+IDE interfaces it redeclares, each with the GUID doubt; the 31 rows with no
+doubt unchanged.
+
+### 15.2 Parameters and locals (PasTree 0.204.0)
+
+`CheckUnusedSymbols` answers a parameter or a local (a `var` or `const` of
+a routine body, an inline one) by its own rule; `FindUnusedSymbols(ANav,
+AMids, AOptions, ...)` lists them as rows with `uoParams` / `uoLocals`
+(off by default: a parameter is part of a signature, and a local is dcc's
+to hint - H2164 never used, H2077 a value assigned never used, but nothing
+for "only ever assigned"). A row's `Name` is its routine's and its own
+(`TWork.Run.ADead`); a parameter or local of a routine that is a row is not
+listed - it goes with the routine.
+
+A parameter is weighed only where the signature is the routine's own to
+change. Not weighed (`TPasUnusedCheck.Skip`): a virtual, dynamic, override,
+abstract or message method's (`usDispatch`); an interface's method's
+(`usInterface`); a class method's that an interface names, or one
+implementing an interface through an `implements` property
+(`usImplements`); an operator's (`usOperator`); a published method's or
+one a form binds - an event handler, whose event type fixes it
+(`usPublished`); a generated unit's (`usGenerated`); and `usSignature`: an
+external, exported or assembler routine's, one with an asm block (it reads
+its parameters by register), an anonymous method's, and one whose address
+code takes - any reference to the routine that is no call (`@Foo`,
+`Handler := Foo`, an argument, a property's accessor, a method resolution
+clause, `exports`): a procedural type fixes the signature.
+
+Its uses are the references in the routine's implementation (nested
+routines included), bound through either header - `procedure TFoo.Bar;`
+may leave the list out, and the body then binds the declaration's
+parameters. A read is a use. A plain assignment `P := X` of a value
+parameter is not (`uhOnlyWritten`, `Writes`): the caller never sees it; of a
+`var` or `out` one it is. A parameter passed whole, as a call's argument,
+into a value or const parameter of a routine weighed the same way is used
+only by that one, and dead when it is (`uhOnlyByUnused`, `By` naming it) -
+a chain dies whole, a cycle too (a greatest fixed point, as the rows made
+by rows): `SnippetRowFor.ACommand`, passed only into `RowTag.ACommand`, read
+nowhere. Passed into a `var` or `out` parameter, or inside an expression, it
+is read.
+
+A local the same, but an `absolute` one, whose writes write another, and
+one an `absolute` names (that names it: a read), have every write read.
+
+Doubts: the name in a branch of the routine this configuration does not
+compile; the name written in the routine where the index bound nothing (a
+`with` it could not follow); another overload of the routine (without the
+parameter its signature may clash with another's, or a call bind to
+another); a value assigned that code computes, an inline variable's
+initializer that is not a literal; an interface held; a parameter it is
+passed into with a doubt. Covered by `TestUnusedSymbolsParams`.
+
+A container fed only by dead code - a field whose only `Add`s sit in rows
+while live code reads its `Count` - is not reported: it is used, and no row
+can say so without being one that cannot be acted on.

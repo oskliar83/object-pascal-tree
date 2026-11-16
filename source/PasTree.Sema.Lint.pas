@@ -227,8 +227,11 @@ function DemandLint(ANav: TPasNavigator; const AMids: TArray<Integer>;
   and for a class or record helper, which applies without being named, no
   member of it used. Kinds weighed: types,
   routines (nested ones too), unit and class variables and constants,
-  fields, properties. A routine's locals and parameters are not: dcc hints
-  them itself (H2164, H2219).
+  fields, properties, an interface's methods and properties (reached by
+  name only, but by late binding: a dispinterface's are not weighed, an
+  IDispatch, IInvokable or COM-shaped one's get a doubt - IfaceDoubt). A
+  routine's parameters and locals have a rule of their own (WeighValue;
+  CheckUnusedSymbols, and FindUnusedSymbols with AOptions).
 
   A declaration every use of which sits in rows - in their bodies, their
   declarations (a property's `read GetX`, a field's type), or its own body
@@ -256,10 +259,11 @@ function DemandLint(ANav: TPasNavigator; const AMids: TArray<Integer>;
   (TPasUnusedSkip): published members, which form files and RTTI find by
   name - in a class that streams (a TPersistent descendant) the unnamed
   first section too; virtual, dynamic, abstract, override and message
-  methods, run through dispatch; an interface's members, and a class's
-  method that an interface its class, an ancestor or a descendant lists
-  names (dcc pairs them by name; a method reference type in the list names
-  Invoke); operators; class constructors and destructors; the constructors
+  methods, run through dispatch; a dispinterface's members; a class's
+  method that a library interface its class, an ancestor or a descendant
+  lists names (dcc pairs them by name; a method reference type in the list
+  names Invoke) - one only own interfaces name is used by them, a row made
+  by them when they all are rows; operators; class constructors and destructors; the constructors
   of a TCustomAttribute descendant, which `[Name(...)]` calls; the for-in
   protocol (GetEnumerator, MoveNext, Current); generated units (`_TLB`, the
   IDE's import headers); a unit that replaces a library unit of the same
@@ -297,7 +301,7 @@ function DemandLint(ANav: TPasNavigator; const AMids: TArray<Integer>;
 type
   TPasUnusedSkip = (usPublished, usDispatch, usInterface, usImplements,
     usOperator, usClassCtor, usAttribute, usForIn, usGenerated,
-    usReplacesLibrary, usPackageRegister);
+    usReplacesLibrary, usPackageRegister, usSignature);
   TPasUnusedSkips = array[TPasUnusedSkip] of Integer;
 
   // Why a row is one (TPasUnusedSymbol.How).
@@ -337,6 +341,21 @@ function FindUnusedSymbols(ANav: TPasNavigator; const AMids: TArray<Integer>;
   out AInRowTypes: TArray<TPasUnusedSymbol>): TArray<TPasUnusedSymbol>;
   overload;
 
+// The same, with the parameters and locals AOptions asks for as rows too
+// (Kind skParam, skVar, skConst; Name the routine's and its own): see
+// CheckUnusedSymbols for the rule. A parameter or local of a routine that is
+// a row is not listed - it goes with it. Off by default: a parameter is part
+// of a signature, and a local is dcc's to hint (H2164 never used, H2077 a
+// value assigned never used - not "only ever assigned").
+type
+  TPasUnusedOption = (uoParams, uoLocals);
+  TPasUnusedOptions = set of TPasUnusedOption;
+
+function FindUnusedSymbols(ANav: TPasNavigator; const AMids: TArray<Integer>;
+  AOptions: TPasUnusedOptions; out ASkips: TPasUnusedSkips;
+  out AInRowTypes: TArray<TPasUnusedSymbol>): TArray<TPasUnusedSymbol>;
+  overload;
+
 // FindUnusedSymbols' demand in light mode: the references of the
 // declarations it searches (DemandReferencesOfAll) - a library body may use
 // an own declaration only there.
@@ -349,8 +368,8 @@ type
     uvUnused,       // a row: Row holds it, its doubts with it
     uvUsed,         // used by name, a bare inherited, a redeclaration or a form
     uvSkipped,      // reached another way, not weighed: Skip says how
-    uvNotCovered,   // not a declaration the rule weighs: a local, a
-                    // parameter, an enum value, a unit, a label
+    uvNotCovered,   // not a declaration the rule weighs: an enum value,
+                    // a unit, a label, a procedural type's parameter
     uvNotFound);    // TPasWorkspace.CheckUnusedSymbols: the key is no
                     // declaration of this analysis
   TPasUnusedCheck = record
@@ -366,6 +385,11 @@ type
 // the doubt "another overload is used" means what it means in a whole run,
 // and so are the declarations its uses sit in, and theirs, up to 4 rounds
 // and 300 declarations: one used only by a dead property's getter is a row.
+// A parameter or a local (skParam, a routine's skVar or skConst) is weighed
+// by its own rule: unused when nothing reads it - only assigned, passed only
+// into parameters nothing reads, or not named - and skipped (usSignature and
+// the rest) where the routine's signature is not its own to change. See
+// docs/editor-features.md sec. 15.2.
 function CheckUnusedSymbols(ANav: TPasNavigator;
   const ATargets: TArray<TPasExtRef>): TArray<TPasUnusedCheck>;
 
@@ -2953,6 +2977,27 @@ type
     Site: TUnusedSite;
   end;
 
+  // A parameter or local weighed (TUnusedLint.WeighValue): what reads it.
+  TUnusedValueKind = (
+    uvkNone,     // not one the rule weighs (uvNotCovered)
+    uvkSkip,     // a parameter of a routine whose signature is fixed (Skip)
+    uvkLive,     // read somewhere
+    uvkMaybe);   // read nowhere - only assigned (Writes), passed only into
+                 // other parameters (Edges), or not named at all
+  TUnusedValue = record
+    Kind: TUnusedValueKind;
+    Skip: TPasUnusedSkip;
+    Mid, Sym: Integer;        // the declaration (a method's: its class's)
+    Name: string;             // the routine's name and its own
+    SymKind: TSemaSymbolKind;
+    FileName: string;
+    Line, Col: Integer;
+    Edges: TArray<Int64>;     // the parameters it is passed into
+    Writes: TArray<string>;   // its plain assignments, 'File.pas:12'
+    Routine: Int64;           // the routine it belongs to, keyed; -1 none
+    Doubts: TArray<string>;
+  end;
+
   TUnusedLint = class
   private
     FNav: TPasNavigator;
@@ -2965,7 +3010,13 @@ type
     FUnbound: TDictionary<string, string>;     // such a name bound to nothing
     FUnused: TDictionary<Int64, Boolean>;      // the rows, once known
     FIfaceNames: TDictionary<string, Boolean>;  // every interface's members
-    FClassIface: TObjectDictionary<Int64, TDictionary<string, Boolean>>;
+    FClassIface: TObjectDictionary<Int64,
+      TDictionary<string, TArray<Int64>>>;  // InterfaceMembersOf
+    FOwnUnit: TDictionary<Integer, Boolean>;   // OwnUnit's answers
+    FIfaceKind: TDictionary<Int64, Integer>;   // IfaceDoubt's, per interface
+    // A candidate's name a call through a Variant spells (`V.Name`): a
+    // late-bound call (MarkUnbound), with where.
+    FLateNames: TDictionary<string, string>;
     FEnumOf: TDictionary<Int64, Int64>;  // an enum value -> its enum type
     FDirNames: TDictionary<string, Boolean>;  // Collect's unit, DirectiveNames
     // A `$IF` name no unit-level declaration answers (the last segment of a
@@ -2997,7 +3048,24 @@ type
     // (LibraryWithin), once computed (FWithinDone).
     FWithin: TArray<Boolean>;
     FWithinAny, FWithinDone: Boolean;
+    // Parameters and locals (WeighValue): each weighed once, by its key and
+    // its declaration's; a routine's skip (-1: weighed), whether code takes
+    // its address; the classes MarkDelegates found implementing an
+    // interface through an `implements` property.
+    FValues: TDictionary<Int64, TUnusedValue>;
+    FRoutineSkip: TDictionary<Int64, Integer>;
+    FDelegated: TDictionary<Int64, Boolean>;
+    // The interfaces an own class lists (IfaceDoubt), lazy.
+    FImplemented: TDictionary<Int64, Boolean>;
     function LibraryWithin(out AAny: Boolean): TArray<Boolean>;
+    function RoutineKeyOf(AMid, ARoutine: Integer): Int64;
+    function ParamNames(LM: TPasSemaModel; ARoutine: Integer): TArray<Integer>;
+    function RoutineSkip(AMid, ASym: Integer): Integer;
+    function AddressTaken(AMid, ASym: Integer): Boolean;
+    function ParamAt(AMid, ASym, AIdx: Integer): Int64;
+    function WeighValue(AMid, ASym: Integer): TUnusedValue;
+    function ValueRow(AMid, ASym: Integer; out ARow: TPasUnusedSymbol;
+      out AValue: TUnusedValue): Boolean;
     procedure PlaceInherited;
     function PlaceHit(const AH: TPasRefHit; AReadOnly: Boolean): TUnusedHit;
     function PlaceHits(AHits: TList<TPasRefHit>): TArray<TUnusedHit>;
@@ -3035,8 +3103,11 @@ type
     function NamesAncestor(const AClass: TSemaXType): Boolean;
     function IsStructType(const AX: TSemaXType; AKind: TPasNodeKind): Boolean;
     function ListedInterfaces(const AClass: TSemaXType): TArray<TSemaXType>;
-    function InterfaceNamesOf(const AClass: TSemaXType): TDictionary<string,
-      Boolean>;
+    function InterfaceMembersOf(const AClass: TSemaXType):
+      TDictionary<string, TArray<Int64>>;
+    function OwnUnit(AMid: Integer): Boolean;
+    function IfaceDoubt(AMid, AIface: Integer; const ANameLower: string):
+      string;
     function QualifiedName(LM: TPasSemaModel; ASym: Integer): string;
     function Generated(LM: TPasSemaModel; const AFile: string): Boolean;
     function DelegatesInterface(LM: TPasSemaModel; ASym: Integer): Boolean;
@@ -3078,8 +3149,14 @@ begin
   FDeclAt := TObjectDictionary<Integer, TDictionary<Integer, Integer>>.Create(
     [doOwnsValues]);
   FIfaceNames := TDictionary<string, Boolean>.Create;
-  FClassIface := TObjectDictionary<Int64, TDictionary<string, Boolean>>.Create(
-    [doOwnsValues]);
+  FClassIface := TObjectDictionary<Int64,
+    TDictionary<string, TArray<Int64>>>.Create([doOwnsValues]);
+  FOwnUnit := TDictionary<Integer, Boolean>.Create;
+  FIfaceKind := TDictionary<Int64, Integer>.Create;
+  FLateNames := TDictionary<string, string>.Create;
+  FValues := TDictionary<Int64, TUnusedValue>.Create;
+  FRoutineSkip := TDictionary<Int64, Integer>.Create;
+  FDelegated := TDictionary<Int64, Boolean>.Create;
   FEnumOf := TDictionary<Int64, Int64>.Create;
   FDirNames := TDictionary<string, Boolean>.Create;
   FIfNames := TDictionary<string, Boolean>.Create;
@@ -3111,6 +3188,13 @@ begin
   FEnumOf.Free;
   FLibUnits.Free;
   FClassIface.Free;
+  FOwnUnit.Free;
+  FIfaceKind.Free;
+  FLateNames.Free;
+  FValues.Free;
+  FRoutineSkip.Free;
+  FDelegated.Free;
+  FImplemented.Free;
   FUnused.Free;
   FUnbound.Free;
   FCandNames.Free;
@@ -3393,19 +3477,38 @@ begin
   end;
 end;
 
-// The method names a call through an interface may run on AClass: every
-// interface the class, an ancestor or a descendant lists names. Per class.
-function TUnusedLint.InterfaceNamesOf(
-  const AClass: TSemaXType): TDictionary<string, Boolean>;
+// The interface methods a call through an interface may run on AClass, by
+// name: every interface the class, an ancestor or a descendant lists names
+// (dcc pairs a class's method with an interface's by name). Each one keyed
+// (K) - or -1 for one the rule does not weigh: a library interface's
+// (IInterface, IComparer<T>: library code calls it), a method reference
+// type's Invoke, a generated unit's. Per class.
+function TUnusedLint.InterfaceMembersOf(
+  const AClass: TSemaXType): TDictionary<string, TArray<Int64>>;
 var
   LK: TSemaXType;
   LClasses: TList<TSemaXType>;
   LIM: TPasSemaModel;
-  LScope: Integer;
+  LScope, LMem: Integer;
+  LKeys: TArray<Int64>;
+  LKey: Int64;
+  LRes: TDictionary<string, TArray<Int64>>;
+
+  procedure AddKey(const AName: string; AKey: Int64);
+  begin
+    if not LRes.TryGetValue(AName, LKeys) then
+      LKeys := nil;
+    for var LHave in LKeys do
+      if LHave = AKey then
+        Exit;
+    LRes.AddOrSetValue(AName, LKeys + [AKey]);
+  end;
+
 begin
   if FClassIface.TryGetValue(K(AClass.UnitId, AClass.Sym), Result) then
     Exit;
-  Result := TDictionary<string, Boolean>.Create;
+  LRes := TDictionary<string, TArray<Int64>>.Create;
+  Result := LRes;
   FClassIface.Add(K(AClass.UnitId, AClass.Sym), Result);
   LClasses := TList<TSemaXType>.Create;
   try
@@ -3428,7 +3531,7 @@ begin
       begin
         if IsStructType(LI, nkProcType) then
         begin
-          Result.AddOrSetValue('invoke', True);
+          AddKey('invoke', -1);
           Continue;
         end;
         if not FProj.EnsureHydrated(LI.UnitId) then
@@ -3437,11 +3540,162 @@ begin
         LScope := LIM.Symbols[LI.Sym].MemberScope;
         if (LScope <> NIL_SCOPE) and (LScope < LIM.Scopes.Count) then
           for var LIdx := 0 to LIM.Scopes[LScope].Symbols.Count - 1 do
-            Result.AddOrSetValue(LIM.Symbols[LIM.Scopes[LScope].Symbols[LIdx]].
-              NameLower, True);
+          begin
+            LMem := LIM.Scopes[LScope].Symbols[LIdx];
+            if OwnUnit(LI.UnitId) then
+              LKey := K(LI.UnitId, LMem)
+            else
+              LKey := -1;
+            AddKey(LIM.Symbols[LMem].NameLower, LKey);
+          end;
       end;
   finally
     LClasses.Free;
+  end;
+end;
+
+// Is unit AMid one whose declarations the rule weighs: the project's own
+// (not light, not under the library trees), not generated, not a library
+// unit's replacement? Per unit.
+function TUnusedLint.OwnUnit(AMid: Integer): Boolean;
+begin
+  if FOwnUnit.TryGetValue(AMid, Result) then
+    Exit;
+  Result := (AMid >= 0) and (AMid < FProj.ModelCount) and
+    not FProj.IsLight(AMid) and
+    not FNav.IsUnderLibraryPath(FProj.ModelFile(AMid)) and
+    FProj.EnsureHydrated(AMid) and
+    not Generated(FProj.Model(AMid), FProj.ModelFile(AMid)) and
+    not ReplacesLibrary(AMid);
+  FOwnUnit.Add(AMid, Result);
+end;
+
+// Is ASym of LM a dispinterface (nkInterfaceType Aux bit 1)? Its members
+// are called by DISPID through a Variant: not weighed.
+function IsDispInterface(LM: TPasSemaModel; ASym: Integer): Boolean;
+var
+  LDef: Integer;
+begin
+  LDef := TPasSemaProject.TypeDefNodeIn(LM, ASym);
+  Result := (LDef <> NIL_NODE) and
+    (LM.Tree.Nodes[LDef].Kind = nkInterfaceType) and
+    (LM.Tree.Nodes[LDef].Aux and 1 <> 0);
+end;
+
+// What makes an own interface's members reachable other than by a name in
+// the code - late binding: its doubt for each member, per interface. A
+// dispinterface is not asked: its members are not weighed.
+// - an IDispatch descendant: a late-bound call (a Variant, IDispatch.Invoke
+//   through a type library) runs a member by its name - one a call through
+//   a Variant in the project spells is named (FLateNames);
+// - IInvokable's descendant, or one declared under `$M+`: RTTI lists its
+//   methods - a SOAP server, TVirtualInterface or an RTTI Invoke runs one by
+//   its name;
+// - a GUID and a member declared stdcall or safecall: a COM interface - a
+//   caller outside the analysis (the OS, another module) runs its members by
+//   their slot, and removing one shifts the slots after it.
+// - a GUID and no class of the analysis implementing it, or a descendant:
+//   its object comes from outside (the IDE, another module) by Supports, and
+//   removing a member shifts the slots after it.
+function TUnusedLint.IfaceDoubt(AMid, AIface: Integer;
+  const ANameLower: string): string;
+var
+  LM: TPasSemaModel;
+  LDef, LChild, LScope, LKind, LNode: Integer;
+  LGuid: Boolean;
+  LAt: string;
+begin
+  Result := '';
+  if not FIfaceKind.TryGetValue(K(AMid, AIface), LKind) then
+  begin
+    LKind := 0;
+    LM := FProj.Model(AMid);
+    if DescendsFrom(XPlain(AMid, AIface), 'idispatch') then
+      LKind := 1
+    else if DescendsFrom(XPlain(AMid, AIface), 'iinvokable') or
+      TypeInfoOn(XPlain(AMid, AIface)) then
+      LKind := 2
+    else
+    begin
+      LDef := TPasSemaProject.TypeDefNodeIn(LM, AIface);
+      LGuid := False;
+      if LDef <> NIL_NODE then
+      begin
+        LChild := LM.Tree.Nodes[LDef].FirstChild;
+        while LChild <> NIL_NODE do
+        begin
+          if LM.Tree.Nodes[LChild].Kind = nkGuid then
+            LGuid := True;
+          LChild := LM.Tree.Nodes[LChild].NextSibling;
+        end;
+      end;
+      LScope := LM.Symbols[AIface].MemberScope;
+      if LGuid and (LScope <> NIL_SCOPE) and (LScope < LM.Scopes.Count) then
+        for var LIdx := 0 to LM.Scopes[LScope].Symbols.Count - 1 do
+        begin
+          var LMem := LM.Scopes[LScope].Symbols[LIdx];
+          if LM.Symbols[LMem].Kind <> skRoutine then
+            Continue;
+          LNode := RoutineNodeOf(LM, LMem);
+          if (LNode <> NIL_NODE) and (HasDirective(LM, LNode, 'stdcall') or
+             HasDirective(LM, LNode, 'safecall')) then
+          begin
+            LKind := 3;
+            Break;
+          end;
+        end;
+      // A GUID and no class of the analysis implementing it (or a
+      // descendant of it): the object comes from outside - an IDE, another
+      // module - through Supports / QueryInterface, laid out by slot.
+      if (LKind = 0) and LGuid then
+      begin
+        // Every interface an own class lists (with the ones they extend),
+        // once: a library class cannot list an own interface.
+        if FImplemented = nil then
+        begin
+          FImplemented := TDictionary<Int64, Boolean>.Create;
+          for var LCMid := 0 to FProj.ModelCount - 1 do
+          begin
+            if not OwnUnit(LCMid) then
+              Continue;
+            var LCM := FProj.Model(LCMid);
+            for var LCSym := 0 to LCM.SymCount - 1 do
+              if (LCM.Symbols[LCSym].Kind = skType) and
+                 (LCM.Symbols[LCSym].TypeCat = tcClass) and
+                 (LCM.Symbols[LCSym].DeclNode <> NIL_NODE) then
+                for var LI in ListedInterfaces(XPlain(LCMid, LCSym)) do
+                  FImplemented.AddOrSetValue(K(LI.UnitId, LI.Sym), True);
+          end;
+        end;
+        if not FImplemented.ContainsKey(K(AMid, AIface)) then
+          LKind := 4;
+      end;
+    end;
+    FIfaceKind.Add(K(AMid, AIface), LKind);
+  end;
+  case LKind of
+    1:
+      if FLateNames.TryGetValue(ANameLower, LAt) then
+        Result := Format('a member of an IDispatch descendant, and a call '
+          + 'through a Variant spells it (%s) - a late-bound call runs it by '
+          + 'its name', [LAt])
+      else
+        Result := 'a member of an IDispatch descendant - a late-bound call '
+          + '(a Variant, a script, another program through COM) runs it by '
+          + 'its name';
+    2:
+      Result := 'a member of an interface with RTTI (IInvokable, $M+) - a '
+        + 'SOAP server, TVirtualInterface or an RTTI Invoke runs it by its '
+        + 'name';
+    3:
+      Result := 'a member of a COM interface (a GUID, stdcall/safecall) - a '
+        + 'caller outside the analysis runs it by its slot, and removing it '
+        + 'shifts the slots after it';
+    4:
+      Result := 'a member of an interface with a GUID no class of the '
+        + 'analysis implements - its object comes from outside (another '
+        + 'module, the IDE) by Supports or QueryInterface, and removing a '
+        + 'member shifts the slots after it';
   end;
 end;
 
@@ -3478,7 +3732,9 @@ begin
       LText := LowerCase(LM.Tree.Source.Files[0].LineText(LLine));
       if (Pos('were generated from data read from', LText) > 0) or
          (Pos('xml data binding', LText) > 0) or
-         (Pos('this unit was generated', LText) > 0) then
+         (Pos('this unit was generated', LText) > 0) or
+         // A remoting framework's interface unit, from its service file.
+         (Pos('was automatically generated', LText) > 0) then
         Exit(True);
     end;
 end;
@@ -3584,7 +3840,10 @@ begin
             var LMem := LCM.Scopes[LScope].Symbols[LIdx];
             if (LCM.Symbols[LMem].Kind = skRoutine) and
                LNames.ContainsKey(LCM.Symbols[LMem].NameLower) then
+            begin
               Hard(K(LT.UnitId, LMem));
+              FDelegated.AddOrSetValue(K(LT.UnitId, LMem), True);
+            end;
           end;
         LT := FProj.CanonTypeX(FProj.AncestorOfX(LT));
       end;
@@ -3844,7 +4103,7 @@ begin
 end;
 
 // The method names of every interface the analysis declares: a cheap no
-// before InterfaceNamesOf's walk of a class's hierarchy.
+// before InterfaceMembersOf's walk of a class's hierarchy.
 procedure TUnusedLint.CollectIfaceNames;
 var
   LM: TPasSemaModel;
@@ -3931,7 +4190,8 @@ var
   LKind: TSemaScopeKind;
   LOwner, LNode, LFi, LLine, LCol, LTFi, LTLine, LTCol, LSym: Integer;
   LC: TPasUnusedSymbol;
-  LSkip: Boolean;
+  LSkip, LIface: Boolean;
+  LImpl: TArray<Int64>;
 
   procedure Skip(AWhy: TPasUnusedSkip);
   begin
@@ -3994,14 +4254,24 @@ begin
        LCol) then
       Continue;
     LSkip := False;
+    LIface := False;
+    LImpl := nil;
     LC := Default(TPasUnusedSymbol);
     LOwner := NIL_SYM;
     if LKind = sckStruct then
       LOwner := LM.Scopes[LS.Scope].StructSym;
     if LOwner <> NIL_SYM then
     begin
+      // An interface's member is reached by its name, through the
+      // interface or a descendant of it - weighed. Not a dispinterface's,
+      // which a Variant call runs by its DISPID.
       if LM.Symbols[LOwner].TypeCat = tcInterface then
-        Skip(usInterface)
+      begin
+        if IsDispInterface(LM, LOwner) then
+          Skip(usInterface)
+        else
+          LIface := True;
+      end
       else if LS.Visibility in [svPublished, svAutomated] then
         Skip(usPublished)
       else if (LS.Visibility = svDefault) and
@@ -4011,7 +4281,7 @@ begin
       LC.RecordField := (LS.Kind = skField) and
         (LM.Symbols[LOwner].TypeCat = tcRecord);
     end;
-    if not LSkip and (LS.Kind = skRoutine) then
+    if not LSkip and not LIface and (LS.Kind = skRoutine) then
     begin
       LNode := LS.DeclNode;
       while (LNode <> NIL_NODE) and (LM.Tree.Nodes[LNode].Kind <> nkRoutine) do
@@ -4039,9 +4309,22 @@ begin
       else if (LM.RoutineHead(LSym) = rhConstructor) and (LOwner <> NIL_SYM)
         and DescendsFrom(XPlain(AMid, LOwner), 'tcustomattribute') then
         Skip(usAttribute)
+      // A method an interface its class lists names implements it (dcc
+      // pairs them by name): used as long as an interface method of that
+      // name is - a row made by it when every one is a row (LImpl, a use
+      // placed in each). Not weighed when one is a library interface's (its
+      // calls are the library's) or a method reference type's Invoke.
       else if (LOwner <> NIL_SYM) and FIfaceNames.ContainsKey(LS.NameLower) and
-        InterfaceNamesOf(XPlain(AMid, LOwner)).ContainsKey(LS.NameLower) then
-        Skip(usImplements)
+        InterfaceMembersOf(XPlain(AMid, LOwner)).TryGetValue(LS.NameLower,
+        LImpl) then
+      begin
+        for var LI in LImpl do
+          if LI = -1 then
+          begin
+            Skip(usImplements);
+            Break;
+          end;
+      end
       else if (LOwner = NIL_SYM) and IsPackageRegister(LM, AMid, LSym) then
         Skip(usPackageRegister);
     end;
@@ -4066,6 +4349,22 @@ begin
     FCands.Add(LC);
     FCount.AddOrSetValue(K(AMid, LSym), 0);
     FCandNames.AddOrSetValue(LS.NameLower, True);
+    // Implementing interface methods (LImpl): a use sitting in each of them -
+    // dead when they all are (Derive), live when one is not weighed here.
+    if LImpl <> nil then
+    begin
+      var LSite := Default(TUnusedSite);
+      LSite.Users := LImpl;
+      LSite.At := Format('%s:%d', [ExtractFileName(LC.FileName), LC.Line]);
+      var LSites: TList<TUnusedSite>;
+      if not FUses.TryGetValue(K(AMid, LSym), LSites) then
+      begin
+        LSites := TList<TUnusedSite>.Create;
+        FUses.Add(K(AMid, LSym), LSites);
+      end;
+      LSites.Add(LSite);
+      FUsed.AddOrSetValue(K(AMid, LSym), True);
+    end;
     // Used without a name in code: a property delegating an interface, a
     // global an EXTERNALSYM / NODEFINE directive names.
     if ((LS.Kind = skProperty) and DelegatesInterface(LM, LSym)) or
@@ -4208,8 +4507,21 @@ begin
       if ((LBase < Length(LM.RefMap)) and (LM.RefMap[LBase] <> NIL_SYM)) or
          LM.ExtRefMap.ContainsKey(LBase) then
       begin
-        if XValid(FProj.WithTargetTypeX(AMid, LBase)) then
+        var LBX := FProj.CanonTypeX(FProj.WithTargetTypeX(AMid, LBase));
+        if XValid(LBX) then
+        begin
+          // `V.Name` on a Variant: a late-bound call - the doubt of an
+          // IDispatch descendant's member of that name (IfaceDoubt).
+          if (FProj.Model(LBX.UnitId).Symbols[LBX.Sym].TypeCat = tcVariant)
+             and not FLateNames.ContainsKey(LName) then
+          begin
+            var LVFi, LVLine, LVCol: Integer;
+            if VisPos(LM, LM.Tree.NodeLeftmostVis(LI), LVFi, LVLine, LVCol) then
+              FLateNames.Add(LName, Format('%s:%d', [ExtractFileName(
+                LM.Tree.Source.FileNames[LVFi]), LVLine]));
+          end;
           Continue;   // a member of a type the index knows: not ours
+        end;
         LQual := '*';
       end
       else if LM.Tree.Nodes[LBase].Kind = nkIdent then
@@ -4979,6 +5291,15 @@ begin
               FProj.Model(LC.UnitId).Symbols[LC.Sym].Name])];
             Break;
           end;
+      // An interface's member late binding may reach (IfaceDoubt).
+      if (LOwnerSym >= 0) and (LM.Scopes[LOwnerSym].Kind = sckStruct) and
+         (LM.Scopes[LOwnerSym].StructSym <> NIL_SYM) and
+         (LM.Symbols[LM.Scopes[LOwnerSym].StructSym].TypeCat = tcInterface) then
+      begin
+        LAt := IfaceDoubt(LC.UnitId, LM.Scopes[LOwnerSym].StructSym, LWord);
+        if LAt <> '' then
+          LC.Doubts := LC.Doubts + [LAt];
+      end;
       // A helper no member of which is used, and such a member: a call
       // to a member it adds is its only use, and the index may have bound
       // one to the helped type's own member (overloads, an access the
@@ -5050,6 +5371,33 @@ begin
   while LN <> NIL_NODE do
   begin
     case LM.Tree.Nodes[LN].Kind of
+      // `procedure IFoo.Bar = DoBar;` (14.2.2): the clause goes with
+      // IFoo.Bar - its own names are no use (the use sits in what it names),
+      // and DoBar is used by IFoo.Bar, which it implements. Bound to nothing:
+      // a live use.
+      nkMethodResolution:
+        begin
+          LName := NIL_NODE;
+          LC := LM.Tree.Nodes[LN].FirstChild;
+          while LC <> NIL_NODE do
+          begin
+            if nfName in LM.Tree.Nodes[LC].Flags then
+              LName := LC;
+            LC := LM.Tree.Nodes[LC].NextSibling;
+          end;
+          var LBound: Int64 := -1;
+          var LAt := ANode;
+          if (LName <> NIL_NODE) and not (nfName in LM.Tree.Nodes[ANode].Flags)
+          then
+            LAt := LName;
+          if (LAt < Length(LM.RefMap)) and (LM.RefMap[LAt] <> NIL_SYM) then
+            LBound := K(AMid, LM.RefMap[LAt])
+          else if LM.ExtRefMap.TryGetValue(LAt, LExt) then
+            LBound := K(LExt.UnitId, LExt.Sym);
+          if LBound <> -1 then
+            AUsers := [LBound];
+          Exit;
+        end;
       nkRoutine:
         begin
           LName := NIL_NODE;
@@ -5602,6 +5950,677 @@ begin
   Derive(False);
 end;
 
+{ Parameters and locals. A parameter is weighed when its routine's signature
+  is the routine's own to change: not a virtual, dynamic, override, abstract
+  or message method (a descendant's or the dispatcher's signature), not an
+  interface's method or a class's method an interface names (the interface
+  fixes it), not an operator, not a published method or one a form binds
+  (an event handler: the event type fixes it), not an external, exported or
+  assembler routine or one with an asm block (it reads its parameters by
+  register), not an anonymous method's, not one whose address code takes
+  (`@Foo`, `Handler := Foo`, passed as a procedural value, a property's
+  accessor - a procedural type fixes the signature): a reference to the
+  routine that is no call. Its uses are the references in the routine's
+  body - its implementation's, nested routines included - bound to it
+  through either header (`procedure TFoo.Bar;` may leave the list out).
+  A read is a use. A plain assignment `P := X` of a value parameter is not
+  (the caller never sees it); of a var or out one it is. A parameter passed
+  whole, as a call's argument, into a value or const parameter of a routine
+  weighed the same way is used only by that one: dead with it (a chain -
+  SnippetRowFor.ACommand passed only into RowTag.ACommand, read nowhere).
+  A local (a `var` or `const` of a routine body, an inline one) the same,
+  but an `absolute` one, or one another aliases, whose every write is a read.
+  Doubts: the name in a branch this configuration does not compile, or
+  written where the index bound nothing, in the routine; another overload of
+  the routine (removing the parameter may make the two clash); a value
+  assigned that code computes; an interface held. }
+
+// A parameter's mode (6.2): 0 value, 1 const, 2 var, 3 out.
+function ValueParamMode(LM: TPasSemaModel; ASym: Integer): Integer;
+var
+  LP: Integer;
+begin
+  Result := 0;
+  LP := LM.Tree.Nodes[LM.Symbols[ASym].DeclNode].Parent;
+  if (LP = NIL_NODE) or (LM.Tree.Nodes[LP].Kind <> nkParam) then
+    Exit;
+  if nfVar in LM.Tree.Nodes[LP].Flags then
+    Result := 2
+  else if nfOut in LM.Tree.Nodes[LP].Flags then
+    Result := 3
+  else if nfConst in LM.Tree.Nodes[LP].Flags then
+    Result := 1;
+end;
+
+// Is reference ANode to a routine a call of it: the callee of a call
+// (`Foo(1)`, `X.Foo(1)`), an `inherited` one, a statement of its own
+// (`Foo;`)? Anything else - `@Foo`, `H := Foo`, an argument, a property's
+// accessor, `exports Foo` - may take its address.
+function IsCallSite(LM: TPasSemaModel; ANode: Integer): Boolean;
+var
+  LCur, LP: Integer;
+begin
+  LCur := ANode;
+  LP := LM.Tree.Nodes[LCur].Parent;
+  if (LP <> NIL_NODE) and (LM.Tree.Nodes[LP].Kind = nkMember) and
+     (LM.Tree.Nodes[LP].FirstChild <> LCur) then
+  begin
+    LCur := LP;
+    LP := LM.Tree.Nodes[LCur].Parent;
+  end;
+  Result := (LP <> NIL_NODE) and ((LM.Tree.Nodes[LP].Kind in [nkInherited,
+    nkExprStmt]) or ((LM.Tree.Nodes[LP].Kind = nkCall) and
+    (LM.Tree.Nodes[LP].FirstChild = LCur)));
+end;
+
+// Does the subtree of ANode hold an asm block?
+function HasAsm(LM: TPasSemaModel; ANode: Integer): Boolean;
+var
+  LStack: TStack<Integer>;
+  LN, LC: Integer;
+begin
+  Result := False;
+  if ANode = NIL_NODE then
+    Exit;
+  LStack := TStack<Integer>.Create;
+  try
+    LStack.Push(ANode);
+    while LStack.Count > 0 do
+    begin
+      LN := LStack.Pop;
+      if LM.Tree.Nodes[LN].Kind = nkAsmStmt then
+        Exit(True);
+      LC := LM.Tree.Nodes[LN].FirstChild;
+      while LC <> NIL_NODE do
+      begin
+        LStack.Push(LC);
+        LC := LM.Tree.Nodes[LC].NextSibling;
+      end;
+    end;
+  finally
+    LStack.Free;
+  end;
+end;
+
+// The routine routine node ARoutine of model AMid declares or implements,
+// keyed - an implementation header paired with its declaration (UsersOf's
+// pairing); -1 when there is none.
+function TUnusedLint.RoutineKeyOf(AMid, ARoutine: Integer): Int64;
+var
+  LM: TPasSemaModel;
+  LName, LC: Integer;
+  LUsers: TArray<Int64>;
+begin
+  Result := -1;
+  LM := FProj.Model(AMid);
+  LName := NIL_NODE;
+  LC := LM.Tree.Nodes[ARoutine].FirstChild;
+  while LC <> NIL_NODE do
+  begin
+    if (LM.Tree.Nodes[LC].Kind = nkIdent) and
+       (nfName in LM.Tree.Nodes[LC].Flags) then
+      LName := LC
+    else if not (LM.Tree.Nodes[LC].Kind in [nkGenericParams, nkAttrGroup]) then
+      Break;
+    LC := LM.Tree.Nodes[LC].NextSibling;
+  end;
+  if (LName <> NIL_NODE) and UsersOf(LM, AMid, LName, False, LUsers) and
+     (Length(LUsers) = 1) then
+    Result := LUsers[0];
+end;
+
+// The parameter names routine node ARoutine's header declares, in order.
+function TUnusedLint.ParamNames(LM: TPasSemaModel;
+  ARoutine: Integer): TArray<Integer>;
+var
+  LC, LP, LN: Integer;
+begin
+  Result := nil;
+  if ARoutine = NIL_NODE then
+    Exit;
+  LC := LM.Tree.Nodes[ARoutine].FirstChild;
+  while (LC <> NIL_NODE) and (LM.Tree.Nodes[LC].Kind <> nkParams) do
+  begin
+    if LM.Tree.Nodes[LC].Kind = nkRoutineBody then
+      Exit;
+    LC := LM.Tree.Nodes[LC].NextSibling;
+  end;
+  if LC = NIL_NODE then
+    Exit;
+  LP := LM.Tree.Nodes[LC].FirstChild;
+  while LP <> NIL_NODE do
+  begin
+    if LM.Tree.Nodes[LP].Kind = nkParam then
+    begin
+      LN := LM.Tree.Nodes[LP].FirstChild;
+      while LN <> NIL_NODE do
+      begin
+        if (LM.Tree.Nodes[LN].Kind = nkIdent) and
+           (nfName in LM.Tree.Nodes[LN].Flags) then
+          Result := Result + [LN];
+        LN := LM.Tree.Nodes[LN].NextSibling;
+      end;
+    end;
+    LP := LM.Tree.Nodes[LP].NextSibling;
+  end;
+end;
+
+// Does code take routine (AMid, ASym)'s address: a reference to it that is
+// no call (IsCallSite)? One the index cannot place counts. Per routine.
+function TUnusedLint.AddressTaken(AMid, ASym: Integer): Boolean;
+var
+  LHits: TList<TPasRefHit>;
+  LRef: TPasExtRef;
+  LP: TUnusedHit;
+  LM: TPasSemaModel;
+begin
+  Result := False;
+  LRef.UnitId := AMid;
+  LRef.Sym := ASym;
+  LHits := TList<TPasRefHit>.Create;
+  try
+    FNav.CollectReferencesOfAll([LRef], LHits);
+    for var LH in LHits do
+    begin
+      LP := PlaceHit(LH, False);
+      if LP.ByName then
+        Exit(True);
+      if LP.Declared or (LP.BMid <> AMid) or (LP.BSym <> ASym) then
+        Continue;
+      LM := FProj.Model(LP.Mid);
+      if nfName in LM.Tree.Nodes[LP.Node].Flags then
+        Continue;
+      if not IsCallSite(LM, LP.Node) then
+        Exit(True);
+    end;
+  finally
+    LHits.Free;
+  end;
+end;
+
+// Why routine (AMid, ASym)'s parameters are not weighed (Ord of a
+// TPasUnusedSkip), or -1. Per routine.
+function TUnusedLint.RoutineSkip(AMid, ASym: Integer): Integer;
+var
+  LM: TPasSemaModel;
+  LS: TSemaSymbol;
+  LND, LNI, LOwner: Integer;
+
+  function Has(ANode: Integer; const AWords: array of string): Boolean;
+  begin
+    Result := False;
+    if ANode <> NIL_NODE then
+      for var LW in AWords do
+        if HasDirective(LM, ANode, LW) then
+          Exit(True);
+  end;
+
+begin
+  if FRoutineSkip.TryGetValue(K(AMid, ASym), Result) then
+    Exit;
+  Result := -1;
+  LM := FProj.Model(AMid);
+  LS := LM.Symbols[ASym];
+  LND := RoutineNodeOf(LM, ASym);
+  LNI := FNav.RoutineImplNode(AMid, ASym);
+  LOwner := NIL_SYM;
+  if (LS.Scope >= 0) and (LS.Scope < LM.Scopes.Count) and
+     (LM.Scopes[LS.Scope].Kind = sckStruct) then
+    LOwner := LM.Scopes[LS.Scope].StructSym;
+  if not OwnUnit(AMid) then
+    Result := Ord(usGenerated)
+  else if LM.RoutineHead(ASym) = rhOperator then
+    Result := Ord(usOperator)
+  else if (LOwner <> NIL_SYM) and (LM.Symbols[LOwner].TypeCat = tcInterface)
+  then
+    Result := Ord(usInterface)
+  else if (sfOverrideDirective in LS.Flags) or Has(LND, ['virtual', 'dynamic',
+    'override', 'abstract', 'message']) then
+    Result := Ord(usDispatch)
+  else if (LOwner <> NIL_SYM) and ((LS.Visibility in [svPublished,
+    svAutomated]) or ((LS.Visibility = svDefault) and
+    (LM.Symbols[LOwner].TypeCat = tcClass) and Streams(XPlain(AMid, LOwner)))
+    or FormBinds(AMid, ASym)) then
+    Result := Ord(usPublished)
+  else if FDelegated.ContainsKey(K(AMid, ASym)) or ((LOwner <> NIL_SYM) and
+    (LM.Symbols[LOwner].TypeCat = tcClass) and
+    FIfaceNames.ContainsKey(LS.NameLower) and
+    InterfaceMembersOf(XPlain(AMid, LOwner)).ContainsKey(LS.NameLower)) then
+    Result := Ord(usImplements)
+  else if (LNI = NIL_NODE) or Has(LND, ['external', 'export', 'assembler']) or
+    Has(LNI, ['export', 'assembler']) or HasAsm(LM, LNI) or
+    AddressTaken(AMid, ASym) then
+    Result := Ord(usSignature);
+  FRoutineSkip.AddOrSetValue(K(AMid, ASym), Result);
+end;
+
+// The parameter at position AIdx of routine (AMid, ASym) - its declaration's
+// - keyed, when it is a value or const one; -1 else.
+function TUnusedLint.ParamAt(AMid, ASym, AIdx: Integer): Int64;
+var
+  LM: TPasSemaModel;
+  LNames: TArray<Integer>;
+  LP: Integer;
+begin
+  Result := -1;
+  if (AMid < 0) or (AMid >= FProj.ModelCount) or
+     not FProj.EnsureHydrated(AMid) then
+    Exit;
+  LM := FProj.Model(AMid);
+  if (ASym < 0) or (ASym >= LM.SymCount) or
+     (LM.Symbols[ASym].Kind <> skRoutine) then
+    Exit;
+  LNames := ParamNames(LM, RoutineNodeOf(LM, ASym));
+  if LNames = nil then
+    LNames := ParamNames(LM, FNav.RoutineImplNode(AMid, ASym));
+  if (AIdx < 0) or (AIdx > High(LNames)) or
+     not DeclaredAt(AMid, LNames[AIdx], LP) then
+    Exit;
+  if ValueParamMode(LM, LP) in [0, 1] then
+    Result := K(AMid, LP);
+end;
+
+// Parameter or local (AMid, ASym) weighed - its reads, assignments and the
+// parameters it is passed into; once each.
+function TUnusedLint.WeighValue(AMid, ASym: Integer): TUnusedValue;
+var
+  LM: TPasSemaModel;
+  LS: TSemaSymbol;
+  LRoutine, LND, LNI, LSkip, LCanon, LP, LFi, LLine, LCol: Integer;
+  LKey, LRKey: Int64;
+  LSyms: TDictionary<Integer, Boolean>;
+  LStack: TStack<Integer>;
+  LWritable, LLive, LUnboundSeen: Boolean;
+  LName, LOwnerName: string;
+  LRes: TUnusedValue;
+
+  procedure Finish;
+  begin
+    if VisPos(LM, LM.Tree.NodeLeftmostVis(LM.Symbols[LRes.Sym].DeclNode), LFi,
+       LLine, LCol) then
+    begin
+      LRes.FileName := LM.Tree.Source.FileNames[LFi];
+      LRes.Line := LLine;
+      LRes.Col := LCol;
+    end;
+    FValues.AddOrSetValue(LKey, LRes);
+    FValues.AddOrSetValue(K(LRes.Mid, LRes.Sym), LRes);
+  end;
+
+  // A reference to it: a read, a plain assignment, or an argument passed
+  // whole into a value or const parameter (an edge).
+  procedure Place(ANode: Integer);
+  var
+    LW, LCall: Boolean;
+    LPar, LCallee, LIdx, LC: Integer;
+    LExt: TPasExtRef;
+    LEdge: Int64;
+  begin
+    if PlainWrite(LM, AMid, ANode, False, LW, LCall) and LW and LWritable then
+    begin
+      if VisPos(LM, LM.Tree.NodeLeftmostVis(ANode), LFi, LLine, LCol) then
+      begin
+        var LAt := Format('%s:%d', [ExtractFileName(
+          LM.Tree.Source.FileNames[LFi]), LLine]);
+        LRes.Writes := LRes.Writes + [LAt];
+        if LCall then
+          LRes.Doubts := LRes.Doubts + [Format('the value assigned at %s is '
+            + 'computed by code (a call, a property) - removing the '
+            + 'assignment drops it', [LAt])];
+      end;
+      Exit;
+    end;
+    LPar := LM.Tree.Nodes[ANode].Parent;
+    if (LPar <> NIL_NODE) and (LM.Tree.Nodes[LPar].Kind = nkCall) and
+       (LM.Tree.Nodes[LPar].FirstChild <> ANode) then
+    begin
+      LIdx := -1;
+      LC := LM.Tree.Nodes[LPar].FirstChild;
+      while (LC <> NIL_NODE) and (LC <> ANode) do
+      begin
+        Inc(LIdx);
+        LC := LM.Tree.Nodes[LC].NextSibling;
+      end;
+      LCallee := LM.Tree.Nodes[LPar].FirstChild;
+      if LM.Tree.Nodes[LCallee].Kind = nkMember then
+        LCallee := LM.Tree.LastChild(LCallee);
+      LEdge := -1;
+      if (LCallee <> NIL_NODE) and (LCallee < Length(LM.RefMap)) and
+         (LM.RefMap[LCallee] <> NIL_SYM) then
+        LEdge := ParamAt(AMid, LM.RefMap[LCallee], LIdx)
+      else if (LCallee <> NIL_NODE) and
+        LM.ExtRefMap.TryGetValue(LCallee, LExt) then
+        LEdge := ParamAt(LExt.UnitId, LExt.Sym, LIdx);
+      if LEdge <> -1 then
+      begin
+        for var LE in LRes.Edges do
+          if LE = LEdge then
+            Exit;
+        LRes.Edges := LRes.Edges + [LEdge];
+        Exit;
+      end;
+    end;
+    LLive := True;
+  end;
+
+begin
+  LKey := K(AMid, ASym);
+  if FValues.TryGetValue(LKey, Result) then
+    Exit;
+  LRes := Default(TUnusedValue);
+  LRes.Kind := uvkNone;
+  LRes.Mid := AMid;
+  LRes.Sym := ASym;
+  LRes.Routine := -1;
+  Result := LRes;
+  if (AMid < 0) or (AMid >= FProj.ModelCount) or
+     not FProj.EnsureHydrated(AMid) then
+    Exit;
+  LM := FProj.Model(AMid);
+  if (ASym < 0) or (ASym >= LM.SymCount) then
+    Exit;
+  LS := LM.Symbols[ASym];
+  LRes.SymKind := LS.Kind;
+  if (LS.DeclNode = NIL_NODE) or (LS.NameLower = '') or
+     not (LS.Kind in [skParam, skVar, skConst]) or (LS.Scope < 0) or
+     (LS.Scope >= LM.Scopes.Count) or
+     not (LM.Scopes[LS.Scope].Kind in [sckRoutine, sckBlock]) then
+  begin
+    FValues.AddOrSetValue(LKey, LRes);
+    Exit;
+  end;
+  // The routine - or anonymous method - it belongs to; a procedural type's
+  // or an array property's parameter is no value.
+  LRoutine := LM.Tree.Nodes[LS.DeclNode].Parent;
+  while (LRoutine <> NIL_NODE) and not (LM.Tree.Nodes[LRoutine].Kind in
+    [nkRoutine, nkAnonMethod, nkProcType, nkPropertyDecl]) do
+    LRoutine := LM.Tree.Nodes[LRoutine].Parent;
+  if (LRoutine = NIL_NODE) or
+     (LM.Tree.Nodes[LRoutine].Kind in [nkProcType, nkPropertyDecl]) then
+  begin
+    FValues.AddOrSetValue(LKey, LRes);
+    Exit;
+  end;
+  LSyms := TDictionary<Integer, Boolean>.Create;
+  try
+    LSyms.Add(ASym, True);
+    LWritable := True;
+    LNI := LRoutine;
+    LOwnerName := '';
+    LSkip := -1;
+    if LM.Tree.Nodes[LRoutine].Kind = nkRoutine then
+    begin
+      LRKey := RoutineKeyOf(AMid, LRoutine);
+      if (LRKey <> -1) and (Integer(LRKey shr 32) = AMid) then
+      begin
+        var LRSym := Integer(Cardinal(LRKey and $FFFFFFFF));
+        LRes.Routine := LRKey;
+        LOwnerName := QualifiedName(LM, LRSym);
+        if LS.Kind = skParam then
+        begin
+          LSkip := RoutineSkip(AMid, LRSym);
+          LND := RoutineNodeOf(LM, LRSym);
+          LNI := FNav.RoutineImplNode(AMid, LRSym);
+          // Its name in both headers: the declaration's first (the key).
+          LCanon := -1;
+          for var LHead in [LND, LNI] do
+            for var LPN in ParamNames(LM, LHead) do
+              if (LM.Tree.NodeNameLower(LPN) = LS.NameLower) and
+                 DeclaredAt(AMid, LPN, LP) then
+              begin
+                LSyms.AddOrSetValue(LP, True);
+                if LCanon = -1 then
+                  LCanon := LP;
+              end;
+          if LCanon <> -1 then
+            LRes.Sym := LCanon;
+          LWritable := ValueParamMode(LM, LRes.Sym) = 0;
+          // Another overload beside it: a call may bind otherwise once the
+          // parameter is gone, or the two clash.
+          var LOv := LM.FindLocal(LM.Symbols[LRSym].Scope,
+            LM.Symbols[LRSym].NameLower);
+          while LOv <> NIL_SYM do
+          begin
+            if (LOv <> LRSym) and (LM.Symbols[LOv].Kind = skRoutine) and
+               not (sfCompletesForward in LM.Symbols[LOv].Flags) then
+            begin
+              LRes.Doubts := LRes.Doubts + [Format('%s is overloaded - '
+                + 'without the parameter its signature may clash with '
+                + 'another overload''s, or a call bind to another one',
+                [LM.Symbols[LRSym].Name])];
+              Break;
+            end;
+            LOv := LM.Symbols[LOv].NextOverload;
+          end;
+        end;
+      end
+      else if LS.Kind = skParam then
+      begin
+        FValues.AddOrSetValue(LKey, LRes);
+        Exit;
+      end;
+    end
+    else if LS.Kind = skParam then
+      LSkip := Ord(usSignature)   // an anonymous method's: its type's
+    else
+      LOwnerName := 'anonymous method';
+    if LOwnerName = '' then
+      LOwnerName := LM.Symbols[ASym].Name
+    else
+      LOwnerName := LOwnerName + '.' + LS.Name;
+    LRes.Name := LOwnerName;
+    if (LSkip < 0) and not OwnUnit(AMid) then
+      LSkip := Ord(usGenerated);
+    if LSkip >= 0 then
+    begin
+      LRes.Kind := uvkSkip;
+      LRes.Skip := TPasUnusedSkip(LSkip);
+      Finish;
+      Exit(LRes);
+    end;
+    if LNI = NIL_NODE then
+    begin
+      Finish;
+      Exit(LRes);
+    end;
+    // `X: T absolute Y` - X's writes write Y; and a local another one
+    // aliases (`absolute X` names it: a read below).
+    if LS.Kind = skVar then
+    begin
+      var LDecl := LM.Tree.Nodes[LS.DeclNode].Parent;
+      if (LDecl <> NIL_NODE) and (LM.Tree.Nodes[LDecl].Kind = nkVarDecl) and
+         (LM.Tree.Nodes[LDecl].Aux = 1) then
+        LWritable := False;
+      // `var X := F;`: the initializer runs when it is not a plain value.
+      if (LDecl <> NIL_NODE) and (LM.Tree.Nodes[LDecl].Kind = nkInlineVar) and
+         (LM.Tree.Nodes[LDecl].Aux = 1) and not (LM.Tree.Nodes[
+         LM.Tree.LastChild(LDecl)].Kind in [nkIntLit, nkRealLit, nkStrLit,
+         nkNilLit, nkCaretChar]) then
+        LRes.Doubts := LRes.Doubts + ['its initializer may run code (a '
+          + 'call) - removing the declaration drops it'];
+    end;
+    LLive := False;
+    LUnboundSeen := False;
+    LName := LS.NameLower;
+    LStack := TStack<Integer>.Create;
+    try
+      LStack.Push(LNI);
+      while LStack.Count > 0 do
+      begin
+        var LN := LStack.Pop;
+        if (LN < Length(LM.RefMap)) and (LM.RefMap[LN] <> NIL_SYM) and
+           LSyms.ContainsKey(LM.RefMap[LN]) then
+        begin
+          if not (nfName in LM.Tree.Nodes[LN].Flags) then
+            Place(LN);
+        end
+        else if not LUnboundSeen and (LM.Tree.Nodes[LN].Kind = nkIdent) and
+          not (nfName in LM.Tree.Nodes[LN].Flags) and
+          ((LN >= Length(LM.RefMap)) or (LM.RefMap[LN] = NIL_SYM)) and
+          not LM.ExtRefMap.ContainsKey(LN) and
+          (LM.Tree.NodeNameLower(LN) = LName) then
+        begin
+          // `X.Name` is a member of X; a bare Name bound to nothing may be
+          // this one (a `with` the index could not follow).
+          var LPar := LM.Tree.Nodes[LN].Parent;
+          if not ((LPar <> NIL_NODE) and (LM.Tree.Nodes[LPar].Kind = nkMember)
+             and (LM.Tree.Nodes[LPar].FirstChild <> LN)) and
+             VisPos(LM, LM.Tree.NodeLeftmostVis(LN), LFi, LLine, LCol) then
+          begin
+            LUnboundSeen := True;
+            LRes.Doubts := LRes.Doubts + [Format('the name is written where '
+              + 'the index bound nothing (%s:%d) - it may be a use of this '
+              + 'one', [ExtractFileName(LM.Tree.Source.FileNames[LFi]),
+              LLine])];
+          end;
+        end;
+        var LC := LM.Tree.Nodes[LN].FirstChild;
+        while LC <> NIL_NODE do
+        begin
+          LStack.Push(LC);
+          LC := LM.Tree.Nodes[LC].NextSibling;
+        end;
+      end;
+    finally
+      LStack.Free;
+    end;
+    // The name in a branch of the routine this configuration does not
+    // compile.
+    var LFirst, LLast: Integer;
+    if LM.Tree.NodeVisRange(LNI, LFirst, LLast) and
+       (LM.Tree.Source.Visible[LFirst].FileId =
+       LM.Tree.Source.Visible[LLast].FileId) then
+    begin
+      LFi := LM.Tree.Source.Visible[LFirst].FileId;
+      var LTS := LM.Tree.Source.Files[LFi];
+      var LFrom := LTS.Tokens[LM.Tree.Source.Visible[LFirst].TokenIndex].Start;
+      var LTo := LTS.Tokens[LM.Tree.Source.Visible[LLast].TokenIndex].Start;
+      if LFi <= High(LM.Tree.Source.Skipped) then
+        for var LR in LM.Tree.Source.Skipped[LFi] do
+          if (LR.Start >= LFrom) and (LR.Start <= LTo) and
+             TRegEx.IsMatch(Copy(LTS.Source, LR.Start + 1, LR.EndPos -
+             LR.Start), '\b' + LName + '\b', [roIgnoreCase]) then
+          begin
+            LTS.OffsetToLineCol(LR.Start, LLine, LCol);
+            LRes.Doubts := LRes.Doubts + [Format('the name is written in a '
+              + 'branch this configuration does not compile (%s:%d)',
+              [ExtractFileName(LM.Tree.Source.FileNames[LFi]), LLine])];
+            Break;
+          end;
+    end;
+    if LLive then
+      LRes.Kind := uvkLive
+    else
+    begin
+      LRes.Kind := uvkMaybe;
+      if LRes.Writes <> nil then
+      begin
+        var LX := FProj.CanonTypeX(FProj.DeclTypeX(AMid, ASym));
+        if XValid(LX) and FProj.EnsureHydrated(LX.UnitId) and
+           (FProj.Model(LX.UnitId).Symbols[LX.Sym].TypeCat = tcInterface) then
+          LRes.Doubts := LRes.Doubts + ['it holds an interface reference - '
+            + 'assigning it keeps the object alive until it is cleared'];
+      end;
+    end;
+    Finish;
+    Result := LRes;
+  finally
+    LSyms.Free;
+  end;
+end;
+
+// The verdict on parameter or local (AMid, ASym): True and its row when
+// nothing reads it - the parameters it is passed into read by nothing
+// either, to a fixed point (a chain dies whole, a cycle too). AValue: what
+// WeighValue found.
+function TUnusedLint.ValueRow(AMid, ASym: Integer; out ARow: TPasUnusedSymbol;
+  out AValue: TUnusedValue): Boolean;
+var
+  LDead: TDictionary<Int64, Boolean>;
+  LTodo: TList<Int64>;
+  LV: TUnusedValue;
+  LChanged: Boolean;
+
+  function Canon(AKey: Int64): Int64;
+  var
+    LW: TUnusedValue;
+  begin
+    LW := WeighValue(Integer(AKey shr 32), Integer(Cardinal(AKey and
+      $FFFFFFFF)));
+    Result := K(LW.Mid, LW.Sym);
+  end;
+
+begin
+  Result := False;
+  ARow := Default(TPasUnusedSymbol);
+  AValue := WeighValue(AMid, ASym);
+  if AValue.Kind <> uvkMaybe then
+    Exit;
+  LDead := TDictionary<Int64, Boolean>.Create;
+  LTodo := TList<Int64>.Create;
+  try
+    LDead.Add(K(AValue.Mid, AValue.Sym), True);
+    LTodo.Add(K(AValue.Mid, AValue.Sym));
+    var LI := 0;
+    while (LI < LTodo.Count) and (LTodo.Count < 2000) do
+    begin
+      LV := FValues[LTodo[LI]];
+      for var LE in LV.Edges do
+      begin
+        var LC := Canon(LE);
+        if not LDead.ContainsKey(LC) and (FValues[LC].Kind = uvkMaybe) then
+        begin
+          LDead.Add(LC, True);
+          LTodo.Add(LC);
+        end;
+      end;
+      Inc(LI);
+    end;
+    repeat
+      LChanged := False;
+      for var LKey in LDead.Keys.ToArray do
+        for var LE in FValues[LKey].Edges do
+          if not LDead.ContainsKey(Canon(LE)) then
+          begin
+            LDead.Remove(LKey);
+            LChanged := True;
+            Break;
+          end;
+    until not LChanged;
+    Result := LDead.ContainsKey(K(AValue.Mid, AValue.Sym));
+    if not Result then
+      Exit;
+    ARow.UnitId := AValue.Mid;
+    ARow.Sym := AValue.Sym;
+    ARow.FileName := AValue.FileName;
+    ARow.Line := AValue.Line;
+    ARow.Col := AValue.Col;
+    ARow.Name := AValue.Name;
+    ARow.Kind := AValue.SymKind;
+    ARow.Doubts := AValue.Doubts;
+    ARow.Writes := AValue.Writes;
+    if AValue.Edges <> nil then
+    begin
+      ARow.How := uhOnlyByUnused;
+      for var LE in AValue.Edges do
+      begin
+        LV := FValues[Canon(LE)];
+        ARow.By := ARow.By + [LV.Name];
+        if LV.Doubts <> nil then
+          ARow.Doubts := ARow.Doubts + [Format('%s, which it is passed into, '
+            + 'has a doubt of its own', [LV.Name])];
+      end;
+    end
+    else if AValue.Writes <> nil then
+      ARow.How := uhOnlyWritten
+    else
+      ARow.How := uhUnused;
+  finally
+    LTodo.Free;
+    LDead.Free;
+  end;
+end;
+
 // The candidates of AMids collected, the group-wide marks made, their
 // references searched and FUnused made (RunUnusedLint's first half).
 procedure GatherUnused(ALint: TUnusedLint; ANav: TPasNavigator;
@@ -5801,6 +6820,13 @@ end;
 function FindUnusedSymbols(ANav: TPasNavigator; const AMids: TArray<Integer>;
   out ASkips: TPasUnusedSkips;
   out AInRowTypes: TArray<TPasUnusedSymbol>): TArray<TPasUnusedSymbol>;
+begin
+  Result := FindUnusedSymbols(ANav, AMids, [], ASkips, AInRowTypes);
+end;
+
+function FindUnusedSymbols(ANav: TPasNavigator; const AMids: TArray<Integer>;
+  AOptions: TPasUnusedOptions; out ASkips: TPasUnusedSkips;
+  out AInRowTypes: TArray<TPasUnusedSymbol>): TArray<TPasUnusedSymbol>;
 var
   LLint: TUnusedLint;
   LRowAt: TDictionary<Int64, Integer>;
@@ -5823,6 +6849,39 @@ begin
         LOut.Add(LLint.FCands[LIdx])
       else
         LKept.Add(LLint.FCands[LIdx]);
+    // The parameters and locals asked for: one row each (a method's both
+    // headers are one), none of a routine that is a row itself.
+    if AOptions <> [] then
+    begin
+      var LSeen := TDictionary<Int64, Boolean>.Create;
+      try
+        for var LMid in AMids do
+        begin
+          if (LMid < 0) or (LMid >= ANav.Project.ModelCount) or
+             not LLint.OwnUnit(LMid) then
+            Continue;
+          var LM := ANav.Project.Model(LMid);
+          for var LSym := 0 to LM.SymCount - 1 do
+          begin
+            var LS := LM.Symbols[LSym];
+            if not (((uoParams in AOptions) and (LS.Kind = skParam)) or
+               ((uoLocals in AOptions) and (LS.Kind in [skVar, skConst]))) or
+               (LS.DeclNode = NIL_NODE) or (LS.Scope < 0) or
+               (LS.Scope >= LM.Scopes.Count) or
+               not (LM.Scopes[LS.Scope].Kind in [sckRoutine, sckBlock]) then
+              Continue;
+            var LRow: TPasUnusedSymbol;
+            var LV: TUnusedValue;
+            if LLint.ValueRow(LMid, LSym, LRow, LV) and
+               LSeen.TryAdd(TUnusedLint.K(LRow.UnitId, LRow.Sym), True) and
+               not LLint.FUnused.ContainsKey(LV.Routine) then
+              LKept.Add(LRow);
+          end;
+        end;
+      finally
+        LSeen.Free;
+      end;
+    end;
     Result := LKept.ToArray;
     AInRowTypes := LOut.ToArray;
     ASkips := LLint.FSkips;
@@ -5865,7 +6924,10 @@ var
   LKey: Int64;
   LSkip: TPasUnusedSkip;
   LAll, LMore: TArray<TPasExtRef>;
+  LRow: TPasUnusedSymbol;
+  LValue: TUnusedValue;
 begin
+  Result := nil;
   SetLength(Result, Length(ATargets));
   // The declarations the targets' uses sit in are weighed too, and theirs,
   // round by round: a getter is dead when its property is.
@@ -5903,8 +6965,25 @@ begin
       // A candidate (bindings counted) not left a row.
       else if LLint.FCount.ContainsKey(LKey) then
         Result[LI].Verdict := uvUsed
+      // A parameter or a local: its own rule (WeighValue).
+      else if LLint.ValueRow(ATargets[LI].UnitId, ATargets[LI].Sym, LRow,
+        LValue) then
+      begin
+        Result[LI].Verdict := uvUnused;
+        Result[LI].Row := LRow;
+      end
       else
-        Result[LI].Verdict := uvNotCovered;
+        case LValue.Kind of
+          uvkSkip:
+            begin
+              Result[LI].Verdict := uvSkipped;
+              Result[LI].Skip := LValue.Skip;
+            end;
+          uvkLive, uvkMaybe:
+            Result[LI].Verdict := uvUsed;
+        else
+          Result[LI].Verdict := uvNotCovered;
+        end;
     end;
   finally
     LLint.Free;
