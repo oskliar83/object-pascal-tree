@@ -1356,6 +1356,41 @@ Remove) should not be handed one, and a doubt is too easy to click past:
 Without a program in the analysis only the listed unit's own initialization
 is judged. SemaNavSmoke: TestLintGlobalInit.
 
+### 12.2a `loTogether`, and WeighRemovedTogether (0.202.0)
+
+Each row of FindUnusedUses is weighed alone, and a host removes them
+together: an entry is safe alone while all of them are not when a unit with
+initialization, finalization or a resource is reached by several removed
+entries - the last of them takes it out of the program. On a 4,000-unit
+group removing every row with no doubt left 13 units out of the main
+program, one registering a graphic format with TPicture. With `loTogether`
+the rows no doubt holds back are weighed as removed together: a row whose
+importer the program still reaches while its unit it no longer does is a
+last path, and gets the doubt "removed together with the other unused
+entries no doubt holds back, it leaves X (initialization) out of P - keep
+it, or another entry that says so"; the rows are weighed again without it
+until nothing more is lost. Every last path is held back, so two entries
+that are the two paths to one unit both are - keep either.
+
+The walk is `WeighRemovedTogether`, over `TPasUsesGraph`s: the analysis'
+own for `loTogether` (a light unit's effect counts as unknown and goes to
+the demand), and pastree-mcp's `lint`, which moved its check here, gives
+one per analysis of a group - each program also weighed without the `uses`
+entries its own defines may not compile. pastree-lsp's Remove All asks for
+it. SemaNavSmoke: TestLintTogether.
+
+### 12.2b Removing the entries: PasTree.UsesEdit (0.202.0)
+
+`UsesRemovalEdits` (by name node) and `UsesRemovalByName` (by name, for a
+tree parsed from the text as it is now) give the edits that take entries
+out: one rewrite per clause, the layout kept (a removed entry takes its
+separator and its own line; a clause emptied goes with its line), a
+compiler directive never dropped (each removed entry takes a comma of its
+own next to it), refused per entry where no comma can go without one, in an
+include, or in a clause with no closing `;`. A pure function of the tree;
+pastree-lsp's `pastree/usesRemoval` and pastree-mcp's `lint` `apply` call
+it. tests/UsesEditSmoke.dpr.
+
 ### 12.3 On the pool, and the library bodies it reads (0.199.0)
 
 Both functions, and `DemandLint`'s run of them, check the units on the

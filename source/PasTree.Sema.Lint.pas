@@ -34,6 +34,7 @@ unit PasTree.Sema.Lint;
 interface
 
 uses
+  System.Generics.Collections,
   PasTree.Sema.Model,
   PasTree.Sema.Project,
   PasTree.Sema.Nav;
@@ -61,8 +62,19 @@ type
     (`FList := TList.Create`, `FList.Add`) stays inside. Such a unit is in
     `uses` for what it registers, which no index of names can see, so a host
     acting on the rows (removing them) is better off not offered it at all.
-    Without the option those rows come with a doubt, as before. }
-  TPasLintOption = (loHideGlobalInit);
+    Without the option those rows come with a doubt, as before.
+
+    loTogether: FindUnusedUses weighs its rows as a host acting on them
+    removes them - all together (WeighRemovedTogether). Each entry may be
+    safe alone while all of them are not: a unit with initialization,
+    finalization or a resource that several unused entries reach leaves the
+    program with the last of them. Such a row - one whose importer the
+    program still reaches while its unit it no longer does - gets the doubt
+    "removed together with the other unused entries no doubt holds back, it
+    leaves X out of P", and the rows are weighed again without it until
+    nothing more is lost. A host that removes every row with no doubt
+    (Remove All) wants it. }
+  TPasLintOption = (loHideGlobalInit, loTogether);
   TPasLintOptions = set of TPasLintOption;
 
   TPasUnreferencedUnit = record
@@ -97,6 +109,77 @@ function FindUnreferencedUnits(ANav: TPasNavigator;
 function FindUnusedUses(ANav: TPasNavigator;
   const AMids: TArray<Integer>;
   AOptions: TPasLintOptions = []): TArray<TPasUnusedUse>;
+
+{ ---- Removed together ----
+
+  The unused `uses` entries no doubt holds back are removed together by
+  whoever acts on them, and each may be safe alone while all of them are
+  not: a unit with an effect (initialization, finalization, a resource)
+  reached by several of the removed edges leaves the program with the last
+  of them. On a 4,000-unit group removing them all left 13 units out of the
+  main program, one registering a graphic format with TPicture. Each removed
+  edge whose importer the program still reaches and whose unit it no longer
+  does is such a last path: its row is held back, and the check runs again
+  without it until nothing more is lost. Moved here from pastree-mcp's
+  `lint` (0.202.0), so both hosts weigh it alike.
+
+  The graph is the host's: FindUnusedUses with loTogether weighs its rows in
+  its own analysis; pastree-mcp weighs the rows of every analysis of a
+  group, each program also in the graph without the `uses` entries its own
+  defines may not compile (Worlds), with its own reading of a light unit. }
+type
+  { One analysis' `uses` graph as WeighRemovedTogether walks it. Model ids
+    are the analysis' (TPasSemaProject); an edge is From shl 32 or Target. }
+  TPasUsesGraph = class abstract
+  public
+    // The programs a removal is weighed for.
+    function Roots: TArray<Integer>; virtual; abstract;
+    // The graphs ARoot is weighed in: nil (every edge), and any edge set left
+    // out as well (a program built with other defines). [nil] by default.
+    function Worlds(ARoot: Integer): TArray<TDictionary<Int64, Boolean>>;
+      virtual;
+    // What ARoot reaches, the edges of AAlso (nil: none) left out.
+    function FullReach(ARoot: Integer;
+      AAlso: TDictionary<Int64, Boolean>): TArray<Boolean>; virtual; abstract;
+    // The same with every edge of ASkip left out too.
+    function ReachWithout(ARoot: Integer; ASkip: TDictionary<Int64, Integer>;
+      AAlso: TDictionary<Int64, Boolean>): TArray<Boolean>; virtual; abstract;
+    // What linking AMid into a program does by itself, '' for nothing.
+    function LinkEffect(AMid: Integer): string; virtual; abstract;
+    // Light mode: the units of ALost a full closure may still reach after the
+    // removal (through units nobody loaded); nil when none.
+    function KeptPastLoaded(const ALess,
+      ALost: TArray<Boolean>): TArray<Boolean>; virtual; abstract;
+    // The units with an effect AStart reaches through the units in ALost,
+    // 'Name (initialization)'.
+    function EffectsFrom(AStart: Integer;
+      const ALost: TArray<Boolean>): TArray<string>; virtual; abstract;
+    // The name a row says a program by.
+    function ProgramName(ARoot: Integer): string; virtual; abstract;
+  end;
+
+  TPasTogetherEdge = record
+    Graph: Integer;           // index into AGraphs
+    From, Target: Integer;    // the `uses` edge, model ids of that graph
+  end;
+
+  TPasTogetherRow = record
+    // The edge the entry is in each graph holding its unit.
+    Edges: TArray<TPasTogetherEdge>;
+    // In: kept, not removed (a doubt holds it back, or not an unused entry
+    // at all). Out: also the rows this check holds back.
+    Held: Boolean;
+    // Out: what removing it with the others leaves out - the units
+    // ('Name (initialization)') and the programs; nil when nothing.
+    Units, Programs: TArray<string>;
+  end;
+
+// Weighs ARows' removal together in every graph of AGraphs, to the fixed
+// point: a row not held whose edge is the last path of a program to a unit
+// with an effect is held, its Units and Programs say what it would leave
+// out. A row held on entry is never weighed as removed.
+procedure WeighRemovedTogether(const AGraphs: TArray<TPasUsesGraph>;
+  var ARows: TArray<TPasTogetherRow>);
 
 { LIGHT MODE (TPasSemaProject.LightPaths). TPasWorkspace.FindUnusedUses /
   FindUnreferencedUnits (PasTree.Sema.Workspace) make the lint exact
@@ -295,7 +378,6 @@ uses
   System.Math,
   System.Character,
   System.RegularExpressions,
-  System.Generics.Collections,
   System.Generics.Defaults,
   System.Threading,
   PasTree.Types,
@@ -347,6 +429,9 @@ type
     FStart, FEdges: TArray<Integer>;
     FRoots: TArray<Integer>;
     FRows: TList<TPasUnusedUse>;
+    // Each row's edge (FRows' order): the listing model shl 32 or the unit
+    // listed - what loTogether weighs.
+    FRowEdges: TList<Int64>;
     FDeadEdges: TDictionary<Int64, Boolean>;   // From shl 32 or Target
     FOptions: TPasLintOptions;
     FGlobalInit: TDictionary<Integer, Boolean>;
@@ -674,6 +759,7 @@ begin
   FEffect := TDictionary<Integer, string>.Create;
   FReach := TDictionary<Integer, TArray<Boolean>>.Create;
   FRows := TList<TPasUnusedUse>.Create;
+  FRowEdges := TList<Int64>.Create;
   FDeadEdges := TDictionary<Int64, Boolean>.Create;
   FGlobalInit := TDictionary<Integer, Boolean>.Create;
   FInlineLight := TDictionary<Int64, TArray<Integer>>.Create;
@@ -715,6 +801,7 @@ begin
   FAccessors.Free;
   FInline.Free;
   FDeadEdges.Free;
+  FRowEdges.Free;
   FRows.Free;
   FReach.Free;
   FEffect.Free;
@@ -2210,6 +2297,7 @@ begin
       LRow.InInterface := LEntry.InInterface;
       LRow.Doubts := LEntry.Doubts;
       FRows.Add(LRow);
+      FRowEdges.Add(K64(AMid, LEntry.UnitId));
     end;
   finally
     LFormWords.Free;
@@ -2285,6 +2373,7 @@ begin
     for var LLint in LLints do
     begin
       ALint.FRows.AddRange(LLint.FRows);
+      ALint.FRowEdges.AddRange(LLint.FRowEdges);
       for var LMid in LLint.FLightNeeded.Keys do
         ALint.FLightNeeded.AddOrSetValue(LMid, True);
       for var LPath in LLint.FLoadNeeded.Keys do
@@ -2299,6 +2388,273 @@ begin
       LStripe.Free;
     LLock.Free;
   end;
+end;
+
+{ ---- removed together ---- }
+
+function TPasUsesGraph.Worlds(
+  ARoot: Integer): TArray<TDictionary<Int64, Boolean>>;
+begin
+  Result := [nil];
+end;
+
+procedure WeighRemovedTogether(const AGraphs: TArray<TPasUsesGraph>;
+  var ARows: TArray<TPasTogetherRow>);
+var
+  LSkip: TDictionary<Int64, Integer>;
+  LFull, LLess, LLost, LKept: TArray<Boolean>;
+  LChanged, LAny: Boolean;
+  LFrom, LTarget, LR: Integer;
+  LG: TPasUsesGraph;
+  LName: string;
+begin
+  LSkip := TDictionary<Int64, Integer>.Create;
+  try
+    repeat
+      LChanged := False;
+      for var LGi := 0 to High(AGraphs) do
+      begin
+        LG := AGraphs[LGi];
+        // The edges removed in this graph, as the rows stand now: a row held
+        // in an earlier graph or round is kept.
+        LSkip.Clear;
+        for LR := 0 to High(ARows) do
+          if not ARows[LR].Held then
+            for var LE in ARows[LR].Edges do
+              if LE.Graph = LGi then
+                LSkip.AddOrSetValue((Int64(LE.From) shl 32) or
+                  Cardinal(LE.Target), LR);
+        if LSkip.Count = 0 then
+          Continue;
+        for var LRoot in LG.Roots do
+          for var LWorld in LG.Worlds(LRoot) do
+          begin
+            LFull := LG.FullReach(LRoot, LWorld);
+            LLess := LG.ReachWithout(LRoot, LSkip, LWorld);
+            SetLength(LLost, Length(LFull));
+            LAny := False;
+            for var LMid := 0 to High(LFull) do
+            begin
+              LLost[LMid] := LFull[LMid] and not LLess[LMid];
+              if LLost[LMid] and (LG.LinkEffect(LMid) <> '') then
+                LAny := True;
+            end;
+            if not LAny then
+              Continue;
+            // Light mode: what a library body may still reach is not lost.
+            LKept := LG.KeptPastLoaded(LLess, LLost);
+            if LKept <> nil then
+            begin
+              LAny := False;
+              for var LMid := 0 to High(LKept) do
+              begin
+                if LKept[LMid] then
+                  LLost[LMid] := False;
+                if LLost[LMid] and (LG.LinkEffect(LMid) <> '') then
+                  LAny := True;
+              end;
+              if not LAny then
+                Continue;
+            end;
+            LName := LG.ProgramName(LRoot);
+            // A removed edge whose importer stays and whose unit goes is a
+            // last path to what that unit brings in.
+            for var LPair in LSkip do
+            begin
+              LFrom := Integer(LPair.Key shr 32);
+              LTarget := Integer(LPair.Key and $FFFFFFFF);
+              if not LLess[LFrom] or not LLost[LTarget] then
+                Continue;
+              LR := LPair.Value;
+              for var LU in LG.EffectsFrom(LTarget, LLost) do
+                if not MatchText(LU, ARows[LR].Units) then
+                  ARows[LR].Units := ARows[LR].Units + [LU];
+              if Length(ARows[LR].Units) = 0 then
+                Continue;
+              if not MatchText(LName, ARows[LR].Programs) then
+                ARows[LR].Programs := ARows[LR].Programs + [LName];
+              if not ARows[LR].Held then
+              begin
+                ARows[LR].Held := True;
+                LChanged := True;
+              end;
+            end;
+          end;
+      end;
+    until not LChanged;
+  finally
+    LSkip.Free;
+  end;
+end;
+
+type
+  // A uses lint's analysis as WeighRemovedTogether walks it (loTogether):
+  // its programs, its edges, its link effects. A light unit's effect is not
+  // known: it counts as one, and goes to the lint's light units - the demand
+  // makes it full and the next round reads it.
+  TLintGraph = class(TPasUsesGraph)
+  private
+    FLint: TUsesLint;
+  public
+    constructor Create(ALint: TUsesLint);
+    function Roots: TArray<Integer>; override;
+    function FullReach(ARoot: Integer;
+      AAlso: TDictionary<Int64, Boolean>): TArray<Boolean>; override;
+    function ReachWithout(ARoot: Integer; ASkip: TDictionary<Int64, Integer>;
+      AAlso: TDictionary<Int64, Boolean>): TArray<Boolean>; override;
+    function LinkEffect(AMid: Integer): string; override;
+    function KeptPastLoaded(const ALess,
+      ALost: TArray<Boolean>): TArray<Boolean>; override;
+    function EffectsFrom(AStart: Integer;
+      const ALost: TArray<Boolean>): TArray<string>; override;
+    function ProgramName(ARoot: Integer): string; override;
+  end;
+
+constructor TLintGraph.Create(ALint: TUsesLint);
+begin
+  inherited Create;
+  FLint := ALint;
+end;
+
+function TLintGraph.Roots: TArray<Integer>;
+begin
+  Result := FLint.FRoots;
+end;
+
+function TLintGraph.FullReach(ARoot: Integer;
+  AAlso: TDictionary<Int64, Boolean>): TArray<Boolean>;
+begin
+  // One world (Worlds' default): AAlso is nil.
+  Result := FLint.FullReach(ARoot);
+end;
+
+function TLintGraph.ReachWithout(ARoot: Integer;
+  ASkip: TDictionary<Int64, Integer>;
+  AAlso: TDictionary<Int64, Boolean>): TArray<Boolean>;
+var
+  LQueue: TList<Integer>;
+  LAt, LU: Integer;
+  LKey: Int64;
+begin
+  FLint.BuildGraph;
+  Result := nil;
+  SetLength(Result, FLint.FProj.ModelCount);
+  LQueue := TList<Integer>.Create;
+  try
+    Result[ARoot] := True;
+    LQueue.Add(ARoot);
+    LAt := 0;
+    while LAt < LQueue.Count do
+    begin
+      LU := LQueue[LAt];
+      for var LE := FLint.FStart[LU] to FLint.FStart[LU + 1] - 1 do
+      begin
+        LKey := (Int64(LU) shl 32) or Cardinal(FLint.FEdges[LE]);
+        if not Result[FLint.FEdges[LE]] and not ASkip.ContainsKey(LKey) and
+           not ((AAlso <> nil) and AAlso.ContainsKey(LKey)) then
+        begin
+          Result[FLint.FEdges[LE]] := True;
+          LQueue.Add(FLint.FEdges[LE]);
+        end;
+      end;
+      Inc(LAt);
+    end;
+  finally
+    LQueue.Free;
+  end;
+end;
+
+function TLintGraph.LinkEffect(AMid: Integer): string;
+begin
+  if FLint.IsLight(AMid) then
+  begin
+    FLint.FLightNeeded.AddOrSetValue(AMid, True);
+    Exit('analyzed interface-only, its initialization not known');
+  end;
+  Result := FLint.LinkEffect(AMid);
+end;
+
+function TLintGraph.KeptPastLoaded(const ALess,
+  ALost: TArray<Boolean>): TArray<Boolean>;
+begin
+  Result := FLint.KeptPastLoaded(ALess, ALost);
+end;
+
+function TLintGraph.EffectsFrom(AStart: Integer;
+  const ALost: TArray<Boolean>): TArray<string>;
+var
+  LSeen: TArray<Boolean>;
+  LQueue: TList<Integer>;
+  LAt, LU: Integer;
+begin
+  Result := nil;
+  FLint.BuildGraph;
+  SetLength(LSeen, FLint.FProj.ModelCount);
+  LQueue := TList<Integer>.Create;
+  try
+    LSeen[AStart] := True;
+    LQueue.Add(AStart);
+    LAt := 0;
+    while LAt < LQueue.Count do
+    begin
+      LU := LQueue[LAt];
+      if LinkEffect(LU) <> '' then
+        Result := Result + [Format('%s (%s)', [FLint.UnitNameOf(LU),
+          LinkEffect(LU)])];
+      for var LE := FLint.FStart[LU] to FLint.FStart[LU + 1] - 1 do
+        if ALost[FLint.FEdges[LE]] and not LSeen[FLint.FEdges[LE]] then
+        begin
+          LSeen[FLint.FEdges[LE]] := True;
+          LQueue.Add(FLint.FEdges[LE]);
+        end;
+      Inc(LAt);
+    end;
+  finally
+    LQueue.Free;
+  end;
+end;
+
+function TLintGraph.ProgramName(ARoot: Integer): string;
+begin
+  Result := FLint.UnitNameOf(ARoot);
+end;
+
+// loTogether: ALint's rows weighed as removed together; a row held back
+// gets the doubt that says what it would leave out.
+procedure WeighRowsTogether(ALint: TUsesLint);
+var
+  LGraph: TLintGraph;
+  LRows: TArray<TPasTogetherRow>;
+  LEdge: TPasTogetherEdge;
+  LRow: TPasUnusedUse;
+begin
+  if (ALint.FRoots = nil) or (ALint.FRows.Count = 0) then
+    Exit;
+  SetLength(LRows, ALint.FRows.Count);
+  for var LI := 0 to ALint.FRows.Count - 1 do
+  begin
+    LEdge.Graph := 0;
+    LEdge.From := Integer(ALint.FRowEdges[LI] shr 32);
+    LEdge.Target := Integer(ALint.FRowEdges[LI] and $FFFFFFFF);
+    LRows[LI].Edges := [LEdge];
+    LRows[LI].Held := ALint.FRows[LI].Doubts <> nil;
+  end;
+  LGraph := TLintGraph.Create(ALint);
+  try
+    WeighRemovedTogether([LGraph], LRows);
+  finally
+    LGraph.Free;
+  end;
+  for var LI := 0 to High(LRows) do
+    if LRows[LI].Units <> nil then
+    begin
+      LRow := ALint.FRows[LI];
+      LRow.Doubts := LRow.Doubts + [Format('removed together with the ' +
+        'other unused entries no doubt holds back, it leaves %s out of %s - ' +
+        'keep it, or another entry that says so', [NamedList(LRows[LI].Units,
+        MAX_NAMED), NamedList(LRows[LI].Programs, MAX_NAMED)])];
+      ALint.FRows[LI] := LRow;
+    end;
 end;
 
 // FindUnreferencedUnits over a lint the caller owns (LintPromotions reads
@@ -2483,6 +2839,8 @@ begin
     // to treat as unknown is recorded on the way.
     LRowsLint.FOptions := AOptions;
     CheckUnits(LRowsLint, AMids, False);
+    if loTogether in AOptions then
+      WeighRowsTogether(LRowsLint);
     LUnrefLint.FOptions := AOptions;
     UnreferencedRows(LUnrefLint, AMids, AOptions);
     for var LMid in LRowsLint.FLightNeeded.Keys do
@@ -2537,6 +2895,8 @@ begin
   try
     LLint.FOptions := AOptions;
     CheckUnits(LLint, AMids, False);
+    if loTogether in AOptions then
+      WeighRowsTogether(LLint);
     Result := LLint.FRows.ToArray;
     ANav.NotSearched := LLint.FLightNeeded.Count + LLint.FLoadNeeded.Count;
   finally
