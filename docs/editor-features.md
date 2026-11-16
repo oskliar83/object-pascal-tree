@@ -1574,10 +1574,20 @@ H2219). Used is any of:
   candidate property's class is asked for its descendants; E2147 without
   it);
 - a property with an `implements` specifier (14.4.1): it supplies the
-  class's methods of that interface (E2291 without it);
+  class's methods of that interface (E2291 without it); where the property
+  is class-typed, the methods of that class and its ancestors named like a
+  method of the interface (or of an ancestor of it) too (E2291 without
+  them);
 - a global an `EXTERNALSYM` or `NODEFINE` directive of its unit names
   (E2003 without it, E2240 where a non-global of the name is left) - read
   from the text, a branch not compiled included;
+- a name a `$IF` / `$ELSEIF` expression reads - a constant
+  (`{$IF CLevel < 2}`, in any unit), the argument of `Declared(TProbe)` -
+  resolved as the unit's code sees it (`IfNameTarget`), a dead directive
+  included; a name no unit-level declaration answers (a dotted name's last
+  segment) keeps every member of that name. Deleting it still compiles (dcc
+  takes an unreadable `$IF` comparison as True, a bare unknown name and
+  `Declared` of it as False) - another branch, so the use is real;
 - an enumeration type one of whose values is bound (`Ord(grpError)` needs
   its type: E2003 without it);
 - a bare `inherited;` running it (`BareInheritedTarget`);
@@ -1592,7 +1602,9 @@ H2219). Used is any of:
 
 Not weighed, counted in `ASkips`, because reached other than by a name in
 code: published members (and the first section of a TPersistent
-descendant's class), virtual, dynamic, abstract, override and message
+descendant's class, or of a descendant of a class declared under `$M+` /
+`$TYPEINFO ON` - `MethodAddress('Ping')` finds it), virtual, dynamic,
+abstract, override and message
 methods, an interface's members, a class method an interface of the class,
 an ancestor or a descendant names (a method reference type in the heritage
 list names `Invoke`), operators, class constructors and destructors,
@@ -1607,7 +1619,8 @@ analysis never reads (F2051, F2613).
 
 Doubts on a row, where the index may be wrong: the name written in a branch
 this configuration does not compile, or - a type - as a whole string
-literal (`FindClass('TFoo')`; a member only as `'TFoo.Bar'`), in the
+literal (`FindClass('TFoo')`; a member as `'TFoo.Bar'`, a public method
+by its bare name too - extended RTTI's `GetMethod('Run')`), in the
 files not under `LibraryPaths`; a record's field (the record
 may be read or written whole); another overload of the name in use (the
 index may pick another overload than dcc); the name declared at unit level
