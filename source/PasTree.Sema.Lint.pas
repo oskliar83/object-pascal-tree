@@ -286,6 +286,7 @@ uses
   System.RegularExpressions,
   System.Generics.Collections,
   System.Generics.Defaults,
+  System.Threading,
   PasTree.Types,
   PasTree.Preprocessor,
   PasTree.Ast,
@@ -357,6 +358,31 @@ type
     // two files and re-parsed the one it found - 12 of the lint's 13 s on a
     // 1,566-unit project.
     FForms: TDictionary<string, TLintFormInfo>;
+    // CheckUnits' lock, shared by the lints of one parallel run (nil when
+    // this lint runs alone): what writes outside the lint - a hydration,
+    // the word index of the units nobody loaded - takes it.
+    FLock: TObject;
+    // A lint of CheckUnits' run shares its main lint's walk past the loaded
+    // models (FNLNodes, FNLPaths, FNLOut - taken under FLock), not owning it.
+    FNLShared: Boolean;
+    // Hydrated's locks, one per model id modulo their count (nil alone).
+    FStripes: TArray<TObject>;
+    // ImplNodeOf's answers, and PastLoadedOut's and NLPath's of the shared
+    // walk: read without the lock.
+    FImplNodes: TDictionary<Int64, Integer>;
+    FNLOutMemo: TDictionary<Integer, TArray<Integer>>;
+    FNLPathMemo: TDictionary<Integer, string>;
+    // LinkEffect's answers of the whole run (CheckUnits: the main lint's
+    // FEffect, under FLock), beside this lint's own.
+    FSharedEffect: TDictionary<Integer, string>;
+    class function K64(AMid, ASym: Integer): Int64; static; inline;
+    procedure Lock;
+    function NLPath(ANode: Integer): string;
+    procedure Unlock;
+    function Hydrated(AMid: Integer): Boolean;
+    function ImplNodeOf(AMid, ASym: Integer): Integer;
+    function NotLoadedOut(AMid: Integer; const APath: string): TArray<string>;
+    procedure ScanNotLoaded(const APaths: TArray<string>);
     function FormInfo(const AFile: string): TLintFormInfo;
     function IsLight(AMid: Integer): Boolean;
     procedure BuildGraph;
@@ -646,6 +672,9 @@ begin
   FNLOut := TDictionary<Integer, TArray<Integer>>.Create;
   FLoadNeeded := TDictionary<string, Boolean>.Create;
   FForms := TDictionary<string, TLintFormInfo>.Create;
+  FImplNodes := TDictionary<Int64, Integer>.Create;
+  FNLOutMemo := TDictionary<Integer, TArray<Integer>>.Create;
+  FNLPathMemo := TDictionary<Integer, string>.Create;
   for var LMid := 0 to FProj.ModelCount - 1 do
   begin
     LM := FProj.Model(LMid);
@@ -658,11 +687,17 @@ end;
 
 destructor TUsesLint.Destroy;
 begin
+  FNLPathMemo.Free;
+  FNLOutMemo.Free;
+  FImplNodes.Free;
   FForms.Free;
   FLoadNeeded.Free;
-  FNLOut.Free;
-  FNLPaths.Free;
-  FNLNodes.Free;
+  if not FNLShared then
+  begin
+    FNLOut.Free;
+    FNLPaths.Free;
+    FNLNodes.Free;
+  end;
   FLightNeeded.Free;
   FInlineLight.Free;
   FGlobalInit.Free;
@@ -678,6 +713,90 @@ end;
 
 // A light model (TPasSemaProject.LightPaths): its implementation - bodies,
 // implementation `uses`, initialization - was never analyzed.
+procedure TUsesLint.Lock;
+begin
+  if FLock <> nil then
+    TMonitor.Enter(FLock);
+end;
+
+procedure TUsesLint.Unlock;
+begin
+  if FLock <> nil then
+    TMonitor.Exit(FLock);
+end;
+
+function TUsesLint.Hydrated(AMid: Integer): Boolean;
+begin
+  // Its text in place: nothing to write, no lock (EnsureHydrated's own
+  // first test).
+  if (AMid < 0) or (AMid >= FProj.ModelCount) or
+     not FProj.Model(AMid).Demoted then
+    Exit(FProj.EnsureHydrated(AMid));
+  if FStripes = nil then
+    Exit(FProj.EnsureHydrated(AMid));
+  // One model at a time - two workers rehydrating the same one would race -
+  // but different models in parallel (EnsureHydrated writes only its own
+  // model, as HydrateModels runs it).
+  TMonitor.Enter(FStripes[AMid mod Length(FStripes)]);
+  try
+    Result := FProj.EnsureHydrated(AMid);
+  finally
+    TMonitor.Exit(FStripes[AMid mod Length(FStripes)]);
+  end;
+end;
+
+// The body node of routine (AMid, ASym): RoutineImplNode, which hydrates
+// the model to pair the headers.
+function TUsesLint.ImplNodeOf(AMid, ASym: Integer): Integer;
+begin
+  // Hydrated first, outside the shared lock; then the pairing, whose caches
+  // are the navigator's (CacheOf), under it.
+  if not Hydrated(AMid) then
+    Exit(NIL_NODE);
+  if FImplNodes.TryGetValue(K64(AMid, ASym), Result) then
+    Exit;
+  if FLock <> nil then
+    FNav.PrepareRoutinePairs(AMid, FLock);
+  Lock;
+  try
+    Result := FNav.RoutineImplNode(AMid, ASym);
+  finally
+    Unlock;
+  end;
+  FImplNodes.Add(K64(AMid, ASym), Result);
+end;
+
+class function TUsesLint.K64(AMid, ASym: Integer): Int64;
+begin
+  Result := (Int64(AMid) shl 32) or Cardinal(ASym);
+end;
+
+// A loaded model's not-loaded imports (AMid >= 0), else what the unit
+// nobody loaded at APath lists (the word index, filled on first ask).
+function TUsesLint.NotLoadedOut(AMid: Integer;
+  const APath: string): TArray<string>;
+begin
+  Lock;
+  try
+    if AMid >= 0 then
+      Result := FProj.NotLoadedImports(AMid)
+    else
+      Result := FProj.NotLoadedUses(APath);
+  finally
+    Unlock;
+  end;
+end;
+
+procedure TUsesLint.ScanNotLoaded(const APaths: TArray<string>);
+begin
+  Lock;
+  try
+    FProj.ScanNotLoaded(APaths);
+  finally
+    Unlock;
+  end;
+end;
+
 function TUsesLint.IsLight(AMid: Integer): Boolean;
 begin
   Result := FProj.IsLight(AMid);
@@ -720,6 +839,20 @@ var
 begin
   if FEffect.TryGetValue(AMid, Result) then
     Exit;
+  // A lint of CheckUnits' run: another may have read it (the file's text).
+  if FSharedEffect <> nil then
+  begin
+    Lock;
+    try
+      if FSharedEffect.TryGetValue(AMid, Result) then
+      begin
+        FEffect.Add(AMid, Result);
+        Exit;
+      end;
+    finally
+      Unlock;
+    end;
+  end;
   LM := FProj.Model(AMid);
   Result := '';
   LSec := ModuleChild(LM, nkInitSec);
@@ -747,6 +880,15 @@ begin
       end;
   end;
   FEffect.Add(AMid, Result);
+  if FSharedEffect <> nil then
+  begin
+    Lock;
+    try
+      FSharedEffect.AddOrSetValue(AMid, Result);
+    finally
+      Unlock;
+    end;
+  end;
 end;
 
 // Whether a binding to AExt needs its unit in `uses`: a unit-level
@@ -916,12 +1058,31 @@ var
   LKey: string;
 begin
   LKey := LowerCase(APath);
-  if not FNLNodes.TryGetValue(LKey, Result) then
-  begin
-    Result := FProj.ModelCount + FNLPaths.Count;
-    FNLPaths.Add(APath);
-    FNLNodes.Add(LKey, Result);
+  Lock;
+  try
+    if not FNLNodes.TryGetValue(LKey, Result) then
+    begin
+      Result := FProj.ModelCount + FNLPaths.Count;
+      FNLPaths.Add(APath);
+      FNLNodes.Add(LKey, Result);
+    end;
+  finally
+    Unlock;
   end;
+end;
+
+// The path of NLNode ANode.
+function TUsesLint.NLPath(ANode: Integer): string;
+begin
+  if FNLPathMemo.TryGetValue(ANode, Result) then
+    Exit;
+  Lock;
+  try
+    Result := FNLPaths[ANode - FProj.ModelCount];
+  finally
+    Unlock;
+  end;
+  FNLPathMemo.Add(ANode, Result);
 end;
 
 // The targets of ANode's `uses` past the loaded graph (FEdges): a loaded
@@ -932,22 +1093,33 @@ var
   LPaths: TArray<string>;
   LMid: Integer;
 begin
-  if FNLOut.TryGetValue(ANode, Result) then
+  if FNLOutMemo.TryGetValue(ANode, Result) then
     Exit;
-  if ANode < FProj.ModelCount then
-    LPaths := FProj.NotLoadedImports(ANode)
-  else
-    LPaths := FProj.NotLoadedUses(FNLPaths[ANode - FProj.ModelCount]);
-  Result := nil;
-  for var LPath in LPaths do
-  begin
-    LMid := FProj.ModelIdOf(LPath);
-    if LMid >= 0 then
-      Result := Result + [LMid]
+  Lock;
+  try
+    if FNLOut.TryGetValue(ANode, Result) then
+    begin
+      FNLOutMemo.Add(ANode, Result);
+      Exit;
+    end;
+    if ANode < FProj.ModelCount then
+      LPaths := NotLoadedOut(ANode, '')
     else
-      Result := Result + [NLNode(LPath)];
+      LPaths := NotLoadedOut(-1, FNLPaths[ANode - FProj.ModelCount]);
+    Result := nil;
+    for var LPath in LPaths do
+    begin
+      LMid := FProj.ModelIdOf(LPath);
+      if LMid >= 0 then
+        Result := Result + [LMid]
+      else
+        Result := Result + [NLNode(LPath)];
+    end;
+    FNLOut.Add(ANode, Result);
+    FNLOutMemo.Add(ANode, Result);
+  finally
+    Unlock;
   end;
-  FNLOut.Add(ANode, Result);
 end;
 
 // Light mode: the units of ALost a full closure may still reach after the
@@ -995,7 +1167,7 @@ begin
       if ALess[LU] and IsLight(LU) then
         for LT in PastLoadedOut(LU) do
           if LT >= LN then
-            Visit(LT, FNLPaths[LT - LN]);
+            Visit(LT, NLPath(LT));
     // Done once every lost unit a row would name is reached.
     LLeft := 0;
     for LU := 0 to LN - 1 do
@@ -1009,10 +1181,15 @@ begin
       if LAt = LWaveEnd then
       begin
         LWave := nil;
-        for var LI := LAt to LQueue.Count - 1 do
-          if (LQueue[LI] >= LN) and not FNLOut.ContainsKey(LQueue[LI]) then
-            LWave := LWave + [FNLPaths[LQueue[LI] - LN]];
-        FProj.ScanNotLoaded(LWave);
+        Lock;
+        try
+          for var LI := LAt to LQueue.Count - 1 do
+            if (LQueue[LI] >= LN) and not FNLOut.ContainsKey(LQueue[LI]) then
+              LWave := LWave + [FNLPaths[LQueue[LI] - LN]];
+          ScanNotLoaded(LWave);
+        finally
+          Unlock;
+        end;
         LWaveEnd := LQueue.Count;
       end;
       LU := LQueue[LAt];
@@ -1241,7 +1418,7 @@ begin
              not LSeen.ContainsKey(LSym) then
           begin
             LSeen.Add(LSym, True);
-            LBody := FNav.RoutineImplNode(AMid, LSym);
+            LBody := ImplNodeOf(AMid, LSym);
             if LBody <> NIL_NODE then
               LStack.Add(LBody);
           end;
@@ -1550,7 +1727,7 @@ begin
       LLight.AddOrSetValue(AMid, True);
       FLightNeeded.AddOrSetValue(AMid, True);
     end;
-    LImpl := FNav.RoutineImplNode(AMid, ASym);
+    LImpl := ImplNodeOf(AMid, ASym);
     LM := FProj.Model(AMid);
     LDecl := RoutineNodeOf(LM, ASym);
     if LDecl <> NIL_NODE then
@@ -1692,7 +1869,7 @@ begin
           for var LClass in LInfo.Classes do
             LQueue.Add(TPair<Integer, string>.Create(LX.UnitId, LClass));
         end;
-        if not FProj.EnsureHydrated(LX.UnitId) then
+        if not Hydrated(LX.UnitId) then
           Break;
         LX := FProj.AncestorOfX(LX);
         Inc(LDepth);
@@ -1750,7 +1927,7 @@ var
   end;
 
 begin
-  if not FProj.EnsureHydrated(AMid) then
+  if not Hydrated(AMid) then
     Exit;
   LM := FProj.Model(AMid);
   // A program, a library, a package: its uses are its contents - but which
@@ -2036,6 +2213,83 @@ begin
   end;
 end;
 
+// CheckUnit(AMid, AEdges) of every unit of AMids, into ALint - on the
+// analysis's pool (TPasSemaProject.ParallelRun): the units in contiguous
+// slices, each checked by a lint of its own (its own caches; one lock for
+// what writes outside a lint), then merged in the slices' order - the rows
+// as one loop adds them, the light units and the dead edges as sets.
+// Single-threaded, or a few units: ALint checks them itself.
+procedure CheckUnits(ALint: TUsesLint; const AMids: TArray<Integer>;
+  AEdges: Boolean);
+var
+  LMids: TArray<Integer>;
+  LLints: TArray<TUsesLint>;
+  LLock: TObject;
+  LStripes: TArray<TObject>;
+  LK, LN: Integer;
+begin
+  LMids := nil;
+  for var LMid in AMids do
+    if (LMid >= 0) and (LMid < ALint.FProj.ModelCount) then
+      LMids := LMids + [LMid];
+  LN := Length(LMids);
+  LK := Min(LN div 8, 2 * Max(1, TThreadPool.Default.MaxWorkerThreads));
+  if ALint.FProj.SingleThreaded or (LK < 2) then
+  begin
+    for var LMid in LMids do
+      ALint.CheckUnit(LMid, AEdges);
+    Exit;
+  end;
+  // The units' own text, read by each check: hydrated here, in parallel.
+  ALint.FProj.HydrateModels(LMids);
+  LLock := TObject.Create;
+  SetLength(LStripes, 64);
+  for var LI := 0 to High(LStripes) do
+    LStripes[LI] := TObject.Create;
+  SetLength(LLints, LK);
+  try
+    for var LI := 0 to LK - 1 do
+    begin
+      LLints[LI] := TUsesLint.Create(ALint.FNav);
+      LLints[LI].FOptions := ALint.FOptions;
+      LLints[LI].FLock := LLock;
+      LLints[LI].FStripes := LStripes;
+      // One walk past the loaded models for all of them: what one scans of
+      // the units nobody loaded, the others find done.
+      LLints[LI].FNLOut.Free;
+      LLints[LI].FNLPaths.Free;
+      LLints[LI].FNLNodes.Free;
+      LLints[LI].FNLOut := ALint.FNLOut;
+      LLints[LI].FNLPaths := ALint.FNLPaths;
+      LLints[LI].FNLNodes := ALint.FNLNodes;
+      LLints[LI].FNLShared := True;
+      LLints[LI].FSharedEffect := ALint.FEffect;
+    end;
+    ALint.FProj.ParallelRun(LK - 1,
+      procedure(ASlice: Integer)
+      begin
+        for var LI := LN * ASlice div LK to LN * (ASlice + 1) div LK - 1 do
+          LLints[ASlice].CheckUnit(LMids[LI], AEdges);
+      end);
+    for var LLint in LLints do
+    begin
+      ALint.FRows.AddRange(LLint.FRows);
+      for var LMid in LLint.FLightNeeded.Keys do
+        ALint.FLightNeeded.AddOrSetValue(LMid, True);
+      for var LPath in LLint.FLoadNeeded.Keys do
+        ALint.FLoadNeeded.AddOrSetValue(LPath, True);
+      for var LEdge in LLint.FDeadEdges.Keys do
+        ALint.FDeadEdges.AddOrSetValue(LEdge, True);
+    end;
+  finally
+    for var LLint in LLints do
+      LLint.Free;
+    for var LStripe in LStripes do
+      LStripe.Free;
+    LLock.Free;
+  end;
+end;
+
 // FindUnreferencedUnits over a lint the caller owns (LintPromotions reads
 // what it recorded).
 function UnreferencedRows(LLint: TUsesLint; const AMids: TArray<Integer>;
@@ -2089,11 +2343,7 @@ begin
   LRows := TList<TPasUnreferencedUnit>.Create;
   try
     LLint.FOptions := AOptions;
-    for var LRoot in LLint.FRoots do
-      LLint.CheckUnit(LRoot, True);
-    for var LMid in AMids do
-      if (LMid >= 0) and (LMid < LProj.ModelCount) then
-        LLint.CheckUnit(LMid, True);
+    CheckUnits(LLint, LLint.FRoots + AMids, True);
     LLive := LLint.LiveUnits;
     // A unit kept for its global initialization - its own, or one only it
     // brings in - is not reported, and it keeps what it really uses: the
@@ -2221,9 +2471,7 @@ begin
     // Both reports, run as a host runs them; every light unit an answer had
     // to treat as unknown is recorded on the way.
     LRowsLint.FOptions := AOptions;
-    for var LMid in AMids do
-      if (LMid >= 0) and (LMid < ANav.Project.ModelCount) then
-        LRowsLint.CheckUnit(LMid);
+    CheckUnits(LRowsLint, AMids, False);
     LUnrefLint.FOptions := AOptions;
     UnreferencedRows(LUnrefLint, AMids, AOptions);
     for var LMid in LRowsLint.FLightNeeded.Keys do
@@ -2277,9 +2525,7 @@ begin
   LLint := TUsesLint.Create(ANav);
   try
     LLint.FOptions := AOptions;
-    for var LMid in AMids do
-      if (LMid >= 0) and (LMid < ANav.Project.ModelCount) then
-        LLint.CheckUnit(LMid);
+    CheckUnits(LLint, AMids, False);
     Result := LLint.FRows.ToArray;
     ANav.NotSearched := LLint.FLightNeeded.Count + LLint.FLoadNeeded.Count;
   finally
@@ -2321,6 +2567,17 @@ type
     At: string;            // 'File.pas:12'
   end;
 
+  // A reference hit placed by Search (TUnusedLint.PlaceHit).
+  TUnusedHit = record
+    Mid, Node: Integer;    // where it is
+    BMid, BSym: Integer;   // what it binds
+    ByName: Boolean;       // not mapped back: by the name it highlights
+    Declared: Boolean;     // a declaration naming (BMid, BSym)
+    Deferred: Boolean;     // on a pool worker: placed again on the caller's
+    SiteReady: Boolean;    // Site made
+    Site: TUnusedSite;
+  end;
+
   TUnusedLint = class
   private
     FNav: TPasNavigator;
@@ -2354,12 +2611,26 @@ type
     FFormAsked: TDictionary<Int64, Boolean>;  // FormBinds' answers
     FFormsRead: Boolean;  // the form files read once for this run (FormBinds)
     FSearched: TDictionary<Int64, Boolean>;  // the candidates Search asked about
+    // The library units whose bodies can name an own declaration
+    // (LibraryWithin), once computed (FWithinDone).
+    FWithin: TArray<Boolean>;
+    FWithinAny, FWithinDone: Boolean;
+    function LibraryWithin(out AAny: Boolean): TArray<Boolean>;
     procedure PlaceInherited;
+    function PlaceHit(const AH: TPasRefHit; AReadOnly: Boolean): TUnusedHit;
+    function PlaceHits(AHits: TList<TPasRefHit>): TArray<TUnusedHit>;
+    function SiteOf(const AH: TPasRefHit; AMid, ANode: Integer;
+      AReadOnly: Boolean; out AReady: Boolean): TUnusedSite;
+    procedure PrepareDeclAt(const AMids: TArray<Integer>);
+    function DeclMapOf(AMid: Integer): TDictionary<Integer, Integer>;
     function FormBinds(AMid, ASym: Integer): Boolean;
     procedure Hard(AKey: Int64);
-    function UsersOf(LM: TPasSemaModel; AMid, ANode: Integer): TArray<Int64>;
+    // UsersOf, PlainWrite: False when AReadOnly (on a pool worker) and a
+    // step that writes was needed (the answer is then not made).
+    function UsersOf(LM: TPasSemaModel; AMid, ANode: Integer;
+      AReadOnly: Boolean; out AUsers: TArray<Int64>): Boolean;
     function PlainWrite(LM: TPasSemaModel; AMid, ANode: Integer;
-      out ACall: Boolean): Boolean;
+      AReadOnly: Boolean; out AWrite, ACall: Boolean): Boolean;
     function MayBeOnlyWritten(AKey: Int64): Boolean;
     procedure Derive(ARows: Boolean);
     procedure InheritDoubts;
@@ -3091,17 +3362,12 @@ end;
 function TUnusedLint.DeclaredAt(AMid, ANode: Integer;
   out ASym: Integer): Boolean;
 var
-  LM: TPasSemaModel;
   LMap: TDictionary<Integer, Integer>;
 begin
   if not FDeclAt.TryGetValue(AMid, LMap) then
   begin
-    LMap := TDictionary<Integer, Integer>.Create;
+    LMap := DeclMapOf(AMid);
     FDeclAt.Add(AMid, LMap);
-    LM := FProj.Model(AMid);
-    for var LSym := 0 to LM.SymCount - 1 do
-      if LM.Symbols[LSym].DeclNode <> NIL_NODE then
-        LMap.AddOrSetValue(LM.Symbols[LSym].DeclNode, LSym);
   end;
   Result := LMap.TryGetValue(ANode, ASym);
 end;
@@ -3229,6 +3495,165 @@ begin
   end;
 end;
 
+// What hit AH binds (Search): its model and node, the declaration it is
+// bound to - or declares (Declared: a descendant's `property X;`) - or
+// ByName (the hit cannot be mapped back). AReadOnly: on a pool worker -
+// what would write (IdentAt's cache, DeclaredAt's map, a hydration) is not
+// done and Deferred says so; the caller places the hit again on its thread.
+// The site (SiteOf) is made too when AH binds a candidate.
+function TUnusedLint.PlaceHit(const AH: TPasRefHit;
+  AReadOnly: Boolean): TUnusedHit;
+var
+  LM: TPasSemaModel;
+  LIdent: TPasNavIdent;
+  LExt: TPasExtRef;
+  LNotReady: Boolean;
+begin
+  Result := Default(TUnusedHit);
+  Result.Mid := FNav.ModelIdOf(AH.FilePath);
+  Result.Node := NIL_NODE;
+  LM := nil;
+  if Result.Mid >= 0 then
+  begin
+    LM := FProj.Model(Result.Mid);
+    if AH.Implicit then
+      Result.Node := AH.IndexNode
+    else if AReadOnly then
+    begin
+      if not FNav.IdentNodeAt(Result.Mid, AH.Line, AH.Col, Result.Node,
+         LNotReady) then
+        Result.Node := NIL_NODE;
+      if LNotReady then
+      begin
+        Result.Deferred := True;
+        Exit;
+      end;
+    end
+    else if FNav.IdentAt(Result.Mid, AH.Line, AH.Col, LIdent) then
+      Result.Node := LIdent.Node;
+  end;
+  if Result.Node = NIL_NODE then
+  begin
+    Result.ByName := True;
+    Exit;
+  end;
+  if (Result.Node >= 0) and (Result.Node < Length(LM.RefMap)) and
+     (LM.RefMap[Result.Node] <> NIL_SYM) then
+  begin
+    Result.BMid := Result.Mid;
+    Result.BSym := LM.RefMap[Result.Node];
+  end
+  else if LM.ExtRefMap.TryGetValue(Result.Node, LExt) then
+  begin
+    Result.BMid := LExt.UnitId;
+    Result.BSym := LExt.Sym;
+  end
+  else if AReadOnly and not FDeclAt.ContainsKey(Result.Mid) then
+  begin
+    Result.Deferred := True;
+    Exit;
+  end
+  else if DeclaredAt(Result.Mid, Result.Node, Result.BSym) then
+  begin
+    Result.BMid := Result.Mid;
+    Result.Declared := True;
+  end
+  else
+  begin
+    Result.ByName := True;
+    Exit;
+  end;
+  // The site, for a candidate: whether it is still weighed when the hit is
+  // applied (FHard) is decided then.
+  if FCount.ContainsKey(K(Result.BMid, Result.BSym)) then
+    Result.Site := SiteOf(AH, Result.Mid, Result.Node, AReadOnly,
+      Result.SiteReady);
+end;
+
+// The site hit AH (on node ANode of model AMid) makes. AReady False: on a
+// pool worker (AReadOnly), a step that writes was needed - made again on the
+// caller's thread.
+function TUnusedLint.SiteOf(const AH: TPasRefHit; AMid, ANode: Integer;
+  AReadOnly: Boolean; out AReady: Boolean): TUnusedSite;
+var
+  LM: TPasSemaModel;
+begin
+  Result := Default(TUnusedSite);
+  LM := FProj.Model(AMid);
+  AReady := False;
+  if not UsersOf(LM, AMid, ANode, AReadOnly, Result.Users) then
+    Exit;
+  if not PlainWrite(LM, AMid, ANode, AReadOnly, Result.Write, Result.Call) then
+    Exit;
+  Result.At := Format('%s:%d', [ExtractFileName(AH.FilePath), AH.Line]);
+  AReady := True;
+end;
+
+// Every hit placed (PlaceHit), on the pool: first, on this thread, the hit
+// models hydrated with their position caches and DeclaredAt's maps built.
+function TUnusedLint.PlaceHits(AHits: TList<TPasRefHit>): TArray<TUnusedHit>;
+var
+  LMids: TArray<Integer>;
+  LSeen: TDictionary<Integer, Boolean>;
+  LResult: TArray<TUnusedHit>;
+  LHits: TArray<TPasRefHit>;
+begin
+  LHits := AHits.ToArray;
+  LMids := nil;
+  LSeen := TDictionary<Integer, Boolean>.Create;
+  try
+    for var LH in LHits do
+    begin
+      var LMid := FNav.ModelIdOf(LH.FilePath);
+      if (LMid >= 0) and LSeen.TryAdd(LMid, True) then
+        LMids := LMids + [LMid];
+    end;
+  finally
+    LSeen.Free;
+  end;
+  FNav.PrepareCaches(LMids);
+  PrepareDeclAt(LMids);
+  SetLength(LResult, Length(LHits));
+  FProj.ParallelRun(High(LHits),
+    procedure(AIdx: Integer)
+    begin
+      LResult[AIdx] := PlaceHit(LHits[AIdx], True);
+    end);
+  Result := LResult;
+end;
+
+// DeclaredAt's maps of AMids, built on the pool (each reads its model only)
+// and added here: afterwards DeclaredAt of them only reads.
+procedure TUnusedLint.PrepareDeclAt(const AMids: TArray<Integer>);
+var
+  LTodo: TArray<Integer>;
+  LMaps: TArray<TDictionary<Integer, Integer>>;
+begin
+  LTodo := nil;
+  for var LMid in AMids do
+    if not FDeclAt.ContainsKey(LMid) then
+      LTodo := LTodo + [LMid];
+  SetLength(LMaps, Length(LTodo));
+  FProj.ParallelRun(High(LTodo),
+    procedure(AIdx: Integer)
+    begin
+      LMaps[AIdx] := DeclMapOf(LTodo[AIdx]);
+    end);
+  for var LIdx := 0 to High(LTodo) do
+    FDeclAt.Add(LTodo[LIdx], LMaps[LIdx]);
+end;
+
+function TUnusedLint.DeclMapOf(AMid: Integer): TDictionary<Integer, Integer>;
+var
+  LM: TPasSemaModel;
+begin
+  Result := TDictionary<Integer, Integer>.Create;
+  LM := FProj.Model(AMid);
+  for var LSym := 0 to LM.SymCount - 1 do
+    if LM.Symbols[LSym].DeclNode <> NIL_NODE then
+      Result.AddOrSetValue(LM.Symbols[LSym].DeclNode, LSym);
+end;
+
 // The references of every candidate in one pass: a hit marks what it binds
 // to, and a property every link up its redeclaration chain (a descendant's
 // `property X;` binds to its own link, and removing the ancestor's breaks
@@ -3238,11 +3663,10 @@ var
   LRefs: TArray<TPasExtRef>;
   LExt: TPasExtRef;
   LHits: TList<TPasRefHit>;
-  LIdent: TPasNavIdent;
-  LM: TPasSemaModel;
   LByName: TDictionary<string, Boolean>;
-  LMid, LNode, LBMid, LBSym, LPMid, LPSym: Integer;
+  LBMid, LBSym, LPMid, LPSym: Integer;
   LNew: TDictionary<Int64, Boolean>;
+  LPlaced: TArray<TUnusedHit>;
 begin
   MarkRepublished;
   // The candidates not searched yet: all of them, but in CheckUnusedSymbols'
@@ -3270,53 +3694,38 @@ begin
   LHits := TList<TPasRefHit>.Create;
   try
     if LRefs <> nil then
-      FNav.CollectReferencesOfAll(LRefs, LHits);
-    for var LH in LHits do
     begin
+      // Not searched: only the library bodies the demand would have made
+      // full (UnusedLintDemand) - the rest cannot name a candidate.
+      var LAny: Boolean;
+      var LWithin := LibraryWithin(LAny);
+      FNav.CollectReferencesOfAll(LRefs, LHits, False, -1, LWithin);
+    end;
+    // Each hit placed on the pool (PlaceHits: what it binds, the site it
+    // makes - reads only), then applied here in the hits' order, as one
+    // loop did it.
+    LPlaced := PlaceHits(LHits);
+    for var LIdx := 0 to LHits.Count - 1 do
+    begin
+      var LH := LHits[LIdx];
+      var LP := LPlaced[LIdx];
+      if LP.Deferred then
+        LP := PlaceHit(LH, False);
       // A hit that cannot be mapped back to what it binds - in an include
       // file, which no model is named after - marks every candidate of the
       // name it highlights: a use is never lost, a namesake kept at worst.
-      LMid := FNav.ModelIdOf(LH.FilePath);
-      LNode := NIL_NODE;
-      LM := nil;
-      if LMid >= 0 then
-      begin
-        LM := FProj.Model(LMid);
-        if LH.Implicit then
-          LNode := LH.IndexNode
-        else if FNav.IdentAt(LMid, LH.Line, LH.Col, LIdent) then
-          LNode := LIdent.Node;
-      end;
-      if LNode = NIL_NODE then
+      if LP.ByName then
       begin
         LByName.AddOrSetValue(LowerCase(Copy(LH.Snippet, LH.HiFrom + 1,
           LH.HiTo - LH.HiFrom)), True);
         Continue;
       end;
-      if (LNode >= 0) and (LNode < Length(LM.RefMap)) and
-         (LM.RefMap[LNode] <> NIL_SYM) then
-      begin
-        LBMid := LMid;
-        LBSym := LM.RefMap[LNode];
-      end
-      else if LM.ExtRefMap.TryGetValue(LNode, LExt) then
-      begin
-        LBMid := LExt.UnitId;
-        LBSym := LExt.Sym;
-      end
-      else if DeclaredAt(LMid, LNode, LBSym) then
-      begin
-        // A descendant's `property X;` is a declaration naming the
-        // ancestor's: the property it declares, and every link up.
-        LBMid := LMid;
+      LBMid := LP.BMid;
+      LBSym := LP.BSym;
+      // A descendant's `property X;` is a declaration naming the
+      // ancestor's: the property it declares, and every link up.
+      if LP.Declared then
         Hard(K(LBMid, LBSym));
-      end
-      else
-      begin
-        LByName.AddOrSetValue(LowerCase(Copy(LH.Snippet, LH.HiFrom + 1,
-          LH.HiTo - LH.HiFrom)), True);
-        Continue;
-      end;
       FUsed.AddOrSetValue(K(LBMid, LBSym), True);
       // Placed: the declarations it sits in, and whether it is assigned.
       if FCount.ContainsKey(K(LBMid, LBSym)) and
@@ -3328,11 +3737,9 @@ begin
           LSites := TList<TUnusedSite>.Create;
           FUses.Add(K(LBMid, LBSym), LSites);
         end;
-        var LSite := Default(TUnusedSite);
-        LSite.Users := UsersOf(LM, LMid, LNode);
-        LSite.Write := PlainWrite(LM, LMid, LNode, LSite.Call);
-        LSite.At := Format('%s:%d', [ExtractFileName(LH.FilePath), LH.Line]);
-        LSites.Add(LSite);
+        if not LP.SiteReady then
+          LP.Site := SiteOf(LH, LP.Mid, LP.Node, False, LP.SiteReady);
+        LSites.Add(LP.Site);
       end;
       for var LDepth := 1 to 64 do
       begin
@@ -3423,7 +3830,7 @@ begin
       LNode := Integer(Cardinal(LWhere and $FFFFFFFF));
       LM := FProj.Model(LMid);
       var LSite := Default(TUnusedSite);
-      LSite.Users := UsersOf(LM, LMid, LNode);
+      UsersOf(LM, LMid, LNode, False, LSite.Users);
       if VisPos(LM, LM.Tree.NodeLeftmostVis(LNode), LFi, LLine, LCol) then
         LSite.At := Format('%s:%d', [ExtractFileName(
           LM.Tree.Source.FileNames[LFi]), LLine]);
@@ -3481,6 +3888,102 @@ end;
 
 // The doubts of the rows left: the name written in a branch not compiled
 // or in a string literal of the project's own files, a record's field.
+// One file's words for AddDoubts: those of the branches it does not compile
+// and those its string literals spell - each with where, in text order.
+type
+  TDoubtWord = record
+    Word, At: string;
+  end;
+
+  TDoubtFile = record
+    FileName: string;
+    Inactive: TArray<TDoubtWord>;
+    Strings: TArray<TDoubtWord>;
+  end;
+
+// Every word of 3 letters or more in AText (at AOffset of ATS), in order.
+procedure DoubtWords(const ATS: TPasTokenStream; const AFile, AText: string;
+  AOffset: Integer; AList: TList<TDoubtWord>);
+var
+  LJ, LK, LLine, LCol: Integer;
+  LW: TDoubtWord;
+begin
+  LJ := 1;
+  while LJ <= Length(AText) do
+  begin
+    if (AText[LJ].IsLetter or (AText[LJ] = '_')) and ((LJ = 1) or
+       not (AText[LJ - 1].IsLetterOrDigit or (AText[LJ - 1] = '_'))) then
+    begin
+      LK := LJ;
+      while (LK <= Length(AText)) and (AText[LK].IsLetterOrDigit or
+        (AText[LK] = '_')) do
+        Inc(LK);
+      LW.Word := LowerCase(Copy(AText, LJ, LK - LJ));
+      if Length(LW.Word) >= 3 then
+      begin
+        ATS.OffsetToLineCol(AOffset + LJ - 1, LLine, LCol);
+        LW.At := Format('%s:%d', [ExtractFileName(AFile), LLine]);
+        AList.Add(LW);
+      end;
+      LJ := LK;
+    end
+    else
+      Inc(LJ);
+  end;
+end;
+
+// The string literals of AText, outside comments: one scan. A lookup by
+// name passes the name as the whole literal: FindClass('TFoo'),
+// 'Unit.TFoo', 'TFoo.Bar' - a word inside a message or a query is not one
+// (3,292 rows of 8,598 on a 4,000-unit group had such a doubt). Kept: the
+// literal, and its last segment ('#' + it) for a type.
+procedure DoubtStrings(const ATS: TPasTokenStream; const AFile: string;
+  AList: TList<TDoubtWord>);
+var
+  LText, LWord: string;
+  LI, LStart, LLine, LCol: Integer;
+  LW: TDoubtWord;
+begin
+  LText := ATS.Source;
+  LI := 1;
+  while LI <= Length(LText) do
+  begin
+    case LText[LI] of
+      '/':
+        if (LI < Length(LText)) and (LText[LI + 1] = '/') then
+          while (LI <= Length(LText)) and not CharInSet(LText[LI],
+            [#10, #13]) do
+            Inc(LI);
+      '{':
+        while (LI <= Length(LText)) and (LText[LI] <> '}') do
+          Inc(LI);
+      '''':
+        begin
+          LStart := LI + 1;
+          Inc(LI);
+          while (LI <= Length(LText)) and not CharInSet(LText[LI],
+            ['''', #10, #13]) do
+            Inc(LI);
+          LWord := LowerCase(Trim(Copy(LText, LStart, LI - LStart)));
+          if IsValidIdent(LWord, True) and (Length(LWord) >= 3) then
+          begin
+            ATS.OffsetToLineCol(LStart - 1, LLine, LCol);
+            LW.At := Format('%s:%d', [ExtractFileName(AFile), LLine]);
+            LW.Word := LWord;
+            AList.Add(LW);
+            if LWord.Contains('.') then
+              LWord := Copy(LWord, LWord.LastIndexOf('.') + 2, MaxInt);
+            LW.Word := '#' + LWord;
+            AList.Add(LW);
+          end;
+        end;
+    end;
+    Inc(LI);
+  end;
+end;
+
+// The doubts of the rows left: the name written in a branch not compiled
+// or in a string literal of the project's own files, a record's field.
 procedure TUnusedLint.AddDoubts;
 var
   LOwnerName: string;
@@ -3489,127 +3992,127 @@ var
   LKind: TSemaScopeKind;
   LDone: TDictionary<string, Boolean>;
   LM: TPasSemaModel;
-  LTS: TPasTokenStream;
-  LText, LFile, LWord, LAt: string;
-  LI, LStart, LLine, LCol: Integer;
+  LFile, LWord, LAt: string;
   LC: TPasUnusedSymbol;
-
-  procedure AddWords(ADict: TDictionary<string, string>; const AText: string;
-    AOffset: Integer);
-  var
-    LJ, LK: Integer;
-  begin
-    LJ := 1;
-    while LJ <= Length(AText) do
-    begin
-      if (AText[LJ].IsLetter or (AText[LJ] = '_')) and ((LJ = 1) or
-         not (AText[LJ - 1].IsLetterOrDigit or (AText[LJ - 1] = '_'))) then
-      begin
-        LK := LJ;
-        while (LK <= Length(AText)) and (AText[LK].IsLetterOrDigit or
-          (AText[LK] = '_')) do
-          Inc(LK);
-        LWord := LowerCase(Copy(AText, LJ, LK - LJ));
-        if (Length(LWord) >= 3) and not ADict.ContainsKey(LWord) then
-        begin
-          LTS.OffsetToLineCol(AOffset + LJ - 1, LLine, LCol);
-          ADict.Add(LWord, Format('%s:%d', [ExtractFileName(LFile), LLine]));
-        end;
-        LJ := LK;
-      end
-      else
-        Inc(LJ);
-    end;
-  end;
-
+  LMids: TArray<Integer>;
+  LFiles: TArray<TArray<Integer>>;
+  LRead: TArray<TArray<TDoubtFile>>;
 begin
   LInactive := TDictionary<string, string>.Create;
   LStrings := TDictionary<string, string>.Create;
   LUnitNames := TDictionary<string, string>.Create;
   LDone := TDictionary<string, Boolean>.Create;
   try
+    // The project's own units and their own files, hydrated here; their
+    // words read on the pool, each file's in order; then taken in the
+    // units' and files' order as one loop took them (the first place of a
+    // word wins, a file's literals once).
+    LMids := nil;
+    LFiles := nil;
     for var LMid := 0 to FProj.ModelCount - 1 do
-    begin
-      if FProj.IsLight(LMid) or FNav.IsUnderLibraryPath(FProj.ModelFile(LMid))
-         or not FProj.EnsureHydrated(LMid) then
-        Continue;
-      LM := FProj.Model(LMid);
-      for var LFi := 0 to High(LM.Tree.Source.Files) do
+      if not FProj.IsLight(LMid) and
+         not FNav.IsUnderLibraryPath(FProj.ModelFile(LMid)) then
+        LMids := LMids + [LMid];
+    FProj.HydrateModels(LMids);
+    SetLength(LFiles, Length(LMids));
+    for var LIdx := 0 to High(LMids) do
+      if not FProj.EnsureHydrated(LMids[LIdx]) then
+        LMids[LIdx] := -1;
+    FProj.ParallelRun(High(LMids),
+      procedure(AIdx: Integer)
+      var
+        LTM: TPasSemaModel;
       begin
-        LFile := LM.Tree.Source.FileNames[LFi];
-        if FNav.IsUnderLibraryPath(LFile) then
-          Continue;
-        LTS := LM.Tree.Source.Files[LFi];
-        if LFi <= High(LM.Tree.Source.Skipped) then
-          for var LR in LM.Tree.Source.Skipped[LFi] do
-            AddWords(LInactive, Copy(LTS.Source, LR.Start + 1, LR.EndPos -
-              LR.Start), LR.Start);
-        if not LDone.TryAdd(LowerCase(LFile), True) then
-          Continue;
-        // String literals, outside comments: one scan of the text.
-        LText := LTS.Source;
-        LI := 1;
-        while LI <= Length(LText) do
-        begin
-          case LText[LI] of
-            '/':
-              if (LI < Length(LText)) and (LText[LI + 1] = '/') then
-                while (LI <= Length(LText)) and not CharInSet(LText[LI],
-                  [#10, #13]) do
-                  Inc(LI);
-            '{':
-              while (LI <= Length(LText)) and (LText[LI] <> '}') do
-                Inc(LI);
-            '''':
-              begin
-                LStart := LI + 1;
-                Inc(LI);
-                while (LI <= Length(LText)) and not CharInSet(LText[LI],
-                  ['''', #10, #13]) do
-                  Inc(LI);
-                // A lookup by name passes the name as the whole literal:
-                // FindClass('TFoo'), 'Unit.TFoo', 'TFoo.Bar' - a word
-                // inside a message or a query is not one (3,292 rows of
-                // 8,598 on a 4,000-unit group had such a doubt). Kept: the
-                // literal, and its last segment ('#' + it) for a type.
-                LWord := LowerCase(Trim(Copy(LText, LStart, LI - LStart)));
-                if IsValidIdent(LWord, True) and (Length(LWord) >= 3) then
-                begin
-                  LTS.OffsetToLineCol(LStart - 1, LLine, LCol);
-                  LAt := Format('%s:%d', [ExtractFileName(LFile), LLine]);
-                  LStrings.TryAdd(LWord, LAt);
-                  if LWord.Contains('.') then
-                    LWord := Copy(LWord, LWord.LastIndexOf('.') + 2, MaxInt);
-                  LStrings.TryAdd('#' + LWord, LAt);
-                end;
-              end;
+        if LMids[AIdx] < 0 then
+          Exit;
+        LTM := FProj.Model(LMids[AIdx]);
+        for var LFi := 0 to High(LTM.Tree.Source.Files) do
+          if not FNav.IsUnderLibraryPath(LTM.Tree.Source.FileNames[LFi]) then
+            LFiles[AIdx] := LFiles[AIdx] + [LFi];
+      end);
+    SetLength(LRead, Length(LMids));
+    FProj.ParallelRun(High(LMids),
+      procedure(AIdx: Integer)
+      var
+        LTM: TPasSemaModel;
+        LTS: TPasTokenStream;
+        LList: TList<TDoubtWord>;
+        LName: string;
+      begin
+        if LMids[AIdx] < 0 then
+          Exit;
+        LTM := FProj.Model(LMids[AIdx]);
+        SetLength(LRead[AIdx], Length(LFiles[AIdx]));
+        LList := TList<TDoubtWord>.Create;
+        try
+          for var LK := 0 to High(LFiles[AIdx]) do
+          begin
+            var LFi := LFiles[AIdx][LK];
+            LName := LTM.Tree.Source.FileNames[LFi];
+            LTS := LTM.Tree.Source.Files[LFi];
+            LRead[AIdx][LK].FileName := LName;
+            LList.Clear;
+            if LFi <= High(LTM.Tree.Source.Skipped) then
+              for var LR in LTM.Tree.Source.Skipped[LFi] do
+                DoubtWords(LTS, LName, Copy(LTS.Source, LR.Start + 1,
+                  LR.EndPos - LR.Start), LR.Start, LList);
+            LRead[AIdx][LK].Inactive := LList.ToArray;
+            LList.Clear;
+            DoubtStrings(LTS, LName, LList);
+            LRead[AIdx][LK].Strings := LList.ToArray;
           end;
-          Inc(LI);
+        finally
+          LList.Free;
         end;
+      end);
+    for var LIdx := 0 to High(LMids) do
+      for var LK := 0 to High(LRead[LIdx]) do
+      begin
+        for var LW in LRead[LIdx][LK].Inactive do
+          LInactive.TryAdd(LW.Word, LW.At);
+        if not LDone.TryAdd(LowerCase(LRead[LIdx][LK].FileName), True) then
+          Continue;
+        for var LW in LRead[LIdx][LK].Strings do
+          LStrings.TryAdd(LW.Word, LW.At);
       end;
-    end;
     // The names every unit declares in its interface, with a unit declaring
     // each: a row's name declared by another unit is a doubt.
+    // Each unit's names on the pool, taken in the units' order.
+    var LNames: TArray<TArray<string>>;
+    SetLength(LNames, FProj.ModelCount);
+    FProj.ParallelRun(FProj.ModelCount - 1,
+      procedure(AMid: Integer)
+      var
+        LTM: TPasSemaModel;
+        LList: TList<string>;
+      begin
+        LTM := FProj.Model(AMid);
+        LList := TList<string>.Create;
+        try
+          for var LSym := 0 to LTM.SymCount - 1 do
+            if (LTM.Symbols[LSym].DeclNode <> NIL_NODE) and
+               (LTM.Symbols[LSym].Scope >= 0) and
+               (LTM.Symbols[LSym].Scope < LTM.Scopes.Count) and
+               (LTM.Scopes[LTM.Symbols[LSym].Scope].Kind = sckUnit) and
+               (LTM.Symbols[LSym].Kind in [skType, skVar, skConst,
+               skRoutine]) then
+              LList.Add(LTM.Symbols[LSym].NameLower);
+          LNames[AMid] := LList.ToArray;
+        finally
+          LList.Free;
+        end;
+      end);
     for var LMid := 0 to FProj.ModelCount - 1 do
     begin
-      LM := FProj.Model(LMid);
-      for var LSym := 0 to LM.SymCount - 1 do
-        if (LM.Symbols[LSym].DeclNode <> NIL_NODE) and
-           (LM.Symbols[LSym].Scope >= 0) and
-           (LM.Symbols[LSym].Scope < LM.Scopes.Count) and
-           (LM.Scopes[LM.Symbols[LSym].Scope].Kind = sckUnit) and
-           (LM.Symbols[LSym].Kind in [skType, skVar, skConst, skRoutine]) then
-        begin
-          LWord := LM.Symbols[LSym].NameLower;
-          if not LUnitNames.TryGetValue(LWord, LAt) then
-            LUnitNames.Add(LWord,
-              TPath.GetFileNameWithoutExtension(FProj.ModelFile(LMid)))
-          else if (Length(LAt) < 200) and not ContainsText('|' + LAt + '|',
-            '|' + TPath.GetFileNameWithoutExtension(FProj.ModelFile(LMid)) +
-            '|') then
-            LUnitNames[LWord] := LAt + '|' +
-              TPath.GetFileNameWithoutExtension(FProj.ModelFile(LMid));
-        end;
+      if LNames[LMid] = nil then
+        Continue;
+      var LUnit := TPath.GetFileNameWithoutExtension(FProj.ModelFile(LMid));
+      for LWord in LNames[LMid] do
+        if not LUnitNames.TryGetValue(LWord, LAt) then
+          LUnitNames.Add(LWord, LUnit)
+        else if (Length(LAt) < 200) and not ContainsText('|' + LAt + '|',
+          '|' + LUnit + '|') then
+          LUnitNames[LWord] := LAt + '|' + LUnit;
     end;
     for var LIdx := 0 to FCands.Count - 1 do
     begin
@@ -3715,8 +4218,8 @@ end;
 // GetX`, a field's type; every name of `FA, FB: TX`). A routine's locals
 // are passed through to the routine. nil: in none (a program's block,
 // initialization, a routine not placed) - a live use.
-function TUnusedLint.UsersOf(LM: TPasSemaModel; AMid, ANode: Integer):
-  TArray<Int64>;
+function TUnusedLint.UsersOf(LM: TPasSemaModel; AMid, ANode: Integer;
+  AReadOnly: Boolean; out AUsers: TArray<Int64>): Boolean;
 var
   LN, LC, LName, LSym, LFi, LLine, LCol, LTMid, LTSym: Integer;
   LExt: TPasExtRef;
@@ -3724,7 +4227,8 @@ var
   LKey: Int64;
   LTName: string;
 begin
-  Result := nil;
+  Result := True;
+  AUsers := nil;
   LN := LM.Tree.Nodes[ANode].Parent;
   while LN <> NIL_NODE do
   begin
@@ -3744,18 +4248,29 @@ begin
             LC := LM.Tree.Nodes[LC].NextSibling;
           end;
           if LName = NIL_NODE then
-            Exit(nil);
+            Exit;
           if DeclaredAt(AMid, LName, LSym) then
-            Exit(TArray<Int64>.Create(K(AMid, LSym)));
+          begin
+            AUsers := [K(AMid, LSym)];
+            Exit;
+          end;
           if (LName < Length(LM.RefMap)) and (LM.RefMap[LName] <> NIL_SYM) then
-            Exit(TArray<Int64>.Create(K(AMid, LM.RefMap[LName])));
+          begin
+            AUsers := [K(AMid, LM.RefMap[LName])];
+            Exit;
+          end;
           if LM.ExtRefMap.TryGetValue(LName, LExt) then
-            Exit(TArray<Int64>.Create(K(LExt.UnitId, LExt.Sym)));
+          begin
+            AUsers := [K(LExt.UnitId, LExt.Sym)];
+            Exit;
+          end;
           // A method's implementation header binds its name to nothing: the
           // navigator pairs it with the declaration (Find References from
           // the header). Once per routine.
           if not FImplSym.TryGetValue(K(AMid, LN), LKey) then
           begin
+            if AReadOnly then
+              Exit(False);   // SymbolAtFile and the memo: the caller's thread
             LKey := -1;
             if VisPos(LM, LM.Tree.NodeLeftmostVis(LName), LFi, LLine, LCol)
                and FNav.SymbolAtFile(AMid, LM.Tree.Source.FileNames[LFi],
@@ -3763,9 +4278,9 @@ begin
               LKey := K(LTMid, LTSym);
             FImplSym.Add(K(AMid, LN), LKey);
           end;
-          if LKey = -1 then
-            Exit(nil);
-          Exit(TArray<Int64>.Create(LKey));
+          if LKey <> -1 then
+            AUsers := [LKey];
+          Exit;
         end;
       nkPropertyDecl, nkVarDecl, nkConstDecl, nkTypeDecl:
         begin
@@ -3780,18 +4295,21 @@ begin
                  (LM.Scopes[LScope].Kind = sckRoutine) then
                 LLocal := True
               else
-                Result := Result + [K(AMid, LSym)];
+                AUsers := AUsers + [K(AMid, LSym)];
             end;
             LC := LM.Tree.Nodes[LC].NextSibling;
           end;
           if LLocal then
-            Result := nil
-          else if Result <> nil then
+            AUsers := nil
+          else if AUsers <> nil then
             Exit;
         end;
       nkInterfaceSec, nkImplementationSec, nkInitSec, nkFinalSec, nkUnit,
       nkProgram, nkLibrary, nkPackage:
-        Exit(nil);
+        begin
+          AUsers := nil;
+          Exit;
+        end;
     end;
     LN := LM.Tree.Nodes[LN].Parent;
   end;
@@ -3801,10 +4319,11 @@ end;
 // `Obj.FX :=`? ACall: the value assigned is not Plain - code runs to
 // compute it (`TFoo.Create`, `GetX`, a property).
 function TUnusedLint.PlainWrite(LM: TPasSemaModel; AMid, ANode: Integer;
-  out ACall: Boolean): Boolean;
+  AReadOnly: Boolean; out AWrite, ACall: Boolean): Boolean;
 var
   LCur, LP, LRhs: Integer;
   LExt: TPasExtRef;
+  LBlocked: Boolean;   // AReadOnly: a model to hydrate first
 
   // A value no code runs to compute: a literal, nil, a variable, field,
   // constant, parameter or enum value, and operators over them. A call, a
@@ -3829,9 +4348,16 @@ var
       nkIntLit, nkRealLit, nkStrLit, nkNilLit, nkCaretChar:
         Exit(True);
       nkIdent:
-        Exit((LBMid >= 0) and FProj.EnsureHydrated(LBMid) and
-          (FProj.Model(LBMid).Symbols[LBSym].Kind in [skVar, skConst, skField,
-          skParam, skEnumValue]));
+        begin
+          if (LBMid >= 0) and AReadOnly and FProj.Model(LBMid).Demoted then
+          begin
+            LBlocked := True;
+            Exit(False);
+          end;
+          Exit((LBMid >= 0) and FProj.EnsureHydrated(LBMid) and
+            (FProj.Model(LBMid).Symbols[LBSym].Kind in [skVar, skConst,
+            skField, skParam, skEnumValue]));
+        end;
       nkUnaryOp, nkBinaryOp, nkParen, nkSetCtor, nkRange, nkInlineIf,
       nkMember, nkIndex, nkDeref:
         begin
@@ -3851,8 +4377,10 @@ var
   end;
 
 begin
-  Result := False;
+  Result := True;
+  AWrite := False;
   ACall := False;
+  LBlocked := False;
   if LM.Tree.Nodes[ANode].Kind <> nkIdent then
     Exit;
   LCur := ANode;
@@ -3868,9 +4396,10 @@ begin
   if (LP = NIL_NODE) or (LM.Tree.Nodes[LP].Kind <> nkAssign) or
      (LM.Tree.Nodes[LP].FirstChild <> LCur) then
     Exit;
-  Result := True;
+  AWrite := True;
   LRhs := LM.Tree.Nodes[LCur].NextSibling;
   ACall := (LRhs <> NIL_NODE) and not Plain(LRhs);
+  Result := not LBlocked;
 end;
 
 // A field, or a unit or class variable, not `absolute` (its writes write
@@ -4245,14 +4774,18 @@ begin
 end;
 
 // The references the candidates of AMids are searched for.
-function UnusedLintDemand(ALint: TUnusedLint; ANav: TPasNavigator;
-  const AMids: TArray<Integer>): TPasDemand;
+// Which library bodies can name an own declaration at all: see
+// UnusedLintDemand. AAny: one does. nil when the analysis has no light unit.
+function TUnusedLint.LibraryWithin(out AAny: Boolean): TArray<Boolean>;
 var
-  LRefs: TArray<TPasExtRef>;
-  LExt: TPasExtRef;
   LWithin, LOwn: TArray<Boolean>;
   LAny, LMore: Boolean;
 begin
+  if FWithinDone then
+  begin
+    AAny := FWithinAny;
+    Exit(FWithin);
+  end;
   // Which library bodies can name an own declaration at all: a library unit
   // sees the project's units only through its own `uses` (either section),
   // so only one listing an own unit can (the declarations reached otherwise
@@ -4268,22 +4801,22 @@ begin
   // edges.
   LWithin := nil;
   LAny := False;
-  SetLength(LWithin, ANav.Project.ModelCount);
-  SetLength(LOwn, ANav.Project.ModelCount);
-  for var LMid := 0 to ANav.Project.ModelCount - 1 do
-    LOwn[LMid] := not ANav.Project.IsLightFile(ANav.Project.ModelFile(LMid))
-      and not ALint.ReplacesLibrary(LMid);
+  SetLength(LWithin, FProj.ModelCount);
+  SetLength(LOwn, FProj.ModelCount);
+  for var LMid := 0 to FProj.ModelCount - 1 do
+    LOwn[LMid] := not FProj.IsLightFile(FProj.ModelFile(LMid))
+      and not ReplacesLibrary(LMid);
   repeat
     LMore := False;
-    for var LMid := 0 to ANav.Project.ModelCount - 1 do
+    for var LMid := 0 to FProj.ModelCount - 1 do
     begin
-      if LWithin[LMid] or not ANav.Project.IsLight(LMid) then
+      if LWithin[LMid] or not FProj.IsLight(LMid) then
         Continue;
-      var LM := ANav.Project.Model(LMid);
+      var LM := FProj.Model(LMid);
       for var LU := 0 to High(LM.UsesList) do
       begin
         var LTarget := LM.UsesList[LU].UnitId;
-        if (LTarget >= 0) and (LTarget < ANav.Project.ModelCount) and
+        if (LTarget >= 0) and (LTarget < FProj.ModelCount) and
            (LOwn[LTarget] or LWithin[LTarget]) then
         begin
           LWithin[LMid] := True;
@@ -4294,6 +4827,22 @@ begin
       end;
     end;
   until not LMore;
+  FWithin := LWithin;
+  FWithinAny := LAny;
+  FWithinDone := True;
+  AAny := LAny;
+  Result := LWithin;
+end;
+
+function UnusedLintDemand(ALint: TUnusedLint; ANav: TPasNavigator;
+  const AMids: TArray<Integer>): TPasDemand;
+var
+  LRefs: TArray<TPasExtRef>;
+  LExt: TPasExtRef;
+  LWithin: TArray<Boolean>;
+  LAny: Boolean;
+begin
+  LWithin := ALint.LibraryWithin(LAny);
   if not LAny then
     Exit(Default(TPasDemand));
   ALint.CollectIfaceNames;

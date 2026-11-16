@@ -501,6 +501,8 @@ type
     function MemberStruct(AMid, ASym: Integer): Integer;
     function FormBinder: TPasFormBinder;
     function CacheOf(AMid: Integer): TNavCache;
+    // CacheOf's cache of a hydrated model, built: reads the model only.
+    function BuildCache(AMid: Integer): TNavCache;
     function TargetFromNode(AMid, ANode: Integer; const AName: string;
       out ATarget: TPasNavTarget): Boolean;
     function RoutineNameNodeOfSym(AMid, ASym: Integer): Integer;
@@ -690,6 +692,22 @@ type
     // The identifier token at (line, col) of model AMid's main file.
     function IdentAt(AMid, ALine, ACol: Integer;
       out AIdent: TPasNavIdent): Boolean;
+    { For a parallel pass over many positions (the unused-declarations
+      lint): every model of AMids hydrated and its position cache built -
+      the caches in parallel (ParallelRun). Call it on the caller's thread;
+      afterwards IdentNodeAt reads them from several threads. }
+    procedure PrepareCaches(const AMids: TArray<Integer>);
+    { For a worker of a parallel pass (the uses lint): model AMid's position
+      cache with its routine pairs (RoutinePeerNode's), built on the calling
+      thread when the navigator has none - the model hydrated already - and
+      kept; ALock serializes every access to the navigator's caches, which
+      a worker then takes for RoutineImplNode itself. }
+    procedure PrepareRoutinePairs(AMid: Integer; ALock: TObject);
+    { IdentAt's AIdent.Node, writing nothing: ANotReady when the model is
+      demoted or its cache is not built (PrepareCaches) - the caller asks
+      IdentAt instead, on its own thread. }
+    function IdentNodeAt(AMid, ALine, ACol: Integer; out ANode: Integer;
+      out ANotReady: Boolean): Boolean;
     // The declaration the identifier node resolved to. False for builtins
     // (no source declaration) and unresolved names.
     function ResolveDecl(AMid, ANode: Integer;
@@ -1183,9 +1201,12 @@ type
     // one by one is that many passes. It is also the scan of one symbol:
     // FindReferences and FindAssignments call it with a one-link list.
     // AOnlyMid >= 0 scans and rehydrates that model alone.
+    // AWithin: NotSearched counts only the library units it marks (nil:
+    // every one) - the restriction of a DemandReferencesOfAll with the same
+    // AWithin, which the scan's caller met first.
     procedure CollectReferencesOfAll(const ASyms: TArray<TPasExtRef>;
       AHits: TList<TPasRefHit>; AAssignOnly: Boolean = False;
-      AOnlyMid: Integer = -1);
+      AOnlyMid: Integer = -1; const AWithin: TArray<Boolean> = nil);
     { Find Implementations, part one: the cursor is on an INTERFACE method -
       the counterpart of MethodAt, and the Enabled test for that command.
       ATMid/ASym come back as the interface's own method symbol.
@@ -1777,7 +1798,6 @@ end;
 function TPasNavigator.CacheOf(AMid: Integer): TNavCache;
 var
   LM: TPasSemaModel;
-  LIdx: Integer;
 begin
   // Everything below indexes the TEXT layer, so hydrate first: a cache built
   // over a demoted model is all-empty, and (see BuiltDemoted) permanently so.
@@ -1792,6 +1812,16 @@ begin
     // frees it) and rebuild against the current model.
     FCaches.Remove(AMid);
   end;
+  Result := BuildCache(AMid);
+  FCaches.Add(AMid, Result);
+end;
+
+function TPasNavigator.BuildCache(AMid: Integer): TNavCache;
+var
+  LM: TPasSemaModel;
+  LIdx: Integer;
+begin
+  LM := FProj.Model(AMid);
   Result := TNavCache.Create;
   Result.SourceModel := LM;
   Result.BuiltDemoted := LM.Demoted;
@@ -1810,7 +1840,120 @@ begin
   for LIdx := 0 to LM.SymCount - 1 do
     if LM.Symbols[LIdx].DeclNode <> NIL_NODE then
       Result.DeclSymOfNode.AddOrSetValue(LM.Symbols[LIdx].DeclNode, LIdx);
-  FCaches.Add(AMid, Result);
+end;
+
+procedure TPasNavigator.PrepareCaches(const AMids: TArray<Integer>);
+var
+  LTodo: TArray<Integer>;
+  LBuilt: TArray<TNavCache>;
+  LCache: TNavCache;
+begin
+  CheckGeneration;
+  FProj.HydrateModels(AMids);
+  LTodo := nil;
+  for var LMid in AMids do
+  begin
+    if (LMid < 0) or (LMid >= FProj.ModelCount) or
+       FProj.Model(LMid).Demoted then
+      Continue;
+    if FCaches.TryGetValue(LMid, LCache) and
+       (LCache.SourceModel = FProj.Model(LMid)) and
+       (LCache.BuiltDemoted = FProj.Model(LMid).Demoted) then
+      Continue;
+    LTodo := LTodo + [LMid];
+  end;
+  SetLength(LBuilt, Length(LTodo));
+  FProj.ParallelRun(High(LTodo),
+    procedure(AIdx: Integer)
+    begin
+      LBuilt[AIdx] := BuildCache(LTodo[AIdx]);
+    end);
+  for var LIdx := 0 to High(LTodo) do
+  begin
+    FCaches.Remove(LTodo[LIdx]);   // a stale one (doOwnsValues frees it)
+    FCaches.Add(LTodo[LIdx], LBuilt[LIdx]);
+  end;
+end;
+
+procedure TPasNavigator.PrepareRoutinePairs(AMid: Integer; ALock: TObject);
+var
+  LCache: TNavCache;
+  LM: TPasSemaModel;
+
+  function Ready: Boolean;
+  var
+    LHave: TNavCache;
+  begin
+    Result := FCaches.TryGetValue(AMid, LHave) and (LHave.SourceModel = LM)
+      and (LHave.BuiltDemoted = LM.Demoted) and LHave.RoutinesBuilt;
+  end;
+
+begin
+  if (AMid < 0) or (AMid >= FProj.ModelCount) then
+    Exit;
+  LM := FProj.Model(AMid);
+  if LM.Demoted then
+    Exit;   // CacheOf hydrates it, under ALock
+  TMonitor.Enter(ALock);
+  try
+    if Ready then
+      Exit;
+  finally
+    TMonitor.Exit(ALock);
+  end;
+  // Built here, unlocked: it reads the model only.
+  LCache := BuildCache(AMid);
+  EnsureRoutinePairs(AMid, LCache);
+  TMonitor.Enter(ALock);
+  try
+    if Ready then
+      LCache.Free   // another worker's came first
+    else
+    begin
+      FCaches.Remove(AMid);
+      FCaches.Add(AMid, LCache);
+    end;
+  finally
+    TMonitor.Exit(ALock);
+  end;
+end;
+
+function TPasNavigator.IdentNodeAt(AMid, ALine, ACol: Integer;
+  out ANode: Integer; out ANotReady: Boolean): Boolean;
+var
+  LM: TPasSemaModel;
+  LCache: TNavCache;
+  LTS: TPasTokenStream;
+  LOffset, LRaw, LVis, LLeaf, LFirst, LLast: Integer;
+begin
+  Result := False;
+  ANotReady := False;
+  ANode := NIL_NODE;
+  if (AMid < 0) or (AMid >= FProj.ModelCount) then
+    Exit;
+  LM := FProj.Model(AMid);
+  if LM.Demoted or not FCaches.TryGetValue(AMid, LCache) or
+     (LCache.SourceModel <> LM) or (LCache.BuiltDemoted <> LM.Demoted) then
+  begin
+    ANotReady := True;
+    Exit;
+  end;
+  // IdentAt's steps, to its node.
+  LTS := LM.Tree.Source.Files[0];
+  if not LTS.OffsetOf(ALine, ACol, LOffset) then
+    Exit;
+  LRaw := LTS.IdentTokenAt(LOffset);
+  if LRaw < 0 then
+    Exit;
+  LVis := LCache.VisOfRaw[LRaw];
+  if (LVis < 0) or not LCache.NodeOfVis.TryGetValue(LVis, ANode) then
+  begin
+    ANode := NIL_NODE;
+    Exit;
+  end;
+  if UsesQualifierInfo(AMid, ANode, LLeaf, LFirst, LLast) then
+    ANode := LLeaf;
+  Result := True;
 end;
 
 // Walks up from ANode (an nkIdent) through any nested nkMember parents to the
@@ -2714,39 +2857,52 @@ end;
   tkUnknown - spurious self-name hits for methods, dropped qualifier hits
   for types - so that model was hydrated before the loop.) }
 procedure TPasNavigator.CollectReferencesOfAll(const ASyms: TArray<TPasExtRef>;
-  AHits: TList<TPasRefHit>; AAssignOnly: Boolean; AOnlyMid: Integer);
+  AHits: TList<TPasRefHit>; AAssignOnly: Boolean; AOnlyMid: Integer;
+  const AWithin: TArray<Boolean>);
 var
-  LWanted: TArray<TArray<Integer>>;   // model id -> wanted symbols; nil none
+  // Model id -> its wanted symbols, by symbol index; nil: none.
+  LWanted: TArray<TArray<Boolean>>;
   LAllPrivate: Boolean;
-  LM: TPasSemaModel;
-  LMi, LNode, LSym, LCount, LFirst: Integer;
-  LPair: TPair<Integer, TPasExtRef>;
-  LHit: TPasRefHit;
-  LCands: TList<TPasExtRef>;
-  LCand: TPasExtRef;
-  LTodo: TArray<Integer>;
+  LCount: Integer;
+  LMids, LTodo: TArray<Integer>;
+  LPer: TArray<TArray<Integer>>;      // LMids[i] -> its candidate nodes
+  LCands: TArray<TPasExtRef>;         // UnitId = model, Sym = node
+  LHits: TArray<TPasRefHit>;
+  LOk, LReady: TArray<Boolean>;
+  LAnyWithin: Boolean;
 
-  function Wants(const AList: TArray<Integer>; ASym: Integer): Boolean;
-  var
-    LIdx: Integer;
+  function Wants(AMid, ASym: Integer): Boolean;
   begin
-    for LIdx := 0 to High(AList) do
-      if AList[LIdx] = ASym then
-        Exit(True);
-    Result := False;
+    Result := (LWanted[AMid] <> nil) and (ASym >= 0) and
+      (ASym < Length(LWanted[AMid])) and LWanted[AMid][ASym];
   end;
 
 begin
-  // Light mode: what the scan below cannot see (empty in a full analysis).
-  FNotSearched := NotSearchedOf(DemandReferencesOfAll(ASyms), AOnlyMid);
+  // Light mode: what the scan below cannot see (empty in a full analysis),
+  // within AWithin - none of it marked: nothing to ask.
+  LAnyWithin := AWithin = nil;
+  for var LW in AWithin do
+    if LW then
+    begin
+      LAnyWithin := True;
+      Break;
+    end;
+  if LAnyWithin then
+    FNotSearched := NotSearchedOf(DemandReferencesOfAll(ASyms, AWithin),
+      AOnlyMid)
+  else
+    FNotSearched := 0;
   LCount := FProj.ModelCount;
   SetLength(LWanted, LCount);
   LAllPrivate := True;
   for var LRef in ASyms do
-    if (LRef.UnitId >= 0) and (LRef.UnitId < LCount) and
-       not Wants(LWanted[LRef.UnitId], LRef.Sym) then
+    if (LRef.UnitId >= 0) and (LRef.UnitId < LCount) and (LRef.Sym >= 0) and
+       (LRef.Sym < FProj.Model(LRef.UnitId).SymCount) and
+       not Wants(LRef.UnitId, LRef.Sym) then
     begin
-      LWanted[LRef.UnitId] := LWanted[LRef.UnitId] + [LRef.Sym];
+      if LWanted[LRef.UnitId] = nil then
+        SetLength(LWanted[LRef.UnitId], FProj.Model(LRef.UnitId).SymCount);
+      LWanted[LRef.UnitId][LRef.Sym] := True;
       if LAllPrivate and not UnitPrivate(LRef.UnitId, LRef.Sym) then
         LAllPrivate := False;
     end;
@@ -2754,53 +2910,80 @@ begin
   // that read no text, in the order the hits are made; then their demoted
   // models rehydrated in parallel; then each candidate hydrated and hit, as
   // one loop did it - one model at a time, a re-preprocess each.
-  LCands := TList<TPasExtRef>.Create;   // UnitId = model, Sym = node
-  try
-    LTodo := nil;
-    for LMi := 0 to LCount - 1 do
+  // Each model's candidates on the pool (they read nodes and maps only),
+  // in the models' order as one loop made them; then the hits, each on the
+  // pool too, the models holding one hydrated here first.
+  LMids := nil;
+  for var LMi := 0 to LCount - 1 do
+    if ((AOnlyMid < 0) or (LMi = AOnlyMid)) and
+       not (LAllPrivate and (LWanted[LMi] = nil)) then
+      LMids := LMids + [LMi];
+  SetLength(LPer, Length(LMids));
+  FProj.ParallelRun(High(LMids),
+    procedure(AIdx: Integer)
+    var
+      LM: TPasSemaModel;
+      LMi, LSym: Integer;
+      LList: TList<Integer>;
     begin
-      if (AOnlyMid >= 0) and (LMi <> AOnlyMid) then
-        Continue;
-      if LAllPrivate and (LWanted[LMi] = nil) then
-        Continue;
+      LMi := LMids[AIdx];
       LM := FProj.Model(LMi);
-      LFirst := LCands.Count;
-      LCand.UnitId := LMi;
-      if LWanted[LMi] <> nil then
-        for LNode := 0 to High(LM.RefMap) do
-        begin
-          LSym := LM.RefMap[LNode];
-          if (LSym <> NIL_SYM) and Wants(LWanted[LMi], LSym) and
-             (not AAssignOnly or IsAssignTarget(LM, LNode)) and
-             not IsDeclSelfName(LM, LSym, LNode) then
+      LList := TList<Integer>.Create;
+      try
+        if LWanted[LMi] <> nil then
+          for var LNode := 0 to High(LM.RefMap) do
           begin
-            LCand.Sym := LNode;
-            LCands.Add(LCand);
+            LSym := LM.RefMap[LNode];
+            if (LSym <> NIL_SYM) and (LSym >= 0) and (LSym < Length(LWanted[LMi])) and LWanted[LMi][LSym] and
+               (not AAssignOnly or IsAssignTarget(LM, LNode)) and
+               not IsDeclSelfName(LM, LSym, LNode) then
+              LList.Add(LNode);
           end;
-        end;
-      for LPair in LM.ExtRefMap do
-        if (Cardinal(LPair.Value.UnitId) < Cardinal(LCount)) and
-           (LWanted[LPair.Value.UnitId] <> nil) and
-           Wants(LWanted[LPair.Value.UnitId], LPair.Value.Sym) and
-           (not AAssignOnly or IsAssignTarget(LM, LPair.Key)) then
-        begin
-          LCand.Sym := LPair.Key;
-          LCands.Add(LCand);
-        end;
-      if (LCands.Count > LFirst) and LM.Demoted then
-        LTodo := LTodo + [LMi];
-    end;
-    FProj.HydrateModels(LTodo);
-    for LCand in LCands do
+        for var LPair in LM.ExtRefMap do
+          if (Cardinal(LPair.Value.UnitId) < Cardinal(LCount)) and
+             (LWanted[LPair.Value.UnitId] <> nil) and (LPair.Value.Sym >= 0) and (LPair.Value.Sym < Length(LWanted[LPair.Value.UnitId])) and LWanted[LPair.Value.UnitId][LPair.Value.Sym] and
+             (not AAssignOnly or IsAssignTarget(LM, LPair.Key)) then
+            LList.Add(LPair.Key);
+        LPer[AIdx] := LList.ToArray;
+      finally
+        LList.Free;
+      end;
+    end);
+  LTodo := nil;
+  SetLength(LReady, LCount);
+  var LTotal := 0;
+  for var LIdx := 0 to High(LMids) do
+    Inc(LTotal, Length(LPer[LIdx]));
+  SetLength(LCands, LTotal);
+  LTotal := 0;
+  for var LIdx := 0 to High(LMids) do
+    if LPer[LIdx] <> nil then
     begin
-      LM := FProj.Model(LCand.UnitId);
-      if FProj.EnsureHydrated(LCand.UnitId) and
-         HitFromNode(LM, LCand.Sym, LHit) then
-        AHits.Add(LHit);
+      if FProj.Model(LMids[LIdx]).Demoted then
+        LTodo := LTodo + [LMids[LIdx]];
+      for var LNode in LPer[LIdx] do
+      begin
+        LCands[LTotal].UnitId := LMids[LIdx];
+        LCands[LTotal].Sym := LNode;
+        Inc(LTotal);
+      end;
     end;
-  finally
-    LCands.Free;
-  end;
+  FProj.HydrateModels(LTodo);
+  for var LIdx := 0 to High(LMids) do
+    if LPer[LIdx] <> nil then
+      LReady[LMids[LIdx]] := FProj.EnsureHydrated(LMids[LIdx]);
+  SetLength(LHits, Length(LCands));
+  SetLength(LOk, Length(LCands));
+  FProj.ParallelRun(High(LCands),
+    procedure(AIdx: Integer)
+    begin
+      LOk[AIdx] := LReady[LCands[AIdx].UnitId] and
+        HitFromNode(FProj.Model(LCands[AIdx].UnitId), LCands[AIdx].Sym,
+        LHits[AIdx]);
+    end);
+  for var LIdx := 0 to High(LCands) do
+    if LOk[LIdx] then
+      AHits.Add(LHits[LIdx]);
 end;
 
 { Is the identifier ANode written to - the LEFT side of `:=`, or the counter

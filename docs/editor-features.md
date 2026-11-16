@@ -1356,6 +1356,48 @@ Remove) should not be handed one, and a doubt is too easy to click past:
 Without a program in the analysis only the listed unit's own initialization
 is judged. SemaNavSmoke: TestLintGlobalInit.
 
+### 12.3 On the pool, and the library bodies it reads (0.199.0)
+
+Both functions, and `DemandLint`'s run of them, check the units on the
+analysis's thread pool (`TPasSemaProject.ParallelRun`, the width the host
+configured - pastree-lsp's `analysisThreads`; `SingleThreaded` runs them on
+the calling thread): the units in contiguous slices, twice as many as the
+pool has threads, each checked by a lint of its own (its own caches), the
+rows and the light units each records merged in the slices' order. What
+writes outside a lint is serialized: a rehydration per model (striped
+locks - different models in parallel), the navigator's routine pairing
+(built outside the lock, kept under it), the word index of the units
+nobody loaded and the walk past them (shared by the slices). A parallel
+loop asked on a pool worker runs on that worker. The rows are the same,
+row for row, at any width (SemaNavSmoke: TestUnusedThreads). On the client
+group's 1,664 units the lint itself: 2.25 s -> 0.4 s.
+
+In light mode the lint reads library bodies in three places (docs/library-light-mode.md, "The uses lint in light mode"):
+`GlobalInit` of an unused entry's own unit and of the units a removal
+leaves out (`loHideGlobalInit`), an inline routine's expansion
+(`InlineDeps`), and the effects of the light units a removal leaves out.
+On the client group the first project-wide run asked for 484 library
+units: 373 only for `GlobalInit` of an unused entry naming a library unit,
+the rest for inline expansions and lost units. 220 of the 373 have no
+`initialization` at all, and could be answered without a body; the other
+264 units are needed as they are - an initialization reaches outside its
+unit through what its statements and the routines they call bind, which
+only the analyzed body says, and an inline expansion names what the
+routine's body uses. Those 264 are still 27% of the library's volume, so
+they would be promoted unit by unit instead of escalating, and promotion
+is the slower road (522 units in three rounds took 20 s; the rebuild
+without light paths takes 5 s): the demand stays as it is, and escalates.
+
+`DemandOfFiles` (the uses lint's demand) measured nothing itself: before
+0.199.0 a session whose first query needing bodies was the uses lint had
+`TotalVolume` 0, never escalated, and made those 522 units full a round at
+a time - it had escalated on the client group only because the
+unused-declarations query, run first, measured the closure as a side effect
+of a demand it did not need (`CollectReferencesOfAll`'s `NotSearched` over
+every library body, which also counted 204 units that cannot name an own
+declaration - now `AWithin` restricts it as `DemandUnusedSymbols` does).
+It now measures the closure (`DemandOf` with no ask) when nothing has.
+
 ### pastree-lsp hand-off
 
 A diagnostic per row (hint severity, `DiagnosticTag.Unnecessary` greys the
@@ -1597,3 +1639,27 @@ property), and the form files read once per run (`FindFormSites` with
 `ARefresh` False after the first call; each refresh stats every form file).
 A project-wide run on the client group's 1,664 own units: 286 s first,
 178 s again (0.197.0) -> 5.2 s and 4.7 s, the same 4,967 rows.
+
+On the pool (0.199.0): the phases that dominated run on the analysis's
+thread pool (`TPasSemaProject.ParallelRun`, the host's width;
+`SingleThreaded` keeps them on the calling thread), each in two steps - the
+work that only reads, on the pool, into one result per item; then the
+results taken in the items' order, as the one loop took them, so the rows
+are the same at any width (SemaNavSmoke: TestUnusedThreads). Search's
+reference hits are placed so (`PlaceHit`: the node a hit names, what it
+binds, the site it makes), the models' position caches built first in
+parallel (`TPasNavigator.PrepareCaches`, read by `IdentNodeAt`) with
+`DeclaredAt`'s maps; a step that would write - a model to hydrate, the
+memo of a method implementation's symbol - is left to the second step.
+The reference scan itself (`CollectReferencesOfAll`: each model's
+candidates, then each hit's text) and AddDoubts' reading of the own files
+and of every unit's names run the same way. Two costs went without
+threads: the scan's wanted-symbol test was a linear search per map entry
+(a flag per symbol now), and a form file's identifiers were scanned whole
+for every declaration asked (`TPasDfmDoc.FindIdents` reads an index built
+once per document). Collect and MarkBound stay on one thread: they ask the
+typer of each class, and that is no read-only step. The client group:
+5.2 s / 4.7 s -> 2.2 s / 1.7 s (the request; the lint itself 3.9 s ->
+1.5 s), the same rows. `NotSearched` counts only the library bodies the
+demand would have asked for (`AWithin`): it said "library implementations
+not searched: 204 units" of units that cannot name an own declaration.
