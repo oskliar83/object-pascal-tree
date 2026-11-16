@@ -3394,6 +3394,159 @@ begin
   end;
 end;
 
+{ FindUnusedSymbols on a package's unit (0.203.0). Its interface
+  `procedure Register;` is the IDE's to call: not weighed (usPackageRegister),
+  a Register with a parameter still a row. A doubt travels down the whole
+  chain of rows made by rows: DRoot is written in a branch not compiled, Mid
+  is used only by it, Leaf only by Mid - both carry a doubt naming DRoot. A
+  member named like a library type's member (TCounter.Count, as
+  TLibList.Count) gets no doubt from its bare name in a dead branch or a
+  string literal; one no library member spells (Zylophone) does, and so does
+  one written qualified there (TCounter.Add). A record's
+  field has the "read or written whole" doubt only in a record with no
+  managed field. }
+procedure TestUnusedSymbolsPackage;
+const
+  PKG =
+    'package PkgReg;'#13#10 +
+    'requires'#13#10 +
+    '  rtl;'#13#10 +
+    'contains'#13#10 +
+    '  UPkgReg in ''UPkgReg.pas'';'#13#10 +
+    'end.'#13#10;
+  UPKG =
+    'unit UPkgReg;'#13#10 +
+    'interface'#13#10 +
+    'procedure Register;'#13#10 +
+    'procedure RegisterLater(A: Integer);'#13#10 +
+    'type'#13#10 +
+    '  TPlainRec = record A, B: Integer; end;'#13#10 +
+    '  TManagedRec = record S: string; N: Integer; end;'#13#10 +
+    '  TCounter = class'#13#10 +
+    '  public'#13#10 +
+    '    function Count: Integer;'#13#10 +
+    '    function Zylophone: Integer;'#13#10 +
+    '    function Add: Integer;'#13#10 +
+    '  end;'#13#10 +
+    'const'#13#10 +
+    '  CNames: array[0..1] of string = (''Count'', ''Zylophone'');'#13#10 +
+    'var'#13#10 +
+    '  GPlain: TPlainRec;'#13#10 +
+    '  GManaged: TManagedRec;'#13#10 +
+    'implementation'#13#10 +
+    'uses ULibList;'#13#10 +
+    'function TCounter.Count: Integer; begin Result := 0; end;'#13#10 +
+    'function TCounter.Zylophone: Integer; begin Result := 0; end;'#13#10 +
+    'function TCounter.Add: Integer; begin Result := 0; end;'#13#10 +
+    'procedure Leaf; begin end;'#13#10 +
+    'procedure Mid; begin Leaf; end;'#13#10 +
+    'procedure DRoot; begin Mid; end;'#13#10 +
+    'procedure RegisterLater(A: Integer); begin end;'#13#10 +
+    'procedure Register;'#13#10 +
+    'var L: TLibList; C: TCounter;'#13#10 +
+    'begin'#13#10 +
+    '  L := TLibList.Create; L.Free;'#13#10 +
+    '  C := TCounter.Create; C.Free;'#13#10 +
+    '  GPlain.A := 1; if GPlain.A = 0 then Exit;'#13#10 +
+    '  GManaged.N := 1; if GManaged.N = 0 then Exit;'#13#10 +
+    '{$IFDEF PASTREE_NEVER_SET}'#13#10 +
+    '  DRoot; C.Count; C.Zylophone; TCounter.Add;'#13#10 +
+    '{$ENDIF}'#13#10 +
+    'end;'#13#10 +
+    'end.'#13#10;
+  ULIB =
+    'unit ULibList;'#13#10 +
+    'interface'#13#10 +
+    'type'#13#10 +
+    '  TLibList = class'#13#10 +
+    '  public'#13#10 +
+    '    function Count: Integer;'#13#10 +
+    '    function Add: Integer;'#13#10 +
+    '  end;'#13#10 +
+    'implementation'#13#10 +
+    'function TLibList.Count: Integer; begin Result := 0; end;'#13#10 +
+    'function TLibList.Add: Integer; begin Result := 0; end;'#13#10 +
+    'end.'#13#10;
+var
+  LDir, LLib: string;
+  LProj: TPasSemaProject;
+  LNav: TPasNavigator;
+  LRows: TArray<TPasUnusedSymbol>;
+  LSkips: TPasUnusedSkips;
+  LNames: string;
+
+  function Row(const AName: string): Integer;
+  begin
+    for var LI := 0 to High(LRows) do
+      if SameText(LRows[LI].Name, AName) then
+        Exit(LI);
+    Result := -1;
+  end;
+
+  function DoubtHas(const AName, AText: string): Boolean;
+  begin
+    Result := False;
+    if Row(AName) >= 0 then
+      for var LD in LRows[Row(AName)].Doubts do
+        if ContainsText(LD, AText) then
+          Exit(True);
+  end;
+
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_unused_pkg');
+  LLib := TPath.Combine(TPath.GetTempPath, 'pastree_unused_pkg_lib');
+  for var LD in [LDir, LLib] do
+  begin
+    if TDirectory.Exists(LD) then
+      TDirectory.Delete(LD, True);
+    TDirectory.CreateDirectory(LD);
+  end;
+  TFile.WriteAllText(TPath.Combine(LDir, 'PkgReg.dpk'), PKG);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UPkgReg.pas'), UPKG);
+  TFile.WriteAllText(TPath.Combine(LLib, 'ULibList.pas'), ULIB);
+  LProj := TPasSemaProject.Create(pfWin32, [LDir, LLib], []);
+  LNav := nil;
+  try
+    LProj.AnalyzeProject(TPath.Combine(LDir, 'PkgReg.dpk'));
+    LNav := TPasNavigator.Create(LProj);
+    LNav.LibraryPaths := [LLib];
+    LRows := FindUnusedSymbols(LNav,
+      [LProj.ModelIdOf(TPath.Combine(LDir, 'UPkgReg.pas'))], LSkips);
+    LNames := '';
+    for var LR in LRows do
+    begin
+      LNames := LNames + LR.Name;
+      for var LD in LR.Doubts do
+        LNames := LNames + ' [' + LD + ']';
+      LNames := LNames + '; ';
+    end;
+    Ok('unused package: Register not weighed, RegisterLater a row (' + LNames
+      + ')', (Row('Register') < 0) and (LSkips[usPackageRegister] = 1) and
+      (Row('RegisterLater') >= 0));
+    Ok('unused package: a doubt down the whole chain (' + LNames + ')',
+      DoubtHas('DRoot', 'branch') and
+      DoubtHas('Mid', 'DRoot, which uses it, has a doubt') and
+      DoubtHas('Leaf', 'Mid, which uses it, is used only by rows going back '
+      + 'to DRoot'));
+    Ok('unused package: a library member''s name is no doubt, a rare one is ('
+      + LNames + ')', (Row('TCounter.Count') >= 0) and
+      (LRows[Row('TCounter.Count')].Doubts = nil) and
+      DoubtHas('TCounter.Zylophone', 'branch') and
+      DoubtHas('TCounter.Zylophone', 'string literal') and
+      DoubtHas('TCounter.Add', 'branch'));
+    Ok('unused package: the record doubt only on a record with no managed '
+      + 'field (' + LNames + ')', DoubtHas('TPlainRec.B', 'written whole') and
+      (Row('TManagedRec.S') >= 0) and
+      not DoubtHas('TManagedRec.S', 'written whole'));
+  finally
+    LNav.Free;
+    LProj.Free;
+    for var LD in [LDir, LLib] do
+      if TDirectory.Exists(LD) then
+        TDirectory.Delete(LD, True);
+  end;
+end;
+
 procedure TestUnusedSymbolsDerived;
 const
   UNUSED_B =
@@ -8562,6 +8715,7 @@ begin
   TestUnusedSymbols;
   TestUnusedSymbolsDerived;
   TestUnusedSymbolsInRowType;
+  TestUnusedSymbolsPackage;
   TestUnusedSymbolsMissedUses;
   TestUnusedSymbolsImplicit;
   TestUnusedSymbolsLight;

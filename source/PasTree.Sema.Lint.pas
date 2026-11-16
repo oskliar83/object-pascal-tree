@@ -249,7 +249,8 @@ function DemandLint(ANav: TPasNavigator; const AMids: TArray<Integer>;
   declaration bound more than 16 times is taken as used unsearched. Doubts
   of their own: an assignment whose value code computes - a call, a
   property (removing it drops that), an interface reference held (it
-  keeps the object alive), a row using it that has a doubt.
+  keeps the object alive), a row using it that has a doubt - down the
+  whole chain of rows made by rows, the doubted row it goes back to named.
 
   What is reached other than by name is not weighed, and counted
   (TPasUnusedSkip): published members, which form files and RTTI find by
@@ -265,7 +266,9 @@ function DemandLint(ANav: TPasNavigator; const AMids: TArray<Integer>;
   name (a patched Vcl.Menus: a unit found under ANav.LibraryPaths or the
   installed $(BDS)\source by that name, at another path) - the library's
   .dcu files were compiled against the original interface, so removing
-  anything from it breaks units the analysis does not see (F2051, F2613).
+  anything from it breaks units the analysis does not see (F2051, F2613);
+  the interface `procedure Register;` of a unit a package (.dpk) of the
+  analysis contains, which the IDE calls when it loads the package.
   A false "unused" costs a deleted declaration that
   was in use, so the exceptions are the rule. A reference hit that cannot
   be mapped back to what it binds (an include file) keeps every candidate of
@@ -275,8 +278,9 @@ function DemandLint(ANav: TPasNavigator; const AMids: TArray<Integer>;
   branch this configuration does not compile, or - a type - as a whole
   string literal (FindClass('TFoo'); a member only as 'TFoo.Bar': a member
   RTTI finds by name is published), in the project's own files (not under
-  ANav.LibraryPaths); a record's field, whose record may be read
-  or written whole; another overload of the name in use (a call bound to it
+  ANav.LibraryPaths) - for a member named like a library type's member
+  (Count, Create) only written qualified ('TFoo.Count'); a record's field,
+  whose record (with no managed field) may be read or written whole; another overload of the name in use (a call bound to it
   may run this one under dcc's rules); the name declared at unit level by
   another unit too (the `uses` order decides which one a unit binds); the
   name written where the analysis bound nothing (what dcc binds there is
@@ -293,7 +297,7 @@ function DemandLint(ANav: TPasNavigator; const AMids: TArray<Integer>;
 type
   TPasUnusedSkip = (usPublished, usDispatch, usInterface, usImplements,
     usOperator, usClassCtor, usAttribute, usForIn, usGenerated,
-    usReplacesLibrary);
+    usReplacesLibrary, usPackageRegister);
   TPasUnusedSkips = array[TPasUnusedSkip] of Integer;
 
   // Why a row is one (TPasUnusedSymbol.How).
@@ -2984,6 +2988,9 @@ type
     // PlaceInherited moves a candidate's to FUses.
     FInherits: TObjectDictionary<Int64, TList<Int64>>;  // (model, node) each
     FFormAsked: TDictionary<Int64, Boolean>;  // FormBinds' answers
+    // The units a package of the analysis contains (`contains`), lazy:
+    // their interface `procedure Register;` the IDE calls (InPackage).
+    FPackaged: TDictionary<Integer, Boolean>;
     FFormsRead: Boolean;  // the form files read once for this run (FormBinds)
     FSearched: TDictionary<Int64, Boolean>;  // the candidates Search asked about
     // The library units whose bodies can name an own declaration
@@ -3040,6 +3047,9 @@ type
     function IsHelperType(LM: TPasSemaModel; ASym: Integer): Boolean;
     function HelperOwner(LM: TPasSemaModel; ASym: Integer): Integer;
     function FormFileOf(AMid: Integer): string;
+    function InPackage(AMid: Integer): Boolean;
+    function IsPackageRegister(LM: TPasSemaModel;
+      AMid, ASym: Integer): Boolean;
     procedure CollectIfaceNames;
     procedure Collect(AMid: Integer);
     function DeclaredAt(AMid, ANode: Integer; out ASym: Integer): Boolean;
@@ -3086,6 +3096,7 @@ end;
 
 destructor TUnusedLint.Destroy;
 begin
+  FPackaged.Free;
   FFormAsked.Free;
   FInherits.Free;
   FSearched.Free;
@@ -3858,6 +3869,60 @@ begin
   end;
 end;
 
+// Does a package (.dpk) of the analysis list unit AMid in its `contains`
+// clause? The `requires` clause (Aux 1) names packages, not units.
+function TUnusedLint.InPackage(AMid: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LN: Integer;
+begin
+  if FPackaged = nil then
+  begin
+    FPackaged := TDictionary<Integer, Boolean>.Create;
+    for var LPk := 0 to FProj.ModelCount - 1 do
+    begin
+      if not SameText(ExtractFileExt(FProj.ModelFile(LPk)), '.dpk') or
+         not FProj.EnsureHydrated(LPk) then
+        Continue;
+      LM := FProj.Model(LPk);
+      if (Length(LM.Tree.Nodes) = 0) or
+         (LM.Tree.Nodes[0].Kind <> nkPackage) then
+        Continue;
+      for var LU in LM.UsesList do
+      begin
+        if LU.UnitId < 0 then
+          Continue;
+        LN := LU.NameNode;
+        while (LN <> NIL_NODE) and (LM.Tree.Nodes[LN].Kind <> nkUsesClause) do
+          LN := LM.Tree.Nodes[LN].Parent;
+        if (LN <> NIL_NODE) and (LM.Tree.Nodes[LN].Aux <> 1) then
+          FPackaged.AddOrSetValue(LU.UnitId, True);
+      end;
+    end;
+  end;
+  Result := FPackaged.ContainsKey(AMid);
+end;
+
+// `procedure Register;` in the interface of a unit a package contains: the
+// IDE calls it by that name when it loads the package (a design-time
+// package registers its components, wizards and editors there), and no
+// code of the group does.
+function TUnusedLint.IsPackageRegister(LM: TPasSemaModel; AMid,
+  ASym: Integer): Boolean;
+begin
+  Result := False;
+  if (LM.Symbols[ASym].Kind <> skRoutine) or
+     (LM.Symbols[ASym].NameLower <> 'register') or
+     (LM.Symbols[ASym].Scope <> LM.InterfaceScope) or
+     (LM.RoutineHead(ASym) <> rhProcedure) then
+    Exit;
+  if LM.Symbols[ASym].MemberScope <> NIL_SCOPE then
+    for var LP in LM.Scopes[LM.Symbols[ASym].MemberScope].Symbols do
+      if LM.Symbols[LP].Kind = skParam then
+        Exit;
+  Result := InPackage(AMid);
+end;
+
 // The declarations of unit AMid weighed - those not reached another way.
 procedure TUnusedLint.Collect(AMid: Integer);
 var
@@ -3976,7 +4041,9 @@ begin
         Skip(usAttribute)
       else if (LOwner <> NIL_SYM) and FIfaceNames.ContainsKey(LS.NameLower) and
         InterfaceNamesOf(XPlain(AMid, LOwner)).ContainsKey(LS.NameLower) then
-        Skip(usImplements);
+        Skip(usImplements)
+      else if (LOwner = NIL_SYM) and IsPackageRegister(LM, AMid, LSym) then
+        Skip(usPackageRegister);
     end;
     // `for X in L` calls L.GetEnumerator, then the enumerator's MoveNext and
     // Current, none of them by a name in the code.
@@ -4586,14 +4653,19 @@ type
     Strings: TArray<TDoubtWord>;
   end;
 
-// Every word of 3 letters or more in AText (at AOffset of ATS), in order.
+// Every word of 3 letters or more in AText (at AOffset of ATS), in order;
+// a word written right after another and a dot also as the pair
+// ('tfoo.create'), which a member named like a library one needs.
 procedure DoubtWords(const ATS: TPasTokenStream; const AFile, AText: string;
   AOffset: Integer; AList: TList<TDoubtWord>);
 var
-  LJ, LK, LLine, LCol: Integer;
+  LJ, LK, LLine, LCol, LPrevEnd: Integer;
   LW: TDoubtWord;
+  LPrev: string;
 begin
   LJ := 1;
+  LPrev := '';
+  LPrevEnd := -1;
   while LJ <= Length(AText) do
   begin
     if (AText[LJ].IsLetter or (AText[LJ] = '_')) and ((LJ = 1) or
@@ -4609,7 +4681,15 @@ begin
         ATS.OffsetToLineCol(AOffset + LJ - 1, LLine, LCol);
         LW.At := Format('%s:%d', [ExtractFileName(AFile), LLine]);
         AList.Add(LW);
+        if (LPrev <> '') and (LJ = LPrevEnd + 1) and
+           (AText[LPrevEnd] = '.') then
+        begin
+          LW.Word := LPrev + '.' + LW.Word;
+          AList.Add(LW);
+        end;
       end;
+      LPrev := LowerCase(Copy(AText, LJ, LK - LJ));
+      LPrevEnd := LK;
       LJ := LK;
     end
     else
@@ -4675,9 +4755,10 @@ var
   LOwnerSym: Integer;
   LInactive, LStrings, LUnitNames: TDictionary<string, string>;
   LKind: TSemaScopeKind;
-  LDone: TDictionary<string, Boolean>;
+  LDone, LLibMembers: TDictionary<string, Boolean>;
   LM: TPasSemaModel;
   LFile, LWord, LAt: string;
+  LCommon: Boolean;
   LC: TPasUnusedSymbol;
   LMids: TArray<Integer>;
   LFiles: TArray<TArray<Integer>>;
@@ -4687,6 +4768,7 @@ begin
   LStrings := TDictionary<string, string>.Create;
   LUnitNames := TDictionary<string, string>.Create;
   LDone := TDictionary<string, Boolean>.Create;
+  LLibMembers := TDictionary<string, Boolean>.Create;
   try
     // The project's own units and their own files, hydrated here; their
     // words read on the pool, each file's in order; then taken in the
@@ -4763,8 +4845,10 @@ begin
     // The names every unit declares in its interface, with a unit declaring
     // each: a row's name declared by another unit is a doubt.
     // Each unit's names on the pool, taken in the units' order.
+    var LLibMem: TArray<TArray<string>>;
     var LNames: TArray<TArray<string>>;
     SetLength(LNames, FProj.ModelCount);
+    SetLength(LLibMem, FProj.ModelCount);
     FProj.ParallelRun(FProj.ModelCount - 1,
       procedure(AMid: Integer)
       var
@@ -4783,10 +4867,29 @@ begin
                skRoutine]) then
               LList.Add(LTM.Symbols[LSym].NameLower);
           LNames[AMid] := LList.ToArray;
+          // A library type's member names (TList.Count, TStrings.Add):
+          // see LLibMembers below.
+          if FProj.IsLight(AMid) or
+             FNav.IsUnderLibraryPath(FProj.ModelFile(AMid)) then
+          begin
+            LList.Clear;
+            for var LSym := 0 to LTM.SymCount - 1 do
+              if (LTM.Symbols[LSym].DeclNode <> NIL_NODE) and
+                 (LTM.Symbols[LSym].Scope >= 0) and
+                 (LTM.Symbols[LSym].Scope < LTM.Scopes.Count) and
+                 (LTM.Scopes[LTM.Symbols[LSym].Scope].Kind = sckStruct) and
+                 (LTM.Symbols[LSym].Kind in [skField, skRoutine,
+                 skProperty, skConst]) then
+                LList.Add(LTM.Symbols[LSym].NameLower);
+            LLibMem[AMid] := LList.ToArray;
+          end;
         finally
           LList.Free;
         end;
       end);
+    for var LMid := 0 to FProj.ModelCount - 1 do
+      for LWord in LLibMem[LMid] do
+        LLibMembers.AddOrSetValue(LWord, True);
     for var LMid := 0 to FProj.ModelCount - 1 do
     begin
       if LNames[LMid] = nil then
@@ -4803,11 +4906,6 @@ begin
     begin
       LC := FCands[LIdx];
       LWord := LowerCase(FProj.Model(LC.UnitId).Symbols[LC.Sym].Name);
-      if LInactive.TryGetValue(LWord, LAt) then
-        LC.Doubts := LC.Doubts + [Format('the name is written in a branch '
-          + 'this configuration does not compile (%s)', [LAt])];
-      // Unbound bare, of a qualifier whose type is not known, or of one
-      // named as the row's type (`TFoo.Create`) or unit (`UFoo.Proc`).
       LOwnerName := FProj.Model(LC.UnitId).UnitNameLower;
       LOwnerSym := FProj.Model(LC.UnitId).Symbols[LC.Sym].Scope;
       if (LOwnerSym >= 0) and (FProj.Model(LC.UnitId).Scopes[LOwnerSym].Kind =
@@ -4815,6 +4913,21 @@ begin
          NIL_SYM) then
         LOwnerName := FProj.Model(LC.UnitId).Symbols[FProj.Model(LC.UnitId).
           Scopes[LOwnerSym].StructSym].NameLower;
+      // A member named like a member of a library type (Count, Add, Items,
+      // Name): its bare name written in a branch not compiled or as a whole
+      // string literal is far likelier that member's, or a column's, than
+      // this one's - on the client group such words gave thousands of rows
+      // a doubt each, from text that names none of them. Its qualified name
+      // ('TFoo.Count') still counts.
+      LCommon := (LOwnerSym >= 0) and
+        (FProj.Model(LC.UnitId).Scopes[LOwnerSym].Kind = sckStruct) and
+        LLibMembers.ContainsKey(LWord);
+      if (not LCommon and LInactive.TryGetValue(LWord, LAt)) or (LCommon and
+         LInactive.TryGetValue(LOwnerName + '.' + LWord, LAt)) then
+        LC.Doubts := LC.Doubts + [Format('the name is written in a branch '
+          + 'this configuration does not compile (%s)', [LAt])];
+      // Unbound bare, of a qualifier whose type is not known, or of one
+      // named as the row's type (`TFoo.Create`) or unit (`UFoo.Proc`).
       if FUnbound.TryGetValue(LWord + '|', LAt) or
          FUnbound.TryGetValue(LWord + '|*', LAt) or
          FUnbound.TryGetValue(LWord + '|' + LOwnerName, LAt) then
@@ -4832,10 +4945,15 @@ begin
          ((LC.Kind = skRoutine) and (LOwnerSym >= 0) and
          (LM.Scopes[LOwnerSym].Kind = sckStruct) and
          (LM.Symbols[LC.Sym].Visibility in [svDefault, svPublic]) and
+         not LCommon and
          LStrings.TryGetValue('#' + LWord, LAt)) then
         LC.Doubts := LC.Doubts + [Format('a string literal spells it (%s) - '
           + 'a lookup by name?', [LAt])];
-      if LC.RecordField then
+      // Not a managed record's (a string, an interface, a dynamic array in
+      // it): such a record holds references, and is never written to a file
+      // or a buffer whole.
+      if LC.RecordField and not FProj.IsManagedTypeX(XPlain(LC.UnitId,
+         FProj.Model(LC.UnitId).Scopes[LOwnerSym].StructSym)) then
         LC.Doubts := LC.Doubts + ['a record''s field: the record may be read '
           + 'or written whole (a file, a stream, a buffer)'];
       // An overload of a name in use: a call the index bound to a sibling
@@ -4903,6 +5021,7 @@ begin
       FCands[LIdx] := LC;
     end;
   finally
+    LLibMembers.Free;
     LUnitNames.Free;
     LDone.Free;
     LStrings.Free;
@@ -5256,31 +5375,62 @@ begin
 end;
 
 // A row made by rows is as sure as they are: a doubt of one using it is one
-// of its own.
+// of its own, and so down the whole chain - a row used only by a row used
+// only by a doubted one is as unsure (on a package's units 600 rows hung
+// two hops and more below one doubted constructor, and had no doubt). The
+// doubted row each one goes back to is named; a cycle of rows none of which
+// is doubted stays sure.
 procedure TUnusedLint.InheritDoubts;
 var
-  LDoubted: TDictionary<string, Boolean>;
+  LOwn: TDictionary<string, Boolean>;   // the rows with a doubt of their own
+  LRoot: TDictionary<string, string>;   // a row -> the doubted row it goes to
   LC: TPasUnusedSymbol;
+  LChanged: Boolean;
+  LTo: string;
 begin
-  LDoubted := TDictionary<string, Boolean>.Create;
+  LOwn := TDictionary<string, Boolean>.Create;
+  LRoot := TDictionary<string, string>.Create;
   try
     for var LR in FCands do
       if LR.Doubts <> nil then
-        LDoubted.AddOrSetValue(LR.Name, True);
+      begin
+        LOwn.AddOrSetValue(LR.Name, True);
+        LRoot.AddOrSetValue(LR.Name, LR.Name);
+      end;
+    // To a fixed point: each pass reaches one hop further down.
+    repeat
+      LChanged := False;
+      for LC in FCands do
+        if not LRoot.ContainsKey(LC.Name) then
+          for var LB in LC.By do
+            if (LB <> '') and LRoot.TryGetValue(LB, LTo) then
+            begin
+              LRoot.Add(LC.Name, LTo);
+              LChanged := True;
+              Break;
+            end;
+    until not LChanged;
+    // A row with a doubt of its own gets its users' too, as before.
     for var LIdx := 0 to FCands.Count - 1 do
     begin
       LC := FCands[LIdx];
       for var LB in LC.By do
-        if (LB <> '') and LDoubted.ContainsKey(LB) then
+        if (LB <> '') and LRoot.TryGetValue(LB, LTo) then
         begin
-          LC.Doubts := LC.Doubts + [Format('%s, which uses it, has a doubt of '
-            + 'its own', [LB])];
+          if LOwn.ContainsKey(LB) then
+            LC.Doubts := LC.Doubts + [Format('%s, which uses it, has a doubt '
+              + 'of its own', [LB])]
+          else
+            LC.Doubts := LC.Doubts + [Format('%s, which uses it, is used only '
+              + 'by rows going back to %s, which has a doubt of its own',
+              [LB, LTo])];
           Break;
         end;
       FCands[LIdx] := LC;
     end;
   finally
-    LDoubted.Free;
+    LRoot.Free;
+    LOwn.Free;
   end;
 end;
 
