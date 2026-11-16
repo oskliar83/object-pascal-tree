@@ -1876,3 +1876,40 @@ passed into with a doubt. Covered by `TestUnusedSymbolsParams`.
 A container fed only by dead code - a field whose only `Add`s sit in rows
 while live code reads its `Count` - is not reported: it is used, and no row
 can say so without being one that cannot be acted on.
+
+### 15.3 A library's exported declarations (PasTree 0.205.0)
+
+An application group links every unit it compiles into its own programs, so
+a declaration nothing in it uses is dead. A library's group does not: its
+programs live elsewhere - pastree-mcp and pastree-lsp call PasTree's
+`TPasWorkspace.FindUnusedSymbols`, which no project of PasTree's own group
+does, and it was a row with no doubt. On PasTree's own group 90 rows were 29
+API its hosts call, 19 used by `tools/*.dpr` and 35-40 really dead.
+
+The caller says which units are a library's (`TPasUnusedLibrary`, passed to
+the `FindUnusedSymbols` and `CheckUnusedSymbols` overloads that take it, and
+through `TPasWorkspace` as unit files): `Packages`, every unit a package
+(.dpk) of the analysis contains - a package is built to be loaded by
+programs the analysis does not compile; `Units`, the caller's marking (a
+library's source directory). Empty, the default, the rule is as before - an
+application group's rows and their doubts are unchanged (the client group:
+8,342 rows before and after).
+
+A declaration of such a unit that another unit can name is exported: one in
+its interface section (spec 1.1.2), or a member of a type declared there, at
+any depth of nesting, neither it nor a type on the way `private` or `strict
+private` (spec 11.2.1: plain private is the declaring unit's alone, a
+protected one a descendant in another program reaches). An exported
+declaration nothing uses stays a row - what is really dead must still show -
+with the doubt "exported - in the interface of a library unit, a program
+outside the analysis may use it" and `Api` `uaExported`. A row used only by
+rows going back to an exported one (a private method only an exported one
+calls, an implementation routine) gets the doubt down the chain, as any, and
+`Api` `uaByExported`. A private member and an implementation declaration
+nothing uses stay sure rows.
+
+`Hosts` is for a caller that knows the programs using the library and
+weighs the exported rows against them itself (pastree-mcp's `hosts`): `Api`
+is set and no doubt added - a row a host uses the caller drops with the rows
+going back to it (`By`), one no host uses is as sure as any. Covered by
+`TestUnusedSymbolsExported`.
