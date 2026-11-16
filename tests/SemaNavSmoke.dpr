@@ -2039,6 +2039,78 @@ begin
   end;
 end;
 
+// loTogether (WeighRemovedTogether): TA and TB both list TInit, which has an
+// initialization, and use nothing of it; TA lists TPlain the same way.
+// Alone each row is safe - the other path keeps TInit in the program - but
+// removed together TInit leaves it: both TInit rows get the doubt, TPlain's
+// does not. Without the option all three come with no doubt.
+procedure TestLintTogether;
+var
+  LDir: string;
+  LProj: TPasSemaProject;
+  LNav: TPasNavigator;
+  LUses: TArray<TPasUnusedUse>;
+  LMids: TArray<Integer>;
+  LTogether, LPlainSure: Integer;
+
+  procedure WriteUnit(const AName, AIntf, AImpl: string);
+  begin
+    TFile.WriteAllText(TPath.Combine(LDir, AName + '.pas'),
+      'unit ' + AName + ';'#13#10'interface'#13#10 + AIntf +
+      'implementation'#13#10 + AImpl + 'end.'#13#10);
+  end;
+
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_together');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'TMain.dpr'),
+    'program TMain;'#13#10'uses TA, TB;'#13#10'begin'#13#10'  APr;'#13#10 +
+    '  BPr;'#13#10'end.'#13#10);
+  WriteUnit('TA', 'uses TInit, TPlain;'#13#10'procedure APr;'#13#10,
+    'procedure APr; begin end;'#13#10);
+  WriteUnit('TB', 'uses TInit;'#13#10'procedure BPr;'#13#10,
+    'procedure BPr; begin end;'#13#10);
+  WriteUnit('TInit', 'var GInit: Integer;'#13#10, 'initialization'#13#10 +
+    '  GInit := 1;'#13#10);
+  WriteUnit('TPlain', 'procedure Plain;'#13#10, 'procedure Plain; begin end;'#13#10);
+  LProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  LNav := nil;
+  try
+    Ok('together: TMain analyzed',
+      LProj.AnalyzeProject(TPath.Combine(LDir, 'TMain.dpr')) >= 0);
+    LNav := TPasNavigator.Create(LProj);
+    LMids := [LProj.ModelIdOf(TPath.Combine(LDir, 'TA.pas')),
+      LProj.ModelIdOf(TPath.Combine(LDir, 'TB.pas'))];
+    LUses := FindUnusedUses(LNav, LMids);
+    Ok('together: without the option, three rows and no doubt',
+      (Length(LUses) = 3) and (LUses[0].Doubts = nil) and
+      (LUses[1].Doubts = nil) and (LUses[2].Doubts = nil));
+    LUses := FindUnusedUses(LNav, LMids, [loTogether]);
+    LTogether := 0;
+    LPlainSure := 0;
+    for var LU in LUses do
+      if SameText(LU.UnitName, 'TInit') and (Length(LU.Doubts) = 1) and
+         LU.Doubts[0].Contains('removed together') and
+         LU.Doubts[0].Contains('TInit (initialization) out of TMain') then
+        Inc(LTogether)
+      else if SameText(LU.UnitName, 'TPlain') and (LU.Doubts = nil) then
+        Inc(LPlainSure);
+    Ok('together: with it, both TInit rows held back, TPlain not',
+      (Length(LUses) = 3) and (LTogether = 2) and (LPlainSure = 1));
+    // One unit alone: its one TInit row is safe - TB's stays.
+    LUses := FindUnusedUses(LNav, [LMids[1]], [loTogether]);
+    Ok('together: TB alone - TA''s path keeps TInit',
+      (Length(LUses) = 1) and (LUses[0].Doubts = nil));
+  finally
+    LNav.Free;
+    LProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 { FindUnusedSymbols in light mode: its demand (DemandUnusedSymbols) wants a
   library body only where it can name an own declaration - a library unit
   whose `uses` list an own unit, or a library unit that does. LibCopy is an
@@ -8497,6 +8569,7 @@ begin
   TestAsmNames;
   TestUnreferencedUnits;
   TestLintGlobalInit;
+  TestLintTogether;
   TestLintLight;
 
   if GCounter.Finish('SemaNavSmoke') then
