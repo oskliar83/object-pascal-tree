@@ -2645,6 +2645,8 @@ type
     function DescendsFrom(AClass: TSemaXType; const ANameLower: string):
       Boolean;
     function Streams(AClass: TSemaXType): Boolean;
+    function AncestryKnown(AClass: TSemaXType): Boolean;
+    function NamesAncestor(const AClass: TSemaXType): Boolean;
     function IsStructType(const AX: TSemaXType; AKind: TPasNodeKind): Boolean;
     function ListedInterfaces(const AClass: TSemaXType): TArray<TSemaXType>;
     function InterfaceNamesOf(const AClass: TSemaXType): TDictionary<string,
@@ -2792,6 +2794,60 @@ end;
 function TUnusedLint.Streams(AClass: TSemaXType): Boolean;
 begin
   Result := DescendsFrom(AClass, 'tpersistent');
+end;
+
+// Was AClass's ancestry followed all the way to TObject? Then Streams'
+// answer is the compiler's: a class that does not reach TPersistent is
+// never streamed, and no form binds a member of its first section.
+function TUnusedLint.AncestryKnown(AClass: TSemaXType): Boolean;
+var
+  LNext: TSemaXType;
+begin
+  for var LDepth := 1 to 64 do
+  begin
+    if not XValid(AClass) then
+      Exit(False);
+    if FProj.Model(AClass.UnitId).Symbols[AClass.Sym].NameLower =
+       'tobject' then
+      Exit(True);
+    LNext := FProj.CanonTypeX(FProj.AncestorOfX(AClass));
+    // No ancestor bound: the root when the class names none (`class` is
+    // TObject's), the end of what the index followed when it names one.
+    if not XValid(LNext) then
+      Exit(not NamesAncestor(AClass));
+    AClass := LNext;
+  end;
+  Result := False;
+end;
+
+// Does AClass's declaration have a heritage list - `class(TBase)`? False
+// too for one whose declaration the index does not hold.
+function TUnusedLint.NamesAncestor(const AClass: TSemaXType): Boolean;
+var
+  LM: TPasSemaModel;
+  LDecl, LDef, LChild: Integer;
+begin
+  Result := True;
+  LM := FProj.Model(AClass.UnitId);
+  LDecl := LM.Symbols[AClass.Sym].DeclNode;
+  if LDecl = NIL_NODE then
+    Exit;
+  LDecl := LM.Tree.DeclRootOf(LDecl);
+  if (LDecl = NIL_NODE) or (LM.Tree.Nodes[LDecl].Kind <> nkTypeDecl) then
+    Exit;
+  LDef := LM.Tree.Nodes[LDecl].FirstChild;
+  while (LDef <> NIL_NODE) and (LM.Tree.Nodes[LDef].Kind <> nkClassType) do
+    LDef := LM.Tree.Nodes[LDef].NextSibling;
+  if LDef = NIL_NODE then
+    Exit;
+  LChild := LM.Tree.Nodes[LDef].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    if LM.Tree.Nodes[LChild].Kind in [nkIdent, nkMember, nkTypeArgs] then
+      Exit;
+    LChild := LM.Tree.Nodes[LChild].NextSibling;
+  end;
+  Result := False;
 end;
 
 // The class or interface node type symbol AX declares, if of AKind.
@@ -4221,12 +4277,17 @@ begin
       // The unnamed first section of a class not seen to stream, in a unit
       // with a form file: published if it streams after all (the ancestry
       // the index could not follow), and the form binds by name at run time.
+      // Not when the ancestry was followed to TObject without meeting
+      // TPersistent (`TFoo = class`): such a class never streams - the doubt
+      // hid every plain class's fields in a form's unit, and with them what
+      // only those fields use (a type held by an unused class's field).
       else if (LC.Kind in [skRoutine, skField, skProperty]) and
         (LM.Symbols[LC.Sym].Visibility = svDefault) and
         (LM.Scopes[LM.Symbols[LC.Sym].Scope].Kind = sckStruct) and
         (LM.Scopes[LM.Symbols[LC.Sym].Scope].StructSym <> NIL_SYM) and
         (LM.Symbols[LM.Scopes[LM.Symbols[LC.Sym].Scope].StructSym].TypeCat =
-        tcClass) then
+        tcClass) and not AncestryKnown(XPlain(LC.UnitId,
+        LM.Scopes[LM.Symbols[LC.Sym].Scope].StructSym)) then
       begin
         LFile := FormFileOf(LC.UnitId);
         if LFile <> '' then

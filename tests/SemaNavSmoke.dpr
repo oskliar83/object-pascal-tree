@@ -2871,6 +2871,23 @@ const
     'procedure TFrm.Unbound(Sender: TObject); begin end;'#13#10 +
     'procedure TFrm.Priv; begin end;'#13#10 +
     'end.'#13#10;
+  // In a unit with a form file, a plain class (ancestry known, TObject,
+  // no TPersistent): its first section is not published - no doubt, and
+  // the type only its unused field holds is a row without one.
+  UNUSED_P =
+    'unit UnusedP;'#13#10 +
+    'interface'#13#10 +
+    'type'#13#10 +
+    '  THeld = class end;'#13#10 +
+    '  THolder = class'#13#10 +
+    '    FF: THeld;'#13#10 +
+    '  end;'#13#10 +
+    'implementation'#13#10 +
+    '{$R *.dfm}'#13#10 +
+    'end.'#13#10;
+  UNUSED_P_DFM =
+    'object Frm2: TFrm2'#13#10 +
+    'end'#13#10;
   UNUSED_F_DFM =
     'object Frm: TFrm'#13#10 +
     '  Left = 0'#13#10 +
@@ -2918,6 +2935,8 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UnusedH.pas'), UNUSED_H);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnusedF.pas'), UNUSED_F);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnusedF.dfm'), UNUSED_F_DFM);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnusedP.pas'), UNUSED_P);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnusedP.dfm'), UNUSED_P_DFM);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnusedLib.pas'), UNUSED_LIB);
   TFile.WriteAllText(TPath.Combine(LLibDir, 'UnusedLib.pas'), UNUSED_LIB);
   LProj := TPasSemaProject.Create(pfWin32, [LDir], []);
@@ -2929,6 +2948,7 @@ begin
     LRows := FindUnusedSymbols(LNav,
       [LProj.ModelIdOf(TPath.Combine(LDir, 'UnusedH.pas')),
        LProj.ModelIdOf(TPath.Combine(LDir, 'UnusedF.pas')),
+       LProj.ModelIdOf(TPath.Combine(LDir, 'UnusedP.pas')),
        LProj.ModelIdOf(TPath.Combine(LDir, 'UnusedLib.pas'))], LSkips);
     LNames := '';
     for var LR in LRows do
@@ -2943,6 +2963,10 @@ begin
       (Row('TFrm.Button1') < 0));
     Ok('unused implicit: the first section the form does not bind - a doubt',
       Doubted('TFrm.Unbound') and Doubted('TFrm.Spare'));
+    Ok('unused implicit: a plain class in a form''s unit - its field a row ' +
+      'without a doubt, and the type only it holds too (' + LNames + ')',
+      (Row('THolder.FF') >= 0) and not Doubted('THolder.FF') and
+      (Row('THeld') >= 0) and not Doubted('THeld'));
     Ok('unused implicit: a private member - a plain row',
       (Row('TFrm.Priv') >= 0) and not Doubted('TFrm.Priv'));
     Ok('unused implicit: a unit replacing a library one is not weighed',
