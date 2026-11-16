@@ -729,8 +729,12 @@ type
       AOnlyMid: Integer = -1): TArray<TPasRefHit>;
     { The form-file half of a reference search with what each site IS - see
       PasTree.Sema.Dfm for the binding rules, which are TReader's. Sorted by
-      file, line, column. }
-    function FindFormSites(ATMid, ASym: Integer): TArray<TPasFormSite>;
+      file, line, column. ARefresh False skips the re-read of the form files
+      (one stat each, every directory listed again): for the later calls of
+      one operation that asks many symbols - FindUnusedSymbols asked it of
+      thousands, and the re-reads were nearly all of a project-wide run. }
+    function FindFormSites(ATMid, ASym: Integer;
+      ARefresh: Boolean = True): TArray<TPasFormSite>;
     // The declaration site FindReferences itself always excludes (see its
     // own comment) - a separate call because a host that wants "where is
     // this defined, plus every use" (Find References' own results list,
@@ -1270,6 +1274,14 @@ type
       `TObject`'s descendants are every class in the closure, each row's model
       rehydrated to position the hit - gate on TypeAt, not on "an identifier". }
     function FindDescendants(ATMid, ASym: Integer): TArray<TPasDescendantHit>;
+    { The types FindDescendants lists below (ATMid, ASym), itself left out,
+      from the same index and walk - and nothing else: no light-mode demand
+      computed, no model rehydrated, no row positioned. For a question asked
+      of thousands of types: FindUnusedSymbols asked FindDescendants of every
+      class with a member an interface could name, and the demands and the
+      rows were most of a project-wide run (a minute on 1,600 units). A
+      caller reading a descendant's tree hydrates its model itself. }
+    function DescendantTypes(ATMid, ASym: Integer): TArray<TPasExtRef>;
     { Find All Assignments, part one: the cursor is on something that can be
       WRITTEN - a variable, a field, a parameter, or a property with a `write`
       specifier (its declaration or any use). ATMid/ASym come back as that
@@ -1402,7 +1414,10 @@ type
       library unit's implementation lists an own unit (a patched library
       copy the project keeps in its tree). }
     function DemandReferences(ATMid, ASym: Integer): TPasDemand;
-    function DemandReferencesOfAll(const ASyms: TArray<TPasExtRef>): TPasDemand;
+    // AWithin not nil: only the loaded units it marks, by model id, can be
+    // wanted (TPasDemandAsk.Within) - FindUnusedSymbols' demand.
+    function DemandReferencesOfAll(const ASyms: TArray<TPasExtRef>;
+      const AWithin: TArray<Boolean> = nil): TPasDemand;
     { FindCreations: a class's construction is written `TFoo.Create`, the
       class or an alias of it before any constructor name the class has -
       the units that can name a member of its unit (an alias may be declared
@@ -1731,12 +1746,12 @@ begin
   Result := FForms;
 end;
 
-function TPasNavigator.FindFormSites(ATMid, ASym: Integer):
-  TArray<TPasFormSite>;
+function TPasNavigator.FindFormSites(ATMid, ASym: Integer;
+  ARefresh: Boolean): TArray<TPasFormSite>;
 var
   LError: string;
 begin
-  Result := FormBinder.SitesOf(ATMid, ASym, False, LError);
+  Result := FormBinder.SitesOf(ATMid, ASym, False, nil, LError, ARefresh);
 end;
 
 function TPasNavigator.DescribeForm(const APath: string;
@@ -5465,6 +5480,33 @@ begin
   end;
 end;
 
+function TPasNavigator.DescendantTypes(ATMid, ASym: Integer):
+  TArray<TPasExtRef>;
+var
+  LAxis: TOvAxis;
+  LList: TList<TPasExtRef>;
+begin
+  Result := nil;
+  if OvInterfaceDefNode(ATMid, ASym) <> NIL_NODE then
+    LAxis := oaInterface
+  else if OvClassDefNode(ATMid, ASym) <> NIL_NODE then
+    LAxis := oaClass
+  else
+    Exit;
+  LList := TList<TPasExtRef>.Create;
+  try
+    OvWalkDescendants(TypeEdges, ATMid, ASym, LAxis,
+      function(const AParent, AKid: TPasExtRef; ADepth: Integer): Boolean
+      begin
+        LList.Add(AKid);
+        Result := True;
+      end);
+    Result := LList.ToArray;
+  finally
+    LList.Free;
+  end;
+end;
+
 { ---- Find Creations / Find Destructions ---------------------------------
   Where instances of one class begin and end. Both read the resolver's
   bindings around a call rather than searching a name, and both are limited
@@ -7342,7 +7384,7 @@ begin
 end;
 
 function TPasNavigator.DemandReferencesOfAll(
-  const ASyms: TArray<TPasExtRef>): TPasDemand;
+  const ASyms: TArray<TPasExtRef>; const AWithin: TArray<Boolean>): TPasDemand;
 var
   LAsks: TArray<TPasDemandAsk>;
   LAsk: TPasDemandAsk;
@@ -7354,6 +7396,7 @@ begin
   for var LRef in ASyms do
   begin
     LAsk := RefAsk(LRef.UnitId, LRef.Sym);
+    LAsk.Within := AWithin;
     if LAsk.UnitId >= 0 then
       LAsks := LAsks + [LAsk];
   end;

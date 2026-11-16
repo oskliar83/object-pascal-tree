@@ -1572,3 +1572,28 @@ first runs found are the exceptions above (attributes, method references,
 for-in) and the doubts on overloads and unit-level namesakes - the last two
 being where PasTree's overload resolution and `uses` order binding differ
 from dcc's.
+
+Light mode (PasTree 0.198.0): `DemandUnusedSymbols` wants a library body
+only where it can name an own declaration. A library unit sees the
+project's units only through its own `uses` (either section), so the units
+it may make full are the library units listing an own unit, and those
+listing such a library unit (the closure over the library units' edges) -
+the general reference demand (`DemandReferencesOfAll` without `AWithin`,
+Find References) is unchanged. An own unit that replaces a library unit
+(`usReplacesLibrary`, a patched copy in the project's tree) is no way in:
+the library's units were compiled against the original's interface and
+bind nothing the copy adds. Usually no library unit lists an own unit, and
+the demand is empty before a candidate is collected. On the client group
+two such copies had brought 186 library units into every run - made full
+in two rounds, the candidates collected again each round; now none, the
+same rows. Covered by `TestUnusedSymbolsLight`.
+
+Cost (0.198.0): the per-declaration questions read indexes, not the
+navigator's whole-answer entries - a class's descendants from the type-edge
+index (`TPasNavigator.DescendantTypes`: no demand, no row positioned, no
+model hydrated; `FindDescendants` did all three, once per class with a
+member an interface could name and once per class with a candidate
+property), and the form files read once per run (`FindFormSites` with
+`ARefresh` False after the first call; each refresh stats every form file).
+A project-wide run on the client group's 1,664 own units: 286 s first,
+178 s again (0.197.0) -> 5.2 s and 4.7 s, the same 4,967 rows.

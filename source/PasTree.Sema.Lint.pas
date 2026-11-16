@@ -2352,6 +2352,7 @@ type
     // PlaceInherited moves a candidate's to FUses.
     FInherits: TObjectDictionary<Int64, TList<Int64>>;  // (model, node) each
     FFormAsked: TDictionary<Int64, Boolean>;  // FormBinds' answers
+    FFormsRead: Boolean;  // the form files read once for this run (FormBinds)
     FSearched: TDictionary<Int64, Boolean>;  // the candidates Search asked about
     procedure PlaceInherited;
     function FormBinds(AMid, ASym: Integer): Boolean;
@@ -2633,8 +2634,11 @@ begin
       LClasses.Add(LK);
       LK := FProj.CanonTypeX(FProj.AncestorOfX(LK));
     end;
-    for var LD in FNav.FindDescendants(AClass.UnitId, AClass.Sym) do
-      if LD.Kind = pdkDescendant then
+    // The index alone (DescendantTypes): FindDescendants' demand and rows,
+    // per class, were most of a project-wide run. ListedInterfaces reads a
+    // descendant's tree: its model hydrated first.
+    for var LD in FNav.DescendantTypes(AClass.UnitId, AClass.Sym) do
+      if FProj.EnsureHydrated(LD.UnitId) then
         LClasses.Add(XPlain(LD.UnitId, LD.Sym));
     for var LC in LClasses do
       for var LI in ListedInterfaces(LC) do
@@ -2772,15 +2776,18 @@ end;
 // 37.0: E2147 "Property 'X' does not exist in base class"). MarkBound sees
 // the redeclarations of the units it walks; this asks every descendant of
 // the candidate's class, wherever it is - a library unit, a light one -
-// which MarkBound does not walk. One FindDescendants per class.
+// which MarkBound does not walk. One DescendantTypes per class - the index
+// alone, no demand and no rows (FindDescendants') - and a descendant's model
+// hydrated only when it declares a property of the name: its symbols and
+// scopes stay when its text is demoted.
 procedure TUnusedLint.MarkRepublished;
 var
   LM, LDM: TPasSemaModel;
-  LKids: TDictionary<Int64, TArray<TPasDescendantHit>>;
-  LHits: TArray<TPasDescendantHit>;
+  LKids: TDictionary<Int64, TArray<TPasExtRef>>;
+  LHits: TArray<TPasExtRef>;
   LOwner, LScope, LP, LBMid, LBSym, LPMid, LPSym: Integer;
 begin
-  LKids := TDictionary<Int64, TArray<TPasDescendantHit>>.Create;
+  LKids := TDictionary<Int64, TArray<TPasExtRef>>.Create;
   try
     for var LC in FCands do
     begin
@@ -2796,19 +2803,18 @@ begin
         Continue;
       if not LKids.TryGetValue(K(LC.UnitId, LOwner), LHits) then
       begin
-        LHits := FNav.FindDescendants(LC.UnitId, LOwner);
+        LHits := FNav.DescendantTypes(LC.UnitId, LOwner);
         LKids.Add(K(LC.UnitId, LOwner), LHits);
       end;
       for var LD in LHits do
       begin
-        if (LD.Kind <> pdkDescendant) or not FProj.EnsureHydrated(LD.UnitId) then
-          Continue;
         LDM := FProj.Model(LD.UnitId);
         LScope := LDM.Symbols[LD.Sym].MemberScope;
         if (LScope = NIL_SCOPE) or (LScope >= LDM.Scopes.Count) then
           Continue;
         LP := LDM.FindLocal(LScope, LM.Symbols[LC.Sym].NameLower);
-        if (LP = NIL_SYM) or (LDM.Symbols[LP].Kind <> skProperty) then
+        if (LP = NIL_SYM) or (LDM.Symbols[LP].Kind <> skProperty) or
+           not FProj.EnsureHydrated(LD.UnitId) then
           Continue;
         // Every link up from the redeclaration: a link between is needed
         // as much as the candidate.
@@ -3382,7 +3388,13 @@ begin
      (LCM.Scopes[LScope].Kind = sckStruct) and
      (LCM.Scopes[LScope].StructSym <> NIL_SYM) and
      (LCM.Symbols[LCM.Scopes[LScope].StructSym].TypeCat = tcClass)) then
-    Result := Length(FNav.FindFormSites(AMid, ASym)) > 0;
+  begin
+    // The form files read as they are now once per run, not once per
+    // declaration asked: each read stats every form file of the group, and
+    // a project-wide run asks thousands.
+    Result := Length(FNav.FindFormSites(AMid, ASym, not FFormsRead)) > 0;
+    FFormsRead := True;
+  end;
   FFormAsked.Add(K(AMid, ASym), Result);
 end;
 
@@ -4238,7 +4250,52 @@ function UnusedLintDemand(ALint: TUnusedLint; ANav: TPasNavigator;
 var
   LRefs: TArray<TPasExtRef>;
   LExt: TPasExtRef;
+  LWithin, LOwn: TArray<Boolean>;
+  LAny, LMore: Boolean;
 begin
+  // Which library bodies can name an own declaration at all: a library unit
+  // sees the project's units only through its own `uses` (either section),
+  // so only one listing an own unit can (the declarations reached otherwise
+  // - virtual, published, interface members - are not weighed). An own unit
+  // that replaces a library unit (a patched copy kept in the project's tree,
+  // usReplacesLibrary) does not count: the library's units were compiled
+  // against the original's interface and bind nothing the copy adds - on a
+  // 3,000-unit client group two such copies brought 186 library units into
+  // every run. Usually no library unit lists an own unit: nothing to
+  // analyze, and the candidates are not even collected for it. A library
+  // unit listing such a library unit is one too (it may name an own member
+  // through that unit's declarations): the closure, over the library units'
+  // edges.
+  LWithin := nil;
+  LAny := False;
+  SetLength(LWithin, ANav.Project.ModelCount);
+  SetLength(LOwn, ANav.Project.ModelCount);
+  for var LMid := 0 to ANav.Project.ModelCount - 1 do
+    LOwn[LMid] := not ANav.Project.IsLightFile(ANav.Project.ModelFile(LMid))
+      and not ALint.ReplacesLibrary(LMid);
+  repeat
+    LMore := False;
+    for var LMid := 0 to ANav.Project.ModelCount - 1 do
+    begin
+      if LWithin[LMid] or not ANav.Project.IsLight(LMid) then
+        Continue;
+      var LM := ANav.Project.Model(LMid);
+      for var LU := 0 to High(LM.UsesList) do
+      begin
+        var LTarget := LM.UsesList[LU].UnitId;
+        if (LTarget >= 0) and (LTarget < ANav.Project.ModelCount) and
+           (LOwn[LTarget] or LWithin[LTarget]) then
+        begin
+          LWithin[LMid] := True;
+          LAny := True;
+          LMore := True;
+          Break;
+        end;
+      end;
+    end;
+  until not LMore;
+  if not LAny then
+    Exit(Default(TPasDemand));
   ALint.CollectIfaceNames;
   for var LMid in AMids do
     if (LMid >= 0) and (LMid < ANav.Project.ModelCount) then
@@ -4250,7 +4307,7 @@ begin
     LExt.Sym := LC.Sym;
     LRefs := LRefs + [LExt];
   end;
-  Result := ANav.DemandReferencesOfAll(LRefs);
+  Result := ANav.DemandReferencesOfAll(LRefs, LWithin);
 end;
 
 function TargetMids(const ATargets: TArray<TPasExtRef>): TArray<Integer>;
