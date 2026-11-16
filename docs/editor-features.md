@@ -1542,7 +1542,11 @@ routines calling only each other are two rows); a bare `inherited;` is a use
 placed in the routine it is written in (PasTree 0.197.0: a static method only
 a dead descendant's hiding method runs is a row); a use the index cannot
 place (an include file), a form file binding it, or a use in a declaration
-not weighed keeps the declaration. Their doubts: an assignment whose value code
+not weighed keeps the declaration, and so does a binding the reference
+search does not place (PasTree 0.199.1: the uses counted - declared names
+and the declaration itself are not - above the hits placed; on a client
+group, calls through a record helper's method). A nameless symbol, the type
+an anonymous method makes for itself, is no row. Their doubts: an assignment whose value code
 computes, an interface reference held, a row using it with a doubt.
 `CheckUnusedSymbols` weighs the declarations the targets' uses sit in too,
 round by round (4 rounds, 300 declarations), so a getter asked alone finds

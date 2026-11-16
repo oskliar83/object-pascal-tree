@@ -3268,7 +3268,9 @@ begin
     // type (MarkBound): `Ord(grpError)` needs TGroups (E2003 without it).
     if (LS.Kind = skEnumValue) and (LS.TypeSym <> NIL_SYM) then
       FEnumOf.AddOrSetValue(K(AMid, LSym), K(AMid, LS.TypeSym));
-    if (LS.DeclNode = NIL_NODE) or
+    // A nameless symbol is the type an anonymous method makes for itself
+    // (25 rows "unused-symbol  (type)" on a client group): nothing names it.
+    if (LS.DeclNode = NIL_NODE) or (LS.NameLower = '') or
        (LS.Flags * [sfBuiltin, sfCompletesForward] <> []) or
        not (LS.Kind in [skType, skVar, skConst, skField, skRoutine,
          skProperty]) or (LS.Scope < 0) or (LS.Scope >= LM.Scopes.Count) then
@@ -3405,17 +3407,27 @@ begin
   // is used, and Search does not ask for its references.
   // A binding of an enum value (FEnumOf) other than its own declaration
   // marks the enum type.
+  // Only uses are counted: a declared name (nfName - the implementation
+  // header's, a forward's) and the declaration itself are not, so a count
+  // above what the reference search places is a use it missed (Search).
   for var LI := 0 to High(LM.RefMap) do
     if LM.RefMap[LI] = NIL_SYM then
       Continue
     else if FCount.TryGetValue(K(AMid, LM.RefMap[LI]), LN) then
-      FCount[K(AMid, LM.RefMap[LI])] := LN + 1
+    begin
+      if not (nfName in LM.Tree.Nodes[LI].Flags) and
+         (LM.Symbols[LM.RefMap[LI]].DeclNode <> LI) then
+        FCount[K(AMid, LM.RefMap[LI])] := LN + 1;
+    end
     else if FEnumOf.TryGetValue(K(AMid, LM.RefMap[LI]), LEnum) and
       (LM.Symbols[LM.RefMap[LI]].DeclNode <> LI) then
       Hard(LEnum);
   for var LP in LM.ExtRefMap do
     if FCount.TryGetValue(K(LP.Value.UnitId, LP.Value.Sym), LN) then
-      FCount[K(LP.Value.UnitId, LP.Value.Sym)] := LN + 1
+    begin
+      if not (nfName in LM.Tree.Nodes[LP.Key].Flags) then
+        FCount[K(LP.Value.UnitId, LP.Value.Sym)] := LN + 1;
+    end
     else if FEnumOf.TryGetValue(K(LP.Value.UnitId, LP.Value.Sym), LEnum) then
       Hard(LEnum);
   // A property redeclared below (`property X;`, a published one too) needs
@@ -3664,9 +3676,10 @@ var
   LExt: TPasExtRef;
   LHits: TList<TPasRefHit>;
   LByName: TDictionary<string, Boolean>;
-  LBMid, LBSym, LPMid, LPSym: Integer;
+  LBMid, LBSym, LPMid, LPSym, LN: Integer;
   LNew: TDictionary<Int64, Boolean>;
   LPlaced: TArray<TUnusedHit>;
+  LPlacedN: TDictionary<Int64, Integer>;  // a new candidate's placed hits
 begin
   MarkRepublished;
   // The candidates not searched yet: all of them, but in CheckUnusedSymbols'
@@ -3692,6 +3705,7 @@ begin
     end;
   LByName := TDictionary<string, Boolean>.Create;
   LHits := TList<TPasRefHit>.Create;
+  LPlacedN := TDictionary<Int64, Integer>.Create;
   try
     if LRefs <> nil then
     begin
@@ -3727,6 +3741,12 @@ begin
       if LP.Declared then
         Hard(K(LBMid, LBSym));
       FUsed.AddOrSetValue(K(LBMid, LBSym), True);
+      if LNew.ContainsKey(K(LBMid, LBSym)) then
+      begin
+        if not LPlacedN.TryGetValue(K(LBMid, LBSym), LN) then
+          LN := 0;
+        LPlacedN.AddOrSetValue(K(LBMid, LBSym), LN + 1);
+      end;
       // Placed: the declarations it sits in, and whether it is assigned.
       if FCount.ContainsKey(K(LBMid, LBSym)) and
          not FHard.ContainsKey(K(LBMid, LBSym)) then
@@ -3755,7 +3775,20 @@ begin
       if LByName.ContainsKey(FProj.Model(LC.UnitId).Symbols[LC.Sym].NameLower)
       then
         Hard(K(LC.UnitId, LC.Sym));
+    // Bound more often than the search placed: a use it does not find (on a
+    // client group, calls through a record helper's method from a unit the
+    // project compiles) - used, and never a row made by rows.
+    for var LC in FCands do
+      if LNew.ContainsKey(K(LC.UnitId, LC.Sym)) and
+         not FHard.ContainsKey(K(LC.UnitId, LC.Sym)) then
+      begin
+        if not LPlacedN.TryGetValue(K(LC.UnitId, LC.Sym), LN) then
+          LN := 0;
+        if FCount[K(LC.UnitId, LC.Sym)] > LN then
+          Hard(K(LC.UnitId, LC.Sym));
+      end;
   finally
+    LPlacedN.Free;
     LByName.Free;
     LHits.Free;
   end;
@@ -4704,6 +4737,37 @@ begin
     end;
     for var LMid in LMids do
       Collect(LMid);
+    // Their uses as the index binds them, as MarkBound counts the first
+    // round's: what Search compares its placed hits with.
+    var LFresh := TDictionary<Int64, Boolean>.Create;
+    try
+      for var LC in FCands do
+        if not FSearched.ContainsKey(K(LC.UnitId, LC.Sym)) then
+          LFresh.AddOrSetValue(K(LC.UnitId, LC.Sym), True);
+      if LFresh.Count > 0 then
+        for var LMid := 0 to FProj.ModelCount - 1 do
+        begin
+          if FProj.IsLight(LMid) or
+             FNav.IsUnderLibraryPath(FProj.ModelFile(LMid)) or
+             not FProj.EnsureHydrated(LMid) then
+            Continue;
+          var LM := FProj.Model(LMid);
+          for var LI := 0 to High(LM.RefMap) do
+            if (LM.RefMap[LI] <> NIL_SYM) and
+               LFresh.ContainsKey(K(LMid, LM.RefMap[LI])) and
+               not (nfName in LM.Tree.Nodes[LI].Flags) and
+               (LM.Symbols[LM.RefMap[LI]].DeclNode <> LI) then
+              FCount[K(LMid, LM.RefMap[LI])] :=
+                FCount[K(LMid, LM.RefMap[LI])] + 1;
+          for var LP in LM.ExtRefMap do
+            if LFresh.ContainsKey(K(LP.Value.UnitId, LP.Value.Sym)) and
+               not (nfName in LM.Tree.Nodes[LP.Key].Flags) then
+              FCount[K(LP.Value.UnitId, LP.Value.Sym)] :=
+                FCount[K(LP.Value.UnitId, LP.Value.Sym)] + 1;
+        end;
+    finally
+      LFresh.Free;
+    end;
     PlaceInherited;
     for var LName in FCandNames.Keys do
       if not LOldNames.ContainsKey(LName) then
