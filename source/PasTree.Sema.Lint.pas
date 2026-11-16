@@ -159,8 +159,10 @@ function DemandLint(ANav: TPasNavigator; const AMids: TArray<Integer>;
   decided together, to a fixed point (a type used only by a field only
   written is one; two routines calling only each other are two), over the
   declarations weighed - a use in one not weighed (another unit's in
-  CheckUnusedSymbols, a virtual method) keeps it. A use the index cannot
-  place (an include file, a bare `inherited`, a form) keeps it too, and a
+  CheckUnusedSymbols, a virtual method) keeps it. A bare `inherited;` is
+  a use placed in the routine it is written in: a static method only a
+  dead descendant's hiding method runs that way is a row. A use the index
+  cannot place (an include file, a form file binding it) keeps it, and a
   declaration bound more than 16 times is taken as used unsearched. Doubts
   of their own: an assignment whose value code computes - a call, a
   property (removing it drops that), an interface reference held (it
@@ -2346,7 +2348,13 @@ type
     FHard: TDictionary<Int64, Boolean>;
     FUses: TObjectDictionary<Int64, TList<TUnusedSite>>;
     FImplSym: TDictionary<Int64, Int64>;  // a routine node -> its symbol
+    // The bare `inherited;` running each routine, placed (MarkBound), until
+    // PlaceInherited moves a candidate's to FUses.
+    FInherits: TObjectDictionary<Int64, TList<Int64>>;  // (model, node) each
+    FFormAsked: TDictionary<Int64, Boolean>;  // FormBinds' answers
     FSearched: TDictionary<Int64, Boolean>;  // the candidates Search asked about
+    procedure PlaceInherited;
+    function FormBinds(AMid, ASym: Integer): Boolean;
     procedure Hard(AKey: Int64);
     function UsersOf(LM: TPasSemaModel; AMid, ANode: Integer): TArray<Int64>;
     function PlainWrite(LM: TPasSemaModel; AMid, ANode: Integer;
@@ -2415,11 +2423,16 @@ begin
   FUses := TObjectDictionary<Int64, TList<TUnusedSite>>.Create([doOwnsValues]);
   FImplSym := TDictionary<Int64, Int64>.Create;
   FSearched := TDictionary<Int64, Boolean>.Create;
+  FInherits := TObjectDictionary<Int64, TList<Int64>>.Create(
+    [doOwnsValues]);
+  FFormAsked := TDictionary<Int64, Boolean>.Create;
   FillChar(FSkips, SizeOf(FSkips), 0);
 end;
 
 destructor TUnusedLint.Destroy;
 begin
+  FFormAsked.Free;
+  FInherits.Free;
   FSearched.Free;
   FImplSym.Free;
   FUses.Free;
@@ -3102,7 +3115,19 @@ begin
     if (LM.Tree.Nodes[LI].Kind = nkInherited) and
        (LM.Tree.Nodes[LI].FirstChild = NIL_NODE) and
        FProj.BareInheritedTarget(AMid, LI, LBMid, LBSym, LCtx) then
-      Hard(K(LBMid, LBSym));
+    begin
+      // A use placed like a reference hit, where it is written kept until
+      // PlaceInherited places a candidate's (most such calls run a virtual
+      // method, never a candidate): dead when the routine running it is.
+      FUsed.AddOrSetValue(K(LBMid, LBSym), True);
+      var LAt: TList<Int64>;
+      if not FInherits.TryGetValue(K(LBMid, LBSym), LAt) then
+      begin
+        LAt := TList<Int64>.Create;
+        FInherits.Add(K(LBMid, LBSym), LAt);
+      end;
+      LAt.Add(K(AMid, LI));
+    end;
   // The bindings, counted: a declaration bound more often than its own
   // sites could make it (its declaration, implementation header, forward)
   // is used, and Search does not ask for its references.
@@ -3222,8 +3247,10 @@ begin
       LNew.Add(K(LC.UnitId, LC.Sym), True);
   LRefs := nil;
   for var LC in FCands do
+    // Used by a bare inherited alone is searched too: its other uses decide
+    // whether that is all.
     if not LNew.ContainsKey(K(LC.UnitId, LC.Sym)) or
-       FUsed.ContainsKey(K(LC.UnitId, LC.Sym)) then
+       FHard.ContainsKey(K(LC.UnitId, LC.Sym)) then
       Continue
     else if FCount[K(LC.UnitId, LC.Sym)] > UNUSED_MAX_SEARCHED then
       Hard(K(LC.UnitId, LC.Sym))
@@ -3326,23 +3353,72 @@ begin
   // ancestry is not followed to TPersistent the form still binds it by name
   // (TReader: MethodAddress, FieldAddress), and deleting it compiles and
   // fails when the form is created.
+  // A used one is asked by Derive, when it may be a row made by rows.
+  for var LC in FCands do
+    if LNew.ContainsKey(K(LC.UnitId, LC.Sym)) and
+       not FUsed.ContainsKey(K(LC.UnitId, LC.Sym)) and
+       FormBinds(LC.UnitId, LC.Sym) then
+      Hard(K(LC.UnitId, LC.Sym));
+  LNew.Free;
+end;
+
+// Does a form file bind (AMid, ASym): a class it names, or a member of a
+// class's unnamed first section (a handler, a component)? Asked once each.
+function TUnusedLint.FormBinds(AMid, ASym: Integer): Boolean;
+var
+  LCM: TPasSemaModel;
+  LScope: Integer;
+begin
+  if FFormAsked.TryGetValue(K(AMid, ASym), Result) then
+    Exit;
+  Result := False;
+  LCM := FProj.Model(AMid);
+  LScope := LCM.Symbols[ASym].Scope;
+  if ((LCM.Symbols[ASym].Kind = skType) and
+     (LCM.Symbols[ASym].TypeCat = tcClass)) or
+     ((LCM.Symbols[ASym].Kind in [skRoutine, skField]) and
+     (LCM.Symbols[ASym].Visibility = svDefault) and (LScope >= 0) and
+     (LScope < LCM.Scopes.Count) and
+     (LCM.Scopes[LScope].Kind = sckStruct) and
+     (LCM.Scopes[LScope].StructSym <> NIL_SYM) and
+     (LCM.Symbols[LCM.Scopes[LScope].StructSym].TypeCat = tcClass)) then
+    Result := Length(FNav.FindFormSites(AMid, ASym)) > 0;
+  FFormAsked.Add(K(AMid, ASym), Result);
+end;
+
+// The bare `inherited;` uses of the candidates (MarkBound) joined to their
+// placed hits; anything else they run stays used.
+procedure TUnusedLint.PlaceInherited;
+var
+  LSites: TList<TUnusedSite>;
+  LAt: TList<Int64>;
+  LM: TPasSemaModel;
+  LMid, LNode, LFi, LLine, LCol: Integer;
+begin
   for var LC in FCands do
   begin
-    if not LNew.ContainsKey(K(LC.UnitId, LC.Sym)) or
-       FUsed.ContainsKey(K(LC.UnitId, LC.Sym)) then
+    var LKey := K(LC.UnitId, LC.Sym);
+    if FHard.ContainsKey(LKey) or not FInherits.TryGetValue(LKey, LAt) then
       Continue;
-    var LCM := FProj.Model(LC.UnitId);
-    if ((LC.Kind = skType) and (LCM.Symbols[LC.Sym].TypeCat = tcClass)) or
-       ((LC.Kind in [skRoutine, skField]) and
-       (LCM.Symbols[LC.Sym].Visibility = svDefault) and
-       (LCM.Scopes[LCM.Symbols[LC.Sym].Scope].Kind = sckStruct) and
-       (LCM.Scopes[LCM.Symbols[LC.Sym].Scope].StructSym <> NIL_SYM) and
-       (LCM.Symbols[LCM.Scopes[LCM.Symbols[LC.Sym].Scope].StructSym].TypeCat =
-       tcClass)) then
-      if Length(FNav.FindFormSites(LC.UnitId, LC.Sym)) > 0 then
-        Hard(K(LC.UnitId, LC.Sym));
+    if not FUses.TryGetValue(LKey, LSites) then
+    begin
+      LSites := TList<TUnusedSite>.Create;
+      FUses.Add(LKey, LSites);
+    end;
+    for var LWhere in LAt do
+    begin
+      LMid := Integer(LWhere shr 32);
+      LNode := Integer(Cardinal(LWhere and $FFFFFFFF));
+      LM := FProj.Model(LMid);
+      var LSite := Default(TUnusedSite);
+      LSite.Users := UsersOf(LM, LMid, LNode);
+      if VisPos(LM, LM.Tree.NodeLeftmostVis(LNode), LFi, LLine, LCol) then
+        LSite.At := Format('%s:%d', [ExtractFileName(
+          LM.Tree.Source.FileNames[LFi]), LLine]);
+      LSites.Add(LSite);
+    end;
+    FInherits.Remove(LKey);
   end;
-  LNew.Free;
 end;
 
 // A class or record helper applies without being named: a call to a member
@@ -3839,6 +3915,11 @@ begin
   LKept := TDictionary<Int64, Boolean>.Create;
   LBy := TDictionary<Int64, Boolean>.Create;
   try
+    // A form file binding one keeps it, whatever uses it in code: asked of
+    // the ones the fixed point keeps (few), and the point made again
+    // without those a form binds.
+    repeat
+    LKept.Clear;
     for var LP in FUses do
       if FUsed.ContainsKey(LP.Key) and not FHard.ContainsKey(LP.Key) and
          not FUnused.ContainsKey(LP.Key) then
@@ -3868,6 +3949,15 @@ begin
           LKept.Remove(LKey);
           LChanged := True;
         end;
+      end;
+    until not LChanged;
+    LChanged := False;
+    for var LKey in LKept.Keys do
+      if FormBinds(Integer(LKey shr 32), Integer(Cardinal(LKey and
+         $FFFFFFFF))) then
+      begin
+        FHard.AddOrSetValue(LKey, True);
+        LChanged := True;
       end;
     until not LChanged;
     for var LKey in LKept.Keys do
@@ -4073,6 +4163,7 @@ begin
     end;
     for var LMid in LMids do
       Collect(LMid);
+    PlaceInherited;
     for var LName in FCandNames.Keys do
       if not LOldNames.ContainsKey(LName) then
         LNames.Add(LName, True);
@@ -4103,6 +4194,7 @@ begin
     if not ANav.Project.IsLight(LMid) and
        not ANav.IsUnderLibraryPath(ANav.Project.ModelFile(LMid)) then
       ALint.MarkBound(LMid);
+  ALint.PlaceInherited;
   ALint.Search;
   ALint.MarkHelpers;
   ALint.Derive(False);

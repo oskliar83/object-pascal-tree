@@ -864,7 +864,7 @@ begin
   // System.pas itself; TBytes/Exception additionally in System.SysUtils) --
   // commented out to rely on the ordinary used-unit/implicit-System
   // fallback (CrossResolve) instead of a per-model seed. Measured on
-  // rtlflat/bigflat/spring4d/both AVImark corpora: ZERO new diagnostics --
+  // rtlflat/bigflat/spring4d/both client corpora: ZERO new diagnostics --
   // every real-world unit that bares these names already carries the
   // `uses` clause dcc itself would require, TObject/TClass/IInterface/
   // IUnknown/TGUID/TArray live in the ALWAYS-searched implicit System unit
