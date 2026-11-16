@@ -253,6 +253,11 @@ type
     // this pattern is loaded light - a search for units by name; a loaded
     // unit is never wanted by it.
     UnitPattern: string;
+    // Not nil: only the loaded units marked here, by model id, can be
+    // wanted; a unit nobody loaded never is. FindUnusedSymbols' demand: the
+    // library units that list an own unit, or such a library unit, in their
+    // `uses` (UnusedLintDemand, 0.198.0).
+    Within: TArray<Boolean>;
   end;
 
   { What a query needs analyzed in full before it can answer as a full
@@ -32928,6 +32933,9 @@ begin
       for LNode := 0 to LN - 1 do
       begin
         if not LIn[LNode] or LWanted[LNode] or not LCandN[LNode] then
+          Continue;
+        if (LAsk.Within <> nil) and ((LNode >= Length(LAsk.Within)) or
+           not LAsk.Within[LNode]) then
           Continue;
         // A declaration search: a light unit matched made full, a unit
         // nobody loaded loaded light (its implementation tested once it is

@@ -2038,6 +2038,141 @@ begin
   end;
 end;
 
+{ FindUnusedSymbols in light mode: its demand (DemandUnusedSymbols) wants a
+  library body only where it can name an own declaration - a library unit
+  whose `uses` list an own unit, or a library unit that does. LibCopy is an
+  own copy of a library unit (usReplacesLibrary) whose interface uses UOwn;
+  LibA lists it and calls GCopy.Spare: a copy is no way in (the library was
+  compiled against the original), and nothing is made full. LibB's
+  implementation uses UOwn and calls X.Spare: the one unit made full - LibA
+  was made full beside it before (it spells Execute, and reached UOwn
+  through the copy) - and Spare is no row after it; Execute and OwnDead stay
+  rows. }
+procedure TestUnusedSymbolsLight;
+var
+  LRoot, LOwn, LLib, LMain: string;
+
+  procedure WriteUnit(const ADir, AName, AIntf, AImpl: string);
+  begin
+    TFile.WriteAllText(TPath.Combine(ADir, AName + '.pas'),
+      'unit ' + AName + ';'#13#10'interface'#13#10 + AIntf +
+      'implementation'#13#10 + AImpl + 'end.'#13#10);
+  end;
+
+  // The names of the rows of UOwn, sorted, joined by a space.
+  function RowNames(ANav: TPasNavigator): string;
+  var
+    LSkips: TPasUnusedSkips;
+    LNames: TArray<string>;
+  begin
+    LNames := nil;
+    for var LRow in FindUnusedSymbols(ANav,
+      [ANav.Project.ModelIdOf(TPath.Combine(LOwn, 'UOwn.pas'))], LSkips) do
+      LNames := LNames + [LRow.Name];
+    for var LI := 1 to High(LNames) do
+      for var LJ := LI downto 1 do
+        if CompareStr(LNames[LJ - 1], LNames[LJ]) > 0 then
+        begin
+          var LS := LNames[LJ];
+          LNames[LJ] := LNames[LJ - 1];
+          LNames[LJ - 1] := LS;
+        end;
+    Result := string.Join(' ', LNames);
+  end;
+
+  function Run(AWithB: Boolean; out ARows: string; out AFirst: TPasDemand;
+    out ARes: TPasEnsureResult): Boolean;
+  var
+    LProj: TPasSemaProject;
+    LNav: TPasNavigator;
+    LRounds: Integer;
+  begin
+    if AWithB then
+      WriteUnit(LOwn, 'UUse', 'procedure Go;'#13#10,
+        'uses LibA, LibB;'#13#10'procedure Go;'#13#10'begin'#13#10 +
+        '  LA;'#13#10'  LB;'#13#10'end;'#13#10)
+    else
+      WriteUnit(LOwn, 'UUse', 'procedure Go;'#13#10,
+        'uses LibA;'#13#10'procedure Go;'#13#10'begin'#13#10 +
+        '  LA;'#13#10'end;'#13#10);
+    LProj := TPasSemaProject.Create(pfWin32, [LOwn, LLib], []);
+    LProj.LightPaths := [LLib];
+    // A library this small is all a demand needs: no escalation.
+    LProj.EscalationPercent := 100;
+    LProj.AnalyzeStaged([LMain], []);
+    LNav := TPasNavigator.Create(LProj);
+    LNav.LibraryPaths := [LLib];
+    try
+      AFirst := DemandUnusedSymbols(LNav,
+        [LProj.ModelIdOf(TPath.Combine(LOwn, 'UOwn.pas'))]);
+      Result := PasEnsureDemand(LNav,
+        function(ANav: TPasNavigator): TPasDemand
+        begin
+          Result := DemandUnusedSymbols(ANav,
+            [ANav.Project.ModelIdOf(TPath.Combine(LOwn, 'UOwn.pas'))]);
+        end, ARes, LRounds);
+      ARows := RowNames(LNav);
+    finally
+      LNav.Free;
+      LProj.Free;
+    end;
+  end;
+
+var
+  LRows: string;
+  LFirst: TPasDemand;
+  LRes: TPasEnsureResult;
+begin
+  LRoot := TPath.Combine(TPath.GetTempPath, 'pastree_unused_light');
+  if TDirectory.Exists(LRoot) then
+    TDirectory.Delete(LRoot, True);
+  LOwn := TPath.Combine(LRoot, 'own');
+  LLib := TPath.Combine(LRoot, 'lib');
+  TDirectory.CreateDirectory(LOwn);
+  TDirectory.CreateDirectory(LLib);
+  try
+    LMain := TPath.Combine(LOwn, 'UMain.dpr');
+    TFile.WriteAllText(LMain, 'program UMain;'#13#10'uses UOwn, UUse;'#13#10 +
+      'begin'#13#10'end.'#13#10);
+    WriteUnit(LOwn, 'UOwn',
+      'type'#13#10'  TOwn = class'#13#10'  public'#13#10 +
+      '    procedure Execute;'#13#10'    procedure Spare;'#13#10'  end;'#13#10 +
+      'procedure OwnDead;'#13#10,
+      'procedure TOwn.Execute; begin end;'#13#10 +
+      'procedure TOwn.Spare; begin end;'#13#10 +
+      'procedure OwnDead; begin end;'#13#10);
+    WriteUnit(LOwn, 'LibCopy', 'uses UOwn;'#13#10'var'#13#10 +
+      '  GCopy: TOwn;'#13#10, '');
+    WriteUnit(LLib, 'LibCopy', '', '');
+    WriteUnit(LLib, 'LibA', 'procedure LA;'#13#10,
+      'uses LibCopy;'#13#10'type'#13#10'  TLocal = class'#13#10 +
+      '    procedure Execute;'#13#10'    procedure Spare;'#13#10'  end;'#13#10 +
+      'procedure TLocal.Execute; begin end;'#13#10 +
+      'procedure TLocal.Spare; begin end;'#13#10 +
+      'procedure LA;'#13#10'begin'#13#10 +
+      '  TLocal.Create.Execute;'#13#10'  GCopy.Spare;'#13#10 +
+      'end;'#13#10);
+    WriteUnit(LLib, 'LibB', 'procedure LB;'#13#10,
+      'uses UOwn;'#13#10'procedure LB;'#13#10'var'#13#10'  X: TOwn;'#13#10 +
+      'begin'#13#10'  X.Spare;'#13#10'end;'#13#10);
+    Ok('unused light: only a copy of a library unit leads in - nothing made ' +
+      'full',
+      Run(False, LRows, LFirst, LRes) and LFirst.IsEmpty and
+      (LRes.Promoted = 0) and (LRes.Loaded = 0));
+    Ok('unused light: ...and the rows are the full analysis''s (' + LRows +
+      ')', LRows = 'OwnDead TOwn.Execute TOwn.Spare');
+    Ok('unused light: LibB uses UOwn - the one unit made full',
+      Run(True, LRows, LFirst, LRes) and (Length(LFirst.Full) = 1) and
+      SameText(ExtractFileName(LFirst.Full[0]), 'LibB.pas') and
+      (LRes.Promoted = 1));
+    Ok('unused light: ...and its call keeps Spare (' + LRows + ')',
+      LRows = 'OwnDead TOwn.Execute');
+  finally
+    if TDirectory.Exists(LRoot) then
+      TDirectory.Delete(LRoot, True);
+  end;
+end;
+
 { The uses lint in light mode (TPasSemaProject.LightPaths). The own units
   sit beside LMain.dpr, the library units in a light tree of their own:
   - UInl lists LibJ only for the expansion of LibI's inline InlI, whose body
@@ -8023,6 +8158,7 @@ begin
   TestUnusedSymbolsDerived;
   TestUnusedSymbolsMissedUses;
   TestUnusedSymbolsImplicit;
+  TestUnusedSymbolsLight;
   TestAsmNames;
   TestUnreferencedUnits;
   TestLintGlobalInit;
