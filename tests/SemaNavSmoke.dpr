@@ -3399,6 +3399,182 @@ begin
   end;
 end;
 
+{ FindUnusedSymbols with a library's units (TPasUnusedLibrary, 0.205.0). A
+  package contains UApiLib. Its interface declarations nothing uses stay
+  rows with the doubt "exported" and Api uaExported (a public and a
+  protected method of a used class, a free routine); a private member is a
+  row with no doubt; what only exported rows use - a private method, an
+  implementation-only routine - is uaByExported with the chain's doubt; a
+  routine nothing uses in the implementation is a sure row. The empty case:
+  no library given, the same rows, none exported, LibCall sure. The library
+  named by the package (Packages) or by the caller (Units) alike; with
+  Hosts the Api is set and no doubt added (the caller weighs them);
+  CheckUnusedSymbols answers the same. }
+procedure TestUnusedSymbolsExported;
+const
+  PKG =
+    'package ApiPkg;'#13#10 +
+    'contains'#13#10 +
+    '  UApiLib in ''UApiLib.pas'';'#13#10 +
+    'end.'#13#10;
+  UAPI =
+    'unit UApiLib;'#13#10 +
+    'interface'#13#10 +
+    'type'#13#10 +
+    '  TApi = class'#13#10 +
+    '  private'#13#10 +
+    '    FHidden: Integer;'#13#10 +
+    '    procedure Helper;'#13#10 +
+    '  protected'#13#10 +
+    '    procedure Hook;'#13#10 +
+    '  public'#13#10 +
+    '    procedure Run;'#13#10 +
+    '  end;'#13#10 +
+    'procedure LibCall;'#13#10 +
+    'implementation'#13#10 +
+    'procedure Tail; begin end;'#13#10 +
+    'procedure Dead; begin end;'#13#10 +
+    'procedure TApi.Helper; begin end;'#13#10 +
+    'procedure TApi.Hook; begin end;'#13#10 +
+    'procedure TApi.Run; begin Helper; end;'#13#10 +
+    'procedure LibCall; begin Tail; end;'#13#10 +
+    'initialization'#13#10 +
+    '  TApi.Create.Free;'#13#10 +
+    'end.'#13#10;
+var
+  LDir: string;
+  LProj: TPasSemaProject;
+  LNav: TPasNavigator;
+  LRows, LInRow: TArray<TPasUnusedSymbol>;
+  LSkips: TPasUnusedSkips;
+  LLib: TPasUnusedLibrary;
+  LMid: Integer;
+  LNames: string;
+  LChecks: TArray<TPasUnusedCheck>;
+  LRef: TPasExtRef;
+
+  function Row(const AName: string): Integer;
+  begin
+    for var LI := 0 to High(LRows) do
+      if SameText(LRows[LI].Name, AName) then
+        Exit(LI);
+    Result := -1;
+  end;
+
+  // Is AName a row whose Api is AApi?
+  function Api(const AName: string; AApi: TPasUnusedApi): Boolean;
+  begin
+    Result := (Row(AName) >= 0) and (LRows[Row(AName)].Api = AApi);
+  end;
+
+  // Is AName a row with no doubt?
+  function Sure(const AName: string): Boolean;
+  begin
+    Result := (Row(AName) >= 0) and (LRows[Row(AName)].Doubts = nil);
+  end;
+
+  function Exp(const AName: string): Boolean;
+  begin
+    Result := False;
+    if Row(AName) >= 0 then
+      for var LD in LRows[Row(AName)].Doubts do
+        if StartsText('exported', LD) then
+          Exit(True);
+  end;
+
+  function Listed: string;
+  begin
+    Result := '';
+    for var LR in LRows do
+    begin
+      Result := Result + LR.Name + ':' + IntToStr(Ord(LR.Api));
+      for var LD in LR.Doubts do
+        Result := Result + ' [' + LD + ']';
+      Result := Result + '; ';
+    end;
+  end;
+
+  // The rows of a library run: what each one is.
+  function LibraryRight: Boolean;
+  begin
+    Result := (Length(LRows) = 7) and
+      Api('TApi.Run', uaExported) and Exp('TApi.Run') and
+      Api('TApi.Hook', uaExported) and Exp('TApi.Hook') and
+      Api('LibCall', uaExported) and Exp('LibCall') and
+      Api('TApi.FHidden', uaNone) and Sure('TApi.FHidden') and
+      Api('TApi.Helper', uaByExported) and not Exp('TApi.Helper') and
+      not Sure('TApi.Helper') and
+      Api('Tail', uaByExported) and not Sure('Tail') and
+      Api('Dead', uaNone) and Sure('Dead');
+  end;
+
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_unused_api');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'ApiPkg.dpk'), PKG);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UApiLib.pas'), UAPI);
+  LProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  LNav := nil;
+  try
+    LProj.AnalyzeProject(TPath.Combine(LDir, 'ApiPkg.dpk'));
+    LNav := TPasNavigator.Create(LProj);
+    LMid := LProj.ModelIdOf(TPath.Combine(LDir, 'UApiLib.pas'));
+    // The empty case: no library, the rule as before.
+    LRows := FindUnusedSymbols(LNav, [LMid], LSkips, LInRow);
+    LNames := Listed;
+    Ok('unused exported: none without a library, the rows as before (' +
+      LNames + ')', (Length(LRows) = 7) and Sure('LibCall') and
+      Sure('TApi.Hook') and Sure('TApi.Run') and Api('TApi.Run', uaNone) and
+      Api('Tail', uaNone) and Api('TApi.Helper', uaNone));
+    // A package's units.
+    LLib := Default(TPasUnusedLibrary);
+    LLib.Packages := True;
+    LRows := FindUnusedSymbols(LNav, [LMid], [], LLib, LSkips, LInRow);
+    LNames := Listed;
+    Ok('unused exported: a package''s interface exported, private and '
+      + 'implementation rows apart (' + LNames + ')', LibraryRight);
+    // The caller's marking.
+    LLib := Default(TPasUnusedLibrary);
+    LLib.Units := [LMid];
+    LRows := FindUnusedSymbols(LNav, [LMid], [], LLib, LSkips, LInRow);
+    LNames := Listed;
+    Ok('unused exported: the units the caller marks (' + LNames + ')',
+      LibraryRight);
+    // The caller weighs them against its hosts: Api set, no doubt.
+    LLib.Hosts := True;
+    LRows := FindUnusedSymbols(LNav, [LMid], [], LLib, LSkips, LInRow);
+    LNames := Listed;
+    Ok('unused exported: Hosts - Api without the doubt (' + LNames + ')',
+      (Length(LRows) = 7) and Api('TApi.Run', uaExported) and
+      Sure('TApi.Run') and Api('LibCall', uaExported) and Sure('LibCall') and
+      Api('Tail', uaByExported) and Sure('Tail') and
+      Api('TApi.Helper', uaByExported) and Sure('TApi.Helper') and
+      Api('Dead', uaNone));
+    LLib.Hosts := False;
+    // Asked alone.
+    LRef.UnitId := LMid;
+    LRef.Sym := -1;
+    for var LS := 0 to LProj.Model(LMid).SymCount - 1 do
+      if SameText(LProj.Model(LMid).Symbols[LS].Name, 'LibCall') then
+        LRef.Sym := LS;
+    LChecks := CheckUnusedSymbols(LNav, [LRef], LLib);
+    Ok('unused exported: CheckUnusedSymbols says the same',
+      (Length(LChecks) = 1) and (LChecks[0].Verdict = uvUnused) and
+      (LChecks[0].Row.Api = uaExported));
+    LChecks := CheckUnusedSymbols(LNav, [LRef]);
+    Ok('unused exported: CheckUnusedSymbols without a library: sure',
+      (Length(LChecks) = 1) and (LChecks[0].Verdict = uvUnused) and
+      (LChecks[0].Row.Api = uaNone) and (LChecks[0].Row.Doubts = nil));
+  finally
+    LNav.Free;
+    LProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 { FindUnusedSymbols on interface members (0.204.0). Weighed by name: a
   member no reference names is a row (IStore.MoreStuff, IStore.Spare,
   IStore.Load), its accessors rows made by it; one called through a
@@ -9101,6 +9277,7 @@ begin
   TestUnusedSymbols;
   TestUnusedSymbolsDerived;
   TestUnusedSymbolsInRowType;
+  TestUnusedSymbolsExported;
   TestUnusedSymbolsPackage;
   TestUnusedSymbolsInterface;
   TestUnusedSymbolsParams;

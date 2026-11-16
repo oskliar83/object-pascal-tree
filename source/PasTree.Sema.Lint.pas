@@ -295,7 +295,9 @@ function DemandLint(ANav: TPasNavigator; const AMids: TArray<Integer>;
   the helper's (27 of 27 such helpers were in use on a 4,000-unit group). A
   member of a class's unnamed first section whose ancestry the index could
   not follow to TPersistent, in a unit with a form file: published if the
-  class streams, and the form may bind it by name at run time. One analysis, one configuration: pastree-mcp's `lint
+  class streams, and the form may bind it by name at run time. A library's
+  exported declaration, when the caller says which units are a library's
+  (TPasUnusedLibrary): a program outside the analysis may use it. One analysis, one configuration: pastree-mcp's `lint
   unused-symbol` keeps a row only when every analysis of a group holding
   the unit finds it unused. }
 type
@@ -311,6 +313,13 @@ type
     uhOnlyWritten);  // a field or variable only assigned (Writes), any other
                      // use by rows (By): nothing reads what it holds
 
+  // A row's place in a library's API (TPasUnusedLibrary): a host keeps or
+  // hides what a program outside the analysis may use by it.
+  TPasUnusedApi = (
+    uaNone,          // not exported, nor used by an exported row
+    uaExported,      // exported itself - its doubt says so
+    uaByExported);   // used only by rows going back to an exported one
+
   TPasUnusedSymbol = record
     UnitId, Sym: Integer;     // the declaration, in ANav's project
     FileName: string;         // the file it is written in (an include too)
@@ -323,6 +332,33 @@ type
     How: TPasUnusedHow;
     By: TArray<string>;       // the rows using it, qualified ('' for itself)
     Writes: TArray<string>;   // uhOnlyWritten: the assignments, 'File.pas:12'
+    Api: TPasUnusedApi;       // uaNone unless TPasUnusedLibrary names its unit
+  end;
+
+  { The units of a library whose interface programs outside the analysis may
+    use - an application group links every unit it compiles into its own
+    programs, a library's are linked into programs the analysis never sees
+    (pastree-mcp and pastree-lsp call PasTree's TPasWorkspace, which no
+    project of PasTree's own group does). Empty, the default: none, the rule
+    as before. A declaration another unit can name (spec 1.1.2: the
+    interface section; 11.2.1: a member of a type declared there, at any
+    depth of nesting, that is not `private` or `strict private` - a
+    `protected` one a descendant in that program reaches) of such a unit
+    stays a row, with the doubt "exported" and Api uaExported: what is
+    really dead must still show. A row used only by such rows gets the
+    doubt down the chain, as any, and Api uaByExported. }
+  TPasUnusedLibrary = record
+    // Every unit a package (.dpk) of the analysis contains: a package is
+    // built to be loaded by programs the analysis does not compile.
+    Packages: Boolean;
+    // And these, by model id - the caller's marking (a library's source
+    // directory whose host programs live elsewhere).
+    Units: TArray<Integer>;
+    // The caller weighs the exported rows itself, against the programs it
+    // knows use the library (pastree-mcp's `hosts`): Api set, no doubt -
+    // a row a host uses it drops with the rows going back to it, one no
+    // host uses is as sure as any.
+    Hosts: Boolean;
   end;
 
 // The unused declarations of the units AMids, by file, line and column.
@@ -353,6 +389,13 @@ type
 
 function FindUnusedSymbols(ANav: TPasNavigator; const AMids: TArray<Integer>;
   AOptions: TPasUnusedOptions; out ASkips: TPasUnusedSkips;
+  out AInRowTypes: TArray<TPasUnusedSymbol>): TArray<TPasUnusedSymbol>;
+  overload;
+// The same, with ALibrary's exported declarations weighed as such
+// (TPasUnusedLibrary): their rows carry the doubt and Api.
+function FindUnusedSymbols(ANav: TPasNavigator; const AMids: TArray<Integer>;
+  AOptions: TPasUnusedOptions; const ALibrary: TPasUnusedLibrary;
+  out ASkips: TPasUnusedSkips;
   out AInRowTypes: TArray<TPasUnusedSymbol>): TArray<TPasUnusedSymbol>;
   overload;
 
@@ -391,7 +434,11 @@ type
 // the rest) where the routine's signature is not its own to change. See
 // docs/editor-features.md sec. 15.2.
 function CheckUnusedSymbols(ANav: TPasNavigator;
-  const ATargets: TArray<TPasExtRef>): TArray<TPasUnusedCheck>;
+  const ATargets: TArray<TPasExtRef>): TArray<TPasUnusedCheck>; overload;
+// The same, ALibrary's exported declarations weighed as such.
+function CheckUnusedSymbols(ANav: TPasNavigator;
+  const ATargets: TArray<TPasExtRef>;
+  const ALibrary: TPasUnusedLibrary): TArray<TPasUnusedCheck>; overload;
 
 // CheckUnusedSymbols' demand in light mode.
 function DemandCheckUnusedSymbols(ANav: TPasNavigator;
@@ -416,6 +463,10 @@ uses
 const
   // Units, places or calls named in one doubt; past them, counted.
   MAX_NAMED = 3;
+  // The doubt of an exported row (TPasUnusedLibrary), one text for all: a
+  // host says it once over the rows sharing it.
+  EXPORTED_DOUBT = 'exported - in the interface of a library unit, a '
+    + 'program outside the analysis may use it';
 
 type
   TLintPlace = record
@@ -3057,6 +3108,9 @@ type
     FDelegated: TDictionary<Int64, Boolean>;
     // The interfaces an own class lists (IfaceDoubt), lazy.
     FImplemented: TDictionary<Int64, Boolean>;
+    // TPasUnusedLibrary: the units marked, whether a package's are too.
+    FApiUnits: TDictionary<Integer, Boolean>;
+    FApiPackages, FApiHosts: Boolean;
     function LibraryWithin(out AAny: Boolean): TArray<Boolean>;
     function RoutineKeyOf(AMid, ARoutine: Integer): Int64;
     function ParamNames(LM: TPasSemaModel; ARoutine: Integer): TArray<Integer>;
@@ -3130,6 +3184,9 @@ type
     procedure MarkHelpers;
     function UsedOverload(AMid, ASym: Integer): Boolean;
     procedure AddDoubts;
+    procedure SetLibrary(const ALibrary: TPasUnusedLibrary);
+    function Exported(AMid, ASym: Integer): Boolean;
+    procedure MarkExported;
   public
     constructor Create(ANav: TPasNavigator);
     destructor Destroy; override;
@@ -3173,6 +3230,7 @@ end;
 
 destructor TUnusedLint.Destroy;
 begin
+  FApiUnits.Free;
   FPackaged.Free;
   FFormAsked.Free;
   FInherits.Free;
@@ -4180,6 +4238,67 @@ begin
       if LM.Symbols[LP].Kind = skParam then
         Exit;
   Result := InPackage(AMid);
+end;
+
+procedure TUnusedLint.SetLibrary(const ALibrary: TPasUnusedLibrary);
+begin
+  FApiPackages := ALibrary.Packages;
+  FApiHosts := ALibrary.Hosts;
+  FreeAndNil(FApiUnits);
+  if ALibrary.Units = nil then
+    Exit;
+  FApiUnits := TDictionary<Integer, Boolean>.Create;
+  for var LMid in ALibrary.Units do
+    FApiUnits.AddOrSetValue(LMid, True);
+end;
+
+// Is ASym of AMid exported (TPasUnusedLibrary): its unit a library's, and
+// it a declaration another unit can name - in the interface section (spec
+// 1.1.2), or a member of a type declared there, at any depth, none of the
+// types on the way nor it `private` or `strict private` (11.2.1: plain
+// private is the declaring unit's alone; protected a descendant reaches).
+function TUnusedLint.Exported(AMid, ASym: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LScope, LSym: Integer;
+begin
+  Result := False;
+  if not (((FApiUnits <> nil) and FApiUnits.ContainsKey(AMid)) or
+     (FApiPackages and InPackage(AMid))) then
+    Exit;
+  LM := FProj.Model(AMid);
+  LSym := ASym;
+  LScope := LM.Symbols[LSym].Scope;
+  while (LScope >= 0) and (LScope < LM.Scopes.Count) and
+        (LM.Scopes[LScope].Kind = sckStruct) do
+  begin
+    if (LM.Symbols[LSym].Visibility in [svPrivate, svStrictPrivate]) or
+       (LM.Scopes[LScope].StructSym = NIL_SYM) then
+      Exit;
+    LSym := LM.Scopes[LScope].StructSym;
+    LScope := LM.Symbols[LSym].Scope;
+  end;
+  Result := (LScope <> NIL_SCOPE) and (LScope = LM.InterfaceScope);
+end;
+
+// The exported rows (Exported): the doubt, Api uaExported. Before
+// InheritDoubts, which carries it down the rows they make.
+procedure TUnusedLint.MarkExported;
+var
+  LC: TPasUnusedSymbol;
+begin
+  if (FApiUnits = nil) and not FApiPackages then
+    Exit;
+  for var LIdx := 0 to FCands.Count - 1 do
+  begin
+    LC := FCands[LIdx];
+    if not Exported(LC.UnitId, LC.Sym) then
+      Continue;
+    LC.Api := uaExported;
+    if not FApiHosts then
+      LC.Doubts := LC.Doubts + [EXPORTED_DOUBT];
+    FCands[LIdx] := LC;
+  end;
 end;
 
 // The declarations of unit AMid weighed - those not reached another way.
@@ -5732,12 +5851,14 @@ procedure TUnusedLint.InheritDoubts;
 var
   LOwn: TDictionary<string, Boolean>;   // the rows with a doubt of their own
   LRoot: TDictionary<string, string>;   // a row -> the doubted row it goes to
+  LApi: TDictionary<string, Boolean>;   // the rows exported or by exported
   LC: TPasUnusedSymbol;
   LChanged: Boolean;
   LTo: string;
 begin
   LOwn := TDictionary<string, Boolean>.Create;
   LRoot := TDictionary<string, string>.Create;
+  LApi := TDictionary<string, Boolean>.Create;
   try
     for var LR in FCands do
       if LR.Doubts <> nil then
@@ -5758,6 +5879,31 @@ begin
               Break;
             end;
     until not LChanged;
+    // Used only by rows going back to an exported one (MarkExported): its
+    // own fixed point - the root LRoot names may be another doubted row.
+    LApi.Clear;
+    for LC in FCands do
+      if LC.Api = uaExported then
+        LApi.AddOrSetValue(LC.Name, True);
+    if LApi.Count > 0 then
+      repeat
+        LChanged := False;
+        for var LIdx := 0 to FCands.Count - 1 do
+        begin
+          LC := FCands[LIdx];
+          if LC.Api <> uaNone then
+            Continue;
+          for var LB in LC.By do
+            if (LB <> '') and LApi.ContainsKey(LB) then
+            begin
+              LC.Api := uaByExported;
+              FCands[LIdx] := LC;
+              LApi.AddOrSetValue(LC.Name, True);
+              LChanged := True;
+              Break;
+            end;
+        end;
+      until not LChanged;
     // A row with a doubt of its own gets its users' too, as before.
     for var LIdx := 0 to FCands.Count - 1 do
     begin
@@ -5777,6 +5923,7 @@ begin
       FCands[LIdx] := LC;
     end;
   finally
+    LApi.Free;
     LRoot.Free;
     LOwn.Free;
   end;
@@ -6657,6 +6804,7 @@ begin
     if ALint.FCands.Count > 0 then
     begin
       ALint.AddDoubts;
+      ALint.MarkExported;
       ALint.InheritDoubts;
     end;
   finally
@@ -6827,6 +6975,15 @@ end;
 function FindUnusedSymbols(ANav: TPasNavigator; const AMids: TArray<Integer>;
   AOptions: TPasUnusedOptions; out ASkips: TPasUnusedSkips;
   out AInRowTypes: TArray<TPasUnusedSymbol>): TArray<TPasUnusedSymbol>;
+begin
+  Result := FindUnusedSymbols(ANav, AMids, AOptions,
+    Default(TPasUnusedLibrary), ASkips, AInRowTypes);
+end;
+
+function FindUnusedSymbols(ANav: TPasNavigator; const AMids: TArray<Integer>;
+  AOptions: TPasUnusedOptions; const ALibrary: TPasUnusedLibrary;
+  out ASkips: TPasUnusedSkips;
+  out AInRowTypes: TArray<TPasUnusedSymbol>): TArray<TPasUnusedSymbol>;
 var
   LLint: TUnusedLint;
   LRowAt: TDictionary<Int64, Integer>;
@@ -6838,6 +6995,7 @@ begin
   LKept := TList<TPasUnusedSymbol>.Create;
   LOut := TList<TPasUnusedSymbol>.Create;
   try
+    LLint.SetLibrary(ALibrary);
     RunUnusedLint(LLint, ANav, AMids);
     // After the fixed point and the doubts: a member of a row type still
     // made its users rows (`by` names it), it is only not listed.
@@ -6919,6 +7077,13 @@ end;
 
 function CheckUnusedSymbols(ANav: TPasNavigator;
   const ATargets: TArray<TPasExtRef>): TArray<TPasUnusedCheck>;
+begin
+  Result := CheckUnusedSymbols(ANav, ATargets, Default(TPasUnusedLibrary));
+end;
+
+function CheckUnusedSymbols(ANav: TPasNavigator;
+  const ATargets: TArray<TPasExtRef>;
+  const ALibrary: TPasUnusedLibrary): TArray<TPasUnusedCheck>;
 var
   LLint: TUnusedLint;
   LKey: Int64;
@@ -6934,6 +7099,7 @@ begin
   LAll := ATargets;
   LLint := TUnusedLint.Create(ANav);
   try
+    LLint.SetLibrary(ALibrary);
     LLint.Restrict(LAll);
     GatherUnused(LLint, ANav, TargetMids(LAll));
     for var LRound := 2 to 4 do
