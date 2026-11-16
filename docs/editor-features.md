@@ -1590,7 +1590,13 @@ search does not place (PasTree 0.199.1: the uses counted - declared names
 and the declaration itself are not - above the hits placed; on a client
 group, calls through a record helper's method). A nameless symbol, the type
 an anonymous method makes for itself, is no row. Their doubts: an assignment whose value code
-computes, an interface reference held, a row using it with a doubt.
+computes, an interface reference held, a row using it with a doubt - and
+so down the whole chain (PasTree 0.203.0): a row used only by a row used
+only by a doubted one is as unsure, and its doubt names the user and the
+doubted row the chain goes back to ("Mid, which uses it, is used only by
+rows going back to DRoot, which has a doubt of its own"); before, the doubt
+went one hop, and on a design-time package's units 600 rows two hops and
+more below one doubted constructor read as sure.
 `CheckUnusedSymbols` weighs the declarations the targets' uses sit in too,
 round by round (4 rounds, 300 declarations), so a getter asked alone finds
 its unused property. Covered by `TestUnusedSymbolsDerived`.
@@ -1650,14 +1656,19 @@ library unit of its name (`usReplacesLibrary`: a unit by that name under
 `LibraryPaths` or the installed `$(BDS)source`, at another path - a patched
 `Vcl.Menus`): the library's `.dcu` files were compiled against the
 original interface, so removing anything from the copy breaks units the
-analysis never reads (F2051, F2613).
+analysis never reads (F2051, F2613). And the interface `procedure Register;`
+(no parameters) of a unit a package of the analysis contains
+(`usPackageRegister`, PasTree 0.203.0): the IDE calls it by that name when it
+loads the package, and no code does - on a design-time package's units it
+was a row, and about 800 rows only it reached were rows made by rows.
 
 Doubts on a row, where the index may be wrong: the name written in a branch
 this configuration does not compile, or - a type - as a whole string
 literal (`FindClass('TFoo')`; a member as `'TFoo.Bar'`, a public method
 by its bare name too - extended RTTI's `GetMethod('Run')`), in the
 files not under `LibraryPaths`; a record's field (the record
-may be read or written whole); another overload of the name in use (the
+may be read or written whole - not one with a managed field, a string, an
+interface or a dynamic array, which no file or buffer takes whole); another overload of the name in use (the
 index may pick another overload than dcc); the name declared at unit level
 by another unit too (the `uses` order decides which one a unit binds); the
 name written where the analysis bound nothing; a helper none of whose
@@ -1666,6 +1677,21 @@ helped type may run the helper's - all 27 helpers a first run reported on
 the client group were in use); a member of the unnamed first section of a
 class not followed to TPersistent, in a unit with a form file (published
 if the class streams, and bound by name at run time).
+
+A member named like a member of a library type (`Count`, `Add`, `Name`,
+`Create` - any field, method, property or constant a type under
+`LibraryPaths` or a light unit declares) takes the first two doubts only
+from its qualified name: `TFoo.Count` written in a branch not compiled, a
+literal `'TFoo.Count'` (PasTree 0.203.0). Its bare name there is far likelier
+that library member's, a column's or a comment's word - a `Method` field got
+the doubt from "method pointers" in a comment of a dead branch. On the
+client group (project scope, pastree-mcp) the branch doubt went from 570
+rows to 116 (243 of the 454 were constructors named `Create`), the string
+doubt from 279 to 10, and rows with no doubt from 3,417 to 3,550 of 5,754;
+a design-time package's 838 rows became 41 (31 with no doubt, 601 before),
+`Register` not weighed. No new row: the six rows more on the client group
+are members of a doubted row type that lost their own doubt (shown, by the
+rule above, rather than left out), the two fewer the converse.
 
 A member of a structured type that is a row itself - a field, a method, a
 property, a nested type or constant, at any depth of nesting - is not
