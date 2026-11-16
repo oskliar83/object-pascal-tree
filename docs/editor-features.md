@@ -1512,7 +1512,15 @@ out ASkips)` with the `TPasUnusedSymbol` row and `TPasUnusedSkips` counts in
 `source/PasTree.Sema.Lint.pas`, its light-mode demand `DemandUnusedSymbols`,
 and `TPasWorkspace.FindUnusedSymbols(AFiles, out ASkips)`; regression-covered
 by `tests/SemaNavSmoke.dpr` (`TestUnusedSymbols`,
-`TestUnusedSymbolsMissedUses`). Not wired into the demo
+`TestUnusedSymbolsMissedUses`) and by `tests/UnusedScenarioSmoke.dpr`: 149
+small programs over the real RTL and VCL (`tests/fixtures/unused/`), each
+declaration's verdict proven by dcc - deleted with its implementation (and,
+for a row made by rows, with the rows using it), the program rebuilt and run:
+still compiles and runs the same (a row), no longer compiles (used), or
+compiles and then fails or behaves otherwise (reached at run time - a form
+file, RTTI, dispatch, an overload a call rebinds to). The suite asserts what
+the rule answers today and prints the known gaps, each with what dcc
+proved. Not wired into the demo
 yet. The host is pastree-mcp's `lint unused-symbol` (0.53.0), which keeps a
 row only when every analysis of a group holding the unit finds it unused.
 
