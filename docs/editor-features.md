@@ -1496,9 +1496,11 @@ unit or class variable whose every other use is the target of a plain `:=`
 is a row, `uhOnlyWritten`, with `Writes` listing the assignments - not a
 record's field (the record is read whole) nor an `absolute` one. Both are
 decided together, a greatest fixed point over the declarations weighed (two
-routines calling only each other are two rows); a use the index cannot place
-(an include file, a bare `inherited`, a form) or one in a declaration not
-weighed keeps the declaration. Their doubts: an assignment whose value code
+routines calling only each other are two rows); a bare `inherited;` is a use
+placed in the routine it is written in (PasTree 0.197.0: a static method only
+a dead descendant's hiding method runs is a row); a use the index cannot
+place (an include file), a form file binding it, or a use in a declaration
+not weighed keeps the declaration. Their doubts: an assignment whose value code
 computes, an interface reference held, a row using it with a doubt.
 `CheckUnusedSymbols` weighs the declarations the targets' uses sit in too,
 round by round (4 rounds, 300 declarations), so a getter asked alone finds

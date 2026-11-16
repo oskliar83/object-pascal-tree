@@ -2785,7 +2785,7 @@ begin
       (Row('NeverProc') >= 0) and (Row('DeadProc') >= 0) and
       (Row('TextProc') >= 0));
     Ok('unused symbols: used another way, not rows (' + LNames + ')',
-      (Row('TBase.Count') < 0) and (Row('TBase.Hidden') < 0) and
+      (Row('TBase.Count') < 0) and
       (Row('TBase.Draw') < 0) and (Row('TBase.Run') < 0) and
       (Row('TFuncImpl.Invoke') < 0) and (Row('TPlainForm.Click') < 0) and
       (Row('MarkAttribute.Create') < 0) and
@@ -2793,6 +2793,10 @@ begin
       (Row('UsedProc') < 0) and (Row('Caller') < 0) and (Row('CUsed') < 0) and
       (Row('TRec.Used') < 0) and (Row('TBase.FCount') < 0) and
       (Row('L') < 0));
+    // TBase.Hidden: run only by the bare inherited of TDerived.Hidden, a row.
+    Ok('unused symbols: run by inherited of a row only - a row made by it',
+      (Row('TBase.Hidden') >= 0) and
+      (LRows[Row('TBase.Hidden')].How = uhOnlyByUnused));
     Ok('unused symbols: the skips counted', (LSkips[usDispatch] = 1) and
       (LSkips[usImplements] = 2) and (LSkips[usPublished] = 1) and
       (LSkips[usAttribute] = 1) and (LSkips[usForIn] = 2) and
@@ -2883,6 +2887,16 @@ const
     '    procedure Run;'#13#10 +
     '    property Item: Integer read GetItem;'#13#10 +
     '  end;'#13#10 +
+    '  TBaseGo = class'#13#10 +
+    '    procedure Go;'#13#10 +
+    '    procedure Stay;'#13#10 +
+    '  end;'#13#10 +
+    '  TDeadKid = class(TBaseGo)'#13#10 +
+    '    procedure Go;'#13#10 +
+    '  end;'#13#10 +
+    '  TLiveKid = class(TBaseGo)'#13#10 +
+    '    procedure Stay;'#13#10 +
+    '  end;'#13#10 +
     'var'#13#10 +
     '  GOwner: TOwner;'#13#10 +
     '  GOnlySet: Integer;'#13#10 +
@@ -2895,6 +2909,10 @@ const
     'procedure TOwner.PingB; begin PingA; end;'#13#10 +
     'procedure TOwner.Rec; begin Rec; end;'#13#10 +
     'function TOwner.Live: Integer; begin Result := FRead; end;'#13#10 +
+    'procedure TBaseGo.Go; begin end;'#13#10 +
+    'procedure TBaseGo.Stay; begin end;'#13#10 +
+    'procedure TDeadKid.Go; begin inherited; end;'#13#10 +
+    'procedure TLiveKid.Stay; begin inherited; end;'#13#10 +
     'procedure TOwner.Run;'#13#10 +
     'begin'#13#10 +
     '  Self.FIndex := 1;'#13#10 +
@@ -2903,6 +2921,7 @@ const
     '  FRead := Live;'#13#10 +
     '  GOnlySet := 3;'#13#10 +
     '  GAlias := 4;'#13#10 +
+    '  TLiveKid(nil).Stay;'#13#10 +
     'end;'#13#10 +
     'initialization'#13#10 +
     '  GOwner.Run;'#13#10 +
@@ -2999,6 +3018,11 @@ begin
       (Row('TOwner.FRead') < 0) and (Row('TOwner.Live') < 0) and
       (Row('TOwner.Run') < 0) and (Row('GAlias') < 0) and
       (Row('GAliased') < 0) and (Row('GOwner') < 0) and (Row('TOwner') < 0));
+    Ok('unused derived: a static method only a dead descendant runs by inherited (' +
+      LNames + ')',
+      Is_('TDeadKid.Go', uhUnused) and Is_('TBaseGo.Go', uhOnlyByUnused) and
+      By('TBaseGo.Go', 'TDeadKid.Go') and (Row('TBaseGo.Stay') < 0) and
+      (Row('TLiveKid.Stay') < 0) and (Row('TBaseGo') < 0));
     // One asked alone: the declarations its uses sit in, round by round.
     LChecks := CheckUnusedSymbols(LNav, [SymOf('GetItem', skRoutine),
       SymOf('THelperType', skType), SymOf('FIndex', skField),
@@ -3013,6 +3037,12 @@ begin
       (LChecks[2].Verdict = uvUnused) and
       (LChecks[2].Row.How = uhOnlyWritten) and
       (LChecks[3].Verdict = uvUsed) and (LChecks[4].Verdict = uvUnused));
+    LChecks := CheckUnusedSymbols(LNav, [SymOf('Go', skRoutine),
+      SymOf('Stay', skRoutine)]);
+    Ok('unused derived, checked: run by inherited of a dead method; of a live one',
+      (LChecks[0].Verdict = uvUnused) and
+      (LChecks[0].Row.How = uhOnlyByUnused) and
+      (LChecks[1].Verdict = uvUsed));
   finally
     LNav.Free;
     LProj.Free;
