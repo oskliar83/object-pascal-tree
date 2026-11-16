@@ -5,7 +5,7 @@ S001	S001A.pas	5	TBase.Hidden	runtime	none	dcc compiles a bare inherited with no
 S001	S001A.pas	6	TBase.Spare	row	row	
 # S002 a static method run only by the bare inherited of an unused descendant
 S002	S002A.pas	7	TDerived	row	row	
-S002	S002A.pas	8	TDerived.Hidden	row	row	
+S002	S002A.pas	8	TDerived.Hidden	row	in-row	
 S002	S002A.pas	5	TBase.Hidden	row	row	run only by the bare inherited of TDerived.Hidden, a row
 # S003 an inherited call with a name: inherited Foo(1)
 S003	S003A.pas	5	TBase.Foo	used	none	
@@ -21,7 +21,7 @@ S005	S005A.pas	11	G	row	row	written, never read
 S006	S006A.pas	8	TBase.Count	used	none	
 # S007 a republished property of an unused descendant
 S007	S007A.pas	10	TDerived	row	row	
-S007	S007A.pas	12	TDerived.Count	row	row	
+S007	S007A.pas	12	TDerived.Count	row	in-row	
 S007	S007A.pas	8	TBase.Count	row	none	republished only by TDerived, a row: a row made by rows
 S007	S007A.pas	6	TBase.FCount	row	none	read only by the property Count
 # S008 an abstract method with no implementation, never called
@@ -30,7 +30,7 @@ S008	S008A.pas	6	TShape.Area	used	none
 # S009 a class used only as the ancestor of an unused class
 S009	S009A.pas	8	TLeaf	row	row	
 S009	S009A.pas	5	TMid	row	row	only TLeaf, a row, derives from it: a row made by rows
-S009	S009A.pas	6	TMid.M	row	row	
+S009	S009A.pas	6	TMid.M	row	in-row	
 S009	S009A.pas	4	TKeep	row	row	
 # S010 a class used only as the ancestor of a used class
 S010	S010A.pas	4	TMid	used	none	
@@ -115,9 +115,9 @@ S037	S037A.pas	6	TMake.Once	row	row
 # S038 a type used only as a generic argument of an unused variable
 S038	S038A.pas	10	GPoints	row	row	
 S038	S038A.pas	5	TPoint3	row	row	only the unused GPoints names it
-S038	S038A.pas	6	TPoint3.X	row	row?	
-S038	S038A.pas	7	TPoint3.Y	row	row?	
-S038	S038A.pas	8	TPoint3.Z	row	row?	
+S038	S038A.pas	6	TPoint3.X	row	in-row	
+S038	S038A.pas	7	TPoint3.Y	row	in-row	
+S038	S038A.pas	8	TPoint3.Z	row	in-row	
 # S039 a generic interface specialised and implemented
 S039	S039A.pas	11	TCounter.Next	used	none	
 # S040 a class helper for a generic instance
@@ -131,7 +131,7 @@ S042	S042A.pas	6	TPair.Equal	used	none
 S042	S042A.pas	7	TPair.NotEqual	row	none	
 # S043 two helpers for one type: only the nearer is active
 S043	S043A.pas	7	TBoxHelper1	row	row?	hidden by TBoxHelper2, declared after it in the same scope
-S043	S043A.pas	8	TBoxHelper1.Twice	row	row?	
+S043	S043A.pas	8	TBoxHelper1.Twice	row	in-row	
 S043	S043A.pas	11	TBoxHelper2.Twice	runtime	none	the call binds it; without it dcc binds the hidden helper's Twice
 # S044 a helper active only through an implementation uses
 S044	S044B.pas	6	TTempHelper.F	used	none	
@@ -145,7 +145,7 @@ S046	S046A.pas	5	TStrHelper.Twice	used	none
 S047	S047A.pas	8	TBaseHelper.Plus1	used	none	reached through TMoreHelper, the active helper, which inherits it
 # S048 a helper for a type nothing uses
 S048	S048A.pas	5	TIdleHelper	row	row?	
-S048	S048A.pas	6	TIdleHelper.Nothing	row	row?	
+S048	S048A.pas	6	TIdleHelper.Nothing	row	in-row	
 S048	S048A.pas	4	TIdle	row	row?	only its unused helper names it
 # S049 for-in over a class with its own enumerator
 S049	S049A.pas	11	TBagEnum.MoveNext	used	none	
@@ -194,8 +194,8 @@ S061	S061A.pas	4	TMode	used	none	its values are named, the type never is
 # S062 a type used only by SizeOf and Default
 S062	S062A.pas	4	TCell	used	none	
 S062	S062A.pas	8	TOther	row	row	
-S062	S062A.pas	9	TOther.C	row	row?	
-S062	S062A.pas	10	TOther.D	row	row?	
+S062	S062A.pas	9	TOther.C	row	in-row	
+S062	S062A.pas	10	TOther.D	row	in-row	
 S062	S062A.pas	5	TCell.A	runtime	row?	SizeOf(TCell) reads the record's size
 S062	S062A.pas	6	TCell.B	runtime	row?	
 # S063 a class used only by is and as
@@ -221,9 +221,9 @@ S071	S071A.pas	4	GList	used	none	created and freed: Free in finalization reads i
 S072	S072A.pas	6	TCounter.FHits	row	none	changed, never read: Inc reads only to write back
 # S073 a type held only by a field of an unused plain class in a form's unit
 S073	S073A.pas	10	TCache	row!	row	a plain class, not streamed: its first section is not published
-S073	S073A.pas	11	TCache.Item	row	row	
+S073	S073A.pas	11	TCache.Item	row	in-row	
 S073	S073A.pas	7	TCacheItem	row	row	only TCache.Item, a row, names it
-S073	S073A.pas	8	TCacheItem.Key	row	row	
+S073	S073A.pas	8	TCacheItem.Key	row	in-row	
 # S074 two procedures calling only each other
 S074	S074A.pas	5	Ping	row	row	only Pong, a row, calls it
 S074	S074A.pas	4	Pong	row	row	
@@ -245,8 +245,8 @@ S079	S079A.pas	5	CSize	row	row
 # S080 a typed constant of a type nothing else uses
 S080	S080A.pas	9	CDefault	row	row	
 S080	S080A.pas	4	TRange	row	row	
-S080	S080A.pas	5	TRange.Lo	row	row?	
-S080	S080A.pas	6	TRange.Hi	row	row?	
+S080	S080A.pas	5	TRange.Lo	row	in-row	
+S080	S080A.pas	6	TRange.Hi	row	in-row	
 # S081 a field read by its own setter, the property assigned by live code
 S081	S081A.pas	6	TBox.FSize	runtime	none	read by SetSize, a live method: without it SetSize counts both assignments
 # S082 a field only written with a computed value
@@ -398,7 +398,7 @@ S143	S143A.pas	5	TBase.Tag	used	none
 S144	S144A.pas	9	TSrc.OnDone	used	none	
 # S145 a field of an unused record type nested in a used class
 S145	S145A.pas	6	TOuter.TInner	row	row	
-S145	S145A.pas	7	TOuter.TInner.Z	row	row?	
+S145	S145A.pas	7	TOuter.TInner.Z	row	in-row	
 # S146 a method used only by a property's write specifier, the property assigned
 S146	S146A.pas	6	TBox.SetSize	used	none	
 # S147 an unused overloaded constructor

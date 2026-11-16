@@ -236,8 +236,19 @@ type
 
 // The unused declarations of the units AMids, by file, line and column.
 // ASkips counts what was not weighed (generated units: one per unit).
+// A member of a structured type that is a row itself - a field, a method,
+// a property, a nested type or constant, at any depth of nesting - is not a
+// row: the type's row says it all, removing the type removes it. Unless
+// every such type has a doubt and the member has none (with doubts hidden,
+// it would be shown nowhere). It still counts for what it uses: a type used
+// only by such a member stays a row made by rows, its By naming the member.
+// AInRowTypes: the members left out so, a host's count.
 function FindUnusedSymbols(ANav: TPasNavigator; const AMids: TArray<Integer>;
-  out ASkips: TPasUnusedSkips): TArray<TPasUnusedSymbol>;
+  out ASkips: TPasUnusedSkips): TArray<TPasUnusedSymbol>; overload;
+function FindUnusedSymbols(ANav: TPasNavigator; const AMids: TArray<Integer>;
+  out ASkips: TPasUnusedSkips;
+  out AInRowTypes: TArray<TPasUnusedSymbol>): TArray<TPasUnusedSymbol>;
+  overload;
 
 // FindUnusedSymbols' demand in light mode: the references of the
 // declarations it searches (DemandReferencesOfAll) - a library body may use
@@ -5233,20 +5244,85 @@ begin
   end;
 end;
 
+// Does row AIdx of ARows go with a structured type that is a row itself -
+// the type it is declared in, or one enclosing that (a nested type's member)?
+// Removing the type removes it, and a member removed first only makes edits
+// that clash with the type's removal. Kept only when every such type has a
+// doubt and the member has none: with doubts hidden, it would be shown
+// nowhere else.
+function InRowType(AProj: TPasSemaProject; const ARows: TList<TPasUnusedSymbol>;
+  ARowAt: TDictionary<Int64, Integer>; AIdx: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LScope, LOwner, LAt: Integer;
+  LAny, LClean: Boolean;
+begin
+  LM := AProj.Model(ARows[AIdx].UnitId);
+  LAny := False;
+  LClean := False;   // an enclosing row type with no doubt
+  LScope := LM.Symbols[ARows[AIdx].Sym].Scope;
+  for var LDepth := 1 to 16 do
+  begin
+    if (LScope < 0) or (LScope >= LM.Scopes.Count) or
+       (LM.Scopes[LScope].Kind <> sckStruct) then
+      Break;
+    LOwner := LM.Scopes[LScope].StructSym;
+    if LOwner = NIL_SYM then
+      Break;
+    if ARowAt.TryGetValue(TUnusedLint.K(ARows[AIdx].UnitId, LOwner), LAt) then
+    begin
+      LAny := True;
+      if ARows[LAt].Doubts = nil then
+        LClean := True;
+    end;
+    LScope := LM.Symbols[LOwner].Scope;
+  end;
+  Result := LAny and (LClean or (ARows[AIdx].Doubts <> nil));
+end;
+
 function FindUnusedSymbols(ANav: TPasNavigator; const AMids: TArray<Integer>;
   out ASkips: TPasUnusedSkips): TArray<TPasUnusedSymbol>;
 var
+  LInRowTypes: TArray<TPasUnusedSymbol>;
+begin
+  Result := FindUnusedSymbols(ANav, AMids, ASkips, LInRowTypes);
+end;
+
+function FindUnusedSymbols(ANav: TPasNavigator; const AMids: TArray<Integer>;
+  out ASkips: TPasUnusedSkips;
+  out AInRowTypes: TArray<TPasUnusedSymbol>): TArray<TPasUnusedSymbol>;
+var
   LLint: TUnusedLint;
+  LRowAt: TDictionary<Int64, Integer>;
+  LKept, LOut: TList<TPasUnusedSymbol>;
+  LCmp: IComparer<TPasUnusedSymbol>;
 begin
   LLint := TUnusedLint.Create(ANav);
+  LRowAt := TDictionary<Int64, Integer>.Create;
+  LKept := TList<TPasUnusedSymbol>.Create;
+  LOut := TList<TPasUnusedSymbol>.Create;
   try
     RunUnusedLint(LLint, ANav, AMids);
-    Result := LLint.FCands.ToArray;
+    // After the fixed point and the doubts: a member of a row type still
+    // made its users rows (`by` names it), it is only not listed.
+    for var LIdx := 0 to LLint.FCands.Count - 1 do
+      LRowAt.AddOrSetValue(TUnusedLint.K(LLint.FCands[LIdx].UnitId,
+        LLint.FCands[LIdx].Sym), LIdx);
+    for var LIdx := 0 to LLint.FCands.Count - 1 do
+      if InRowType(ANav.Project, LLint.FCands, LRowAt, LIdx) then
+        LOut.Add(LLint.FCands[LIdx])
+      else
+        LKept.Add(LLint.FCands[LIdx]);
+    Result := LKept.ToArray;
+    AInRowTypes := LOut.ToArray;
     ASkips := LLint.FSkips;
   finally
+    LOut.Free;
+    LKept.Free;
+    LRowAt.Free;
     LLint.Free;
   end;
-  TArray.Sort<TPasUnusedSymbol>(Result, TComparer<TPasUnusedSymbol>.Construct(
+  LCmp := TComparer<TPasUnusedSymbol>.Construct(
     function(const A, B: TPasUnusedSymbol): Integer
     begin
       Result := CompareText(A.FileName, B.FileName);
@@ -5254,7 +5330,9 @@ begin
         Result := A.Line - B.Line;
       if Result = 0 then
         Result := A.Col - B.Col;
-    end));
+    end);
+  TArray.Sort<TPasUnusedSymbol>(Result, LCmp);
+  TArray.Sort<TPasUnusedSymbol>(AInRowTypes, LCmp);
 end;
 
 function DemandUnusedSymbols(ANav: TPasNavigator;

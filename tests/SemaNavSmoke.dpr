@@ -2956,16 +2956,19 @@ begin
     Ok('unused implicit: a helper with a member used is used (' + LNames + ')',
       (Row('TBoxHelper') < 0) and (Row('TBoxHelper.Extra') < 0) and
       (Row('TIntHelper') < 0) and (Row('TIntHelper.Twice') < 0));
-    Ok('unused implicit: an unused helper and its member - rows with a doubt',
-      Doubted('TIdleHelper') and Doubted('TIdleHelper.Never'));
+    Ok('unused implicit: an unused helper a row with a doubt, its member ' +
+      'left out with it (a doubt of its own)',
+      Doubted('TIdleHelper') and (Row('TIdleHelper.Never') < 0));
     Ok('unused implicit: the form binds a handler and a component (' + LNames +
       ')', (Row('TFrm') < 0) and (Row('TFrm.Button1Click') < 0) and
       (Row('TFrm.Button1') < 0));
     Ok('unused implicit: the first section the form does not bind - a doubt',
       Doubted('TFrm.Unbound') and Doubted('TFrm.Spare'));
-    Ok('unused implicit: a plain class in a form''s unit - its field a row ' +
-      'without a doubt, and the type only it holds too (' + LNames + ')',
-      (Row('THolder.FF') >= 0) and not Doubted('THolder.FF') and
+    Ok('unused implicit: a plain class in a form''s unit - a row without a ' +
+      'doubt, its field left out with it, and the type only it holds a row (' +
+      LNames + ')',
+      (Row('THolder') >= 0) and not Doubted('THolder') and
+      (Row('THolder.FF') < 0) and
       (Row('THeld') >= 0) and not Doubted('THeld'));
     Ok('unused implicit: a private member - a plain row',
       (Row('TFrm.Priv') >= 0) and not Doubted('TFrm.Priv'));
@@ -3224,6 +3227,101 @@ end;
 // `absolute` one aliases (writing the alias writes it), the alias. Asked
 // of one declaration, the declarations its uses sit in are weighed round
 // by round (THelperType: FDeadOnly, then DeadUser).
+// FindUnusedSymbols: a member of a structured type that is a row itself is
+// left out (AInRowTypes) - at any depth of nesting - but still counts for
+// what it uses (a type only it holds stays a row, By naming it); kept when
+// the type has a doubt the member does not share.
+procedure TestUnusedSymbolsInRowType;
+const
+  UNUSED_R =
+    'unit UnusedR;'#13#10 +
+    'interface'#13#10 +
+    'type'#13#10 +
+    '  TXMyClass = class end;'#13#10 +
+    '  TXMyClass2 = class ff: TXMyClass; end;'#13#10 +
+    '  TOuter = class'#13#10 +
+    '  type'#13#10 +
+    '    TInner = class'#13#10 +
+    '      procedure Deep;'#13#10 +
+    '    end;'#13#10 +
+    '  end;'#13#10 +
+    '  TDoubtful = class FX: Integer; end;'#13#10 +
+    '  TLive = class FDead: Integer; end;'#13#10 +
+    'const'#13#10 +
+    '  CName = ''TDoubtful'';'#13#10 +
+    'var'#13#10 +
+    '  GLive: TLive;'#13#10 +
+    'implementation'#13#10 +
+    'procedure TOuter.TInner.Deep; begin end;'#13#10 +
+    'initialization'#13#10 +
+    '  GLive := TLive.Create;'#13#10 +
+    '  GLive.Free;'#13#10 +
+    'end.'#13#10;
+var
+  LDir: string;
+  LProj: TPasSemaProject;
+  LNav: TPasNavigator;
+  LRows, LInRow: TArray<TPasUnusedSymbol>;
+  LSkips: TPasUnusedSkips;
+  LNames, LOut: string;
+
+  function Find(const ARows: TArray<TPasUnusedSymbol>;
+    const AName: string): Integer;
+  begin
+    for var LI := 0 to High(ARows) do
+      if SameText(ARows[LI].Name, AName) then
+        Exit(LI);
+    Result := -1;
+  end;
+
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_unused_inrow');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnusedR.pas'), UNUSED_R);
+  LProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  LNav := nil;
+  try
+    LProj.AnalyzeDirectory(LDir);
+    LNav := TPasNavigator.Create(LProj);
+    LRows := FindUnusedSymbols(LNav,
+      [LProj.ModelIdOf(TPath.Combine(LDir, 'UnusedR.pas'))], LSkips, LInRow);
+    LNames := '';
+    for var LR in LRows do
+      LNames := LNames + LR.Name + ' ';
+    LOut := '';
+    for var LR in LInRow do
+      LOut := LOut + LR.Name + ' ';
+    Ok('unused in a row type: the field of an unused class left out, the '
+      + 'class it holds still a row by it (' + LNames + '| ' + LOut + ')',
+      (Find(LRows, 'TXMyClass2') >= 0) and (Find(LRows, 'TXMyClass2.ff') < 0)
+      and (Find(LInRow, 'TXMyClass2.ff') >= 0) and
+      (Find(LRows, 'TXMyClass') >= 0) and
+      (LRows[Find(LRows, 'TXMyClass')].How = uhOnlyByUnused) and
+      (Length(LRows[Find(LRows, 'TXMyClass')].By) = 1) and
+      SameText(LRows[Find(LRows, 'TXMyClass')].By[0], 'TXMyClass2.ff'));
+    Ok('unused in a row type: a nested type and its method left out (' +
+      LNames + '| ' + LOut + ')',
+      (Find(LRows, 'TOuter') >= 0) and (Find(LRows, 'TOuter.TInner') < 0) and
+      (Find(LRows, 'TOuter.TInner.Deep') < 0) and
+      (Find(LInRow, 'TOuter.TInner') >= 0) and
+      (Find(LInRow, 'TOuter.TInner.Deep') >= 0));
+    Ok('unused in a row type: kept under a doubted type, and in a used one ('
+      + LNames + '| ' + LOut + ')',
+      (Find(LRows, 'TDoubtful') >= 0) and
+      (LRows[Find(LRows, 'TDoubtful')].Doubts <> nil) and
+      (Find(LRows, 'TDoubtful.FX') >= 0) and
+      (LRows[Find(LRows, 'TDoubtful.FX')].Doubts = nil) and
+      (Find(LRows, 'TLive.FDead') >= 0) and (Length(LInRow) = 3));
+  finally
+    LNav.Free;
+    LProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 procedure TestUnusedSymbolsDerived;
 const
   UNUSED_B =
@@ -3300,6 +3398,7 @@ var
   LSkips: TPasUnusedSkips;
   LNames: string;
   LChecks: TArray<TPasUnusedCheck>;
+  LInRow: TArray<TPasUnusedSymbol>;
 
   function Row(const AName: string): Integer;
   begin
@@ -3352,7 +3451,7 @@ begin
     LProj.AnalyzeDirectory(LDir);
     LNav := TPasNavigator.Create(LProj);
     LRows := FindUnusedSymbols(LNav,
-      [LProj.ModelIdOf(TPath.Combine(LDir, 'UnusedB.pas'))], LSkips);
+      [LProj.ModelIdOf(TPath.Combine(LDir, 'UnusedB.pas'))], LSkips, LInRow);
     LNames := '';
     for var LR in LRows do
       LNames := LNames + LR.Name + '/' + IntToStr(Ord(LR.How)) + ' ';
@@ -3387,7 +3486,9 @@ begin
       (Row('') < 0) and (Row('GRun') < 0));
     Ok('unused derived: a static method only a dead descendant runs by inherited (' +
       LNames + ')',
-      Is_('TDeadKid.Go', uhUnused) and Is_('TBaseGo.Go', uhOnlyByUnused) and
+      (Row('TDeadKid.Go') < 0) and (Length(LInRow) = 1) and
+      SameText(LInRow[0].Name, 'TDeadKid.Go') and Is_('TDeadKid', uhUnused) and
+      Is_('TBaseGo.Go', uhOnlyByUnused) and
       By('TBaseGo.Go', 'TDeadKid.Go') and (Row('TBaseGo.Stay') < 0) and
       (Row('TLiveKid.Stay') < 0) and (Row('TBaseGo') < 0));
     // One asked alone: the declarations its uses sit in, round by round.
@@ -8388,6 +8489,7 @@ begin
   TestUnusedUses;
   TestUnusedSymbols;
   TestUnusedSymbolsDerived;
+  TestUnusedSymbolsInRowType;
   TestUnusedSymbolsMissedUses;
   TestUnusedSymbolsImplicit;
   TestUnusedSymbolsLight;

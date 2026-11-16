@@ -314,7 +314,12 @@ type
     // The unused declarations of AFiles (PasTree.Sema.Lint.FindUnusedSymbols)
     // once the references they are searched for are complete.
     function FindUnusedSymbols(const AFiles: TArray<string>;
-      out ASkips: TPasUnusedSkips): TArray<TPasUnusedSymbol>;
+      out ASkips: TPasUnusedSkips): TArray<TPasUnusedSymbol>; overload;
+    // AInRowTypes: the members left out as members of a type that is a row.
+    function FindUnusedSymbols(const AFiles: TArray<string>;
+      out ASkips: TPasUnusedSkips;
+      out AInRowTypes: TArray<TPasUnusedSymbol>): TArray<TPasUnusedSymbol>;
+      overload;
     // The verdict on each declaration AKeys names, in their order
     // (PasTree.Sema.Lint.CheckUnusedSymbols); uvNotFound for a key that
     // resolves to nothing here.
@@ -1342,6 +1347,15 @@ end;
 function TPasWorkspace.FindUnusedSymbols(const AFiles: TArray<string>;
   out ASkips: TPasUnusedSkips): TArray<TPasUnusedSymbol>;
 var
+  LInRowTypes: TArray<TPasUnusedSymbol>;
+begin
+  Result := FindUnusedSymbols(AFiles, ASkips, LInRowTypes);
+end;
+
+function TPasWorkspace.FindUnusedSymbols(const AFiles: TArray<string>;
+  out ASkips: TPasUnusedSkips;
+  out AInRowTypes: TArray<TPasUnusedSymbol>): TArray<TPasUnusedSymbol>;
+var
   LFiles: TArray<string>;
 begin
   LFiles := AFiles;
@@ -1350,7 +1364,8 @@ begin
     begin
       Result := DemandUnusedSymbols(ANav, MidsOf(LFiles));
     end);
-  Result := PasTree.Sema.Lint.FindUnusedSymbols(FNav, MidsOf(AFiles), ASkips);
+  Result := PasTree.Sema.Lint.FindUnusedSymbols(FNav, MidsOf(AFiles), ASkips,
+    AInRowTypes);
   Finish;
 end;
 
