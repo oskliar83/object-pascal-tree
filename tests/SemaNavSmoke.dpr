@@ -12,6 +12,7 @@ program SemaNavSmoke;
 uses
   System.SysUtils,
   System.IOUtils,
+  System.StrUtils,
   PasTree.Types in '..\source\PasTree.Types.pas',
   PasTree.Lexer in '..\source\PasTree.Lexer.pas',
   PasTree.SourceManager in '..\source\PasTree.SourceManager.pas',
@@ -2169,6 +2170,208 @@ begin
       LRows = 'OwnDead TOwn.Execute');
   finally
     if TDirectory.Exists(LRoot) then
+      TDirectory.Delete(LRoot, True);
+  end;
+end;
+
+{ The unused searches on the analysis's pool give what they give on one
+  thread (TPasSemaProject.SingleThreaded): every row, field by field and in
+  order, of FindUnusedSymbols, FindUnusedUses, FindUnreferencedUnits and
+  CheckUnusedSymbols, the demands of the first two, and a reference search -
+  over a generated group large enough for every parallel pass to split
+  (40 own units: Search's hits, AddDoubts' files, the uses lint's slices,
+  the reference scan), in a full analysis and with a light library tree
+  (the uses lint's walk past it, its locks and shared caches). Each unit
+  has a dead method and routine, a field only written, a used chain to the
+  previous unit, an unused `uses` entry, an initialization, a name in a
+  dead branch and in a string; a form file binds a handler. }
+procedure TestUnusedThreads;
+const
+  N = 40;
+  L = 12;
+var
+  LRoot, LOwn, LLib, LMain: string;
+
+  function U(I: Integer): string;
+  begin
+    Result := Format('U%.2d', [I]);
+  end;
+
+  function Join(const A: TArray<string>): string;
+  begin
+    Result := '[' + string.Join('|', A) + ']';
+  end;
+
+  // Every answer of one analysis, as text.
+  function Answers(ASingle, ALight: Boolean): string;
+  var
+    LProj: TPasSemaProject;
+    LNav: TPasNavigator;
+    LMids, LUnitMids: TArray<Integer>;
+    LSkips: TPasUnusedSkips;
+    LSB: TStringBuilder;
+    LTargets: TArray<TPasExtRef>;
+    LHits: TArray<TPasRefHit>;
+    LDemand: TPasDemand;
+  begin
+    LProj := TPasSemaProject.Create(pfWin32, [LOwn, LLib], []);
+    LProj.SingleThreaded := ASingle;
+    if ALight then
+    begin
+      LProj.LightPaths := [LLib];
+      LProj.EscalationPercent := 0;
+    end;
+    LProj.AnalyzeStaged([LMain], []);
+    LNav := TPasNavigator.Create(LProj);
+    LNav.LibraryPaths := [LLib];
+    LSB := TStringBuilder.Create;
+    try
+      LMids := nil;
+      for var LI := 1 to N do
+        LMids := LMids + [LProj.ModelIdOf(TPath.Combine(LOwn, U(LI) + '.pas'))];
+      LUnitMids := LMids + [LProj.ModelIdOf(LMain)];
+      LSB.AppendLine('demand symbols: ' + Join(DemandUnusedSymbols(LNav,
+        LMids).Full));
+      LDemand := DemandLint(LNav, LUnitMids, [loHideGlobalInit]);
+      LSB.AppendLine('demand lint: ' + Join(LDemand.Full) + ' ' +
+        Join(LDemand.LoadOnly));
+      for var LR in FindUnusedSymbols(LNav, LMids, LSkips) do
+        LSB.AppendLine(Format('sym %s %d %s:%d:%d %d %s %s %s', [LR.Name,
+          Ord(LR.Kind), ExtractFileName(LR.FileName), LR.Line, LR.Col,
+          Ord(LR.How), Join(LR.By), Join(LR.Writes), Join(LR.Doubts)]));
+      for var LS := Low(TPasUnusedSkip) to High(TPasUnusedSkip) do
+        LSB.Append(LSkips[LS]).Append(' ');
+      LSB.AppendLine;
+      for var LHide in [False, True] do
+      begin
+        var LOpts: TPasLintOptions := [];
+        if LHide then
+          LOpts := [loHideGlobalInit];
+        for var LR in FindUnusedUses(LNav, LUnitMids, LOpts) do
+          LSB.AppendLine(Format('uses %s %s:%d:%d %s %s', [LR.UnitName,
+            ExtractFileName(LR.Hit.FilePath), LR.Hit.Line, LR.Hit.Col,
+            BoolToStr(LR.InInterface, True), Join(LR.Doubts)]));
+        for var LR in FindUnreferencedUnits(LNav, LUnitMids, LOpts) do
+          LSB.AppendLine(Format('unref %s %s %s', [LR.UnitName,
+            Join(LR.ListedBy), Join(LR.Doubts)]));
+        LSB.AppendLine('not searched ' + IntToStr(LNav.NotSearched));
+      end;
+      // Three dead methods asked alone, the rounds down their users.
+      LTargets := nil;
+      for var LI in [3, 17, 31] do
+      begin
+        var LMid := LMids[LI - 1];
+        for var LSym := 0 to LProj.Model(LMid).SymCount - 1 do
+          if SameText(LProj.Model(LMid).Symbols[LSym].Name, 'Dead') or
+             SameText(LProj.Model(LMid).Symbols[LSym].Name, 'FOnlyWritten') then
+          begin
+            var LT: TPasExtRef;
+            LT.UnitId := LMid;
+            LT.Sym := LSym;
+            LTargets := LTargets + [LT];
+          end;
+      end;
+      for var LC in CheckUnusedSymbols(LNav, LTargets) do
+        LSB.AppendLine(Format('check %s.%s %d %d %s', [
+          ExtractFileName(LProj.ModelFile(LC.Target.UnitId)),
+          LProj.Model(LC.Target.UnitId).Symbols[LC.Target.Sym].Name,
+          Ord(LC.Verdict), Ord(LC.Skip), LC.Row.Name]));
+      // A reference search: U17's Live, called by U18's.
+      for var LSym := 0 to LProj.Model(LMids[16]).SymCount - 1 do
+        if SameText(LProj.Model(LMids[16]).Symbols[LSym].Name, 'Live') then
+        begin
+          LHits := LNav.FindReferences(LMids[16], LSym);
+          for var LH in LHits do
+            LSB.AppendLine(Format('ref %s:%d:%d', [ExtractFileName(
+              LH.FilePath), LH.Line, LH.Col]));
+        end;
+      Result := LSB.ToString;
+    finally
+      LSB.Free;
+      LNav.Free;
+      LProj.Free;
+    end;
+  end;
+
+var
+  LIntf, LImpl, LDfm: string;
+  LOne, LMany: string;
+begin
+  LOne := '';
+  LMany := '';
+  LRoot := TPath.Combine(TPath.GetTempPath, 'pastree_unused_threads');
+  if TDirectory.Exists(LRoot) then
+    TDirectory.Delete(LRoot, True);
+  LOwn := TPath.Combine(LRoot, 'own');
+  LLib := TPath.Combine(LRoot, 'lib');
+  TDirectory.CreateDirectory(LOwn);
+  TDirectory.CreateDirectory(LLib);
+  try
+    // The library: each unit's initialization calls the next one's routine.
+    for var LI := 1 to L do
+      TFile.WriteAllText(TPath.Combine(LLib, Format('L%.2d.pas', [LI])),
+        Format('unit L%.2d;'#13#10'interface'#13#10'procedure LRun%d;'#13#10 +
+        'procedure LInl%d; inline;'#13#10'implementation'#13#10 +
+        IfThen(LI < L, Format('uses L%.2d;'#13#10, [LI + 1]), '') +
+        'procedure LRun%d; begin end;'#13#10 +
+        'procedure LInl%d; begin LRun%d; end;'#13#10 +
+        IfThen(LI mod 3 = 0, 'initialization'#13#10'  LRun%d;'#13#10, '') +
+        'end.'#13#10, [LI, LI, LI, LI, LI, LI, LI]));
+    LMain := TPath.Combine(LOwn, 'UMain.dpr');
+    LIntf := 'program UMain;'#13#10'uses';
+    for var LI := 1 to N do
+      LIntf := LIntf + IfThen(LI > 1, ',', '') + #13#10'  ' + U(LI);
+    TFile.WriteAllText(LMain, LIntf + ';'#13#10'begin'#13#10'  ' + U(N) +
+      '.Live;'#13#10'end.'#13#10);
+    for var LI := 1 to N do
+    begin
+      LIntf := 'uses ' + Format('L%.2d', [(LI mod L) + 1]) +
+        IfThen(LI > 1, ', ' + U(LI - 1), '') +
+        IfThen(LI > 2, ', ' + U(LI - 2), '') + ';'#13#10 +
+        'type'#13#10'  TC = class'#13#10'    procedure Handler;'#13#10 +
+        '  private'#13#10'    FP, FOnlyWritten: Integer;'#13#10 +
+        '  public'#13#10'    procedure Used;'#13#10'    procedure Dead;'#13#10 +
+        '    property P: Integer read FP;'#13#10'  end;'#13#10 +
+        'procedure Live;'#13#10'procedure DeadRoutine;'#13#10 +
+        'var'#13#10'  G: Integer;'#13#10;
+      LImpl := '{$IFDEF NEVER} DeadRoutine; {$ENDIF}'#13#10 +
+        'procedure TC.Handler; begin end;'#13#10 +
+        'procedure TC.Used; begin FOnlyWritten := 1; end;'#13#10 +
+        'procedure TC.Dead; begin Used; end;'#13#10 +
+        'procedure DeadRoutine; begin G := 2; end;'#13#10 +
+        'procedure Live;'#13#10'var'#13#10'  S: string;'#13#10'  X: TC;'#13#10 +
+        'begin'#13#10'  S := ''TC.Dead'';'#13#10'  X.Used;'#13#10 +
+        Format('  LInl%d;'#13#10, [(LI mod L) + 1]) +
+        IfThen(LI > 1, '  ' + U(LI - 1) + '.Live;'#13#10, '') +
+        'end;'#13#10'initialization'#13#10'  G := 1;'#13#10;
+      if LI mod 5 = 0 then
+      begin
+        LImpl := '{$R *.dfm}'#13#10 + LImpl;
+        LDfm := 'object C: TC'#13#10'  OnClick = Handler'#13#10'end'#13#10;
+        TFile.WriteAllText(TPath.Combine(LOwn, U(LI) + '.dfm'), LDfm);
+      end;
+      TFile.WriteAllText(TPath.Combine(LOwn, U(LI) + '.pas'),
+        'unit ' + U(LI) + ';'#13#10'interface'#13#10 + LIntf +
+        'implementation'#13#10 + LImpl + 'end.'#13#10);
+    end;
+    for var LLight in [False, True] do
+    begin
+      LOne := Answers(True, LLight);
+      LMany := Answers(False, LLight);
+      Ok(Format('unused threads (%s): rows found', [IfThen(LLight, 'light',
+        'full')]), LOne.Contains('sym TC.Dead 4 U17.pas') and
+        LOne.Contains('uses U15 U17.pas') and LOne.Contains('ref U18.pas'));
+      Ok(Format('unused threads (%s): one thread and the pool answer alike',
+        [IfThen(LLight, 'light', 'full')]), LOne = LMany);
+      if LOne <> LMany then
+      begin
+        TFile.WriteAllText(TPath.Combine(LRoot, 'one.txt'), LOne);
+        TFile.WriteAllText(TPath.Combine(LRoot, 'many.txt'), LMany);
+        Writeln('  answers differ: ', LRoot);
+      end;
+    end;
+  finally
+    if LOne = LMany then
       TDirectory.Delete(LRoot, True);
   end;
 end;
@@ -8159,6 +8362,7 @@ begin
   TestUnusedSymbolsMissedUses;
   TestUnusedSymbolsImplicit;
   TestUnusedSymbolsLight;
+  TestUnusedThreads;
   TestAsmNames;
   TestUnreferencedUnits;
   TestLintGlobalInit;

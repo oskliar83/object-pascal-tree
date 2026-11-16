@@ -43,7 +43,8 @@ interface
 
 uses
   System.SysUtils,
-  System.Classes;
+  System.Classes,
+  System.Generics.Collections;
 
 type
   TPasDfmObjectKind = (dokObject, dokInherited, dokInline);
@@ -108,7 +109,13 @@ type
   TPasDfmDoc = class(TInterfacedObject, IPasDfmDoc)
   private
     FLineStarts: TArray<Integer>;
+    // FindIdents' index: the all-ASCII identifiers by their lower-cased
+    // bytes, each with its indices in order. Built on the first ask and
+    // published by a compare-exchange (the doc is shared by every reader of
+    // the cache, the unused-declarations lint asks from several threads).
+    FIdentIndex: TDictionary<string, TArray<Integer>>;
     function DecodeRange(AFrom, ACount: Integer): string;
+    function IdentIndex: TDictionary<string, TArray<Integer>>;
   public
     Path: string;
     // The text as read - or, for a binary form file, as converted. A binary
@@ -134,6 +141,7 @@ type
     Objects: TArray<TPasDfmObject>;
     Props: TArray<TPasDfmProp>;
     Idents: TArray<TPasDfmIdent>;
+    destructor Destroy; override;
     function Doc: TPasDfmDoc;
     // The line TrailingOffset is on; 0 when nothing follows the root.
     function TrailingLine: Integer;
@@ -215,7 +223,6 @@ uses
 {$ENDIF}
   System.IOUtils,
   System.Character,
-  System.Generics.Collections,
   PasTree.Types;   // PasFoldName: IdentIsSuffixed's non-ASCII base
 
 type
@@ -644,6 +651,55 @@ begin
   Result := True;
 end;
 
+destructor TPasDfmDoc.Destroy;
+begin
+  FIdentIndex.Free;
+  inherited;
+end;
+
+function TPasDfmDoc.IdentIndex: TDictionary<string, TArray<Integer>>;
+var
+  LNew: TDictionary<string, TArray<Integer>>;
+  LKey: string;
+  LList: TArray<Integer>;
+  LByte: Byte;
+  LAscii: Boolean;
+begin
+  Result := FIdentIndex;
+  if Result <> nil then
+    Exit;
+  LNew := TDictionary<string, TArray<Integer>>.Create;
+  for var LIdx := 0 to High(Idents) do
+  begin
+    SetLength(LKey, Idents[LIdx].ByteLen);
+    LAscii := True;
+    for var LChar := 0 to Idents[LIdx].ByteLen - 1 do
+    begin
+      LByte := Bytes[Idents[LIdx].Offset + LChar];
+      if LByte > 127 then
+      begin
+        LAscii := False;
+        Break;
+      end;
+      if (LByte >= Ord('A')) and (LByte <= Ord('Z')) then
+        Inc(LByte, 32);
+      LKey[LChar + 1] := Char(LByte);
+    end;
+    // A non-ASCII identifier never matches an ASCII name byte for byte.
+    if not LAscii then
+      Continue;
+    if not LNew.TryGetValue(LKey, LList) then
+      LList := nil;
+    LNew.AddOrSetValue(LKey, LList + [LIdx]);
+  end;
+  Result := TDictionary<string, TArray<Integer>>(AtomicCmpExchange(
+    Pointer(FIdentIndex), Pointer(LNew), nil));
+  if Result = nil then
+    Result := LNew
+  else
+    LNew.Free;
+end;
+
 function TPasDfmDoc.FindIdents(const ANameLower: string): TArray<Integer>;
 var
   LList: TList<Integer>;
@@ -662,6 +718,16 @@ begin
       LAscii := False;
       Break;
     end;
+  // An ASCII name: the index (the same identifiers the scan below would
+  // find, in the same order).
+  if LAscii then
+  begin
+    if IdentIndex.TryGetValue(ANameLower, Result) then
+      Result := Copy(Result)
+    else
+      Result := nil;
+    Exit;
+  end;
   LList := TList<Integer>.Create;
   try
     for LIdx := 0 to High(Idents) do

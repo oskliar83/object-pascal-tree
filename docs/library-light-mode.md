@@ -230,7 +230,10 @@ fourth checks it:
    `TPasDemand` lists the files to make fully analyzed (`Full`), the units
    to load light on the way to one (`LoadOnly`), and how many units the
    query would leave out now (`NotSearched`). Empty, at no cost, when no
-   unit is light.
+   unit is light. `DemandOfFiles` builds no graph of its own: its volumes
+   are what `DemandOf` measured, and it measures (a `DemandOf` with no ask)
+   when nothing has yet - before 0.199.0 a first demand by files had
+   `TotalVolume` 0 and never escalated.
 2. **Ensure** - `TPasSemaProject.EnsureFull(demand)` makes them full:
    light units promoted in one batch, units nobody loaded taken in.
 3. **Completeness** - every query of a wired family sets

@@ -1802,6 +1802,15 @@ type
     // driver exactly; results are identical either way - the parallel stages
     // are pure per unit). Default False (one worker per core).
     property SingleThreaded: Boolean read FSingleThreaded write FSingleThreaded;
+    { ABody(0..AHi) on the analysis's pool, at its width (ConfigureThreadPool)
+      - inline when SingleThreaded or the range is small. For the queries
+      (the unused-declarations and uses lints) whose per-unit work reads the
+      models only: a body must not write shared state, hydrate a model, or
+      start a parallel loop of its own (a pool worker never waits on queued
+      work - see ConfigureThreadPool). An exception in a body is raised
+      from here (EAggregateException), never swallowed. Never call it from a
+      pool task. }
+    procedure ParallelRun(AHi: Integer; const ABody: TProc<Integer>);
     { LIGHT MODE (docs/library-light-mode.md): directory TREES whose units
       are analyzed interface-only for good - no implementation section, so
       no bodies, no implementation `uses` (units reachable only through one
@@ -3314,6 +3323,11 @@ type
     function GetHashCode(const Value: TSymIdentity): Integer;
       overload; override;
   end;
+
+threadvar
+  // On a worker of TPasSemaProject.ParallelRun: a parallel loop asked there
+  // runs inline (ParallelFor).
+  GInParallelRun: Boolean;
 
 var
   // Process-wide, set once - see TPasSemaProject.ConfigureThreadPool.
@@ -32295,13 +32309,38 @@ var
 begin
   if AHi < 0 then
     Exit;
-  if FSingleThreaded or (AHi < 8) then
+  // Inline too inside a ParallelRun body: a pool worker never waits on
+  // queued work (ConfigureThreadPool) - a hydration or the word index a
+  // lint worker asks for runs its own loop on that worker.
+  if FSingleThreaded or (AHi < 8) or GInParallelRun then
   begin
     for LIdx := 0 to AHi do
       ABody(LIdx);
   end
   else
     TParallel.&For(0, AHi, ABody);
+end;
+
+procedure TPasSemaProject.ParallelRun(AHi: Integer;
+  const ABody: TProc<Integer>);
+begin
+  if GInParallelRun then
+  begin
+    // Nested: on this worker (see ParallelFor).
+    for var LIdx := 0 to AHi do
+      ABody(LIdx);
+    Exit;
+  end;
+  ParallelFor(AHi,
+    procedure(AIdx: Integer)
+    begin
+      GInParallelRun := True;
+      try
+        ABody(AIdx);
+      finally
+        GInParallelRun := False;
+      end;
+    end);
 end;
 
 function TPasSemaProject.AnalyzeModuleOnly(const APath: string): Boolean;
@@ -33278,9 +33317,16 @@ var
   LMid: Integer;
   LEntry: TPasWordEntry;
 begin
-  // No graph and no word index for named files: the volumes come from what
-  // an earlier demand measured. Before any, TotalVolume is 0 and EnsureFull
-  // does not escalate - a host naming files knows what it asks for.
+  // No graph for named files: the volumes come from what a demand measured
+  // (DemandOf: the closure's library volume and the word index). With none
+  // measured yet, one with no ask measures it - before, TotalVolume was 0
+  // here and EnsureFull never escalated: the uses lint, the first query of
+  // a session to need bodies, made 522 library units of a 3,000-unit client
+  // group full one round at a time (20 s) where a full analysis takes 6 s.
+  // It had escalated only because an earlier unused-declarations query
+  // happened to measure the closure first.
+  if (FLightTotal = 0) and (AFiles <> nil) then
+    DemandOf(nil);
   Result := Default(TPasDemand);
   Result.TotalVolume := FLightTotal;
   for var LFile in AFiles do
