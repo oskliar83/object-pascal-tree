@@ -1632,6 +1632,18 @@ the client group were in use); a member of the unnamed first section of a
 class not followed to TPersistent, in a unit with a form file (published
 if the class streams, and bound by name at run time).
 
+A member of a structured type that is a row itself - a field, a method, a
+property, a nested type or constant, at any depth of nesting - is not
+listed (PasTree 0.201.0): the type's row says it all, removing the type
+removes it, and a member removed first only makes edits that clash with
+the type's removal. It is left out after the fixed point, so it still
+counts for what it uses: a type only such a member holds stays a row, its
+`By` naming the member. It stays listed only when every enclosing row type
+has a doubt and the member has none - with doubts hidden it would be shown
+nowhere. The members left out are the `AInRowTypes` of the overload that
+takes it (a host's count); on the client group 728 of 4,907 rows, 30
+members kept under a doubted type.
+
 Checked against dcc on the client group (pastree-mcp, 2026-11-14): every
 row that takes a hint marked `deprecated '<tag>'`, the own units rebuilt;
 a W1000 naming the tag is a use the rule missed. The classes of misses the

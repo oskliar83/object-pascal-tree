@@ -17,8 +17,9 @@ program UnusedScenarioSmoke;
   before without it; `used` - it does not compile; `runtime` - it compiles
   but the program fails or does something else (a form file, RTTI,
   FindClass, dispatch, an overload a call rebinds to). now is what
-  FindUnusedSymbols answers today: `none`, `row` (no doubt) or `row?` (a row
-  with a doubt). The suite asserts `now`, so it stays green, and counts
+  FindUnusedSymbols answers today: `none`, `row` (no doubt), `row?` (a row
+  with a doubt) or `in-row` (left out as a member of a type that is a row:
+  right where the member is dead). The suite asserts `now`, so it stays green, and counts
   where `now` falls short of `truth`: a known gap, the note saying what the
   rule misses. Fixing one is changing its `now`. Every row FindUnusedSymbols
   gives in a fixture unit must be in the file.
@@ -27,7 +28,8 @@ program UnusedScenarioSmoke;
   they stand for do.
 
   UnusedScenarioSmoke -dump <file>: write every row of the fixture units,
-  tab-separated (scenario, file, line, name, kind, how, doubts), and check
+  tab-separated (scenario, file, line, name, kind, how - `in-row` for a
+  member left out - doubts), and check
   nothing - the generator's input. }
 
 {$APPTYPE CONSOLE}
@@ -71,9 +73,11 @@ begin
     TPath.Combine(LSrc, 'rtl\win'), TPath.Combine(LSrc, 'vcl')];
 end;
 
-function Verdict(const ARow: TPasUnusedSymbol): string;
+function Verdict(const ARow: TPasUnusedSymbol; AInRow: Boolean): string;
 begin
-  if ARow.Doubts <> nil then
+  if AInRow then
+    Result := 'in-row'
+  else if ARow.Doubts <> nil then
     Result := 'row?'
   else
     Result := 'row';
@@ -85,7 +89,8 @@ const
 
 // One scenario's rows: its directory analyzed alone, so that the same names
 // in two scenarios stay apart (a name declared twice is a doubt of its own).
-function ScenarioRows(const ADir: string): TArray<TPasUnusedSymbol>;
+function ScenarioRows(const ADir: string;
+  out AInRow: TArray<TPasUnusedSymbol>): TArray<TPasUnusedSymbol>;
 var
   LProj: TPasSemaProject;
   LNav: TPasNavigator;
@@ -101,7 +106,7 @@ begin
     LMids := nil;
     for var LFile in TDirectory.GetFiles(ADir, '*.pas') do
       LMids := LMids + [LProj.ModelIdOf(LFile)];
-    Result := FindUnusedSymbols(LNav, LMids, LSkips);
+    Result := FindUnusedSymbols(LNav, LMids, LSkips, AInRow);
   finally
     LNav.Free;
     LProj.Free;
@@ -112,6 +117,7 @@ type
   TScenRow = record
     Scenario: string;
     Row: TPasUnusedSymbol;
+    InRow: Boolean;   // left out: a member of a row type
     Seen: Boolean;
   end;
 
@@ -142,13 +148,19 @@ begin
   end;
   LRows := nil;
   for var LDir in TDirectory.GetDirectories(LFixDir) do
-    for var LR in ScenarioRows(LDir) do
-    begin
-      LS.Scenario := ExtractFileName(LDir);
-      LS.Row := LR;
-      LS.Seen := False;
-      LRows := LRows + [LS];
-    end;
+  begin
+    var LInRow: TArray<TPasUnusedSymbol>;
+    var LShown := ScenarioRows(LDir, LInRow);
+    for var LPass := 0 to 1 do
+      for var LR in (if LPass = 0 then LShown else LInRow) do
+      begin
+        LS.Scenario := ExtractFileName(LDir);
+        LS.Row := LR;
+        LS.InRow := LPass = 1;
+        LS.Seen := False;
+        LRows := LRows + [LS];
+      end;
+  end;
   LOut := TStringList.Create;
   LLines := TStringList.Create;
   LGapRows := TStringList.Create;
@@ -158,7 +170,8 @@ begin
       for LS in LRows do
         LOut.Add(Format('%s'#9'%s'#9'%d'#9'%s'#9'%d'#9'%s'#9'%s',
           [LS.Scenario, ExtractFileName(LS.Row.FileName), LS.Row.Line,
-           LS.Row.Name, Ord(LS.Row.Kind), cHow[LS.Row.How],
+           LS.Row.Name, Ord(LS.Row.Kind),
+           (if LS.InRow then 'in-row' else cHow[LS.Row.How]),
            string.Join(' | ', LS.Row.Doubts)]));
       LOut.WriteBOM := False;
       LOut.SaveToFile(ADumpFile, TEncoding.UTF8);
@@ -190,7 +203,7 @@ begin
            (LRows[LI].Row.Line = StrToInt(LF[2])) and
            SameText(LRows[LI].Row.Name, LF[3]) then
         begin
-          LNow := Verdict(LRows[LI].Row);
+          LNow := Verdict(LRows[LI].Row, LRows[LI].InRow);
           LRows[LI].Seen := True;
           Inc(LMatch);
         end;
@@ -201,6 +214,7 @@ begin
       // reach it, so no doubt either), no row - or one with a doubt - for
       // one bound at run time, no row for a used one.
       if ((LTruth = 'row!') and (LF[5] = 'row')) or
+         (((LTruth = 'row') or (LTruth = 'row!')) and (LF[5] = 'in-row')) or
          ((LTruth = 'row') and (LF[5] <> 'none')) or
          ((LTruth = 'runtime') and (LF[5] <> 'row')) or
          ((LTruth = 'used') and (LF[5] = 'none')) then
