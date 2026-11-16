@@ -3225,6 +3225,7 @@ const
     '    procedure Run;'#13#10 +
     '    property Item: Integer read GetItem;'#13#10 +
     '  end;'#13#10 +
+    '  TProcRef = reference to procedure;'#13#10 +
     '  TBaseGo = class'#13#10 +
     '    procedure Go;'#13#10 +
     '    procedure Stay;'#13#10 +
@@ -3240,6 +3241,7 @@ const
     '  GOnlySet: Integer;'#13#10 +
     '  GAliased: Integer;'#13#10 +
     '  GAlias: Integer absolute GAliased;'#13#10 +
+    '  GRun: TProcRef;'#13#10 +
     'implementation'#13#10 +
     'function TOwner.GetItem: Integer; begin Result := FRead; end;'#13#10 +
     'procedure TOwner.DeadUser; begin FDeadOnly := nil; FIndex := 2; end;'#13#10 +
@@ -3259,6 +3261,8 @@ const
     '  FRead := Live;'#13#10 +
     '  GOnlySet := 3;'#13#10 +
     '  GAlias := 4;'#13#10 +
+    '  GRun := procedure begin GOnlySet := 5; end;'#13#10 +
+    '  GRun;'#13#10 +
     '  TLiveKid(nil).Stay;'#13#10 +
     'end;'#13#10 +
     'initialization'#13#10 +
@@ -3355,7 +3359,8 @@ begin
       LNames + ')',
       (Row('TOwner.FRead') < 0) and (Row('TOwner.Live') < 0) and
       (Row('TOwner.Run') < 0) and (Row('GAlias') < 0) and
-      (Row('GAliased') < 0) and (Row('GOwner') < 0) and (Row('TOwner') < 0));
+      (Row('GAliased') < 0) and (Row('GOwner') < 0) and (Row('TOwner') < 0) and
+      (Row('') < 0) and (Row('GRun') < 0));
     Ok('unused derived: a static method only a dead descendant runs by inherited (' +
       LNames + ')',
       Is_('TDeadKid.Go', uhUnused) and Is_('TBaseGo.Go', uhOnlyByUnused) and
