@@ -30,7 +30,16 @@ program UnusedScenarioSmoke;
   UnusedScenarioSmoke -dump <file>: write every row of the fixture units,
   tab-separated (scenario, file, line, name, kind, how - `in-row` for a
   member left out - doubts), and check
-  nothing - the generator's input. }
+  nothing - the generator's input.
+
+  REMOVE ALL (PasTree.SymbolEdit, 0.209.0): every scenario's rows without a
+  doubt are removed as the hosts' Remove All removes them, and every one is
+  either removed or refused with a reason - the counts are asserted
+  (cRemoveTaken, cRemoveRefused), so a change in what Remove takes shows.
+  UnusedScenarioSmoke -removed <dir>: write each scenario so edited into
+  <dir>\<scenario>\ with a P.dpr naming its units (the generator's
+  program), for dcc32 to build and run: the generator's `removed` check -
+  it must compile and exit 0 as the untouched program does. }
 
 {$APPTYPE CONSOLE}
 {$MAXSTACKSIZE $01000000}
@@ -46,6 +55,12 @@ uses
   PasTree.Sema.Project in '..\source\PasTree.Sema.Project.pas',
   PasTree.Sema.Nav in '..\source\PasTree.Sema.Nav.pas',
   PasTree.Sema.Lint in '..\source\PasTree.Sema.Lint.pas',
+  PasTree.Preprocessor in '..\source\PasTree.Preprocessor.pas',
+  PasTree.SourceManager in '..\source\PasTree.SourceManager.pas',
+  PasTree.Ast in '..\source\PasTree.Ast.pas',
+  PasTree.Parser in '..\source\PasTree.Parser.pas',
+  PasTree.UsesEdit in '..\source\PasTree.UsesEdit.pas',
+  PasTree.SymbolEdit in '..\source\PasTree.SymbolEdit.pas',
   PasTree.TestKit in 'PasTree.TestKit.pas';
 
 var
@@ -84,6 +99,10 @@ begin
 end;
 
 const
+  // Remove All over the corpus (see the header): the rows it removes and
+  // the asked rows it refuses.
+  cRemoveTaken = 100;
+  cRemoveRefused = 1;   // S103's row in an $I include file
   cHow: array[TPasUnusedHow] of string = ('unused', 'only-by-unused',
     'only-written');
 
@@ -113,6 +132,88 @@ begin
   end;
 end;
 
+{ Remove All over one scenario's rows: the ones without a doubt, removed;
+  ATaken and ARefused counted. With AOutDir, the edited scenario is written
+  there with its program. }
+procedure RemoveAll(const ADir: string; const ARows: TArray<TPasUnusedSymbol>;
+  const AOutDir: string; var ATaken, ARefused: Integer);
+var
+  LAsked, LTaken: TArray<Integer>;
+  LRefused: TArray<TPasSymbolRefusal>;
+  LEdits: TArray<TPasSymbolRemoval>;
+  LSM: TPasSourceManager;
+  LPP: TPasPreprocessor;
+  LText, LUnits, LDest: string;
+begin
+  LAsked := nil;
+  for var LI := 0 to High(ARows) do
+    if ARows[LI].Doubts = nil then
+      LAsked := LAsked + [LI];
+  LSM := TPasSourceManager.Create(nil);
+  LPP := TPasPreprocessor.Create(LSM, CreatePlatformDefines(pfWin32));
+  try
+    LEdits := UnusedSymbolsRemoval(ARows, LAsked,
+      function(const AFileName: string; out AText: string): Boolean
+      begin
+        AText := TFile.ReadAllText(AFileName);
+        Result := True;
+      end,
+      function(const AFileName, AText: string; out ATree: TPasTree;
+        out AErrors: Integer): Boolean
+      var
+        LDiags: TArray<TPasParseDiag>;
+      begin
+        ATree := TPasParser.ParseFile(LPP.ProcessText(AFileName, AText),
+          LDiags);
+        AErrors := Length(LDiags);
+        Result := True;
+      end, LTaken, LRefused);
+  finally
+    LPP.Free;
+    LSM.Free;
+  end;
+  // Every asked row is taken or refused.
+  for var LA in LAsked do
+  begin
+    var LFound := False;
+    for var LT in LTaken do
+      LFound := LFound or (LT = LA);
+    for var LR in LRefused do
+      LFound := LFound or (LR.Row = LA);
+    Ok('remove all: ' + ExtractFileName(ADir) + ' ' + ARows[LA].Name +
+      ' is taken or refused', LFound);
+  end;
+  for var LR in LRefused do
+    Writeln('  remove all: ', ExtractFileName(ADir), ' ', ARows[LR.Row].Name,
+      ' refused: ', LR.Reason);
+  Inc(ATaken, Length(LTaken));
+  Inc(ARefused, Length(LRefused));
+  if AOutDir = '' then
+    Exit;
+  LDest := TPath.Combine(AOutDir, ExtractFileName(ADir));
+  TDirectory.CreateDirectory(TPath.Combine(LDest, 'out'));
+  LUnits := '';
+  for var LFile in TDirectory.GetFiles(ADir) do
+  begin
+    LText := TFile.ReadAllText(LFile);
+    for var LI := High(LEdits) downto 0 do
+      if SameText(LEdits[LI].FileName, LFile) then
+        LText := Copy(LText, 1, LEdits[LI].Edit.Start) + Copy(LText,
+          LEdits[LI].Edit.Start + LEdits[LI].Edit.Len + 1, MaxInt);
+    TFile.WriteAllText(TPath.Combine(LDest, ExtractFileName(LFile)), LText,
+      TEncoding.UTF8);
+    if SameText(ExtractFileExt(LFile), '.pas') then
+    begin
+      if LUnits <> '' then
+        LUnits := LUnits + ', ';
+      LUnits := LUnits + TPath.GetFileNameWithoutExtension(LFile);
+    end;
+  end;
+  TFile.WriteAllText(TPath.Combine(LDest, 'P.dpr'), 'program P' +
+    Copy(ExtractFileName(ADir), 2, MaxInt) + ';'#13#10'{$APPTYPE CONSOLE}'#13#10 +
+    'uses ' + LUnits + ';'#13#10'begin'#13#10'end.'#13#10);
+end;
+
 type
   TScenRow = record
     Scenario: string;
@@ -121,7 +222,7 @@ type
     Seen: Boolean;
   end;
 
-procedure Run(const ADumpFile: string);
+procedure Run(const ADumpFile, ARemovedDir: string);
 var
   LFixDir, LExpFile: string;
   LRows: TArray<TScenRow>;
@@ -129,8 +230,10 @@ var
   LOut, LLines, LGapRows: TStringList;
   LF: TArray<string>;
   LKey, LNow, LTruth, LNames: string;
-  LTotal, LRight, LGaps, LSerious, LMatch: Integer;
+  LTotal, LRight, LGaps, LSerious, LMatch, LTaken, LRefused: Integer;
 begin
+  LTaken := 0;
+  LRefused := 0;
   LFixDir := TPath.GetFullPath(TPath.Combine(ExtractFilePath(ParamStr(0)),
     '..\fixtures\unused'));
   LExpFile := TPath.Combine(LFixDir, 'expected.txt');
@@ -151,6 +254,8 @@ begin
   begin
     var LInRow: TArray<TPasUnusedSymbol>;
     var LShown := ScenarioRows(LDir, LInRow);
+    if ADumpFile = '' then
+      RemoveAll(LDir, LShown, ARemovedDir, LTaken, LRefused);
     for var LPass := 0 to 1 do
       for var LR in (if LPass = 0 then LShown else LInRow) do
       begin
@@ -160,6 +265,15 @@ begin
         LS.Seen := False;
         LRows := LRows + [LS];
       end;
+  end;
+  if ADumpFile = '' then
+  begin
+    Writeln(Format('remove all: %d rows taken, %d refused', [LTaken,
+      LRefused]));
+    Ok(Format('remove all: %d rows taken (expected %d)', [LTaken,
+      cRemoveTaken]), LTaken = cRemoveTaken);
+    Ok(Format('remove all: %d refused (expected %d)', [LRefused,
+      cRemoveRefused]), LRefused = cRemoveRefused);
   end;
   LOut := TStringList.Create;
   LLines := TStringList.Create;
@@ -251,9 +365,11 @@ begin
   GCounter.Init;
   try
     if (ParamCount = 2) and SameText(ParamStr(1), '-dump') then
-      Run(ParamStr(2))
+      Run(ParamStr(2), '')
+    else if (ParamCount = 2) and SameText(ParamStr(1), '-removed') then
+      Run('', ParamStr(2))
     else
-      Run('');
+      Run('', '');
   except
     on E: Exception do
       Ok('unused scenarios: no exception (' + E.ClassName + ': ' + E.Message +

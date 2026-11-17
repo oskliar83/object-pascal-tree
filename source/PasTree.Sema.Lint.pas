@@ -335,6 +335,16 @@ type
     uhOnlyWritten);  // a field or variable only assigned (Writes), any other
                      // use by rows (By): nothing reads what it holds
 
+  // One assignment of an only-assigned row (TPasUnusedSymbol.WriteSites):
+  // the name written, by its file's full path and 1-based line and column,
+  // and whether the value assigned is computed by code (a call, a property -
+  // removing the assignment drops that).
+  TPasUnusedWrite = record
+    FileName: string;
+    Line, Col: Integer;
+    Computed: Boolean;
+  end;
+
   TPasUnusedSymbol = record
     UnitId, Sym: Integer;     // the declaration, in ANav's project
     FileName: string;         // the file it is written in (an include too)
@@ -347,6 +357,7 @@ type
     How: TPasUnusedHow;
     By: TArray<string>;       // the rows using it, qualified ('' for itself)
     Writes: TArray<string>;   // uhOnlyWritten: the assignments, 'File.pas:12'
+    WriteSites: TArray<TPasUnusedWrite>;  // the same, placed (0.209.0)
   end;
 
   { The units of a library whose interface programs outside the analysis
@@ -3249,6 +3260,7 @@ type
     Write: Boolean;        // the target of a plain `:=`
     Call: Boolean;         // Write: the value assigned is computed by a call
     At: string;            // 'File.pas:12'
+    Place: TPasUnusedWrite;  // Write: where, by full path (Computed = Call)
   end;
 
   // A reference hit placed by Search (TUnusedLint.PlaceHit).
@@ -4966,6 +4978,10 @@ begin
   if not PlainWrite(LM, AMid, ANode, AReadOnly, Result.Write, Result.Call) then
     Exit;
   Result.At := Format('%s:%d', [ExtractFileName(AH.FilePath), AH.Line]);
+  Result.Place.FileName := AH.FilePath;
+  Result.Place.Line := AH.Line;
+  Result.Place.Col := AH.Col;
+  Result.Place.Computed := Result.Call;
   AReady := True;
 end;
 
@@ -6015,6 +6031,7 @@ begin
         Continue;
       LBy.Clear;
       LWrites := nil;
+      LC.WriteSites := nil;
       LC.How := uhOnlyByUnused;
       for var LSite in FUses[LKey] do
       begin
@@ -6036,6 +6053,7 @@ begin
         begin
           LC.How := uhOnlyWritten;
           LWrites := LWrites + [LSite.At];
+          LC.WriteSites := LC.WriteSites + [LSite.Place];
           if LSite.Call then
             LC.Doubts := LC.Doubts + [Format('the value assigned at %s is '
               + 'computed by code (a call, a property) - removing the '

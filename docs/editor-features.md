@@ -1952,6 +1952,59 @@ rows said nothing a reader could act on without reading every host: the
 doubt, the `Api` field and `Hosts` are gone. Covered by
 `TestUnusedSymbolsExported`.
 
+### 15.4 Removing the rows: PasTree.SymbolEdit (0.209.0)
+
+`UnusedSymbolsRemoval` gives the edits that take rows out - what pastree-lsp's
+`pastree/symbolsRemoval` (the RAD Studio client's Remove in its Unused tab)
+and pastree-mcp's `lint` `apply` make. It works on the text as it is now, by
+parse: a row is found again by its name's line and column and the name is
+checked there (a Remove before this one may have moved the lines; the
+client moves its rows with its edits). The host hands in two callbacks - the
+current text of a file and a parse of a text as the host parses it.
+
+What a row takes with it: one name out of `A, B: Integer` (with the comma
+beside it), the whole declaration when every name goes, the whole `var` /
+`const` / `type` section when every declaration of it goes (`class var` and
+the other head words of a type's own sections too); for a routine every part
+dcc pairs with it by its written, qualified name - the declaration in a type
+or the interface, a `forward`, the body or an `external` header in the
+implementation, a method resolution clause naming it - overloads told apart
+by their parameter types; for a type its declaration, a forward of it and
+the bodies of its methods and its nested types'; for an only-assigned row
+the assignments in `WriteSites` (new: TPasUnusedSymbol.WriteSites, each
+assignment's file, line, column and whether code computes the value);
+for any row the rows in its `By`, transitively (removed alone they would no
+longer compile), and a type row's member rows. Every edit is a deletion;
+the edits of one file are merged where they touch, so they never overlap.
+
+Layout: a part that has its lines to itself goes with them (the blanks
+before it, its `;`, a comment after it on its line, the line break); a
+comment directly above it - no blank line between, on lines of its own, no
+directive - goes too unless the next line continues its group (the comment
+heads more than this declaration); one blank line goes where two would be
+left in a row, or right under a list's head word (`const`, `private`). An
+assignment in a statement list goes with its `;`; as the body of an `if`,
+a loop or a `case` branch it leaves an empty statement (the condition is
+still evaluated, as before).
+
+Refused, with a reason per asked row: a doubt on it or on a row that goes
+with it; a `By` name no row given and no type row's member; the name no
+longer at its place; a part in an $I include file; a directive inside what
+would go, other than conditionals and regions balanced within it (an
+unbalanced `{$ENDIF}` - a declaration split between branches); a variant
+part's field; an assignment whose value code computes; an implementation
+not told among overloads; and an edit after which the file would parse
+with more errors than before - the backstop for what the rules miss.
+
+Checked by tests/SymbolEditSmoke.dpr (the rules, case by case) and by
+UnusedScenarioSmoke's Remove All pass: every scenario's rows without a doubt
+removed (100 rows, 1 refused - an include), and with `-removed <dir>` the
+edited scenarios written for dcc32, which builds and runs every one (150 of
+150 compile and exit 0). On a 3,000-unit client project: 3,777 rows without
+a doubt asked, 3,758 removed (with what goes with them) by 3,310 edits in
+496 files, 19 refused (17 in include files, 2 with a directive inside); the
+project then compiles with no error and the same warnings.
+
 ## 16. Import Graph (`PasTree.Sema.ImportGraph` + demo `PasTreeDemo.ImportGraph`, PasTree 0.208.0)
 
 The question: through which units does the program take unit X in? A unit
