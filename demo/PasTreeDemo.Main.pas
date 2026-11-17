@@ -307,6 +307,8 @@ type
     FindProjectUnusedUnits1: TMenuItem;
     FindUnreferencedUnitsAction: TAction;
     FindUnreferencedUnits1: TMenuItem;
+    ImportGraphAction: TAction;
+    ImportGraph1: TMenuItem;
     FindAll1: TMenuItem;
     RenameAction: TAction;
     Rename1: TMenuItem;
@@ -395,6 +397,7 @@ type
     procedure FindProjectUnusedUnitsActionUpdate(Sender: TObject);
     procedure FindProjectUnusedUnitsActionExecute(Sender: TObject);
     procedure FindUnreferencedUnitsActionExecute(Sender: TObject);
+    procedure ImportGraphActionExecute(Sender: TObject);
     procedure RenameActionUpdate(Sender: TObject);
     procedure RenameActionExecute(Sender: TObject);
     procedure FormatActionUpdate(Sender: TObject);
@@ -806,6 +809,10 @@ var
 implementation
 
 {$R *.dfm}
+
+uses
+  PasTree.Sema.ImportGraph,
+  PasTreeDemo.ImportGraph;
 
 type
   // A source tab that owns its editor, so we can recover the editor from the
@@ -2194,6 +2201,73 @@ begin
   pgcBottom.ActivePage := LTab;
 end;
 
+{ Find All > Import Graph: through which units the program takes a unit in
+  (PasTree.Sema.ImportGraph, PasTreeDemo.ImportGraph) - the unit at the caret
+  when it is on a `uses` entry or the unit header, else the unit in the
+  editor. The graph is the full closure's (TPasWorkspace.ImportGraph); the
+  paths start from the project's own program when it reaches the unit. One
+  page per unit, refreshed when asked again. }
+procedure TfrmMain.ImportGraphActionExecute(Sender: TObject);
+var
+  LLine, LCol, LTMid, LTarget, LRoot: Integer;
+  LFilePath, LTargetFile, LName: string;
+  LEditor: TSynEdit;
+  LGraph: TPasImportGraph;
+  LTab: TImportGraphTab;
+begin
+  if not Assigned(FNav) or
+     not ActiveEditorPos(LFilePath, LEditor, LLine, LCol) or
+     (FNav.ModelIdOf(LFilePath) < 0) then
+    Exit;
+  LTargetFile := LFilePath;
+  if ActiveUnitTarget(LTMid, LName) and (LTMid >= 0) then
+    LTargetFile := FNav.Project.ModelFile(LTMid);
+  LGraph := nil;
+  if not RunQuery(
+    procedure
+    begin
+      LGraph := FWS.ImportGraph;
+    end) then
+    Exit;
+  LTarget := LGraph.UnitOf(LTargetFile);
+  if LTarget < 0 then
+  begin
+    Log('Import graph: ' + TPath.GetFileName(LTargetFile) +
+      ' is not in the analysis.');
+    LGraph.Free;
+    Exit;
+  end;
+  LTab := nil;
+  for var LIdx := 0 to pgcBottom.PageCount - 1 do
+    if (pgcBottom.Pages[LIdx] is TImportGraphTab) and
+       SameText(TImportGraphTab(pgcBottom.Pages[LIdx]).TargetFile,
+         LTargetFile) then
+      LTab := TImportGraphTab(pgcBottom.Pages[LIdx]);
+  if LTab = nil then
+  begin
+    LTab := TImportGraphTab.Create(pgcBottom);
+    LTab.PageControl := pgcBottom;
+    LTab.TargetFile := LTargetFile;
+  end;
+  LRoot := -1;
+  // A .dproj names its .dpr after itself.
+  if FProjectFile <> '' then
+    LRoot := LGraph.UnitOf(TPath.GetFileNameWithoutExtension(FProjectFile));
+  LTab.Show(LGraph, LTarget, LRoot,
+    function(AGraph: TPasImportGraph; AEdge: Integer; out AFile: string;
+      out ALine, ACol: Integer): Boolean
+    begin
+      // Read from the analysis as it is now - never while one runs.
+      Result := Assigned(FNav) and not FAnalyzing and
+        AGraph.EdgeSite(FNav.Project, AEdge, AFile, ALine, ACol);
+    end,
+    procedure(const AFile: string; ALine, ACol: Integer)
+    begin
+      NavigateTo(AFile, ALine, ACol);
+    end);
+  pgcBottom.ActivePage := LTab;
+end;
+
 // Rename covers the same two identities Find References does MINUS the third:
 // a symbol, or a unit (its header + every `uses` item). A compiler builtin is
 // never renameable - the name is the compiler's, so there is nothing to edit
@@ -2993,7 +3067,8 @@ end;
 // ActivePage wherever it already was) closes nothing.
 procedure TfrmMain.CloseSearchTabClick(Sender: TObject);
 begin
-  if pgcBottom.ActivePage is TFindRefTab then
+  if (pgcBottom.ActivePage is TFindRefTab) or
+     (pgcBottom.ActivePage is TImportGraphTab) then
     pgcBottom.ActivePage.Free;
 end;
 
@@ -3002,7 +3077,8 @@ var
   LIdx: Integer;
 begin
   for LIdx := pgcBottom.PageCount - 1 downto 0 do
-    if pgcBottom.Pages[LIdx] is TFindRefTab then
+    if (pgcBottom.Pages[LIdx] is TFindRefTab) or
+       (pgcBottom.Pages[LIdx] is TImportGraphTab) then
       pgcBottom.Pages[LIdx].Free;
 end;
 
