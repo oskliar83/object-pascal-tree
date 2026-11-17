@@ -96,6 +96,13 @@ type
   TPasLintOption = (loHideGlobalInit, loTogether, loAfterRows);
   TPasLintOptions = set of TPasLintOption;
 
+  { loTogether weighs as removed every row no doubt holds back. A host that
+    removes fewer says which rows it keeps: True keeps ARow, weighed as
+    staying like a row with a doubt. pastree-lsp's group mode (0.92.0)
+    removes only the entries every program of the group finds unused, and
+    weighs each program with that set. }
+  TPasUnusedUseKept = reference to function(const ARow: TPasUnusedUse): Boolean;
+
   TPasUnreferencedUnit = record
     Hit: TPasRefHit;          // the unit's name in its own header
     UnitName: string;
@@ -475,6 +482,12 @@ function FindUnusedUses(ANav: TPasNavigator; const AMids: TArray<Integer>;
   AOptions: TPasLintOptions;
   const ARows: TArray<TPasUnusedSymbol>): TArray<TPasUnusedUse>; overload;
 
+// The same with loTogether weighing only the rows AKept does not keep (nil:
+// every row no doubt holds back, as above).
+function FindUnusedUses(ANav: TPasNavigator; const AMids: TArray<Integer>;
+  AOptions: TPasLintOptions; const ARows: TArray<TPasUnusedSymbol>;
+  const AKept: TPasUnusedUseKept): TArray<TPasUnusedUse>; overload;
+
 implementation
 
 uses
@@ -544,6 +557,8 @@ type
     FRowEdges: TList<Int64>;
     FDeadEdges: TDictionary<Int64, Boolean>;   // From shl 32 or Target
     FOptions: TPasLintOptions;
+    // loTogether: the rows the host keeps besides the doubted ones; nil none.
+    FKept: TPasUnusedUseKept;
     FGlobalInit: TDictionary<Integer, Boolean>;
     // Light mode: an inline routine -> the LIGHT units its expansion depends
     // on (a body there is not analyzed), and every light unit an answer had
@@ -2922,7 +2937,8 @@ begin
     LRows[LI].Edges := [LEdge];
     // A row that goes with unused declarations is not removed alone.
     LRows[LI].Held := (ALint.FRows[LI].Doubts <> nil) or
-      (ALint.FRows[LI].By <> nil);
+      (ALint.FRows[LI].By <> nil) or
+      (Assigned(ALint.FKept) and ALint.FKept(ALint.FRows[LI]));
   end;
   LGraph := TLintGraph.Create(ALint);
   try
@@ -3210,12 +3226,20 @@ end;
 function FindUnusedUses(ANav: TPasNavigator; const AMids: TArray<Integer>;
   AOptions: TPasLintOptions;
   const ARows: TArray<TPasUnusedSymbol>): TArray<TPasUnusedUse>;
+begin
+  Result := FindUnusedUses(ANav, AMids, AOptions, ARows, nil);
+end;
+
+function FindUnusedUses(ANav: TPasNavigator; const AMids: TArray<Integer>;
+  AOptions: TPasLintOptions; const ARows: TArray<TPasUnusedSymbol>;
+  const AKept: TPasUnusedUseKept): TArray<TPasUnusedUse>;
 var
   LLint: TUsesLint;
 begin
   LLint := TUsesLint.Create(ANav);
   try
     LLint.FOptions := AOptions;
+    LLint.FKept := AKept;
     if (loAfterRows in AOptions) and (ARows <> nil) then
       LLint.SetDeadRows(ARows, AMids);
     CheckUnits(LLint, AMids, False);
