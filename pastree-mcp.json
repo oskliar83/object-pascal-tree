@@ -1,1 +1,1 @@
-{"also": ["tests/*.dpr", "tools/*.dpr"], "like": "SemaNavSmoke", "exported": ["source/*.pas"], "hosts": ["../pastree-mcp/pastree-mcp.dproj", "../pastree-lsp/pastree-server.dproj"]}
+{"also": ["tests/*.dpr", "tools/*.dpr"], "like": "SemaNavSmoke", "exported": ["source/*.pas"]}

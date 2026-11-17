@@ -320,10 +320,11 @@ type
       out ASkips: TPasUnusedSkips;
       out AInRowTypes: TArray<TPasUnusedSymbol>): TArray<TPasUnusedSymbol>;
       overload;
-    // The same, a library's exported declarations weighed as such
-    // (TPasUnusedLibrary): ALibrary, with AExported - the library units'
-    // files - added to its Units (those this analysis does not hold are
-    // passed over).
+    // The same, with a library's exported declarations used, not weighed
+    // (TPasUnusedLibrary, usExported): ALibrary, with AExported - the
+    // library units' files - added to its Units (those this analysis does
+    // not hold are passed over). The overloads above pass
+    // Default(TPasUnusedLibrary): a package's units are exported.
     function FindUnusedSymbols(const AFiles: TArray<string>;
       const ALibrary: TPasUnusedLibrary; const AExported: TArray<string>;
       out ASkips: TPasUnusedSkips;
@@ -334,7 +335,8 @@ type
     // resolves to nothing here.
     function CheckUnusedSymbols(
       const AKeys: TArray<TPasSymbolKey>): TArray<TPasUnusedCheck>; overload;
-    // The same, a library's exported declarations weighed as such.
+    // The same, with a library's exported declarations (uvSkipped,
+    // usExported).
     function CheckUnusedSymbols(const AKeys: TArray<TPasSymbolKey>;
       const ALibrary: TPasUnusedLibrary;
       const AExported: TArray<string>): TArray<TPasUnusedCheck>; overload;
