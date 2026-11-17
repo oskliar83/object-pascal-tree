@@ -1391,6 +1391,36 @@ include, or in a clause with no closing `;`. A pure function of the tree;
 pastree-lsp's `pastree/usesRemoval` and pastree-mcp's `lint` `apply` call
 it. tests/UsesEditSmoke.dpr.
 
+### 12.2c `loAfterRows`: entries needed only by unused declarations (0.206.0)
+
+An entry whose every use sits in declarations of its unit that are
+themselves unused (FindUnusedSymbols' rows, sec. 15) is not reported by the
+plain rule - it is used - yet goes the moment they do. Replaying an agent's
+session found it: a routine `WriteDisk` nothing called was the only user of
+`PasLsp.SourceText`; lint named the routine, and the agent found the entry
+by hand after deleting it. With `loAfterRows` FindUnusedUses runs the
+declaration search over the same units first (or takes the rows a host
+already has: the overload with `ARows`, the rows and the members of row
+types), maps each row to its nodes - its declaration (a `var` list only when
+every name in it is a row), a routine's body, a member and a method body of
+a row type, which go with the outermost row type - and places every use of
+an entry: one under such a node goes with that row, any other (and the
+form file's, which names no node) keeps the entry. An entry with only the
+first kind is a row with `By` naming the rows, and is weighed as an unused
+one for its doubts, except that a call the rows make no longer counts for
+the "another overload" doubt. A row of `By` with a doubt gives the entry the
+doubt "X, which needs it, has a doubt - <its first doubt>". Such a row is
+never removed alone - removed before its rows, they no longer compile - so
+`loTogether` weighs it as kept, and a host offers it with the rows, not as
+Remove. A write of an only-assigned field stays a live use: the
+assignment is in live code until the field goes. The option costs the
+declaration search; off by default - on a 1,965-unit group pastree-mcp's
+whole-group unused-uses lint took 70 s instead of 30 (6.4 s instead of 2.0
+again) and found 214 such entries beside 13,992 plain ones. In light mode
+the demand runs the search too once its own demand is met, so the entries
+the rows free are weighed with the light units their removal reads.
+SemaNavSmoke: TestUnusedUsesAfterRows.
+
 ### 12.3 On the pool, and the library bodies it reads (0.199.0)
 
 Both functions, and `DemandLint`'s run of them, check the units on the

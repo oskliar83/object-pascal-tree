@@ -2111,6 +2111,120 @@ begin
   end;
 end;
 
+{ loAfterRows: a `uses` entry every use of which sits in unused declarations
+  of its unit is a row going with them (By). UDisk is needed only by the dead
+  WriteDisk (the replayed case); UBoth by the dead Dead2 and the live Run -
+  no row; UCls only by a method body of the dead class TDeadObj - By names
+  the class; UDoubt only by DeadDoubt, a row with a doubt (a branch not
+  compiled names it) - the entry gets a doubt naming it; UPlain by nothing -
+  a plain row, By empty. Without the option only UPlain. UB uses UBoth live:
+  the empty case. }
+procedure TestUnusedUsesAfterRows;
+var
+  LDir: string;
+  LProj: TPasSemaProject;
+  LNav: TPasNavigator;
+  LUses: TArray<TPasUnusedUse>;
+  LMidA, LMidB: Integer;
+  LSkips: TPasUnusedSkips;
+  LRows, LInRow: TArray<TPasUnusedSymbol>;
+
+  procedure WriteUnit(const AName, AIntf, AImpl: string);
+  begin
+    TFile.WriteAllText(TPath.Combine(LDir, AName + '.pas'),
+      'unit ' + AName + ';'#13#10'interface'#13#10 + AIntf +
+      'implementation'#13#10 + AImpl + 'end.'#13#10);
+  end;
+
+  function RowOf(const AUnit: string): Integer;
+  begin
+    for var LI := 0 to High(LUses) do
+      if SameText(LUses[LI].UnitName, AUnit) then
+        Exit(LI);
+    Result := -1;
+  end;
+
+  function Checked(const AWhat: string): Boolean;
+  var
+    LD, LP, LC, LB: Integer;
+  begin
+    LD := RowOf('UDisk');
+    LP := RowOf('UPlain');
+    LC := RowOf('UCls');
+    LB := RowOf('UDoubt');
+    Result := (Length(LUses) = 4) and (RowOf('UBoth') < 0) and
+      (LD >= 0) and (Length(LUses[LD].By) = 1) and
+      (LUses[LD].By[0] = 'WriteDisk') and (LUses[LD].Doubts = nil) and
+      (LP >= 0) and (LUses[LP].By = nil) and (LUses[LP].Doubts = nil) and
+      (LC >= 0) and (Length(LUses[LC].By) = 1) and
+      (LUses[LC].By[0] = 'TDeadObj') and (LUses[LC].Doubts = nil) and
+      (LB >= 0) and (Length(LUses[LB].By) = 1) and
+      (LUses[LB].By[0] = 'DeadDoubt') and (Length(LUses[LB].Doubts) = 1) and
+      LUses[LB].Doubts[0].StartsWith('DeadDoubt, which needs it, has a doubt');
+    if not Result then
+      for var LU in LUses do
+        Writeln('  ', AWhat, ': ', LU.UnitName, ' by [',
+          string.Join(', ', LU.By), '] doubts [',
+          string.Join(' | ', LU.Doubts), ']');
+  end;
+
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_uses_after');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'PAfter.dpr'),
+    'program PAfter;'#13#10'uses UA, UB;'#13#10'begin'#13#10'  Run;'#13#10 +
+    '  RunB;'#13#10'end.'#13#10);
+  for var LName in ['UDisk', 'UBoth', 'UDoubt', 'UCls', 'UPlain'] do
+    WriteUnit(LName, 'procedure ' + LName + 'Call;'#13#10,
+      'procedure ' + LName + 'Call; begin end;'#13#10);
+  WriteUnit('UA', 'uses UDisk, UBoth, UDoubt, UCls, UPlain;'#13#10 +
+    'procedure Run;'#13#10,
+    'type'#13#10'  TDeadObj = class'#13#10'    procedure Go;'#13#10 +
+    '  end;'#13#10 +
+    'procedure TDeadObj.Go; begin UClsCall; end;'#13#10 +
+    'procedure WriteDisk; begin UDiskCall; end;'#13#10 +
+    'procedure Dead2; begin UBothCall; end;'#13#10 +
+    'procedure DeadDoubt; begin UDoubtCall; end;'#13#10 +
+    'procedure Run;'#13#10'begin'#13#10'  UBothCall;'#13#10 +
+    '{$IFDEF NEVER}'#13#10'  DeadDoubt;'#13#10'{$ENDIF}'#13#10'end;'#13#10);
+  WriteUnit('UB', 'uses UBoth;'#13#10'procedure RunB;'#13#10,
+    'procedure RunB; begin UBothCall; end;'#13#10);
+  LProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  LNav := nil;
+  try
+    Ok('uses after rows: PAfter analyzed',
+      LProj.AnalyzeProject(TPath.Combine(LDir, 'PAfter.dpr')) >= 0);
+    LNav := TPasNavigator.Create(LProj);
+    LMidA := LProj.ModelIdOf(TPath.Combine(LDir, 'UA.pas'));
+    LMidB := LProj.ModelIdOf(TPath.Combine(LDir, 'UB.pas'));
+    LUses := FindUnusedUses(LNav, [LMidA]);
+    Ok('uses after rows: without the option, UPlain alone',
+      (Length(LUses) = 1) and SameText(LUses[0].UnitName, 'UPlain') and
+      (LUses[0].By = nil));
+    LUses := FindUnusedUses(LNav, [LMidA], [loAfterRows]);
+    Ok('uses after rows: UDisk by WriteDisk, UCls by TDeadObj, UDoubt ' +
+      'doubted by DeadDoubt, UPlain plain, UBoth live', Checked('option'));
+    // The rows given by the caller: the same answer.
+    LRows := FindUnusedSymbols(LNav, [LMidA], LSkips, LInRow);
+    LUses := FindUnusedUses(LNav, [LMidA], [loAfterRows], LRows + LInRow);
+    Ok('uses after rows: the rows passed in, the same', Checked('passed'));
+    // With loTogether too: the rows by rows are kept out of the weighing,
+    // and nothing changes here.
+    LUses := FindUnusedUses(LNav, [LMidA], [loAfterRows, loTogether]);
+    Ok('uses after rows: with loTogether, the same', Checked('together'));
+    // UB's one entry is used live: nothing.
+    LUses := FindUnusedUses(LNav, [LMidB], [loAfterRows]);
+    Ok('uses after rows: the empty case', LUses = nil);
+  finally
+    LNav.Free;
+    LProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 { FindUnusedSymbols in light mode: its demand (DemandUnusedSymbols) wants a
   library body only where it can name an own declaration - a library unit
   whose `uses` list an own unit, or a library unit that does. LibCopy is an
@@ -9289,6 +9403,7 @@ begin
   TestUnreferencedUnits;
   TestLintGlobalInit;
   TestLintTogether;
+  TestUnusedUsesAfterRows;
   TestLintLight;
 
   if GCounter.Finish('SemaNavSmoke') then
