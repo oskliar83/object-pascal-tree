@@ -32,6 +32,7 @@ uses
   PasTree.Sema.Project in '..\source\PasTree.Sema.Project.pas',
   PasTree.Sema.Nav in '..\source\PasTree.Sema.Nav.pas',
   PasTree.Sema.Lint in '..\source\PasTree.Sema.Lint.pas',
+  PasTree.Sema.ImportGraph in '..\source\PasTree.Sema.ImportGraph.pas',
   PasTree.Outline in '..\source\PasTree.Outline.pas',
   PasTree.TestKit in 'PasTree.TestKit.pas';
 
@@ -1951,6 +1952,126 @@ begin
       SameText(ExtractFileName(ExtractFileDir(LUnits[3].Hit.FilePath)), 'a'));
   finally
     LNav.Free;
+    LProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
+// TPasImportGraph / TPasImportPaths: IMain lists IA, IB and IZ; IA lists IHub
+// in its interface, IB in its implementation; IHub lists IMid, IMid lists IX
+// in its implementation, and IX lists IMid back (a cycle). IX comes in
+// through IA or IB, then always IHub -> IMid -> IX: IHub and IMid are
+// bottlenecks, IHub -> IMid and IMid -> IX sole edges, IMain -> IA not. IZ is
+// reached but on no path to IX.
+procedure TestImportGraph;
+var
+  LDir: string;
+  LProj: TPasSemaProject;
+  LG: TPasImportGraph;
+  LP: TPasImportPaths;
+  LMain, LA, LB, LHub, LMid, LX, LZ: Integer;
+  LIn: TArray<Integer>;
+  LFile: string;
+  LLine, LCol: Integer;
+
+  procedure WriteUnit(const AName, AIntfUses, AImplUses: string);
+  begin
+    TFile.WriteAllText(TPath.Combine(LDir, AName + '.pas'),
+      'unit ' + AName + ';'#13#10'interface'#13#10 + AIntfUses +
+      'implementation'#13#10 + AImplUses + 'end.'#13#10);
+  end;
+
+  function EdgeOf(AFrom, ATo: Integer): Integer;
+  begin
+    for var LE in LG.OutEdges(AFrom) do
+      if LG.Edges[LE].ToUnit = ATo then
+        Exit(LE);
+    Result := -1;
+  end;
+
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_importgraph');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'IMain.dpr'),
+    'program IMain;'#13#10'uses IA, IB, IZ;'#13#10'begin'#13#10'end.'#13#10);
+  WriteUnit('IA', 'uses IHub;'#13#10, '');
+  WriteUnit('IB', '', 'uses IHub;'#13#10);
+  WriteUnit('IHub', 'uses IMid;'#13#10, '');
+  WriteUnit('IMid', '', 'uses IX;'#13#10);
+  WriteUnit('IX', '', 'uses IMid;'#13#10);
+  WriteUnit('IZ', '', '');
+  LProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  LG := nil;
+  LP := nil;
+  try
+    Ok('import graph: IMain analyzed',
+      LProj.AnalyzeProject(TPath.Combine(LDir, 'IMain.dpr')) >= 0);
+    LG := TPasImportGraph.Create(LProj);
+    LMain := LG.UnitOf('IMain');
+    LA := LG.UnitOf('ia');
+    LB := LG.UnitOf(TPath.Combine(LDir, 'IB.pas'));
+    LHub := LG.UnitOf('IHub');
+    LMid := LG.UnitOf('IMid');
+    LX := LG.UnitOf('IX');
+    LZ := LG.UnitOf('IZ');
+    Ok('import graph: every unit by name or file',
+      (LMain >= 0) and (LA >= 0) and (LB >= 0) and (LHub >= 0) and
+      (LMid >= 0) and (LX >= 0) and (LZ >= 0));
+    Ok('import graph: IMain the one root',
+      (Length(LG.Roots) = 1) and (LG.Roots[0] = LMain) and
+      LG.Units[LMain].IsRoot and not LG.Units[LA].IsRoot);
+    Ok('import graph: IMain reaches IX',
+      (Length(LG.RootsReaching(LX)) = 1) and (LG.RootsReaching(LX)[0] = LMain));
+    Ok('import graph: an implementation entry is marked',
+      (EdgeOf(LB, LHub) >= 0) and LG.Edges[EdgeOf(LB, LHub)].InImpl and
+      (EdgeOf(LA, LHub) >= 0) and not LG.Edges[EdgeOf(LA, LHub)].InImpl);
+    Ok('import graph: the entry''s site, read from the project',
+      LG.EdgeSite(LProj, EdgeOf(LB, LHub), LFile, LLine, LCol) and
+      SameText(ExtractFileName(LFile), 'IB.pas') and (LLine = 4) and
+      (LCol = 6));
+    LP := TPasImportPaths.Create(LG, LMain, LX);
+    Ok('import graph: IX reached at depth 4',
+      LP.Reached and (LP.Depth(LX) = 4) and (LP.Depth(LZ) = 1));
+    Ok('import graph: six units on a path, IZ not',
+      (LP.OnPathCount = 6) and LP.OnPath(LHub) and not LP.OnPath(LZ));
+    Ok('import graph: the shortest chain IMain IA IHub IMid IX',
+      (Length(LP.ShortestChain) = 4) and
+      (LG.Edges[LP.ShortestChain[0]].FromUnit = LMain) and
+      (LG.Edges[LP.ShortestChain[0]].ToUnit = LA) and
+      (LG.Edges[LP.ShortestChain[3]].ToUnit = LX));
+    Ok('import graph: IHub and IMid bottlenecks, IA and the ends not',
+      LP.IsBottleneck(LHub) and LP.IsBottleneck(LMid) and
+      not LP.IsBottleneck(LA) and not LP.IsBottleneck(LMain) and
+      not LP.IsBottleneck(LX) and (Length(LP.Bottlenecks) = 2) and
+      (LP.Bottlenecks[0] = LHub));
+    Ok('import graph: IHub -> IMid and IMid -> IX sole, IMain -> IA not',
+      LP.IsSole(EdgeOf(LHub, LMid)) and LP.IsSole(EdgeOf(LMid, LX)) and
+      not LP.IsSole(EdgeOf(LMain, LA)) and not LP.IsSole(EdgeOf(LA, LHub)) and
+      (Length(LP.SoleEdges) = 2));
+    LIn := LP.Importers(LHub);
+    Ok('import graph: IHub imported by IA then IB',
+      (Length(LIn) = 2) and (LG.Edges[LIn[0]].FromUnit = LA) and
+      (LG.Edges[LIn[1]].FromUnit = LB));
+    LIn := LP.Importers(LMid);
+    Ok('import graph: IMid imported by IHub, then IX of the cycle',
+      (Length(LIn) = 2) and (LG.Edges[LIn[0]].FromUnit = LHub) and
+      (LG.Edges[LIn[1]].FromUnit = LX));
+    FreeAndNil(LP);
+    LP := TPasImportPaths.Create(LG, LMain, LZ);
+    Ok('import graph: IZ straight from the program, its one edge sole',
+      LP.Reached and (Length(LP.ShortestChain) = 1) and
+      LP.IsSole(LP.ShortestChain[0]) and (LP.Bottlenecks = nil));
+    FreeAndNil(LP);
+    LP := TPasImportPaths.Create(LG, LZ, LX);
+    Ok('import graph: IZ does not reach IX',
+      not LP.Reached and (LP.ShortestChain = nil) and
+      (LP.Importers(LX) = nil));
+  finally
+    LP.Free;
+    LG.Free;
     LProj.Free;
     if TDirectory.Exists(LDir) then
       TDirectory.Delete(LDir, True);
@@ -9416,6 +9537,7 @@ begin
   TestUnusedThreads;
   TestAsmNames;
   TestUnreferencedUnits;
+  TestImportGraph;
   TestLintGlobalInit;
   TestLintTogether;
   TestUnusedUsesAfterRows;

@@ -2059,6 +2059,12 @@ Still open, roughly in the order we're tackling it:
   project units nobody uses - what the program would no longer take in once
   every unused entry is gone, the `.dpr`'s own list included. See
   `docs/editor-features.md` §12.
+- ~~**Import Graph**~~ - DONE (`PasTree.Sema.ImportGraph`, 0.208.0): through
+  which units the program takes a unit in - a tree grown backwards from the
+  unit, its importers a level at a time, the shortest chain first; the
+  units every path goes through and the `uses` entries whose removal alone
+  drops the unit marked. The demo's Find All > Import Graph. See
+  `docs/editor-features.md` §16.
 - **Show Defines** - for the identifier/position under the cursor, list
   every preprocessor define ACTIVE there (module where `$DEFINE`d / project-
   or platform-level, line, the define name), in its own results window,

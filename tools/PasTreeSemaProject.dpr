@@ -92,7 +92,13 @@ program PasTreeSemaProject;
   -lintpromote  with -unused in light mode: the lint through a
          TPasWorkspace, as a host asks it - the light units it needs made
          full inside the query (a rebuild with the project as donor when a
-         promotion asks for one), so the lint is exact. }
+         promotion asks for one), so the lint is exact.
+
+  -imports:<unit>  with -dproj: how the program takes <unit> (a name or a
+         file) in - TPasWorkspace.ImportGraph and TPasImportPaths from the
+         .dproj's program: the shortest chain, the units on its paths, the
+         bottlenecks and the sole entries with their sites, and the time
+         (Find All > Import Graph, headless). }
 
 {$APPTYPE CONSOLE}
 {$MAXSTACKSIZE $01000000}   // 16 MB per thread: README, "The stack every host should reserve"
@@ -125,6 +131,7 @@ uses
   PasTree.Sema.Project in '..\source\PasTree.Sema.Project.pas',
   PasTree.Sema.Nav in '..\source\PasTree.Sema.Nav.pas',
   PasTree.Sema.Lint in '..\source\PasTree.Sema.Lint.pas',
+  PasTree.Sema.ImportGraph in '..\source\PasTree.Sema.ImportGraph.pas',
   PasTree.Sema.Workspace in '..\source\PasTree.Sema.Workspace.pas';
 
 type
@@ -171,6 +178,7 @@ var
   GFpAfter: string;           // -fpafter:<file>, the fingerprint after -promote
   GFpUnits: TArray<string>;  // -fpunit:<file>, repeatable: a library unit in -fp too
   GLintPromote: Boolean;      // -lintpromote: LintPromotions + PromoteUnit before -unused
+  GImports: string;           // -imports:<unit>: the import graph of one unit
   GRefSets: TArray<string>;   // -refset:<unit>, repeatable
   GPromotes: TArray<string>;  // -promote:<file>, repeatable
   GLightSpecs: TArray<string>; // -light:<spec>, repeatable; see LightTrees
@@ -1301,6 +1309,75 @@ begin
           LONav.Free;
         end;
       end;
+      if GImports <> '' then
+      begin
+        // Find All > Import Graph, headless: through a workspace, so a light
+        // analysis has its whole closure loaded first.
+        var LIWS := TPasWorkspace.Create(GProj, nil);
+        try
+          var LISW := TStopwatch.StartNew;
+          var LIG := LIWS.ImportGraph;
+          var LIMs := LISW.ElapsedMilliseconds;
+          try
+            var LIT := LIG.UnitOf(GImports);
+            var LIR := LIG.UnitOf(TPath.GetFileNameWithoutExtension(APath));
+            if LIR < 0 then
+              for var LRo in LIG.RootsReaching(Max(LIT, 0)) do
+              begin
+                LIR := LRo;
+                Break;
+              end;
+            Writeln(ErrOutput, Format('  imports: graph %d units, %d edges ' +
+              'in %d ms (closure included)', [LIG.UnitCount, LIG.EdgeCount,
+              LIMs]));
+            if (LIT < 0) or (LIR < 0) then
+              Writeln(ErrOutput, '  imports: ' + GImports +
+                ' or the program not in the graph')
+            else
+            begin
+              LISW := TStopwatch.StartNew;
+              var LIP := TPasImportPaths.Create(LIG, LIR, LIT);
+              try
+                Writeln(ErrOutput, Format('  imports: %s from %s - %s, %d ms',
+                  [LIG.Units[LIT].Name, LIG.Units[LIR].Name,
+                  IfThen(LIP.Reached, 'reached', 'NOT reached'),
+                  LISW.ElapsedMilliseconds]));
+                var LIChain := LIG.Units[LIR].Name;
+                for var LIE in LIP.ShortestChain do
+                  LIChain := LIChain + ' -> ' +
+                    LIG.Units[LIG.Edges[LIE].ToUnit].Name +
+                    IfThen(LIG.Edges[LIE].InImpl, ' (impl)', '');
+                Writeln(ErrOutput, Format('    shortest (%d steps): %s',
+                  [Length(LIP.ShortestChain), LIChain]));
+                Writeln(ErrOutput, Format('    units on its paths: %d; ' +
+                  'importers of the unit: %d', [LIP.OnPathCount,
+                  Length(LIP.Importers(LIT))]));
+                for var LIU in LIP.Bottlenecks do
+                  Writeln(ErrOutput, '    bottleneck: ' + LIG.Units[LIU].Name);
+                for var LIE in LIP.SoleEdges do
+                begin
+                  var LIFile: string;
+                  var LILine, LICol: Integer;
+                  if not LIG.EdgeSite(LIWS.Project, LIE, LIFile, LILine,
+                       LICol) then
+                    LIFile := '?';
+                  Writeln(ErrOutput, Format('    sole entry: %s -> %s  %s:%d',
+                    [LIG.Units[LIG.Edges[LIE].FromUnit].Name,
+                    LIG.Units[LIG.Edges[LIE].ToUnit].Name,
+                    ExtractFileName(LIFile), LILine]));
+                end;
+              finally
+                LIP.Free;
+              end;
+            end;
+          finally
+            LIG.Free;
+          end;
+        finally
+          GProj := LIWS.Release;
+          LIWS.Free;
+        end;
+      end;
       if GUnused then
       begin
         // Find All > Unused Units in the Project, headless: the .dproj's
@@ -1480,6 +1557,8 @@ begin
         GOutline := True
       else if SameText(ParamStr(GIdx), '-unused') then
         GUnused := True
+      else if StartsText('-imports:', ParamStr(GIdx)) then
+        GImports := Copy(ParamStr(GIdx), Length('-imports:') + 1, MaxInt)
       else if SameText(ParamStr(GIdx), '-lintpromote') then
         GLintPromote := True
       else if SameText(ParamStr(GIdx), '-defines') then

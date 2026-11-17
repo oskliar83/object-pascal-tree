@@ -1951,3 +1951,85 @@ told of (`hosts`, by word). A host can only use what is exported, so the
 rows said nothing a reader could act on without reading every host: the
 doubt, the `Api` field and `Hosts` are gone. Covered by
 `TestUnusedSymbolsExported`.
+
+## 16. Import Graph (`PasTree.Sema.ImportGraph` + demo `PasTreeDemo.ImportGraph`, PasTree 0.208.0)
+
+The question: through which units does the program take unit X in? A unit
+is linked when the program's `uses` closure reaches it - through an
+interface or an implementation entry alike - and the chain is often one
+nobody wrote on purpose (a form unit lists a VCL unit whose implementation
+lists the unit asked about). The answer is every path Root -> ... -> X of
+the `uses` graph: on a real project far too many to list, so it is shown as
+a tree grown backwards from X, a level at a time, with the forced steps
+marked.
+
+### 16.1 The graph (`TPasImportGraph`)
+
+A snapshot of one analysis: a unit per model (`Name` is the file name
+without its extension, `IsRoot` a program, library or package, `Light` a
+unit read light), an edge per resolved `uses` entry - dcc's own resolution,
+conditionals decided, so an entry in a branch not compiled is no edge. An
+edge says whether it is a unit's implementation entry (`InImpl`; a root's
+`uses` has no sections and is never one). It keeps no model id and no
+reference to the project, so a host may hold it across a reanalysis. Where
+an entry is written is asked of a project when shown (`EdgeSite`): reading
+every entry's position up front would rehydrate every demoted model. A
+site is refused when the importer is gone or its entry names another unit
+now (an edit since).
+
+`TPasWorkspace.ImportGraph` meets `EnsureClosure` first: in light mode the
+units nobody loaded are loaded (light) before the snapshot, so the graph is
+the full closure's - on this repository's demo, 131 loaded units become the
+same 158 units and 1,109 edges a full analysis has (241 ms).
+
+### 16.2 One root, one target (`TPasImportPaths`)
+
+- `Depth` - the fewest steps from the root, -1 when not reached.
+- `Importers(U)` - the edges into U from units the root reaches. Each is on
+  some path to the target (U reaches it). They come nearest to the root
+  first, then by name, so following the first importer up is a shortest
+  chain (`ShortestChain`).
+- `IsBottleneck(U)` - every path goes through U (a dominator of the target;
+  never the root or the target).
+- `IsSole(E)` - every path takes edge E: removing that one entry drops the
+  target from the program (in this configuration).
+- `OnPathCount` - the units on a path, both ends included.
+
+Both bottlenecks and sole edges lie on any shortest chain, so each candidate
+of it is checked by one walk from the root with the candidate left out: a
+chain is short and the walks are linear. On this repository's demo,
+`System.ZLib` comes in only through `Vcl.GraphUtil`'s implementation
+`uses` (a bottleneck, and its entry the one sole edge); `Winapi.ShlObj` has
+74 units on its paths and nine importers, nothing forced.
+
+### 16.3 The demo page
+
+Find All > Import Graph, on the unit at the caret (a `uses` entry or the
+unit header) or else the unit in the editor. One bottom page per unit,
+refreshed when asked again. A combo box picks the root among the programs
+that reach the unit (the project's own program first). The line beside it
+summarizes: the steps and the shortest chain, the units on its paths, the
+bottlenecks and the entries whose removal drops the unit.
+
+The tree's root is the unit; a node's children are its importers, made when
+it is expanded (the page opens with the shortest chain expanded down to the
+program). Columns: the importer, where it lists its parent (interface or
+implementation), its level (the fewest steps from the program) and the
+entry's file and line. A bold row is a sole entry, a navy name a bottleneck; a unit already
+on the row's own chain is grey, "(cycle)", and not expanded. Double-click
+opens the entry (the unit itself, when it cannot be placed now).
+
+Headless: `tools\PasTreeSemaProject <file.dproj> -dproj -imports:<unit>`.
+Covered by `SemaNavSmoke` `TestImportGraph`.
+
+### pastree-lsp hand-off
+
+Taken up in pastree-lsp 0.90.0: `pastree/importGraph` answers with the whole
+subgraph of the paths at once - the units on them with their level and
+bottleneck flag, every importer edge with `impl`, `sole` and the entry's
+location, the shortest chain - and the client grows its tree from it. The
+subgraph is small next to the closure, and one answer spares the client a
+request per expanded node. The IDE plugin shows it in a Messages tab (Find
+All > Import Graph), where every row is built up front: a unit is expanded at
+its first place only. Still open: pastree-mcp's `unit_deps` with a `why`
+argument - the shortest chain, the bottlenecks and the sole entries.

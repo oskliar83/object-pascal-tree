@@ -143,6 +143,7 @@
         </DCCReference>
         <DCCReference Include="PasTreeDemo.Coverage.pas"/>
         <DCCReference Include="PasTreeDemo.Format.pas"/>
+        <DCCReference Include="PasTreeDemo.ImportGraph.pas"/>
         <DCCReference Include="..\tests\PasTree.TestKit.pas"/>
         <DCCReference Include="..\tests\PasTree.Tests.Parser.pas"/>
         <DCCReference Include="..\tests\PasTree.Tests.Roundtrip.pas"/>
@@ -174,6 +175,7 @@
         <DCCReference Include="..\source\PasTree.Sema.Dfm.pas"/>
         <DCCReference Include="..\source\PasTree.Sema.Nav.pas"/>
         <DCCReference Include="..\source\PasTree.Sema.Lint.pas"/>
+        <DCCReference Include="..\source\PasTree.Sema.ImportGraph.pas"/>
         <DCCReference Include="..\source\PasTree.Sema.Workspace.pas"/>
         <DCCReference Include="..\source\PasTree.Outline.pas"/>
         <DCCReference Include="..\source\PasTree.Sema.Complete.pas"/>

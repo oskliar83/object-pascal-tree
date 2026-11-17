@@ -42,7 +42,8 @@ uses
   PasTree.Sema.Model,
   PasTree.Sema.Project,
   PasTree.Sema.Nav,
-  PasTree.Sema.Lint;
+  PasTree.Sema.Lint,
+  PasTree.Sema.ImportGraph;
 
 type
   EPasWorkspaceBusy = class(Exception);
@@ -255,6 +256,10 @@ type
       (the library ones light) - Project's models are the full closure's
       units, for a host counting them. }
     procedure EnsureClosure;
+    { The `uses` graph of the full closure (EnsureClosure met first), a
+      snapshot the caller owns (PasTree.Sema.ImportGraph): how a unit gets
+      into a program. }
+    function ImportGraph: TPasImportGraph;
     { The demands of FindOverrides (AOverrides) and FindImplementations
       (AImpls) of every key met in one query, nothing searched: for a host
       whose own walk reads the hierarchy from Project's models (a callee
@@ -1051,6 +1056,13 @@ begin
     begin
       Result := ANav.DemandClosure;
     end);
+end;
+
+function TPasWorkspace.ImportGraph: TPasImportGraph;
+begin
+  EnsureClosure;
+  Result := TPasImportGraph.Create(FProject);
+  Finish;
 end;
 
 procedure TPasWorkspace.EnsureFiles(const AFiles: TArray<string>);

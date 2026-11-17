@@ -740,6 +740,14 @@ object frmMain: TfrmMain
       OnExecute = FindUnreferencedUnitsActionExecute
       OnUpdate = FindProjectUnusedUnitsActionUpdate
     end
+    object ImportGraphAction: TAction
+      Caption = 'Import Graph'
+      Hint =
+        'Through which units the program takes this unit in - the uses en' +
+        'try or unit header at the caret, else this file'#39's unit'
+      OnExecute = ImportGraphActionExecute
+      OnUpdate = FindUnusedUnitsActionUpdate
+    end
     object RenameAction: TAction
       Caption = 'Rename...'
       Hint = 
@@ -833,6 +841,9 @@ object frmMain: TfrmMain
       end
       object FindUnreferencedUnits1: TMenuItem
         Action = FindUnreferencedUnitsAction
+      end
+      object ImportGraph1: TMenuItem
+        Action = ImportGraphAction
       end
     end
     object Rename1: TMenuItem
