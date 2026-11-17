@@ -47,6 +47,11 @@ type
     // Why removing it may be wrong, one sentence each; empty when nothing
     // the index sees speaks against the removal.
     Doubts: TArray<string>;
+    // loAfterRows: the unused declarations (FindUnusedSymbols' rows) every
+    // use of the unit sits in, by name - the entry goes with them, never
+    // alone (removed first, they no longer compile). Empty for an entry
+    // nothing uses.
+    By: TArray<string>;
   end;
 
   { loHideGlobalInit: leave out what a removal would cost a unit's
@@ -73,8 +78,22 @@ type
     "removed together with the other unused entries no doubt holds back, it
     leaves X out of P", and the rows are weighed again without it until
     nothing more is lost. A host that removes every row with no doubt
-    (Remove All) wants it. }
-  TPasLintOption = (loHideGlobalInit, loTogether);
+    (Remove All) wants it. A row with By (loAfterRows) is not removed alone:
+    it is weighed as kept.
+
+    loAfterRows: FindUnusedUses also reports the entries a unit needs only
+    in its own unused declarations - FindUnusedSymbols' rows over the same
+    units (and the members of row types it leaves out), the fixed point of
+    rows made by rows. An entry every use of which sits in such rows - in a
+    row's declaration, its body, a member or a method body of a row type -
+    is a row with By naming them: removed with them it is missed by nothing.
+    A use the index cannot place in a row (a form file naming the unit, a
+    write of an only-assigned field, which stays in live code until the
+    field goes) keeps the entry. The entry gets the doubts of an unused one
+    and, for each row of By that has a doubt, "X, which needs it, has a
+    doubt - ...". It costs the declaration search (FindUnusedSymbols): off
+    by default. }
+  TPasLintOption = (loHideGlobalInit, loTogether, loAfterRows);
   TPasLintOptions = set of TPasLintOption;
 
   TPasUnreferencedUnit = record
@@ -108,7 +127,7 @@ function FindUnreferencedUnits(ANav: TPasNavigator;
 // AOptions: see TPasLintOption.
 function FindUnusedUses(ANav: TPasNavigator;
   const AMids: TArray<Integer>;
-  AOptions: TPasLintOptions = []): TArray<TPasUnusedUse>;
+  AOptions: TPasLintOptions = []): TArray<TPasUnusedUse>; overload;
 
 { ---- Removed together ----
 
@@ -444,6 +463,13 @@ function CheckUnusedSymbols(ANav: TPasNavigator;
 function DemandCheckUnusedSymbols(ANav: TPasNavigator;
   const ATargets: TArray<TPasExtRef>): TPasDemand;
 
+// FindUnusedUses with loAfterRows over the unused declarations ARows the
+// caller already has - FindUnusedSymbols' rows of AMids AND its AInRowTypes
+// (a method of a row class is placed by its own body): no search of its own.
+function FindUnusedUses(ANav: TPasNavigator; const AMids: TArray<Integer>;
+  AOptions: TPasLintOptions;
+  const ARows: TArray<TPasUnusedSymbol>): TArray<TPasUnusedUse>; overload;
+
 implementation
 
 uses
@@ -479,6 +505,10 @@ type
     NameNode: Integer;
     UnitId, Sym: Integer;
     InInterface, Used: Boolean;
+    // loAfterRows: used by a use outside the unit's unused declarations
+    // (Live), and the rows the others sit in (TUsesLint.FDeadRows' indexes).
+    Live: Boolean;
+    ByRows: TArray<Integer>;
     Doubts: TArray<string>;
   end;
 
@@ -550,6 +580,17 @@ type
     // LinkEffect's answers of the whole run (CheckUnits: the main lint's
     // FEffect, under FLock), beside this lint's own.
     FSharedEffect: TDictionary<Integer, string>;
+    // loAfterRows: the nodes of the unused declarations (model shl 32 or a
+    // node - a routine, a declaration, a method body) -> the row they go
+    // with, an index of FDeadRows (a member of a row type: that type's row).
+    // Built by SetDeadRows before the check; shared, read-only, by
+    // CheckUnits' lints (FDeadShared). nil: no rows weighed.
+    FDeadAt: TDictionary<Int64, Integer>;
+    FDeadRows: TArray<TPasUnusedSymbol>;
+    FDeadShared: Boolean;
+    procedure SetDeadRows(const ARows: TArray<TPasUnusedSymbol>;
+      const AMids: TArray<Integer>);
+    function DeadRowOf(LM: TPasSemaModel; AMid, ANode: Integer): Integer;
     class function K64(AMid, ASym: Integer): Int64; static; inline;
     procedure Lock;
     function NLPath(ANode: Integer): string;
@@ -868,6 +909,8 @@ begin
   FImplNodes.Free;
   FForms.Free;
   FLoadNeeded.Free;
+  if not FDeadShared then
+    FDeadAt.Free;
   if not FNLShared then
   begin
     FNLOut.Free;
@@ -2058,6 +2101,121 @@ begin
   end;
 end;
 
+// loAfterRows' map (FDeadAt): each row's declaration - the routine, type,
+// property or constant node its name sits in; a `var` list only when every
+// name of it is a row - and a routine's body apart from its heading; a member
+// of a row type goes with that type's row (the outermost one). Rows of units
+// not in AMids are passed over: an entry is weighed against its own unit's.
+procedure TUsesLint.SetDeadRows(const ARows: TArray<TPasUnusedSymbol>;
+  const AMids: TArray<Integer>);
+var
+  LIn: TDictionary<Integer, Boolean>;
+  LNamed: TDictionary<string, Integer>;   // 'unit id|lower name' -> row
+  LDeclNodes: TDictionary<Int64, Boolean>;   // every row's name node
+  LM: TPasSemaModel;
+  LR: TPasUnusedSymbol;
+  LNode, LOwner, LIdx, LC, LImpl: Integer;
+  LName: string;
+  LAll: Boolean;
+
+  function Placed(const ARow: TPasUnusedSymbol): Boolean;
+  begin
+    Result := LIn.ContainsKey(ARow.UnitId) and Hydrated(ARow.UnitId) and
+      (ARow.Sym >= 0) and (ARow.Sym < FProj.Model(ARow.UnitId).SymCount) and
+      (FProj.Model(ARow.UnitId).Symbols[ARow.Sym].DeclNode <> NIL_NODE);
+  end;
+
+begin
+  FDeadRows := ARows;
+  if not FDeadShared then
+    FDeadAt.Free;
+  FDeadShared := False;
+  FDeadAt := TDictionary<Int64, Integer>.Create;
+  LIn := TDictionary<Integer, Boolean>.Create;
+  LNamed := TDictionary<string, Integer>.Create;
+  LDeclNodes := TDictionary<Int64, Boolean>.Create;
+  try
+    for var LMid in AMids do
+      LIn.AddOrSetValue(LMid, True);
+    for var LI := 0 to High(ARows) do
+      if Placed(ARows[LI]) then
+      begin
+        LNamed.AddOrSetValue(IntToStr(ARows[LI].UnitId) + '|' +
+          LowerCase(ARows[LI].Name), LI);
+        LDeclNodes.AddOrSetValue(K64(ARows[LI].UnitId, FProj.Model(
+          ARows[LI].UnitId).Symbols[ARows[LI].Sym].DeclNode), True);
+      end;
+    for var LI := 0 to High(ARows) do
+    begin
+      LR := ARows[LI];
+      if not Placed(LR) then
+        Continue;
+      LM := FProj.Model(LR.UnitId);
+      LOwner := LI;
+      LName := LR.Name;
+      while LName.Contains('.') do
+      begin
+        LName := Copy(LName, 1, LName.LastIndexOf('.'));
+        if LNamed.TryGetValue(IntToStr(LR.UnitId) + '|' + LowerCase(LName),
+          LIdx) then
+          LOwner := LIdx;
+      end;
+      LNode := LM.Symbols[LR.Sym].DeclNode;
+      while (LNode <> NIL_NODE) and not (LM.Tree.Nodes[LNode].Kind in
+        [nkRoutine, nkTypeDecl, nkConstDecl, nkVarDecl, nkPropertyDecl]) do
+        LNode := LM.Tree.Nodes[LNode].Parent;
+      if LNode = NIL_NODE then
+        Continue;
+      // `A, B: TFoo`: the type goes only when both names do.
+      if LM.Tree.Nodes[LNode].Kind in [nkVarDecl, nkConstDecl] then
+      begin
+        LAll := True;
+        LC := LM.Tree.Nodes[LNode].FirstChild;
+        while LC <> NIL_NODE do
+        begin
+          if (nfName in LM.Tree.Nodes[LC].Flags) and
+             not LDeclNodes.ContainsKey(K64(LR.UnitId, LC)) then
+            LAll := False;
+          LC := LM.Tree.Nodes[LC].NextSibling;
+        end;
+        if not LAll then
+          Continue;
+      end;
+      FDeadAt.AddOrSetValue(K64(LR.UnitId, LNode), LOwner);
+      if LR.Kind = skRoutine then
+      begin
+        LImpl := ImplNodeOf(LR.UnitId, LR.Sym);
+        if (LImpl <> NIL_NODE) and (LImpl <> LNode) then
+          FDeadAt.AddOrSetValue(K64(LR.UnitId, LImpl), LOwner);
+      end;
+    end;
+  finally
+    LDeclNodes.Free;
+    LNamed.Free;
+    LIn.Free;
+  end;
+end;
+
+// The row (an FDeadRows index) the node ANode of model AMid sits in, -1 for
+// none: the nearest of its ancestors FDeadAt holds - a nested routine goes
+// with the routine it is nested in.
+function TUsesLint.DeadRowOf(LM: TPasSemaModel; AMid, ANode: Integer): Integer;
+var
+  LN: Integer;
+begin
+  if FDeadAt <> nil then
+  begin
+    LN := ANode;
+    while LN <> NIL_NODE do
+    begin
+      if FDeadAt.TryGetValue(K64(AMid, LN), Result) then
+        Exit;
+      LN := LM.Tree.Nodes[LN].Parent;
+    end;
+  end;
+  Result := -1;
+end;
+
 procedure TUsesLint.CheckUnit(AMid: Integer; AEdges: Boolean);
 var
   LM: TPasSemaModel;
@@ -2074,6 +2232,7 @@ var
   LUnbound: TDictionary<string, Integer>;
   LSkipped: TDictionary<string, TLintPlace>;
   LOverCalls: TDictionary<string, Integer>;   // called routine name -> a call
+  LOverLive, LOver: TDictionary<string, Integer>;   // the calls in no row
   LNames: TDictionary<string, Integer>;
   LInline: TDictionary<Integer, Boolean>;   // units inline expansions need
   LInlineLight: TArray<string>;   // light units whose expansions are unknown
@@ -2083,12 +2242,30 @@ var
   LFormClasses: TArray<string>;   // the class names the form file streams
   LDesign: TDictionary<Integer, Boolean>;
 
-  procedure MarkUse(AIdx: Integer);
+  // A use of the entry at ANode of LM (NIL_NODE: a use placed nowhere in
+  // the unit's code - its form file - which no row takes away).
+  procedure MarkUse(AIdx: Integer; ANode: Integer);
   var
     LX: TLintEntry;
+    LDead: Integer;
   begin
     LX := LEntries[AIdx];
     LX.Used := True;
+    LDead := -1;
+    if (FDeadAt <> nil) and not AEdges and (ANode <> NIL_NODE) then
+      LDead := DeadRowOf(LM, AMid, ANode);
+    if LDead < 0 then
+    begin
+      LX.Live := True;
+      LX.ByRows := nil;
+    end
+    else if not LX.Live then
+    begin
+      for var LB in LX.ByRows do
+        if LB = LDead then
+          Exit;
+      LX.ByRows := LX.ByRows + [LDead];
+    end;
     LEntries[AIdx] := LX;
   end;
 
@@ -2127,6 +2304,7 @@ begin
   LUnbound := nil;
   LSkipped := nil;
   LOverCalls := nil;
+  LOverLive := nil;
   LFormWords := nil;
   LFormClasses := nil;
   try
@@ -2161,7 +2339,7 @@ begin
       LInIface := LM.Tree.Nodes[LPair.Key].FirstToken < LImplTok;
       if LByUnit.TryGetValue(LPair.Value.UnitId, LE) and
          (LEntries[LE].InInterface or not LInIface) then
-        MarkUse(LE)
+        MarkUse(LE, LPair.Key)
       else if (LPair.Value.UnitId <> AMid) and not MatchText(FProj.Model(
         LPair.Value.UnitId).UnitNameLower, ['system', 'sysinit']) then
         LOrphans.Add(LPair);
@@ -2176,10 +2354,10 @@ begin
         LPair.Value.Sym].NameLower;
       LInIface := LM.Tree.Nodes[LPair.Key].FirstToken < LImplTok;
       for LE := 0 to LEntries.Count - 1 do
-        if not LEntries[LE].Used and
+        if not LEntries[LE].Live and
            (LEntries[LE].InInterface or not LInIface) and
            NamesOf(LEntries[LE].UnitId).ContainsKey(LName) then
-          MarkUse(LE);
+          MarkUse(LE, LPair.Key);
     end;
     // `Unit.Name`: the qualifier binds to the uses entry itself.
     if LBySym.Count > 0 then
@@ -2187,8 +2365,8 @@ begin
       begin
         LSym := LM.RefMap[LNode];
         if (LSym <> NIL_SYM) and LBySym.TryGetValue(LSym, LE) and
-           not LEntries[LE].Used and not InUsesClause(LM, LNode) then
-          MarkUse(LE);
+           not LEntries[LE].Live and not InUsesClause(LM, LNode) then
+          MarkUse(LE, LNode);
       end;
     // The unit's form file naming a declaration of a listed unit - a
     // component class, a link to another module's component (`PopupMenu =
@@ -2217,13 +2395,13 @@ begin
       end;
     if LFormWords <> nil then
       for LE := 0 to LEntries.Count - 1 do
-        if not LEntries[LE].Used then
+        if not LEntries[LE].Live then
         begin
           LNames := NamesOf(LEntries[LE].UnitId);
           for var LW in LFormWords do
             if LNames.ContainsKey(LW.Key) then
             begin
-              MarkUse(LE);
+              MarkUse(LE, NIL_NODE);
               Break;
             end;
         end;
@@ -2234,9 +2412,9 @@ begin
       LDesign := DesignerUnits(AMid, LFormFile, LFormClasses);
       try
         for LE := 0 to LEntries.Count - 1 do
-          if not LEntries[LE].Used and
+          if not LEntries[LE].Live and
              LDesign.ContainsKey(LEntries[LE].UnitId) then
-            MarkUse(LE);
+            MarkUse(LE, NIL_NODE);
       finally
         LDesign.Free;
       end;
@@ -2247,7 +2425,7 @@ begin
     LInline := nil;
     LInlineLight := nil;
     for LEntry in LEntries do
-      if not LEntry.Used then
+      if not LEntry.Live then
       begin
         LInline := TDictionary<Integer, Boolean>.Create;
         Break;
@@ -2270,24 +2448,29 @@ begin
         end;
         for var LK in LKeys do
         begin
+          // Placed at the call: an expansion inside a row goes with it.
           for var LU in InlineDeps(LK shr 32, Integer(LK and $FFFFFFFF)) do
-            LInline.AddOrSetValue(LU, True);
+            if LByUnit.TryGetValue(LU, LE) and not LEntries[LE].Live then
+              MarkUse(LE, LPair.Key);
           for var LU in InlineLightOf(LK) do
             if not MatchText(UnitNameOf(LU), LInlineLight) then
               LInlineLight := LInlineLight + [UnitNameOf(LU)];
         end;
       end;
-      for LE := 0 to LEntries.Count - 1 do
-        if not LEntries[LE].Used and LInline.ContainsKey(LEntries[LE].UnitId)
-        then
-          MarkUse(LE);
+      LInline.Free;
     end;
 
     // What may make a removal wrong.
+    // An entry used only in rows (loAfterRows) is weighed as unused - it is,
+    // once they go - and gets the doubt of each of them that has one.
     for LE := 0 to LEntries.Count - 1 do
     begin
-      if LEntries[LE].Used then
+      if LEntries[LE].Live then
         Continue;
+      for var LB in LEntries[LE].ByRows do
+        if FDeadRows[LB].Doubts <> nil then
+          AddDoubt(LE, Format('%s, which needs it, has a doubt - %s',
+            [FDeadRows[LB].Name, FDeadRows[LB].Doubts[0]]));
       LEntry := LEntries[LE];
       LNames := NamesOf(LEntry.UnitId);
       if LUnbound = nil then
@@ -2315,16 +2498,27 @@ begin
       // A routine of another unit called here that this unit declares too:
       // dcc picks among the overloads of every unit in scope, and PasTree's
       // pick may not be its.
+      // An entry going with rows (loAfterRows) is removed with them: the
+      // calls they make go too, only the others are weighed (LOverLive).
       if LOverCalls = nil then
       begin
         LOverCalls := TDictionary<string, Integer>.Create;
+        LOverLive := TDictionary<string, Integer>.Create;
         for var LPair in LM.ExtRefMap do
           if NeedsItsUnit(LPair.Value) and (FProj.Model(
             LPair.Value.UnitId).Symbols[LPair.Value.Sym].Kind = skRoutine) then
+          begin
             LOverCalls.TryAdd(FProj.Model(LPair.Value.UnitId).Symbols[
               LPair.Value.Sym].NameLower, LPair.Key);
+            if DeadRowOf(LM, AMid, LPair.Key) < 0 then
+              LOverLive.TryAdd(FProj.Model(LPair.Value.UnitId).Symbols[
+                LPair.Value.Sym].NameLower, LPair.Key);
+          end;
       end;
-      for var LW in LOverCalls do
+      LOver := LOverCalls;
+      if LEntry.ByRows <> nil then
+        LOver := LOverLive;
+      for var LW in LOver do
         if LNames.TryGetValue(LW.Key, LSym) and
            (FProj.Model(LEntry.UnitId).Symbols[LSym].Kind = skRoutine) then
         begin
@@ -2364,7 +2558,7 @@ begin
     end;
     for LEntry in LEntries do
     begin
-      if LEntry.Used or not EntryHit(LM, LEntry.NameNode, LRow.Hit) then
+      if LEntry.Live or not EntryHit(LM, LEntry.NameNode, LRow.Hit) then
         Continue;
       // The entry's own unit whether or not the program still reaches it
       // another way: it is in this `uses` for what it registers.
@@ -2375,11 +2569,17 @@ begin
       LRow.UnitName := LEntry.Name;
       LRow.InInterface := LEntry.InInterface;
       LRow.Doubts := LEntry.Doubts;
+      LRow.By := nil;
+      for var LB in LEntry.ByRows do
+        if not MatchText(FDeadRows[LB].Name, LRow.By) then
+          LRow.By := LRow.By + [FDeadRows[LB].Name];
+      TArray.Sort<string>(LRow.By, TIStringComparer.Ordinal);
       FRows.Add(LRow);
       FRowEdges.Add(K64(AMid, LEntry.UnitId));
     end;
   finally
     LFormWords.Free;
+    LOverLive.Free;
     LOverCalls.Free;
     LSkipped.Free;
     LUnbound.Free;
@@ -2442,6 +2642,9 @@ begin
       LLints[LI].FNLNodes := ALint.FNLNodes;
       LLints[LI].FNLShared := True;
       LLints[LI].FSharedEffect := ALint.FEffect;
+      LLints[LI].FDeadAt := ALint.FDeadAt;
+      LLints[LI].FDeadRows := ALint.FDeadRows;
+      LLints[LI].FDeadShared := True;
     end;
     ALint.FProj.ParallelRun(LK - 1,
       procedure(ASlice: Integer)
@@ -2716,7 +2919,9 @@ begin
     LEdge.From := Integer(ALint.FRowEdges[LI] shr 32);
     LEdge.Target := Integer(ALint.FRowEdges[LI] and $FFFFFFFF);
     LRows[LI].Edges := [LEdge];
-    LRows[LI].Held := ALint.FRows[LI].Doubts <> nil;
+    // A row that goes with unused declarations is not removed alone.
+    LRows[LI].Held := (ALint.FRows[LI].Doubts <> nil) or
+      (ALint.FRows[LI].By <> nil);
   end;
   LGraph := TLintGraph.Create(ALint);
   try
@@ -2899,9 +3104,11 @@ begin
 end;
 
 // LintPromotions, and the not-loaded imports to take in light (ALoad,
-// KeptPastLoaded's frontier), sorted.
+// KeptPastLoaded's frontier), sorted. ARows: loAfterRows' unused
+// declarations (nil: none) - the entries only they use are weighed too.
 function LintNeeds(ANav: TPasNavigator; const AMids: TArray<Integer>;
-  AOptions: TPasLintOptions; out ALoad: TArray<string>): TArray<string>;
+  AOptions: TPasLintOptions; out ALoad: TArray<string>;
+  const ARows: TArray<TPasUnusedSymbol> = nil): TArray<string>;
 var
   LRowsLint, LUnrefLint: TUsesLint;
   LNeeded: TDictionary<Integer, Boolean>;
@@ -2917,6 +3124,8 @@ begin
     // Both reports, run as a host runs them; every light unit an answer had
     // to treat as unknown is recorded on the way.
     LRowsLint.FOptions := AOptions;
+    if (loAfterRows in AOptions) and (ARows <> nil) then
+      LRowsLint.SetDeadRows(ARows, AMids);
     CheckUnits(LRowsLint, AMids, False);
     if loTogether in AOptions then
       WeighRowsTogether(LRowsLint);
@@ -2955,24 +3164,59 @@ function DemandLint(ANav: TPasNavigator; const AMids: TArray<Integer>;
   AOptions: TPasLintOptions): TPasDemand;
 var
   LLoad: TArray<string>;
+  LSymbols: TPasDemand;
+  LRows, LInRowTypes: TArray<TPasUnusedSymbol>;
+  LSkips: TPasUnusedSkips;
 begin
   if ANav.Project.LightCount = 0 then
     Exit(Default(TPasDemand));
+  // loAfterRows searches the declarations first: their demand, and once it
+  // is met the entries only the rows use are weighed as the lint will -
+  // what removing them leaves out reads light units too.
+  LRows := nil;
+  LSymbols := Default(TPasDemand);
+  if loAfterRows in AOptions then
+  begin
+    LSymbols := DemandUnusedSymbols(ANav, AMids);
+    if LSymbols.IsEmpty then
+    begin
+      LRows := FindUnusedSymbols(ANav, AMids, LSkips, LInRowTypes);
+      LRows := LRows + LInRowTypes;
+    end;
+  end;
   Result := ANav.Project.DemandOfFiles(LintNeeds(ANav, AMids, AOptions,
-    LLoad));
+    LLoad, LRows));
   Result.LoadOnly := LLoad;
   Inc(Result.NotSearched, Length(LLoad));
+  if not LSymbols.IsEmpty then
+    Result := PasMergeDemand(Result, LSymbols);
 end;
 
 function FindUnusedUses(ANav: TPasNavigator;
   const AMids: TArray<Integer>;
   AOptions: TPasLintOptions): TArray<TPasUnusedUse>;
 var
+  LSkips: TPasUnusedSkips;
+  LRows, LInRowTypes: TArray<TPasUnusedSymbol>;
+begin
+  LRows := nil;
+  LInRowTypes := nil;
+  if loAfterRows in AOptions then
+    LRows := FindUnusedSymbols(ANav, AMids, LSkips, LInRowTypes);
+  Result := FindUnusedUses(ANav, AMids, AOptions, LRows + LInRowTypes);
+end;
+
+function FindUnusedUses(ANav: TPasNavigator; const AMids: TArray<Integer>;
+  AOptions: TPasLintOptions;
+  const ARows: TArray<TPasUnusedSymbol>): TArray<TPasUnusedUse>;
+var
   LLint: TUsesLint;
 begin
   LLint := TUsesLint.Create(ANav);
   try
     LLint.FOptions := AOptions;
+    if (loAfterRows in AOptions) and (ARows <> nil) then
+      LLint.SetDeadRows(ARows, AMids);
     CheckUnits(LLint, AMids, False);
     if loTogether in AOptions then
       WeighRowsTogether(LLint);
