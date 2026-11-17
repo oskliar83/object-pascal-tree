@@ -328,6 +328,10 @@ var
   LQueue: TArray<Integer>;
   LAt, LCount, LU, LTo: Integer;
 begin
+  // A fresh array: a caller calling Reach in a loop (RootsReaching) hands
+  // the same result temporary back each time, and SetLength of the same
+  // length keeps its flags - the previous root's reach became this one's.
+  Result := nil;
   SetLength(Result, Length(FUnits));
   SetLength(LQueue, Length(FUnits));
   Result[AUnit] := True;

@@ -2069,6 +2069,27 @@ begin
     Ok('import graph: IZ does not reach IX',
       not LP.Reached and (LP.ShortestChain = nil) and
       (LP.Importers(LX) = nil));
+    // A second program, after IMain by name, reaching only IZ: RootsReaching
+    // walks IMain first, and IOther's reach must not inherit its flags (the
+    // result temporary Reach is handed back in the loop kept them).
+    FreeAndNil(LP);
+    FreeAndNil(LG);
+    FreeAndNil(LProj);
+    TFile.WriteAllText(TPath.Combine(LDir, 'IOther.dpr'),
+      'program IOther;'#13#10'uses IZ;'#13#10'begin'#13#10'end.'#13#10);
+    LProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+    LProj.AnalyzeStaged([TPath.Combine(LDir, 'IMain.dpr'),
+      TPath.Combine(LDir, 'IOther.dpr')], []);
+    LG := TPasImportGraph.Create(LProj);
+    LMain := LG.UnitOf('IMain');
+    LX := LG.UnitOf('IX');
+    LZ := LG.UnitOf('IZ');
+    Ok('import graph: two programs, both roots',
+      Length(LG.Roots) = 2);
+    Ok('import graph: only IMain reaches IX, both reach IZ',
+      (Length(LG.RootsReaching(LX)) = 1) and
+      (LG.RootsReaching(LX)[0] = LMain) and
+      (Length(LG.RootsReaching(LZ)) = 2));
   finally
     LP.Free;
     LG.Free;
