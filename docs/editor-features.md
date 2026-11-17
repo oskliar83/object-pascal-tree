@@ -1379,6 +1379,13 @@ one per analysis of a group - each program also weighed without the `uses`
 entries its own defines may not compile. pastree-lsp's Remove All asks for
 it. SemaNavSmoke: TestLintTogether.
 
+A host that removes FEWER than every row no doubt holds back says which it
+keeps (0.210.0): `FindUnusedUses(..., AKept)` and the workspace's overload
+take a `TPasUnusedUseKept`, and a row it keeps is weighed as staying, like a
+row with a doubt. pastree-lsp's group mode runs one server per program and
+removes only the entries every program of the group finds unused - fewer
+than each program's own rows - so it asks each program again with that set.
+
 ### 12.2b Removing the entries: PasTree.UsesEdit (0.202.0)
 
 `UsesRemovalEdits` (by name node) and `UsesRemovalByName` (by name, for a

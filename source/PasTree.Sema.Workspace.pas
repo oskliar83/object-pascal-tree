@@ -313,7 +313,11 @@ type
       const AQuery: TPasPositionQuery<T>): T;
     { ---- the uses lint (PasTree.Sema.Lint) ---- }
     function FindUnusedUses(const AFiles: TArray<string>;
-      AOptions: TPasLintOptions = []): TArray<TPasUnusedUse>;
+      AOptions: TPasLintOptions = []): TArray<TPasUnusedUse>; overload;
+    // loTogether weighing only the rows AKept does not keep (TPasUnusedUseKept).
+    function FindUnusedUses(const AFiles: TArray<string>;
+      AOptions: TPasLintOptions;
+      const AKept: TPasUnusedUseKept): TArray<TPasUnusedUse>; overload;
     function FindUnreferencedUnits(const AFiles: TArray<string>;
       AOptions: TPasLintOptions = []): TArray<TPasUnreferencedUnit>;
     // The unused declarations of AFiles (PasTree.Sema.Lint.FindUnusedSymbols)
@@ -1335,6 +1339,36 @@ begin
 end;
 
 { ---- the uses lint ---- }
+
+function TPasWorkspace.FindUnusedUses(const AFiles: TArray<string>;
+  AOptions: TPasLintOptions;
+  const AKept: TPasUnusedUseKept): TArray<TPasUnusedUse>;
+var
+  LFiles: TArray<string>;
+  LOpts: TPasLintOptions;
+  LRows, LInRowTypes: TArray<TPasUnusedSymbol>;
+  LSkips: TPasUnusedSkips;
+begin
+  LFiles := AFiles;
+  LOpts := AOptions;
+  Prepare(
+    function(ANav: TPasNavigator): TPasDemand
+    begin
+      Result := DemandLint(ANav, MidsOf(LFiles), LOpts);
+    end);
+  // As PasTree.Sema.Lint's FindUnusedUses without rows: loAfterRows
+  // searches the declarations first.
+  LRows := nil;
+  if loAfterRows in AOptions then
+  begin
+    LRows := PasTree.Sema.Lint.FindUnusedSymbols(FNav, MidsOf(AFiles), LSkips,
+      LInRowTypes);
+    LRows := LRows + LInRowTypes;
+  end;
+  Result := PasTree.Sema.Lint.FindUnusedUses(FNav, MidsOf(AFiles), AOptions,
+    LRows, AKept);
+  Finish;
+end;
 
 function TPasWorkspace.FindUnusedUses(const AFiles: TArray<string>;
   AOptions: TPasLintOptions): TArray<TPasUnusedUse>;

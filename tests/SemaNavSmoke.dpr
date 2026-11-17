@@ -2224,6 +2224,29 @@ begin
     LUses := FindUnusedUses(LNav, [LMids[1]], [loTogether]);
     Ok('together: TB alone - TA''s path keeps TInit',
       (Length(LUses) = 1) and (LUses[0].Doubts = nil));
+    // The host keeps TB's TInit row (TPasUnusedUseKept - another program
+    // of a group uses it): TA's alone leaves TInit in, no row is held back.
+    LUses := FindUnusedUses(LNav, LMids, [loTogether], nil,
+      function(const ARow: TPasUnusedUse): Boolean
+      begin
+        Result := SameText(ARow.UnitName, 'TInit') and
+          SameText(ExtractFileName(ARow.Hit.FilePath), 'TB.pas');
+      end);
+    Ok('together: TB''s TInit row kept by the host - no doubt on any row',
+      (Length(LUses) = 3) and (LUses[0].Doubts = nil) and
+      (LUses[1].Doubts = nil) and (LUses[2].Doubts = nil));
+    // Kept TPlain changes nothing for TInit: both still held back.
+    LUses := FindUnusedUses(LNav, LMids, [loTogether], nil,
+      function(const ARow: TPasUnusedUse): Boolean
+      begin
+        Result := SameText(ARow.UnitName, 'TPlain');
+      end);
+    LTogether := 0;
+    for var LU in LUses do
+      if SameText(LU.UnitName, 'TInit') and (Length(LU.Doubts) = 1) then
+        Inc(LTogether);
+    Ok('together: TPlain kept by the host - both TInit rows still held back',
+      LTogether = 2);
   finally
     LNav.Free;
     LProj.Free;
