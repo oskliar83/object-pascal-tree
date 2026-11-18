@@ -52,7 +52,8 @@ uses
   System.Classes,
   System.Generics.Collections,
   PasTree.Types,
-  PasTree.Dcu;
+  PasTree.Dcu,
+  PasTree.Dcp;
 
 const
   { The spelling of a type the printer could not resolve. Declared nowhere,
@@ -1439,8 +1440,10 @@ begin
   if FForeign.TryGetValue(LKey, Result) then
     Exit;
   Result := nil;
-  LPath := TPath.Combine(TPath.GetDirectoryName(FUnit.FileName), LUses.Name + '.dcu');
-  if FileExists(LPath) then
+  // Beside this file - or, for a unit inside a .dcp, in the same package,
+  // beside it, or in a package it requires (PasTree.Dcp.DcuSiblingPath).
+  LPath := DcuSiblingPath(FUnit.FileName, LUses.Name);
+  if LPath <> '' then
     if Assigned(FLoader) then
       Result := FLoader(LPath)
     else

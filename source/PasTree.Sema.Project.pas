@@ -1955,6 +1955,11 @@ type
       resolution. Set BEFORE analyzing. }
     procedure SetNamespaces(const ANamespaces: TArray<string>);
     procedure AddUnitAlias(const AAlias, AReal: string);
+    { The packages the project links (a package's `requires`, TPasDProj.
+      Requires; a program's runtime packages), forwarded to the source
+      manager (TPasSourceManager.SetPackages): a unit found nowhere else is
+      read from one of their .dcp files. Set BEFORE analyzing. }
+    procedure SetPackages(const APackages: TArray<string>);
     { The switch state every unit starts in - dcc's command-line `-$`
       switches, which a .dproj's DCC_* properties become (TPasDProj.Switches,
       PasStartOptState); dcc's no-config state by default. `$IFOPT` reads it
@@ -3760,6 +3765,11 @@ procedure TPasSemaProject.SetNamespaces(const ANamespaces: TArray<string>);
 begin
   FNamespaces := ANamespaces;
   FSM.SetNamespaces(ANamespaces);
+end;
+
+procedure TPasSemaProject.SetPackages(const APackages: TArray<string>);
+begin
+  FSM.SetPackages(APackages);
 end;
 
 procedure TPasSemaProject.AddUnitAlias(const AAlias, AReal: string);

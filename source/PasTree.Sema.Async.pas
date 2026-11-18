@@ -138,6 +138,7 @@ type
     { Configuration forwarded to the project. Call BEFORE Start: this and
       every other setter of the session raises EInvalidOperation after it. }
     procedure SetNamespaces(const ANamespaces: TArray<string>);
+    procedure SetPackages(const APackages: TArray<string>);
     procedure AddUnitAlias(const AAlias, AReal: string);
     procedure PinUnitFile(const APath: string);
     procedure SetProjectDir(const ADir: string);
@@ -301,6 +302,12 @@ procedure TPasAsyncSession.SetNamespaces(const ANamespaces: TArray<string>);
 begin
   CheckNotStarted('SetNamespaces');
   FProject.SetNamespaces(ANamespaces);
+end;
+
+procedure TPasAsyncSession.SetPackages(const APackages: TArray<string>);
+begin
+  CheckNotStarted('SetPackages');
+  FProject.SetPackages(APackages);
 end;
 
 procedure TPasAsyncSession.PinUnitFile(const APath: string);
