@@ -17,7 +17,9 @@ program PasTreeDcu;
   -dump   print the raw declaration tables instead
   -trace  print the `<offset> <tag>` record stream to stderr while reading
   -parse  run the generated source through the PasTree parser and report
-          its syntax diagnostics (per file in a sweep)
+          its syntax diagnostics (per file in a sweep), and count the units
+          whose source names a type the reader could not resolve
+          (cDcuUnresolvedName - an E2003 in every host that analyzes it)
   -v      in a sweep, list every file rather than only the failures
   -dcp    in a directory sweep, read the units inside every .dcp there
           instead of the .dcu files. A .dcp argument sweeps its own units;
@@ -244,7 +246,7 @@ var
   GUnit: TPasDcuUnit;
   GFiles: TArray<string>;
   GFile, GSource, GMsg: string;
-  GOk, GFail, GParseFail: Integer;
+  GOk, GFail, GParseFail, GUnresUnits, GUnresNames: Integer;
   GWatch: TStopwatch;
   GTraceProc: TPasDcuTraceProc;
 
@@ -312,6 +314,8 @@ begin
       GOk := 0;
       GFail := 0;
       GParseFail := 0;
+      GUnresUnits := 0;
+      GUnresNames := 0;
       GWatch := TStopwatch.StartNew;
       for GFile in GFiles do
       begin
@@ -321,6 +325,23 @@ begin
             if GParse then
             begin
               GSource := DcuInterfaceSource(GUnit);
+              GIdx := 0;
+              GArg := GSource;
+              while Pos(cDcuUnresolvedName, GArg) > 0 do
+              begin
+                Inc(GIdx);
+                Delete(GArg, 1, Pos(cDcuUnresolvedName, GArg) +
+                  Length(cDcuUnresolvedName) - 1);
+              end;
+              // The header comment names none: each use is one declaration.
+              if GIdx > 0 then
+              begin
+                Inc(GUnresUnits);
+                Inc(GUnresNames, GIdx);
+                if GVerbose then
+                  Writeln('UNRES ', TPath.GetFileNameWithoutExtension(GFile),
+                    ' :: ', GIdx, ' unresolved type(s)');
+              end;
               GIdx := ParseDiagCount(GSource, TPath.GetFileName(GFile), GVerbose);
               if GIdx > 0 then
               begin
@@ -348,6 +369,8 @@ begin
       end;
       Writeln(Format('TOTAL files=%d ok=%d fail=%d parsefail=%d (%d ms)',
         [Length(GFiles), GOk, GFail, GParseFail, GWatch.ElapsedMilliseconds]));
+      if GParse then
+        Writeln(Format('UNRESOLVED units=%d names=%d', [GUnresUnits, GUnresNames]));
       if (GFail > 0) or (GParseFail > 0) then
         Halt(1);
       Exit;

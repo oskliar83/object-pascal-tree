@@ -2068,7 +2068,18 @@ function TPasDcuReader.ReadVarDecl(AKind: TPasDcuDeclKind; ATag: Byte): TPasDcuD
 begin
   Result := NewNamedDecl(AKind, ATag);
   ReadFlagged(Result, False);
-  Result.TypeIdx := ReadUIndex;
+  // A unit inside a .dcp sets F1's $80 on every variable and typed constant
+  // of its interface: ReadFlagged has read B2, which is the type, and the
+  // field that holds the type elsewhere holds a value that is no type index
+  // (a four-byte index rising with the declaration order: `EmptyRect` in
+  // designide.dcp's ComponentDesigner is $6506720, `EmptyPoint` $6506760).
+  // Read as the type, every such declaration was __PasTreeUnresolved -
+  // 9,900 to 15,000 names per Studio's .dcp files; the standalone .dcu
+  // sweep is the same either way.
+  if (Result.Flags1 and $80) <> 0 then
+    ReadUIndex
+  else
+    Result.TypeIdx := ReadUIndex;
   Result.Offset := ReadUIndex;
   if AKind = dkAbsVar then
     ReserveAddr(Result.Offset);  // `absolute` names its target by slot
