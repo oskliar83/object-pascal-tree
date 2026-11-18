@@ -3425,6 +3425,7 @@ type
     procedure MarkIfNames(AMid: Integer);
     procedure MarkIfNamed;
     function AncestryKnown(AClass: TSemaXType): Boolean;
+    function PublishedWeighed(const AClass: TSemaXType): Boolean;
     function NamesAncestor(const AClass: TSemaXType): Boolean;
     function IsStructType(const AX: TSemaXType; AKind: TPasNodeKind): Boolean;
     function ListedInterfaces(const AClass: TSemaXType): TArray<TSemaXType>;
@@ -3664,6 +3665,18 @@ begin
       Result := True;
 end;
 
+// Is a published member of class AClass weighed - a class whose ancestry is
+// known and holds no TComponent? A component's published members are
+// what a form file binds by name; a TPersistent that is no component is
+// read by Assign, DefineProperties or RTTI code (Alex, 0.211.0). See
+// Collect.
+function TUnusedLint.PublishedWeighed(const AClass: TSemaXType): Boolean;
+begin
+  Result := XValid(AClass) and
+    (FProj.Model(AClass.UnitId).Symbols[AClass.Sym].TypeCat = tcClass) and
+    AncestryKnown(AClass) and not DescendsFrom(AClass, 'tcomponent');
+end;
+
 // Was AClass's ancestry followed all the way to TObject? Then Streams'
 // answer is the compiler's: a class that does not reach TPersistent is
 // never streamed, and no form binds a member of its first section.
@@ -3711,8 +3724,11 @@ begin
   LChild := LM.Tree.Nodes[LDef].FirstChild;
   while LChild <> NIL_NODE do
   begin
+    // `class(TObject)` names the root itself: the ancestry is known even
+    // where the index binds no ancestor to it.
     if LM.Tree.Nodes[LChild].Kind in [nkIdent, nkMember, nkTypeArgs] then
-      Exit;
+      Exit(not ((LM.Tree.Nodes[LChild].Kind = nkIdent) and
+        LM.Tree.NodeTextEquals(LChild, 'TObject')));
     LChild := LM.Tree.Nodes[LChild].NextSibling;
   end;
   Result := False;
@@ -4640,11 +4656,18 @@ begin
         else
           LIface := True;
       end
-      else if LS.Visibility in [svPublished, svAutomated] then
-        Skip(usPublished)
-      else if (LS.Visibility = svDefault) and
+      // Published in a class that is no TComponent (its ancestry followed
+      // to TObject without meeting it): no form binds it by name, only
+      // RTTI, Assign or DefineProperties reach it - weighed, a row always
+      // with the doubt `published` (Alex, 0.211.0). That holds for a
+      // TPersistent and under `$M+` / `$TYPEINFO ON`, which publish the
+      // unnamed first section as well. Where the ancestry is not known, or
+      // the class is a component, not weighed.
+      else if ((LS.Visibility in [svPublished, svAutomated]) or
+        ((LS.Visibility = svDefault) and
         (LM.Symbols[LOwner].TypeCat = tcClass) and
-        Streams(XPlain(AMid, LOwner)) then
+        Streams(XPlain(AMid, LOwner)))) and not
+        PublishedWeighed(XPlain(AMid, LOwner)) then
         Skip(usPublished);
       LC.RecordField := (LS.Kind = skField) and
         (LM.Symbols[LOwner].TypeCat = tcRecord);
@@ -5715,7 +5738,21 @@ begin
             + 'a class the index did not follow to TPersistent, in a unit with '
             + 'a form file (%s) - published if the class streams, and a form '
             + 'may bind it by name at run time', [ExtractFileName(LFile)])];
-      end;
+      end
+      // Published in a class that is no TComponent (Collect weighs only
+      // those; a streaming class's unnamed first section is published too):
+      // RTTI may reach it by name, which no index sees.
+      else if (LM.Symbols[LC.Sym].Visibility in [svPublished, svAutomated]) or
+        ((LM.Symbols[LC.Sym].Visibility = svDefault) and
+        (LM.Scopes[LM.Symbols[LC.Sym].Scope].Kind = sckStruct) and
+        (LM.Scopes[LM.Symbols[LC.Sym].Scope].StructSym <> NIL_SYM) and
+        (LM.Symbols[LM.Scopes[LM.Symbols[LC.Sym].Scope].StructSym].TypeCat =
+        tcClass) and Streams(XPlain(LC.UnitId,
+        LM.Scopes[LM.Symbols[LC.Sym].Scope].StructSym))) then
+        LC.Doubts := LC.Doubts + ['published - RTTI (MethodAddress, '
+          + 'GetPropInfo, TRttiType, a JSON or SOAP serializer, Assign) may '
+          + 'reach it by name; the class is no TComponent, so no form binds '
+          + 'it'];
       FCands[LIdx] := LC;
     end;
   finally

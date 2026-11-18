@@ -265,14 +265,15 @@ S086	S086B.pas	6	TS086Child.Note	runtime	none	the form file creates the componen
 S087	S087A.pas	8	TOptions.Width	row!	row	TOptions does not stream: its first section is public, the form file cannot reach it
 S087	S087A.pas	9	TOptions.Apply	row!	row	
 # S088 a {$M+} class looked up by MethodAddress
-S088	S088A.pas	6	TScript.Ping	runtime	none	MethodAddress('Ping') finds it by name
-S088	S088A.pas	7	TScript.Pong	row	none	published, nothing looks it up
+S088	S088A.pas	6	TScript.Ping	runtime	row?	MethodAddress('Ping') finds it by name
+S088	S088A.pas	7	TScript.Pong	row	row?	published, nothing looks it up
 # S089 a published method of a TPersistent class with no form
-S089	S089A.pas	7	TSetting.Reset	row	none	published, but no form file, MethodAddress or RTTI names it
+S089	S089A.pas	7	TSetting.Reset	row	row?	published, but no form file, MethodAddress or RTTI names it
 # S090 a class created only through FindClass
 S090	S090A.pas	7	TS090Widget.Create	runtime	none	the virtual constructor FindClass's class runs
 # S091 a class only registered, its published property set by name
-S091	S091A.pas	10	TS091Gadget.Level	runtime	none	read and written by name (SetOrdProp, GetOrdProp)
+S091	S091A.pas	10	TS091Gadget.Level	runtime	row?	read and written by name (SetOrdProp, GetOrdProp)
+S091	S091A.pas	7	TS091Gadget.FLevel	runtime	row?	goes with Level, which is set by name
 S091	S091A.pas	8	TS091Gadget.FSpare	row	row	
 # S092 a public method invoked through extended RTTI
 S092	S092A.pas	6	TS092Svc.Run	runtime	row?	TRttiType.GetMethod('Run') finds it by name
@@ -354,7 +355,9 @@ S123	S123A.pas	5	TMath2.Twice	used	none
 S124	S124A.pas	6	TBase.GetText	used	none	
 # S125 a type used only in a published property of an unused class
 S125	S125A.pas	6	TS125Ruler	row	row	streamable, but nothing registers, creates or names it
-S125	S125A.pas	5	TUnits	row	none	
+S125	S125A.pas	5	TUnits	row	row?	
+S125	S125A.pas	8	TS125Ruler.FUnits	row	in-row	
+S125	S125A.pas	10	TS125Ruler.Units	row	in-row	
 # S126 an exception class raised and one only declared
 S126	S126A.pas	6	EUnused	row	row	
 # S127 an interface method implemented by an inherited public method
