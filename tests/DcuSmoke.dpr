@@ -956,6 +956,9 @@ begin
     'type'#13#10'  TDcpChild = class(TDcpBase)'#13#10'  public'#13#10 +
     '    procedure Hello; override;'#13#10 +
     '    function Twice(A: Integer): Integer;'#13#10'  end;'#13#10 +
+    '  TDcpPair = record'#13#10'    A, B: Integer;'#13#10'  end;'#13#10 +
+    'const'#13#10'  CDcpPair: TDcpPair = (A: 3; B: 4);'#13#10 +
+    'var'#13#10'  GDcpChild: TDcpChild;'#13#10 +
     'implementation'#13#10 +
     'procedure TDcpChild.Hello;'#13#10'begin'#13#10'end;'#13#10 +
     'function TDcpChild.Twice(A: Integer): Integer;'#13#10 +
@@ -1028,6 +1031,15 @@ begin
       LText.Contains('TDcpChild = class(TDcpBase)') and
       LText.Contains('function Twice(A: Integer): Integer;'));
     Ok(ATag + ': ... which parse clean', ParseDiagCount(LText, 'DcpUnitB.dcu') = 0);
+    // An interface variable or typed constant in a package's image carries
+    // F1 $80: its type in B2, then one more field before the address -
+    // read as the type, every one of them was __PasTreeUnresolved.
+    Ok(ATag + ': ... an interface variable and typed constant with their types',
+      LText.Contains('GDcpChild: TDcpChild;') and
+      LText.Contains('CDcpPair: TDcpPair') and
+      not LText.Contains(cDcuUnresolvedName));
+    if not LText.Contains('GDcpChild: TDcpChild;') then
+      Writeln(LText);
   finally
     LUnit.Free;
   end;

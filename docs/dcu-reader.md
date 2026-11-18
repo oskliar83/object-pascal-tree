@@ -325,7 +325,7 @@ unit to a `.pas` on the path; PasTree keeps the source first on purpose -
 the declarations are the same when the two match, and navigation lands in
 the real text. No package linked (the default), no `.dcp` is read.
 
-**Two reader facts only packaged units showed.** Their images are not the
+**Three reader facts only packaged units showed.** Their images are not the
 standalone `.dcu` files (smaller; a unit in both reads either way), and:
 
 - A unit inside a 64-bit `.dcp` carries one more header record, `$B7` with
@@ -339,6 +339,18 @@ standalone `.dcu` files (smaller; a unit in both reads either way), and:
   nine Delphi 12 ones (BDE and `vcldbx` units in 23.0), no Delphi 11 one -
   not by version byte, as the reader had it: `@Vcl@Dblookup@initialization
   $qqrv` is `02 06` in 12.0's `vcldbx.dcp` and `02 00 06` in 13.0's.
+- Every variable and typed constant of a packaged unit's interface sets
+  `F1` bit `$80`: its type is in `B2` (read with the flag words), and the
+  field that holds the type in a standalone unit holds a four-byte index
+  that is no type (it rises with the declaration order - `EmptyRect` in
+  `designide.dcp`'s `ComponentDesigner` is `$6506720`, `EmptyPoint`
+  `$6506760`); the address index follows as usual. The standalone
+  sweep is unchanged by reading it so. Read as the type, every such declaration
+  printed as `__PasTreeUnresolved` - an `E2003` on each in a host that
+  analyzes the unit, 9,900 to 15,000 per Studio's `.dcp` files. A packaged
+  typed constant's value is not in the image either ("no data range in the
+  fixup table"): it prints as `var X: T;` with that reason, as a standalone
+  unit's typed constant of a type the reader cannot lay out does.
 
 And one class shape no standalone unit has: `B04` bit `$08`
 (`cfExtraIndexes`) puts three more indexes before the interface table - only
@@ -349,6 +361,13 @@ version and on both platforms. What they mean is not known.
 `lib\<platform>\release` of 22.0, 23.0 and 37.0, Win32 and Win64: 11,660
 units inside `.dcp` files read and parse with zero diagnostics, and the
 standalone sweep (`<dir> -parse`) still reads all 10,235 `.dcu` files.
+The sweep with `-parse` also counts the units whose text names a type the
+reader could not resolve (`UNRESOLVED units=.. names=..`; `-v` lists them):
+parsing does not see those, a host's `E2003` does. Since the `F1 $80` fix
+the `.dcp` units are at the standalone level - 37.0 Win32: 33 units and 370
+names against 32 and 360, the difference being `dcldb.dcp`'s `WideSqlEdit`
+(`WideString` parameter defaults, constant kind 2, a gap of their own) and
+`Winapi.WinRT` spelled `Winapi.Winrt` by the standalone file.
 `tests\DcuSmoke.dpr` compiles two packages with dcc32 and dcc64 (`DcpFix2`
 requires `DcpFix`), deletes their `.dcu` files and checks the directory, a
 unit printed from its image, imports found in the same and in a required
