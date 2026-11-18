@@ -4916,6 +4916,9 @@ begin
     begin
       Result.SwitchStart := PasStartOptState(FDProj.Switches);
       Result.ConsoleTarget := FDProj.ConsoleTarget;
+      // A package's `requires`: a unit only inside one of their .dcp files
+      // (designide's DockForm) resolves, as dcc links it.
+      Result.SetPackages(FDProj.Requires);
     end;
     Result.SetNamespaces(EffectiveNamespaces(APlatform)); // Forms -> Vcl.Forms
     // Defaults ALWAYS, then the project's on top: the IDE prepends a project's
@@ -5262,6 +5265,7 @@ begin
   begin
     FAsyncSession.SetSwitchStart(PasStartOptState(FDProj.Switches));
     FAsyncSession.SetConsoleTarget(FDProj.ConsoleTarget);
+    FAsyncSession.SetPackages(FDProj.Requires);
   end;
   FAsyncSession.SetNamespaces(EffectiveNamespaces(LPlatform));
   for var LDef in PasDefaultUnitAliases(LPlatform) do  // defaults, then project

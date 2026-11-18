@@ -270,6 +270,92 @@ field. Then raise the accepted version range - never before the sweep is
 green. The patched public parser in `local/dcu32int/` remains the oracle for
 a record whose meaning is in doubt.
 
+## Units inside a `.dcp`
+
+Some units ship with no `.pas` and no `.dcu` at all: they exist only inside
+a package's `.dcp` (`DockForm`, `DesignIntf`, `ToolsAPI` and the rest of
+`designide.dcp` in every 37.0 install). Added 2026-11-18 (v0.212.0).
+
+**The format.** A `.dcp` is a container: a header, the package's `.bpl`
+name and its `requires`, a directory of its units, then each unit's `.dcu`
+image in full, back to back in directory order. Measured over every `.dcp`
+of Studio 22.0, 23.0 and 37.0 (2,419 files, every platform, 46,497 units):
+the first image starts right after the directory, each image is exactly as
+long as the size its own `.dcu` header states, and the last ends the file.
+The `+n` offsets count from the end of the magic (4 bytes, or 8 with the
+units' `.dcu` magic of a `PKX1`).
+
+| Offset | Field |
+|---|---|
+| 0 | `PKX0` (32-bit targets) or `PKX1` (64-bit: the units' `.dcu` magic follows, 4 bytes) |
+| +0 | number of `requires` entries |
+| +4 | number of units |
+| +8 | size of the directory |
+| +12 | offset of the directory |
+| +16 | image base, 4 bytes (`PKX0`) or 8 (`PKX1`) |
+| then | `9` (4 bytes, in every file), the length of the `.bpl` name (4 bytes) |
+| then | the `.bpl` name and each required package, zero-terminated (dcc writes `requires rtl, Pkg` as `Pkg`, `rtl`) |
+| directory | per unit: its image's offset (4), 52 bytes, flags (4), its name and its namespace, both zero-terminated |
+
+The package's own unit is in the directory too, named with a leading dot
+(`.VclSmp`, flags 3): no `uses` can name it, and `TPasDcpPackage` leaves it
+out. The 52 bytes and the other flag values ($280, $800) are not decoded.
+
+**What was built.** `source/PasTree.Dcp.pas` reads the header and the
+directory (`ReadDcpPackage`; `DcpPackage` shares one per file and stamp) and
+a unit's image (`ReadDcpMember`). A unit inside a `.dcp` is addressed by a
+path that is no file, `<dir>\<package>.dcp\<unit>.dcu` (`DcpMemberPath`):
+`LoadDcu` reads it from the package, `TPasSourceManager.IsDcuPath` holds for
+it, so the source manager, the analysis and a host's read-only tab treat it
+as any `.dcu`. The printer's imports (`ForeignUnit`) look in the same `.dcp`,
+then for a `.dcu` beside it, then in the packages it requires, transitively,
+as `.dcp` files beside it (`DcuSiblingPath`). A unit's text is stamped by
+its `.dcp`'s write time and size (`DcuStampPath`).
+
+**Which `.dcp` files.** dcc takes a unit from a package only when the
+package is linked - a package's `requires`, transitively, or a program's
+`-LU` - and never from a `.dcp` merely on the search path (spec 1.2.2).
+`TPasSourceManager.SetPackages` (and `TPasSemaProject.SetPackages`,
+`TPasAsyncSession.SetPackages`) takes the linked packages; the demo and
+`tools\PasTreeSemaProject` pass a `.dproj`'s `Requires`. Each is looked up
+as `<name>.dcp` on the search paths, its `requires` followed breadth first,
+and `FindDcuFile` asks those units after the `.dcu` files: a source still
+beats a `.dcu`, and a `.dcu` beats a `.dcp`. dcc prefers a linked package's
+unit to a `.pas` on the path; PasTree keeps the source first on purpose -
+the declarations are the same when the two match, and navigation lands in
+the real text. No package linked (the default), no `.dcp` is read.
+
+**Two reader facts only packaged units showed.** Their images are not the
+standalone `.dcu` files (smaller; a unit in both reads either way), and:
+
+- A unit inside a 64-bit `.dcp` carries one more header record, `$B7` with
+  one 64-bit index - the package's image base `$180000000` - between the
+  unit flags and the source files (`drPackageImageBase`). No standalone
+  `.dcu` and no Win32 `.dcp` has it; before it was read, every Win64
+  packaged unit failed with "No source files".
+- Packaged units carry one `drExport` record per routine the `.bpl` exports.
+  Its middle index (0 in every one seen) is present when the header's second
+  index has bit `$400000` (`FHeaderFlags`) - every Delphi 13 unit, all but
+  nine Delphi 12 ones (BDE and `vcldbx` units in 23.0), no Delphi 11 one -
+  not by version byte, as the reader had it: `@Vcl@Dblookup@initialization
+  $qqrv` is `02 06` in 12.0's `vcldbx.dcp` and `02 00 06` in 13.0's.
+
+And one class shape no standalone unit has: `B04` bit `$08`
+(`cfExtraIndexes`) puts three more indexes before the interface table - only
+`designide.dcp`'s `DMForm` (`TDataModuleForm`, three interfaces), in every
+version and on both platforms. What they mean is not known.
+
+**Gates (2026-11-18).** `tools\PasTreeDcu.exe <dir> -dcp -parse` over every
+`lib\<platform>\release` of 22.0, 23.0 and 37.0, Win32 and Win64: 11,660
+units inside `.dcp` files read and parse with zero diagnostics, and the
+standalone sweep (`<dir> -parse`) still reads all 10,235 `.dcu` files.
+`tests\DcuSmoke.dpr` compiles two packages with dcc32 and dcc64 (`DcpFix2`
+requires `DcpFix`), deletes their `.dcu` files and checks the directory, a
+unit printed from its image, imports found in the same and in a required
+package, refusals, and a project resolving the units through `SetPackages`
+only. pastree-lsp's RAD Studio package (`requires designide`): 67 `F1027`
+and 52 units with `E2003` gated before, 0 and 0 after (180 -> 210 units).
+
 ## Comparing two compiles byte for byte
 
 The parser-fidelity harness (`tools\fidelity.ps1` driving

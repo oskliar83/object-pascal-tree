@@ -121,6 +121,18 @@ type
     // .pas anywhere on the paths beats a .dcu anywhere, so a library that
     // ships both is still analyzed from its source.
     FDcuIndex: TDictionary<string, string>;
+    // The packages the project links (SetPackages) and the units inside
+    // their .dcp files (a unit name, lower -> its PasTree.Dcp member path):
+    // after FDcuIndex, the last thing FindDcuFile asks. Built on the first
+    // miss there, from the search-path listings (a .dcp lies where dcc's
+    // library path keeps it), over the packages' `requires`, transitively,
+    // first package first; dropped with the listings. dcc takes a unit from
+    // a linked package only - never from a .dcp merely on the path - and
+    // ahead of a .pas on the path, while PasTree keeps a source and a .dcu
+    // first: the same declarations when they match, and a source navigates
+    // to the real text (spec 1.2.1).
+    FPackages: TArray<string>;
+    FDcpIndex: TDictionary<string, string>;
     // DcuTextFilter: applied to a generated text before FDcuTexts keeps it.
     FDcuTextFilter: TPasTextFilter;
     // The generated interface text per .dcu path (lower), so a unit's text
@@ -296,6 +308,7 @@ type
     function SearchPathInclude(const AName: string;
       out AResolved: string): Boolean;
     function FindDcuFile(const AUnitName: string; out AResolved: string): Boolean;
+    procedure EnsureDcpIndex;
     function DcuText(const APath: string): string;
     procedure SetDcuTextFilter(const AFilter: TPasTextFilter);
     function DcuForeign(const APath: string): TObject;
@@ -352,6 +365,14 @@ type
       prefixes when an unqualified unit name has no file of its own:
       `uses Generics.Collections` -> System.Generics.Collections.pas. }
     procedure SetNamespaces(const ANamespaces: TArray<string>);
+    { The packages the project links, by name as a `requires` clause writes
+      them (`rtl`, `designide`): a package's own `requires` (TPasDProj.
+      Requires), a program's runtime packages (dcc -LU, DCC_UsePackage). A
+      unit with no source and no .dcu on the search paths is then taken
+      from the .dcp of one of them, or of a package they require - found on
+      the search paths (FDcpIndex). Empty (the default): no .dcp is read. }
+    procedure SetPackages(const APackages: TArray<string>);
+    property Packages: TArray<string> read FPackages;
     { Unit aliases (dcc -A / DCC_UnitAlias): a whole-name match rewrites the
       unit name BEFORE resolution (WinTypes -> Winapi.Windows). }
     procedure AddUnitAlias(const AAlias, AReal: string);
@@ -393,7 +414,8 @@ type
       holds its text. Every gate that asks "is there a unit here" asks this,
       never TFile.Exists alone: a disk-only gate dropped such a unit from the
       closure, so it was analyzed nowhere until the first save (a new data
-      module in a real project, 2026-09-25). }
+      module in a real project, 2026-09-25). A unit inside a .dcp
+      (PasTree.Dcp's member path, no file) exists when its .dcp holds it. }
     function SourceExists(const APath: string): Boolean;
     { The version stamp SetBuffer stored for APath, or -1 when no overlay is
       set for it. An async host compares this against the version it holds
@@ -551,6 +573,7 @@ uses
   System.SyncObjs,
   PasTree.Lexer,
   PasTree.Dcu,
+  PasTree.Dcp,
   PasTree.Dcu.Source;
 
 const
@@ -671,6 +694,7 @@ begin
   FSavedPins.Free;
   FSavedInPath.Free;
   FDcuIndex.Free;
+  FDcpIndex.Free;
   FDcuLock.Free;
   FRecovered.Free;
   FRecoveredLock.Free;
@@ -797,6 +821,14 @@ end;
 procedure TPasSourceManager.SetNamespaces(const ANamespaces: TArray<string>);
 begin
   FNamespaces := ANamespaces;
+  ForgetUnitResolution;
+end;
+
+procedure TPasSourceManager.SetPackages(const APackages: TArray<string>);
+begin
+  FPackages := Copy(APackages);
+  FreeAndNil(FDcpIndex);
+  FSearchNamesBuilt := False;
   ForgetUnitResolution;
 end;
 
@@ -1009,6 +1041,8 @@ function TPasSourceManager.SourceExists(const APath: string): Boolean;
 begin
   if TFile.Exists(APath) then
     Exit(True);
+  if IsDcuPath(APath) and DcuPathExists(APath) then
+    Exit(True);
   Result := False;
   if (FBuffers = nil) or (APath = '') then
     Exit;
@@ -1202,6 +1236,7 @@ begin
   Inc(FResolveEpoch);
   FreeAndNil(FSearchIndex);
   FreeAndNil(FDcuIndex);
+  FreeAndNil(FDcpIndex);   // built again from the new listings on demand
   FSearchIndex := TDictionary<string, string>.Create;
   FDcuIndex := TDictionary<string, string>.Create;
   for LIdx := 0 to High(FPathListings) do
@@ -1439,6 +1474,65 @@ function TPasSourceManager.FindDcuFile(const AUnitName: string;
 begin
   EnsureSearchIndex;
   Result := FDcuIndex.TryGetValue(PasFoldName(AUnitName), AResolved);
+  // Then inside a linked package's .dcp (FDcpIndex).
+  if not Result and (FPackages <> nil) then
+  begin
+    EnsureDcpIndex;
+    Result := FDcpIndex.TryGetValue(PasFoldName(AUnitName), AResolved);
+  end;
+end;
+
+// FDcpIndex: FPackages and what they require, transitively and breadth
+// first, each one's .dcp the first of its name on the search paths; a unit
+// two packages contain is the first one's. A package with no .dcp there,
+// or one that cannot be read, contributes nothing - its units stay F1027.
+procedure TPasSourceManager.EnsureDcpIndex;
+var
+  LDcpFiles: TDictionary<string, string>;
+  LSeen: TDictionary<string, Boolean>;
+  LQueue: TQueue<string>;
+  LName, LPath: string;
+  LPkg: TPasDcpPackage;
+begin
+  if FDcpIndex <> nil then
+    Exit;
+  EnsureSearchIndex;
+  FDcpIndex := TDictionary<string, string>.Create;
+  if FPackages = nil then
+    Exit;
+  LDcpFiles := TDictionary<string, string>.Create;
+  LSeen := TDictionary<string, Boolean>.Create;
+  LQueue := TQueue<string>.Create;
+  try
+    for var LListing in FPathListings do
+      for var LFile in LListing do
+        if HasExt(LFile, '.dcp') then
+          LDcpFiles.TryAdd(PasFoldName(TPath.GetFileNameWithoutExtension(LFile)),
+            LFile);
+    for LName in FPackages do
+      LQueue.Enqueue(LName);
+    while LQueue.Count > 0 do
+    begin
+      LName := PasFoldName(Trim(LQueue.Dequeue));
+      if (LName = '') or LSeen.ContainsKey(LName) then
+        Continue;
+      LSeen.Add(LName, True);
+      if not LDcpFiles.TryGetValue(LName, LPath) then
+        Continue;
+      LPkg := DcpPackage(LPath);
+      if LPkg = nil then
+        Continue;
+      for var LEntry in LPkg.Units do
+        FDcpIndex.TryAdd(PasFoldName(LEntry.UnitName),
+          DcpMemberPath(LPath, LEntry.UnitName));
+      for var LReq in LPkg.Requires do
+        LQueue.Enqueue(LReq);
+    end;
+  finally
+    LQueue.Free;
+    LSeen.Free;
+    LDcpFiles.Free;
+  end;
 end;
 
 class function TPasSourceManager.IsDcuPath(const APath: string): Boolean;
@@ -1482,7 +1576,7 @@ var
   LUnit: TPasDcuUnit;
 begin
   LKey := PasFoldName(TPath.GetFullPath(APath));
-  LStamp := FileStamp(APath);
+  LStamp := FileStamp(DcuStampPath(APath));
   TMonitor.Enter(FDcuLock);
   try
     if (FDcuUnits <> nil) and FDcuUnits.TryGetValue(LKey, LHit) and
@@ -1586,7 +1680,7 @@ var
   LNotes: TArray<string>;
 begin
   LKey := PasFoldName(TPath.GetFullPath(APath));
-  LStamp := FileStamp(APath);
+  LStamp := FileStamp(DcuStampPath(APath));
   TMonitor.Enter(FDcuLock);
   try
     if (FDcuStamps <> nil) and FDcuStamps.TryGetValue(LKey, LOld) and
@@ -1672,6 +1766,7 @@ begin
   begin
     FSearchNamesBuilt := True;
     EnsureSearchIndex;
+    EnsureDcpIndex;   // empty when no package is linked
     // The project directory first: ResolveUnit probes it before the search
     // paths, so a unit beside the .dpr that nothing imports yet is one a
     // `uses` can name (audit B4-40). A basename the paths hold too is listed
@@ -1681,9 +1776,10 @@ begin
       LProject := DirIndex(FProjectDir);
     if LProject <> nil then
       SetLength(FSearchNames, LProject.Count + FSearchIndex.Count +
-        FDcuIndex.Count)
+        FDcuIndex.Count + FDcpIndex.Count)
     else
-      SetLength(FSearchNames, FSearchIndex.Count + FDcuIndex.Count);
+      SetLength(FSearchNames, FSearchIndex.Count + FDcuIndex.Count +
+        FDcpIndex.Count);
     LIdx := 0;
     if LProject <> nil then
       for LPath in LProject.Values do
@@ -1704,6 +1800,14 @@ begin
            PasFoldName(TPath.GetFileNameWithoutExtension(LPath)) + '.pas') then
       begin
         FSearchNames[LIdx] := TPath.GetFileNameWithoutExtension(LPath);
+        Inc(LIdx);
+      end;
+    // And one inside a linked package's .dcp (FDcpIndex).
+    for var LPair in FDcpIndex do
+      if not FSearchIndex.ContainsKey(LPair.Key + '.pas') and
+         not FDcuIndex.ContainsKey(LPair.Key) then
+      begin
+        FSearchNames[LIdx] := TPath.GetFileNameWithoutExtension(LPair.Value);
         Inc(LIdx);
       end;
     SetLength(FSearchNames, LIdx);

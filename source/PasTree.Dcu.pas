@@ -397,6 +397,7 @@ const
   pfFinal = $40000;      // a method header's `final` (4004C vs 4C)
   // B04 of a class definition (probed 2026-09-18).
   cfSealed = $40;
+  cfExtraIndexes = $08;  // three more indexes follow BX3 (ReadClassDef)
   // $4 is set for `class abstract` AND for any class with an abstract method
   // somewhere in its ancestry, implemented or not (TFromAbsMethod, which
   // overrides the only abstract method, still carries it) - it cannot be
@@ -417,7 +418,8 @@ const
 implementation
 
 uses
-  System.IOUtils;
+  System.IOUtils,
+  PasTree.Dcp;
 
 // A member's stored flag word, normalized (TPasDcuDecl.LocFlagsX): stored
 // with the `class` bit at $10 and the scope above it, read with the scope at
@@ -515,6 +517,11 @@ const
   drAddrToSegInfo = $B2;
   drDependencyInfo = $B5;
   drNextOverload = $B6;
+  // Only in a unit's image inside a 64-bit target's .dcp (PasTree.Dcp):
+  // one index, the package's image base ($180000000), between the unit
+  // flags and the source files. Not in any standalone .dcu, nor in a Win32
+  // .dcp (Delphi 11 to 13).
+  drPackageImageBase = $B7;
   arFinalFlag = $C2;
   arAnonymousBlock = $01;
   arVal = $21;             // '!'
@@ -553,6 +560,11 @@ type
     FDefStart: Integer;      // offset of the record being read (for messages)
     FTag: Byte;              // the current record tag
     FNdxHi: Integer;         // high dword of the last 64-bit index read
+    // The header's second index after the unit's short name. Bit $400000
+    // is set in every Delphi 13 unit and in nearly every Delphi 12 one, never
+    // in a Delphi 11 one; where it is set, an export record carries one more
+    // index (see drExport). The rest is not decoded.
+    FHeaderFlags: Integer;
     FUnit: TPasDcuUnit;
     FTrace: TPasDcuTraceProc;
     FNextAddr: Integer;      // > 0: the slot the next declaration must fill (drProcAddInfo)
@@ -1024,7 +1036,22 @@ begin
 end;
 
 function LoadDcu(const APath: string; const ATrace: TPasDcuTraceProc): TPasDcuUnit;
+var
+  LDcp, LUnit: string;
 begin
+  // A unit inside a .dcp (PasTree.Dcp.DcpMemberPath): its image, read from
+  // the package, is a .dcu like any other. A failure to find it is the
+  // reader''s refusal, so the importer''s F1027 names it.
+  if not FileExists(APath) and SplitDcpMemberPath(APath, LDcp, LUnit) then
+  begin
+    try
+      Result := LoadDcuFromBytes(ReadDcpMember(APath), APath, ATrace);
+    except
+      on E: EPasDcpError do
+        raise EPasDcuError.Create(E.Message);
+    end;
+    Exit;
+  end;
   Result := LoadDcuFromBytes(TFile.ReadAllBytes(APath), APath, ATrace);
 end;
 
@@ -1552,15 +1579,20 @@ begin
   ReadByte;
   ReadByte;
   AddAddr(nil);                  // slot 1: the unit itself
-  ReadShortName;                 // sName - always empty in the samples
+  ReadShortName;                 // sName: the unit's namespace, or empty
   ReadUIndex;
-  ReadUIndex;
+  FHeaderFlags := ReadUIndex;
   ReadTag;
   if FTag = drUnitFlags then
   begin
     FUnit.UnitFlags := ReadUIndex;
     ReadUIndex;                  // Flags1
     ReadUIndex;                  // unit priority
+    ReadTag;
+  end;
+  if FTag = drPackageImageBase then
+  begin
+    ReadIndex64;
     ReadTag;
   end;
 end;
@@ -2477,6 +2509,15 @@ begin
   LType.ClassInfo[4] := ReadUIndex;    // property count
   LType.ClassFlags[3] := ReadUIndex;   // B04
   LType.ClassInfo[5] := ReadUIndex;    // BX3
+  // B04 bit $08: three more indexes (1, 1, 1 in the one class seen) before
+  // the interface table. Only designide.dcp's DMForm has it, in Delphi 11, 12
+  // and 13, Win32 and Win64; no class of the standalone RTL/VCL does.
+  if (LType.ClassFlags[3] and cfExtraIndexes) <> 0 then
+  begin
+    ReadUIndex;
+    ReadUIndex;
+    ReadUIndex;
+  end;
   if ATag = drMetaClassDef then
   begin
     LType.MetaClassIdx := ReadUIndex;
@@ -2973,9 +3014,17 @@ begin
           begin
             LDecl := NewNamedDecl(dkExport, LTag);
             LDecl.BaseSlot := ReadUIndex;
-            LDecl.IndexValue := ReadUIndex;
-            if FUnit.VersionByte >= $24 then
+            // A unit whose header sets FHeaderFlags' $400000 writes one
+            // more index between the two (0 in every one seen). A unit
+            // inside a .dcp carries one export record per routine the .bpl
+            // exports: `@Vcl@Dblookup@initialization$qqrv` is `02 06` (slot
+            // 1, index 3) in Delphi 12's vcldbx.dcp, whose units lack the
+            // bit, and `02 00 06` in Delphi 13's; VclSmp.dcp of Delphi 12
+            // sets it and writes three. Gating on the version byte instead
+            // ($24) misread the nine Delphi 12 units without the bit.
+            if (FHeaderFlags and $400000) <> 0 then
               ReadUIndex;
+            LDecl.IndexValue := ReadUIndex;
           end;
         arVal, arVar, arResult, arFld:
           LDecl := ReadLocalDecl(AKind, LTag, AOwnerType);

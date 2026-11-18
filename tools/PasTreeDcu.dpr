@@ -9,7 +9,9 @@ program PasTreeDcu;
 
   Usage:
     PasTreeDcu <file.dcu> [-src] [-dump] [-trace] [-parse]
-    PasTreeDcu <directory> [-parse] [-v]
+    PasTreeDcu <directory> [-dcp] [-parse] [-v]
+    PasTreeDcu <file.dcp> [-parse] [-v]
+    PasTreeDcu <file.dcp>\<unit>.dcu [-src] [-dump] [-trace] [-parse]
 
   -src    print the generated interface source (the default for one file)
   -dump   print the raw declaration tables instead
@@ -17,6 +19,9 @@ program PasTreeDcu;
   -parse  run the generated source through the PasTree parser and report
           its syntax diagnostics (per file in a sweep)
   -v      in a sweep, list every file rather than only the failures
+  -dcp    in a directory sweep, read the units inside every .dcp there
+          instead of the .dcu files. A .dcp argument sweeps its own units;
+          one unit inside it is named as PasTree.Dcp.DcpMemberPath writes it.
 }
 
 {$APPTYPE CONSOLE}
@@ -36,6 +41,7 @@ uses
   PasTree.Ast in '..\source\PasTree.Ast.pas',
   PasTree.Parser in '..\source\PasTree.Parser.pas',
   PasTree.Dcu in '..\source\PasTree.Dcu.pas',
+  PasTree.Dcp in '..\source\PasTree.Dcp.pas',
   PasTree.Dcu.Source in '..\source\PasTree.Dcu.Source.pas';
 
 const
@@ -231,7 +237,10 @@ end;
 var
   GArg, GTarget: string;
   GIdx: Integer;
-  GDump, GTrace, GParse, GVerbose: Boolean;
+  GDump, GTrace, GParse, GVerbose, GDcp: Boolean;
+  GPkg: TPasDcpPackage;
+  GMembers: TArray<string>;
+  GEntry: TPasDcpEntry;
   GUnit: TPasDcuUnit;
   GFiles: TArray<string>;
   GFile, GSource, GMsg: string;
@@ -247,6 +256,7 @@ begin
     GTrace := False;
     GParse := False;
     GVerbose := False;
+    GDcp := False;
     for GIdx := 1 to ParamCount do
     begin
       GArg := ParamStr(GIdx);
@@ -255,11 +265,12 @@ begin
       else if SameText(GArg, '-src') then   // the default: the source text
       else if SameText(GArg, '-parse') then GParse := True
       else if SameText(GArg, '-v') then GVerbose := True
+      else if SameText(GArg, '-dcp') then GDcp := True
       else GTarget := GArg;
     end;
     if GTarget = '' then
     begin
-      Writeln('usage: PasTreeDcu <file.dcu|directory> [-src] [-dump] [-trace] [-parse] [-v]');
+      Writeln('usage: PasTreeDcu <file.dcu|file.dcp|directory> [-dcp] [-src] [-dump] [-trace] [-parse] [-v]');
       Halt(2);
     end;
     if GTrace then
@@ -271,10 +282,33 @@ begin
     else
       GTraceProc := nil;
 
-    if TDirectory.Exists(GTarget) then
+    if TDirectory.Exists(GTarget) or
+       (SameText(TPath.GetExtension(GTarget), '.dcp') and TFile.Exists(GTarget)) then
     begin
-      GFiles := TDirectory.GetFiles(GTarget, '*.dcu');
+      if TFile.Exists(GTarget) then
+        GFiles := [GTarget]
+      else if GDcp then
+        GFiles := TDirectory.GetFiles(GTarget, '*.dcp')
+      else
+        GFiles := TDirectory.GetFiles(GTarget, '*.dcu');
       TArray.Sort<string>(GFiles);
+      // A .dcp stands for the units inside it.
+      if TFile.Exists(GTarget) or GDcp then
+      begin
+        GMembers := nil;
+        for GFile in GFiles do
+        begin
+          GPkg := DcpPackage(GFile);
+          if GPkg = nil then
+          begin
+            Writeln('FAIL  ', TPath.GetFileName(GFile), ' :: ', DcpPackageError(GFile));
+            Continue;
+          end;
+          for GEntry in GPkg.Units do
+            GMembers := GMembers + [DcpMemberPath(GFile, GEntry.UnitName)];
+        end;
+        GFiles := GMembers;
+      end;
       GOk := 0;
       GFail := 0;
       GParseFail := 0;

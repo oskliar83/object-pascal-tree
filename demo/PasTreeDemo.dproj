@@ -152,6 +152,7 @@
         <DCCReference Include="..\source\PasTree.Lexer.pas"/>
         <DCCReference Include="..\source\PasTree.SourceManager.pas"/>
         <DCCReference Include="..\source\PasTree.Dcu.pas"/>
+        <DCCReference Include="..\source\PasTree.Dcp.pas"/>
         <DCCReference Include="..\source\PasTree.Dcu.Source.pas"/>
         <DCCReference Include="..\source\PasTree.Preprocessor.pas"/>
         <DCCReference Include="..\source\PasTree.CondEval.pas"/>

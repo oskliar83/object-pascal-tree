@@ -33,6 +33,7 @@ uses
   PasTree.Lexer in '..\source\PasTree.Lexer.pas',
   PasTree.SourceManager in '..\source\PasTree.SourceManager.pas',
   PasTree.Dcu in '..\source\PasTree.Dcu.pas',
+  PasTree.Dcp in '..\source\PasTree.Dcp.pas',
   PasTree.Dcu.Source in '..\source\PasTree.Dcu.Source.pas',
   PasTree.Preprocessor in '..\source\PasTree.Preprocessor.pas',
   PasTree.Platforms in '..\source\PasTree.Platforms.pas',
@@ -893,6 +894,216 @@ begin
   end;
 end;
 
+{ Units inside a .dcp (PasTree.Dcp). Two packages are compiled here, their
+  .dcu files then deleted, so the units exist only inside the .dcp files:
+  DcpFix (requires rtl; contains DcpUnitA, DcpUnitB - B uses A) and DcpFix2
+  (requires rtl, DcpFix; contains DcpUnitC - C uses A). Checked: the
+  directory (the .bpl, the requires, the units without the package's own);
+  a unit read and printed from its image, which parses clean; an import
+  found in the same package and in a required one; a refusal by name; and
+  a project resolving the units through SetPackages only - the requires
+  followed transitively, a package not linked leaving its units F1027 as
+  dcc does (F2613), none linked leaving every one F1027. }
+procedure CheckDcp(const ADir, ACompiler, APlatform: string;
+  AProjPlatform: TPasPlatform; const ATag: string);
+var
+  LSrc, LLib, LTmp, LBpl, LProj, LCmd, LDcp1, LDcp2, LText, LMsg: string;
+  LPkg: TPasDcpPackage;
+  LUnit: TPasDcuUnit;
+  LUser: Integer;
+  LSM: TPasSourceManager;
+  LPath: string;
+
+  function Compile(const AFile: string): Boolean;
+  begin
+    LCmd := Format('"%s\bin\%s" -B -Q -LE"%s" -LN"%s" -NU"%s" ' +
+      '-U"%s;%s\lib\%s\release" -NSSystem;Winapi "%s"', [StudioRoot,
+      ACompiler, LBpl, LLib, LTmp, LLib, StudioRoot, APlatform,
+      TPath.Combine(LSrc, AFile)]);
+    Result := RunProcess(LCmd, LSrc) = 0;
+    if not Result then
+      Writeln('  (package compile failed: ', LCmd, ')');
+  end;
+
+  procedure Analyze(const APackages: TArray<string>);
+  begin
+    FreeAndNil(GProj);
+    GProj := TPasSemaProject.Create(AProjPlatform, [LLib,
+      TPath.Combine(StudioRoot, 'source\rtl\sys'),
+      TPath.Combine(StudioRoot, 'source\rtl\common'),
+      TPath.Combine(StudioRoot, 'source\rtl\win')], []);
+    GProj.SetNamespaces(['System', 'Winapi']);
+    GProj.SetPackages(APackages);
+    GProj.AnalyzeProject(TPath.Combine(LProj, 'DcpApp.dpr'));
+  end;
+
+begin
+  LSrc := TPath.Combine(ADir, 'dcpsrc_' + APlatform);
+  LLib := TPath.Combine(ADir, 'dcplib_' + APlatform);
+  LTmp := TPath.Combine(ADir, 'dcptmp_' + APlatform);
+  LBpl := TPath.Combine(ADir, 'dcpbpl_' + APlatform);
+  LProj := TPath.Combine(ADir, 'dcpproj_' + APlatform);
+  for var LD in [LSrc, LLib, LTmp, LBpl, LProj] do
+    TDirectory.CreateDirectory(LD);
+  TFile.WriteAllText(TPath.Combine(LSrc, 'DcpUnitA.pas'),
+    'unit DcpUnitA;'#13#10'interface'#13#10'type'#13#10 +
+    '  TDcpBase = class'#13#10'  public'#13#10 +
+    '    procedure Hello; virtual;'#13#10'  end;'#13#10 +
+    'const'#13#10'  KDcpA = 7;'#13#10'implementation'#13#10 +
+    'procedure TDcpBase.Hello;'#13#10'begin'#13#10'end;'#13#10'end.'#13#10);
+  TFile.WriteAllText(TPath.Combine(LSrc, 'DcpUnitB.pas'),
+    'unit DcpUnitB;'#13#10'interface'#13#10'uses DcpUnitA;'#13#10 +
+    'type'#13#10'  TDcpChild = class(TDcpBase)'#13#10'  public'#13#10 +
+    '    procedure Hello; override;'#13#10 +
+    '    function Twice(A: Integer): Integer;'#13#10'  end;'#13#10 +
+    'implementation'#13#10 +
+    'procedure TDcpChild.Hello;'#13#10'begin'#13#10'end;'#13#10 +
+    'function TDcpChild.Twice(A: Integer): Integer;'#13#10 +
+    'begin'#13#10'  Result := A * KDcpA;'#13#10'end;'#13#10'end.'#13#10);
+  TFile.WriteAllText(TPath.Combine(LSrc, 'DcpUnitC.pas'),
+    'unit DcpUnitC;'#13#10'interface'#13#10'uses DcpUnitA;'#13#10 +
+    'type'#13#10'  TDcpOther = class(TDcpBase)'#13#10'  end;'#13#10 +
+    'implementation'#13#10'end.'#13#10);
+  TFile.WriteAllText(TPath.Combine(LSrc, 'DcpFix.dpk'),
+    'package DcpFix;'#13#10'requires rtl;'#13#10 +
+    'contains DcpUnitA, DcpUnitB;'#13#10'end.'#13#10);
+  TFile.WriteAllText(TPath.Combine(LSrc, 'DcpFix2.dpk'),
+    'package DcpFix2;'#13#10'requires rtl, DcpFix;'#13#10 +
+    'contains DcpUnitC;'#13#10'end.'#13#10);
+  Ok(ATag + ': both packages compile', Compile('DcpFix.dpk') and
+    Compile('DcpFix2.dpk'));
+  // The .dcu files go: the units now exist only inside the .dcp files, and
+  // their sources lie on no search path.
+  TDirectory.Delete(LTmp, True);
+  LDcp1 := TPath.Combine(LLib, 'DcpFix.dcp');
+  LDcp2 := TPath.Combine(LLib, 'DcpFix2.dcp');
+  if not (TFile.Exists(LDcp1) and TFile.Exists(LDcp2)) then
+    Exit;
+
+  // The directory.
+  LPkg := ReadDcpPackage(LDcp1);
+  try
+    Ok(ATag + ': the directory names the .bpl',
+      SameText(LPkg.BplName, 'DcpFix.bpl'));
+    Ok(ATag + ': its requires', (Length(LPkg.Requires) = 1) and
+      SameText(LPkg.Requires[0], 'rtl'));
+    Ok(ATag + ': its units, not the package''s own',
+      (Length(LPkg.Units) = 2) and (LPkg.IndexOf('dcpunita') >= 0) and
+      (LPkg.IndexOf('DcpUnitB') >= 0) and (LPkg.IndexOf('DcpFix') < 0));
+  finally
+    LPkg.Free;
+  end;
+  LPkg := DcpPackage(LDcp2);
+  // dcc writes the list last entry first (`requires rtl, DcpFix`).
+  Ok(ATag + ': a requires list of two, read shared',
+    (LPkg <> nil) and (Length(LPkg.Requires) = 2) and
+    SameText(LPkg.Requires[0], 'DcpFix') and SameText(LPkg.Requires[1], 'rtl') and
+    (DcpPackage(LDcp2) = LPkg));
+
+  // The source manager alone: a linked package's units resolve, the
+  // required package's too.
+  LSM := TPasSourceManager.Create([LLib]);
+  try
+    Ok(ATag + ': no package linked, no unit from a .dcp',
+      not LSM.ResolveUnit('DcpUnitA', '', '', LPath));
+    LSM.SetPackages(['DcpFix2']);
+    Ok(ATag + ': linked, a unit of a required package resolves to its member path',
+      LSM.ResolveUnit('DcpUnitA', '', '', LPath) and
+      SameText(LPath, DcpMemberPath(LDcp1, 'DcpUnitA')));
+    if not SameText(LPath, DcpMemberPath(LDcp1, 'DcpUnitA')) then
+      Writeln('  (resolved: "', LPath, '")');
+    Ok(ATag + ': ... and is a name a uses clause can offer',
+      TArray.IndexOf<string>(LSM.SearchPathUnitNames, 'DcpUnitC') >= 0);
+  finally
+    LSM.Free;
+  end;
+
+  // One unit, read from its image and printed.
+  LUnit := LoadDcu(DcpMemberPath(LDcp1, 'DcpUnitB'));
+  try
+    Ok(ATag + ': a unit inside reads by its member path',
+      SameText(LUnit.UnitName, 'DcpUnitB'));
+    LText := DcuInterfaceSource(LUnit);
+    Ok(ATag + ': ... and prints its declarations',
+      LText.Contains('TDcpChild = class(TDcpBase)') and
+      LText.Contains('function Twice(A: Integer): Integer;'));
+    Ok(ATag + ': ... which parse clean', ParseDiagCount(LText, 'DcpUnitB.dcu') = 0);
+  finally
+    LUnit.Free;
+  end;
+  Ok(ATag + ': an import is found in the same package',
+    SameText(DcuSiblingPath(DcpMemberPath(LDcp1, 'DcpUnitB'), 'DcpUnitA'),
+      DcpMemberPath(LDcp1, 'DcpUnitA')));
+  Ok(ATag + ': ... and in a package it requires',
+    SameText(DcuSiblingPath(DcpMemberPath(LDcp2, 'DcpUnitC'), 'DcpUnitA'),
+      DcpMemberPath(LDcp1, 'DcpUnitA')));
+  Ok(ATag + ': member paths exist only for units inside',
+    DcuPathExists(DcpMemberPath(LDcp1, 'DcpUnitA')) and
+    not DcuPathExists(DcpMemberPath(LDcp1, 'DcpUnitC')));
+  Ok(ATag + ': a unit stamps as its .dcp',
+    SameText(DcuStampPath(DcpMemberPath(LDcp1, 'DcpUnitA')), LDcp1));
+  LMsg := '';
+  try
+    LoadDcu(DcpMemberPath(LDcp1, 'Nope')).Free;
+  except
+    on E: EPasDcuError do
+      LMsg := E.Message;
+  end;
+  Ok(ATag + ': a unit the .dcp does not contain is refused by name',
+    LMsg.Contains('contains no unit Nope'));
+  LMsg := '';
+  TFile.WriteAllBytes(TPath.Combine(LLib, 'Short.dcp'),
+    Copy(TFile.ReadAllBytes(LDcp1), 0, 40));
+  try
+    ReadDcpPackage(TPath.Combine(LLib, 'Short.dcp')).Free;
+  except
+    on E: EPasDcpError do
+      LMsg := E.Message;
+  end;
+  Ok(ATag + ': a truncated .dcp is refused, not read past its end', LMsg <> '');
+
+  // A project: DcpUser uses all three units.
+  TFile.WriteAllText(TPath.Combine(LProj, 'DcpUser.pas'),
+    'unit DcpUser;'#13#10'interface'#13#10 +
+    'uses DcpUnitA, DcpUnitB, DcpUnitC;'#13#10'procedure Run;'#13#10 +
+    'implementation'#13#10'procedure Run;'#13#10'var'#13#10 +
+    '  C: TDcpChild;'#13#10'  O: TDcpOther;'#13#10'begin'#13#10 +
+    '  C := TDcpChild.Create;'#13#10'  C.Hello;'#13#10 +
+    '  C.Twice(KDcpA);'#13#10'  O := TDcpOther.Create;'#13#10 +
+    '  O.Hello;'#13#10'end;'#13#10'end.'#13#10);
+  TFile.WriteAllText(TPath.Combine(LProj, 'DcpApp.dpr'),
+    'program DcpApp;'#13#10'uses DcpUser;'#13#10 +
+    'begin'#13#10'  Run;'#13#10'end.'#13#10);
+  try
+    Analyze(['DcpFix2']);
+    LUser := MidByName('dcpuser');
+    Ok(ATag + ': linked through requires, every unit resolves',
+      (LUser >= 0) and (DiagCount(LUser, 'F1027') = 0) and
+      (DiagCount(LUser, 'E2003') = 0));
+    if (LUser >= 0) and (Length(GProj.Model(LUser).Diags) > 0) then
+      Writeln('  (', GProj.Model(LUser).Diags[0].Msg, ')');
+    Ok(ATag + ': ... the required package''s unit from its .dcp',
+      (MidByName('dcpunita') >= 0) and
+      SameText(GProj.ModelFile(MidByName('dcpunita')),
+        DcpMemberPath(LDcp1, 'DcpUnitA')) and
+      TPasSourceManager.IsDcuPath(GProj.ModelFile(MidByName('dcpunita'))));
+    Ok(ATag + ': ... and its generated text is clean',
+      (MidByName('dcpunitb') >= 0) and
+      (Length(GProj.Model(MidByName('dcpunitb')).Diags) = 0));
+    Analyze(['DcpFix']);
+    LUser := MidByName('dcpuser');
+    Ok(ATag + ': a package not linked leaves its unit F1027',
+      (DiagCount(LUser, 'F1027') = 1) and
+      DiagText(LUser, 'F1027').Contains('DcpUnitC'));
+    Analyze([]);
+    LUser := MidByName('dcpuser');
+    Ok(ATag + ': no package linked, no .dcp read (dcc: F2613)',
+      DiagCount(LUser, 'F1027') = 3);
+  finally
+    FreeAndNil(GProj);
+  end;
+end;
+
 var
   GDir, GSrcDir, GLib32, GLib64, GProjDir: string;
   GBytes: TBytes;
@@ -992,6 +1203,10 @@ begin
       CheckProject(GLib32, GProjDir, pfWin32, 'project/win32');
     if TFile.Exists(TPath.Combine(GLib64, 'DcuFix.dcu')) then
       CheckProject(GLib64, GProjDir, pfWin64, 'project/win64');
+
+    // Units that exist only inside a package's .dcp.
+    CheckDcp(GDir, 'dcc32.exe', 'win32', pfWin32, 'dcp/win32');
+    CheckDcp(GDir, 'dcc64.exe', 'win64', pfWin64, 'dcp/win64');
   finally
     if TDirectory.Exists(GDir) then
       TDirectory.Delete(GDir, True);

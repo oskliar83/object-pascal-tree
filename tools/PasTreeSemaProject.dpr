@@ -116,6 +116,7 @@ uses
   PasTree.Lexer in '..\source\PasTree.Lexer.pas',
   PasTree.SourceManager in '..\source\PasTree.SourceManager.pas',
   PasTree.Dcu in '..\source\PasTree.Dcu.pas',
+  PasTree.Dcp in '..\source\PasTree.Dcp.pas',
   PasTree.Dcu.Source in '..\source\PasTree.Dcu.Source.pas',
   PasTree.Preprocessor in '..\source\PasTree.Preprocessor.pas',
   PasTree.Platforms in '..\source\PasTree.Platforms.pas',
@@ -1045,6 +1046,8 @@ begin
       // to dcc - and a command-line -$X / -CC on top, as dcc would take it.
       AProj.SwitchStart := PasStartOptState(LD.Switches + GSwitches);
       AProj.ConsoleTarget := LD.ConsoleTarget or GConsole;
+      // A package's `requires`: units only inside their .dcp files resolve.
+      AProj.SetPackages(LD.Requires);
       // No -NS list in the .dproj means we could not read the option, not that
       // the project wants zero prefixes - dcc has none built in, so zero would
       // turn every legacy unqualified import into an F1027.
