@@ -3190,19 +3190,43 @@ const
     '  TIntHelper = record helper for Integer'#13#10 +
     '    function Twice: Integer;'#13#10 +
     '  end;'#13#10 +
-    'procedure Run(B: TBox; I: Integer);'#13#10 +
+    '  TPubPlain = class'#13#10 +
+    '  published'#13#10 +
+    '    procedure Pub;'#13#10 +
+    '  end;'#13#10 +
+    '  TPersistent = class end;'#13#10 +
+    '  TComponent = class(TPersistent) end;'#13#10 +
+    '  TPubPers = class(TPersistent)'#13#10 +
+    '  published'#13#10 +
+    '    procedure PubP;'#13#10 +
+    '  end;'#13#10 +
+    '  TPubComp = class(TComponent)'#13#10 +
+    '  published'#13#10 +
+    '    procedure PubC;'#13#10 +
+    '  end;'#13#10 +
+    '  TPubLost = class(TMissingBase)'#13#10 +
+    '  published'#13#10 +
+    '    procedure Lost;'#13#10 +
+    '  end;'#13#10 +
+    'procedure Run(B: TBox; I: Integer; P: TPubPlain; L: TPubLost;'#13#10 +
+    '  PP: TPubPers; PC: TPubComp);'#13#10 +
     'implementation'#13#10 +
     'procedure TBox.Plain; begin end;'#13#10 +
     'procedure TBoxHelper.Extra; begin Plain; end;'#13#10 +
     'procedure TIdleHelper.Never; begin end;'#13#10 +
     'function TIntHelper.Twice: Integer; begin Result := Self * 2; end;'#13#10 +
-    'procedure Run(B: TBox; I: Integer);'#13#10 +
+    'procedure TPubPlain.Pub; begin end;'#13#10 +
+    'procedure TPubLost.Lost; begin end;'#13#10 +
+    'procedure TPubPers.PubP; begin end;'#13#10 +
+    'procedure TPubComp.PubC; begin end;'#13#10 +
+    'procedure Run(B: TBox; I: Integer; P: TPubPlain; L: TPubLost;'#13#10 +
+    '  PP: TPubPers; PC: TPubComp);'#13#10 +
     'begin'#13#10 +
     '  B.Extra;'#13#10 +
     '  if I.Twice = 0 then Exit;'#13#10 +
     'end;'#13#10 +
     'initialization'#13#10 +
-    '  Run(nil, 0);'#13#10 +
+    '  Run(nil, 0, nil, nil, nil, nil);'#13#10 +
     'end.'#13#10;
   UNUSED_F =
     'unit UnusedF;'#13#10 +
@@ -3321,6 +3345,14 @@ begin
       (Row('THolder') >= 0) and not Doubted('THolder') and
       (Row('THolder.FF') < 0) and
       (Row('THeld') >= 0) and not Doubted('THeld'));
+    Ok('unused implicit: published in a class that does not stream - a row ' +
+      'with the doubt `published`; in one whose ancestry is not known - not ' +
+      'weighed (' + LNames + ')', Doubted('TPubPlain.Pub') and
+      LRows[Row('TPubPlain.Pub')].Doubts[0].StartsWith('published') and
+      (Row('TPubLost.Lost') < 0));
+    Ok('unused implicit: published in a TPersistent that is no component - ' +
+      'a row with the doubt; in a TComponent - not weighed (' + LNames + ')',
+      Doubted('TPubPers.PubP') and (Row('TPubComp.PubC') < 0));
     Ok('unused implicit: a private member - a plain row',
       (Row('TFrm.Priv') >= 0) and not Doubted('TFrm.Priv'));
     Ok('unused implicit: a unit replacing a library one is not weighed',
@@ -3338,8 +3370,10 @@ end;
 // in code, so not rows: TBase.Count (a descendant redeclares it), TBase.Hidden
 // (a descendant's bare inherited), TBase.Draw (an interface a descendant
 // lists names it), TBase.Run (virtual), TFuncImpl.Invoke (a method reference
-// type it implements), TPlainForm.Click (the first section of a streaming
-// class), MarkAttribute.Create (an attribute), TList.GetEnumerator (for-in).
+// type it implements), TPlainForm.Click (the first section of a TPersistent
+// that is no component, weighed since 0.211.0 - left out as a member of the
+// unused TPlainForm), MarkAttribute.Create (an attribute), TList.GetEnumerator
+// (for-in).
 // Rows: TBase.Spare, TDerived.Hidden, TFuncImpl, TPlainForm, TMarked, TRec.Spare
 // (a record's field - a doubt), TNever, CNever, NeverProc, DeadProc (a branch
 // not compiled names it - a doubt), TextProc (its name a whole string literal:
@@ -3513,7 +3547,7 @@ begin
       (Row('TBase.Hidden') >= 0) and
       (LRows[Row('TBase.Hidden')].How = uhOnlyByUnused));
     Ok('unused symbols: the skips counted', (LSkips[usDispatch] = 1) and
-      (LSkips[usImplements] = 1) and (LSkips[usPublished] = 1) and
+      (LSkips[usImplements] = 1) and (LSkips[usPublished] = 0) and
       (LSkips[usAttribute] = 1) and (LSkips[usForIn] = 2) and
       (LSkips[usInterface] = 0));
     // IShape.Draw: no call names it - a row, and TBase.Draw, which
