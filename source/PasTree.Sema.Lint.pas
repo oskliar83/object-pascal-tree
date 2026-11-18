@@ -2257,6 +2257,7 @@ var
   LRow: TPasUnusedUse;
   LFormClasses: TArray<string>;   // the class names the form file streams
   LDesign: TDictionary<Integer, Boolean>;
+  LByIdx: Integer;
 
   // A use of the entry at ANode of LM (NIL_NODE: a use placed nowhere in
   // the unit's code - its form file - which no row takes away).
@@ -2586,9 +2587,16 @@ begin
       LRow.InInterface := LEntry.InInterface;
       LRow.Doubts := LEntry.Doubts;
       LRow.By := nil;
-      for var LB in LEntry.ByRows do
-        if not MatchText(FDeadRows[LB].Name, LRow.By) then
-          LRow.By := LRow.By + [FDeadRows[LB].Name];
+      // An index, not `for var LB in LEntry.ByRows`: dcc64 35.0 and 36.0
+      // with optimization dropped the copy of LRow.By into the open-array
+      // temporary MatchText is passed, which was then read unwritten - a
+      // string at $FFFFFFFFFFFFFFFF, an access violation in pastree-mcp's
+      // lint built by 22.0 on any row with a By. -$O- and dcc 37.0 were
+      // right; it took this routine's whole load of temporaries (a short
+      // program of the same loops compiles right). Keep this loop plain.
+      for LByIdx := 0 to High(LEntry.ByRows) do
+        if not MatchText(FDeadRows[LEntry.ByRows[LByIdx]].Name, LRow.By) then
+          LRow.By := LRow.By + [FDeadRows[LEntry.ByRows[LByIdx]].Name];
       TArray.Sort<string>(LRow.By, TIStringComparer.Ordinal);
       FRows.Add(LRow);
       FRowEdges.Add(K64(AMid, LEntry.UnitId));
