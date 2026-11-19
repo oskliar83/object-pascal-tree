@@ -409,11 +409,15 @@ function FindUnusedSymbols(ANav: TPasNavigator; const AMids: TArray<Integer>;
   overload;
 
 // The same, with the parameters and locals AOptions asks for as rows too
-// (Kind skParam, skVar, skConst; Name the routine's and its own): see
-// CheckUnusedSymbols for the rule. A parameter or local of a routine that is
-// a row is not listed - it goes with it. Off by default: a parameter is part
-// of a signature, and a local is dcc's to hint (H2164 never used, H2077 a
-// value assigned never used - not "only ever assigned").
+// (Kind skParam, skVar, skConst, skType; Name the routine's and its own):
+// see CheckUnusedSymbols for the rule. A parameter or local of a routine
+// that is a row is not listed - it goes with it, and so does a member of a
+// local type that is a row. A local only nested routines that are rows use
+// is a row made by them (By). Off by default: a parameter is part of a
+// signature. Locals are not left to dcc's hints: it has none for a constant
+// or a type, none for a managed variable (a string, an interface, a dynamic
+// array - initialized and finalized, so "used"), and none for one read only
+// by a dead nested routine.
 type
   TPasUnusedOption = (uoParams, uoLocals);
   TPasUnusedOptions = set of TPasUnusedOption;
@@ -3322,9 +3326,24 @@ type
     FileName: string;
     Line, Col: Integer;
     Edges: TArray<Int64>;     // the parameters it is passed into
+    DeadBy: TArray<Int64>;    // the rows - nested routines - its other uses
+                              // sit in, keyed
     Writes: TArray<string>;   // its plain assignments, 'File.pas:12'
     Routine: Int64;           // the routine it belongs to, keyed; -1 none
     Doubts: TArray<string>;
+  end;
+
+  // One routine body's names, walked once for all its parameters and locals
+  // (WeighValue): the nodes bound to each symbol, in the walk's order, and
+  // the first bare identifier of each name bound to nothing. A walk per local
+  // made the client group's whole run 10 s -> 15 s once locals were weighed.
+  TUnusedBody = class
+  public
+    Seq: TList<Integer>;                                // the nodes kept, walked
+    BySym: TObjectDictionary<Integer, TList<Integer>>;  // indexes into Seq
+    Unbound: TDictionary<string, Integer>;              // index into Seq
+    constructor Create;
+    destructor Destroy; override;
   end;
 
   TUnusedLint = class
@@ -3382,6 +3401,11 @@ type
     // its address; the classes MarkDelegates found implementing an
     // interface through an `implements` property.
     FValues: TDictionary<Int64, TUnusedValue>;
+    FBodies: TObjectDictionary<Int64, TUnusedBody>;  // by model and node
+    FRoutineKeys: TDictionary<Int64, Int64>;         // RoutineKeyOf's
+    // FindUnusedSymbols with options: a parameter's skip asked only once it
+    // is read nowhere (WeighValue).
+    FLazySkip: Boolean;
     FRoutineSkip: TDictionary<Int64, Integer>;
     FDelegated: TDictionary<Int64, Boolean>;
     // The interfaces an own class lists (IfaceDoubt), lazy.
@@ -3392,10 +3416,12 @@ type
     FPackagesInternal: Boolean;
     function LibraryWithin(out AAny: Boolean): TArray<Boolean>;
     function RoutineKeyOf(AMid, ARoutine: Integer): Int64;
+    function RoutineKeyFind(AMid, ARoutine: Integer): Int64;
     function ParamNames(LM: TPasSemaModel; ARoutine: Integer): TArray<Integer>;
     function RoutineSkip(AMid, ASym: Integer): Integer;
     function AddressTaken(AMid, ASym: Integer): Boolean;
     function ParamAt(AMid, ASym, AIdx: Integer): Int64;
+    function BodyOf(AMid, ANode: Integer): TUnusedBody;
     function WeighValue(AMid, ASym: Integer): TUnusedValue;
     function ValueRow(AMid, ASym: Integer; out ARow: TPasUnusedSymbol;
       out AValue: TUnusedValue): Boolean;
@@ -3491,6 +3517,8 @@ begin
   FIfaceKind := TDictionary<Int64, Integer>.Create;
   FLateNames := TDictionary<string, string>.Create;
   FValues := TDictionary<Int64, TUnusedValue>.Create;
+  FBodies := TObjectDictionary<Int64, TUnusedBody>.Create([doOwnsValues]);
+  FRoutineKeys := TDictionary<Int64, Int64>.Create;
   FRoutineSkip := TDictionary<Int64, Integer>.Create;
   FDelegated := TDictionary<Int64, Boolean>.Create;
   FEnumOf := TDictionary<Int64, Int64>.Create;
@@ -3529,6 +3557,8 @@ begin
   FIfaceKind.Free;
   FLateNames.Free;
   FValues.Free;
+  FBodies.Free;
+  FRoutineKeys.Free;
   FRoutineSkip.Free;
   FDelegated.Free;
   FImplemented.Free;
@@ -3546,6 +3576,81 @@ end;
 class function TUnusedLint.K(AMid, ASym: Integer): Int64;
 begin
   Result := (Int64(AMid) shl 32) or Cardinal(ASym);
+end;
+
+constructor TUnusedBody.Create;
+begin
+  inherited Create;
+  Seq := TList<Integer>.Create;
+  BySym := TObjectDictionary<Integer, TList<Integer>>.Create([doOwnsValues]);
+  Unbound := TDictionary<string, Integer>.Create;
+end;
+
+destructor TUnusedBody.Destroy;
+begin
+  Unbound.Free;
+  BySym.Free;
+  Seq.Free;
+  inherited;
+end;
+
+// Routine body ANode of model AMid walked once (TUnusedBody), as WeighValue
+// walked it per value: a stack, children pushed in order. A node bound to a
+// symbol is kept under it; a bare identifier bound to nothing, not a
+// member's name and placed in a file, under its name - the first only.
+function TUnusedLint.BodyOf(AMid, ANode: Integer): TUnusedBody;
+var
+  LM: TPasSemaModel;
+  LStack: TStack<Integer>;
+  LList: TList<Integer>;
+  LFi, LLine, LCol: Integer;
+begin
+  if FBodies.TryGetValue(K(AMid, ANode), Result) then
+    Exit;
+  Result := TUnusedBody.Create;
+  FBodies.Add(K(AMid, ANode), Result);
+  LM := FProj.Model(AMid);
+  LStack := TStack<Integer>.Create;
+  try
+    LStack.Push(ANode);
+    while LStack.Count > 0 do
+    begin
+      var LN := LStack.Pop;
+      if (LN < Length(LM.RefMap)) and (LM.RefMap[LN] <> NIL_SYM) then
+      begin
+        if not Result.BySym.TryGetValue(LM.RefMap[LN], LList) then
+        begin
+          LList := TList<Integer>.Create;
+          Result.BySym.Add(LM.RefMap[LN], LList);
+        end;
+        LList.Add(Result.Seq.Count);
+        Result.Seq.Add(LN);
+      end
+      else if (LM.Tree.Nodes[LN].Kind = nkIdent) and
+        not (nfName in LM.Tree.Nodes[LN].Flags) and
+        not LM.ExtRefMap.ContainsKey(LN) and
+        not Result.Unbound.ContainsKey(LM.Tree.NodeNameLower(LN)) then
+      begin
+        // `X.Name` is a member of X, not a bare Name.
+        var LPar := LM.Tree.Nodes[LN].Parent;
+        if not ((LPar <> NIL_NODE) and (LM.Tree.Nodes[LPar].Kind = nkMember)
+           and (LM.Tree.Nodes[LPar].FirstChild <> LN)) and
+           VisPos(LM, LM.Tree.NodeLeftmostVis(LN), LFi, LLine, LCol) then
+        begin
+          Result.Unbound.Add(LM.Tree.NodeNameLower(LN), Result.Seq.Count);
+          Result.Seq.Add(LN);
+        end;
+      end;
+      var LC := LM.Tree.Nodes[LN].FirstChild;
+      while LC <> NIL_NODE do
+      begin
+        LStack.Push(LC);
+        LC := LM.Tree.Nodes[LC].NextSibling;
+      end;
+    end;
+  finally
+    LStack.Free;
+  end;
 end;
 
 procedure TUnusedLint.Hard(AKey: Int64);
@@ -6471,6 +6576,16 @@ end;
 // keyed - an implementation header paired with its declaration (UsersOf's
 // pairing); -1 when there is none.
 function TUnusedLint.RoutineKeyOf(AMid, ARoutine: Integer): Int64;
+begin
+  // Asked for every local of a body and every use inside a nested routine:
+  // kept.
+  if FRoutineKeys.TryGetValue(K(AMid, ARoutine), Result) then
+    Exit;
+  Result := RoutineKeyFind(AMid, ARoutine);
+  FRoutineKeys.Add(K(AMid, ARoutine), Result);
+end;
+
+function TUnusedLint.RoutineKeyFind(AMid, ARoutine: Integer): Int64;
 var
   LM: TPasSemaModel;
   LName, LC: Integer;
@@ -6658,8 +6773,8 @@ var
   LRoutine, LND, LNI, LSkip, LCanon, LP, LFi, LLine, LCol: Integer;
   LKey, LRKey: Int64;
   LSyms: TDictionary<Integer, Boolean>;
-  LStack: TStack<Integer>;
-  LWritable, LLive, LUnboundSeen: Boolean;
+  LWritable, LLive, LUnboundSeen, LDeferred: Boolean;
+  LLazySkip: Integer;
   LName, LOwnerName: string;
   LRes: TUnusedValue;
 
@@ -6685,6 +6800,67 @@ var
     LExt: TPasExtRef;
     LEdge: Int64;
   begin
+    // In a nested routine that is a row (FUnused, final when this runs): a
+    // use by it - the local goes with it (a constant only dead helpers
+    // read). Any routine between the use and the owner's body counts.
+    LPar := LM.Tree.Nodes[ANode].Parent;
+    while (LPar <> NIL_NODE) and (LPar <> LNI) do
+    begin
+      if LM.Tree.Nodes[LPar].Kind = nkRoutine then
+      begin
+        LEdge := RoutineKeyOf(AMid, LPar);
+        if (LEdge <> -1) and FUnused.ContainsKey(LEdge) then
+        begin
+          for var LD in LRes.DeadBy do
+            if LD = LEdge then
+              Exit;
+          LRes.DeadBy := LRes.DeadBy + [LEdge];
+          Exit;
+        end;
+      end;
+      LPar := LM.Tree.Nodes[LPar].Parent;
+    end;
+    // In the declaration of another local - a constant's value, a variable's
+    // or a type's type (`CMaxStay = 60 * CPerDay`, `L: TLocalRec`): used by
+    // it, and dead when every one declared there is (an edge, as a parameter
+    // passed on).
+    LPar := LM.Tree.Nodes[ANode].Parent;
+    while (LPar <> NIL_NODE) and (LPar <> LNI) and
+          not (LM.Tree.Nodes[LPar].Kind in [nkConstDecl, nkTypeDecl,
+          nkVarDecl, nkRoutine, nkAnonMethod]) do
+      LPar := LM.Tree.Nodes[LPar].Parent;
+    if (LPar <> NIL_NODE) and (LPar <> LNI) and
+       (LM.Tree.Nodes[LPar].Kind in [nkConstDecl, nkTypeDecl, nkVarDecl]) then
+    begin
+      var LDeclared: TArray<Int64> := nil;
+      LC := LM.Tree.Nodes[LPar].FirstChild;
+      while LC <> NIL_NODE do
+      begin
+        var LDS: Integer;
+        if (LM.Tree.Nodes[LC].Kind = nkIdent) and
+           (LC <> ANode) and DeclaredAt(AMid, LC, LDS) and (LDS <> ASym) and
+           (LM.Symbols[LDS].Kind in [skVar, skConst, skType]) and
+           (LM.Symbols[LDS].Scope >= 0) and
+           (LM.Symbols[LDS].Scope < LM.Scopes.Count) and
+           (LM.Scopes[LM.Symbols[LDS].Scope].Kind in [sckRoutine, sckBlock])
+        then
+          LDeclared := LDeclared + [K(AMid, LDS)];
+        LC := LM.Tree.Nodes[LC].NextSibling;
+      end;
+      if LDeclared <> nil then
+      begin
+        for var LD in LDeclared do
+        begin
+          var LHas := False;
+          for var LE in LRes.Edges do
+            if LE = LD then
+              LHas := True;
+          if not LHas then
+            LRes.Edges := LRes.Edges + [LD];
+        end;
+        Exit;
+      end;
+    end;
     if PlainWrite(LM, AMid, ANode, False, LW, LCall) and LW and LWritable then
     begin
       if VisPos(LM, LM.Tree.NodeLeftmostVis(ANode), LFi, LLine, LCol) then
@@ -6720,6 +6896,11 @@ var
       else if (LCallee <> NIL_NODE) and
         LM.ExtRefMap.TryGetValue(LCallee, LExt) then
         LEdge := ParamAt(LExt.UnitId, LExt.Sym, LIdx);
+      // A library routine's parameter is never weighed (not an own unit):
+      // passed into one, the value is read - said here, before weighing that
+      // parameter hydrates its unit.
+      if (LEdge <> -1) and not OwnUnit(Integer(LEdge shr 32)) then
+        LEdge := -1;
       if LEdge <> -1 then
       begin
         for var LE in LRes.Edges do
@@ -6750,8 +6931,9 @@ begin
     Exit;
   LS := LM.Symbols[ASym];
   LRes.SymKind := LS.Kind;
+  // A local type (0.213.0) as a local constant: any reference reads it.
   if (LS.DeclNode = NIL_NODE) or (LS.NameLower = '') or
-     not (LS.Kind in [skParam, skVar, skConst]) or (LS.Scope < 0) or
+     not (LS.Kind in [skParam, skVar, skConst, skType]) or (LS.Scope < 0) or
      (LS.Scope >= LM.Scopes.Count) or
      not (LM.Scopes[LS.Scope].Kind in [sckRoutine, sckBlock]) then
   begin
@@ -6777,7 +6959,14 @@ begin
     LNI := LRoutine;
     LOwnerName := '';
     LSkip := -1;
-    if LM.Tree.Nodes[LRoutine].Kind = nkRoutine then
+    LLazySkip := NIL_SYM;
+    // A local's routine - its key and name - is wanted only once it is read
+    // nowhere, and finding a method's from its implementation header costs:
+    // asked first for every local, 3 of the 3.4 s the client group's main
+    // analysis spent on locals. A parameter's decides whether it is weighed.
+    LDeferred := (LS.Kind <> skParam) and
+      (LM.Tree.Nodes[LRoutine].Kind = nkRoutine);
+    if (LM.Tree.Nodes[LRoutine].Kind = nkRoutine) and not LDeferred then
     begin
       LRKey := RoutineKeyOf(AMid, LRoutine);
       if (LRKey <> -1) and (Integer(LRKey shr 32) = AMid) then
@@ -6787,7 +6976,12 @@ begin
         LOwnerName := QualifiedName(LM, LRSym);
         if LS.Kind = skParam then
         begin
-          LSkip := RoutineSkip(AMid, LRSym);
+          // A whole run asks it only of a parameter read nowhere (below):
+          // AddressTaken searches the group for the routine's references.
+          if FLazySkip then
+            LLazySkip := LRSym
+          else
+            LSkip := RoutineSkip(AMid, LRSym);
           LND := RoutineNodeOf(LM, LRSym);
           LNI := FNav.RoutineImplNode(AMid, LRSym);
           // Its name in both headers: the declaration's first (the key).
@@ -6831,7 +7025,7 @@ begin
     end
     else if LS.Kind = skParam then
       LSkip := Ord(usSignature)   // an anonymous method's: its type's
-    else
+    else if not LDeferred then
       LOwnerName := 'anonymous method';
     if LOwnerName = '' then
       LOwnerName := LM.Symbols[ASym].Name
@@ -6871,52 +7065,54 @@ begin
     LLive := False;
     LUnboundSeen := False;
     LName := LS.NameLower;
-    LStack := TStack<Integer>.Create;
-    try
-      LStack.Push(LNI);
-      while LStack.Count > 0 do
+    // The body walked once for every parameter and local of it (BodyOf); its
+    // nodes visited here in the walk's order, as one walk per value did.
+    var LBody := BodyOf(AMid, LNI);
+    var LSeqs: TArray<Integer> := nil;
+    for var LSy in LSyms.Keys do
+    begin
+      var LList: TList<Integer>;
+      if LBody.BySym.TryGetValue(LSy, LList) then
+        LSeqs := LSeqs + LList.ToArray;
+    end;
+    var LUnboundSeq: Integer;
+    if not LBody.Unbound.TryGetValue(LName, LUnboundSeq) then
+      LUnboundSeq := -1;
+    TArray.Sort<Integer>(LSeqs);
+    var LSi := 0;
+    while (LSi <= High(LSeqs)) or (LUnboundSeq >= 0) do
+    begin
+      // A bare name bound to nothing may be this one (a `with` the index
+      // could not follow) - said once, where the walk met it.
+      if (LUnboundSeq >= 0) and ((LSi > High(LSeqs)) or
+         (LUnboundSeq < LSeqs[LSi])) then
       begin
-        var LN := LStack.Pop;
-        if (LN < Length(LM.RefMap)) and (LM.RefMap[LN] <> NIL_SYM) and
-           LSyms.ContainsKey(LM.RefMap[LN]) then
+        var LN := LBody.Seq[LUnboundSeq];
+        LUnboundSeq := -1;
+        if VisPos(LM, LM.Tree.NodeLeftmostVis(LN), LFi, LLine, LCol) then
         begin
-          if not (nfName in LM.Tree.Nodes[LN].Flags) then
-            Place(LN);
-        end
-        else if not LUnboundSeen and (LM.Tree.Nodes[LN].Kind = nkIdent) and
-          not (nfName in LM.Tree.Nodes[LN].Flags) and
-          ((LN >= Length(LM.RefMap)) or (LM.RefMap[LN] = NIL_SYM)) and
-          not LM.ExtRefMap.ContainsKey(LN) and
-          (LM.Tree.NodeNameLower(LN) = LName) then
-        begin
-          // `X.Name` is a member of X; a bare Name bound to nothing may be
-          // this one (a `with` the index could not follow).
-          var LPar := LM.Tree.Nodes[LN].Parent;
-          if not ((LPar <> NIL_NODE) and (LM.Tree.Nodes[LPar].Kind = nkMember)
-             and (LM.Tree.Nodes[LPar].FirstChild <> LN)) and
-             VisPos(LM, LM.Tree.NodeLeftmostVis(LN), LFi, LLine, LCol) then
-          begin
-            LUnboundSeen := True;
-            LRes.Doubts := LRes.Doubts + [Format('the name is written where '
-              + 'the index bound nothing (%s:%d) - it may be a use of this '
-              + 'one', [ExtractFileName(LM.Tree.Source.FileNames[LFi]),
-              LLine])];
-          end;
+          LUnboundSeen := True;
+          LRes.Doubts := LRes.Doubts + [Format('the name is written where '
+            + 'the index bound nothing (%s:%d) - it may be a use of this '
+            + 'one', [ExtractFileName(LM.Tree.Source.FileNames[LFi]),
+            LLine])];
         end;
-        var LC := LM.Tree.Nodes[LN].FirstChild;
-        while LC <> NIL_NODE do
-        begin
-          LStack.Push(LC);
-          LC := LM.Tree.Nodes[LC].NextSibling;
-        end;
+        Continue;
       end;
-    finally
-      LStack.Free;
+      var LN := LBody.Seq[LSeqs[LSi]];
+      Inc(LSi);
+      // Not its declaration: a constant's or a type's name carries no
+      // nfName, and bound to itself it read as a use (0.213.0).
+      if not (nfName in LM.Tree.Nodes[LN].Flags) and
+         (LM.Symbols[LM.RefMap[LN]].DeclNode <> LN) then
+        Place(LN);
     end;
     // The name in a branch of the routine this configuration does not
-    // compile.
+    // compile - a doubt only a value read nowhere needs: most are read, and
+    // the file's every skipped range searched for each of them cost seconds
+    // a whole run once locals were weighed.
     var LFirst, LLast: Integer;
-    if LM.Tree.NodeVisRange(LNI, LFirst, LLast) and
+    if not LLive and LM.Tree.NodeVisRange(LNI, LFirst, LLast) and
        (LM.Tree.Source.Visible[LFirst].FileId =
        LM.Tree.Source.Visible[LLast].FileId) then
     begin
@@ -6936,6 +7132,27 @@ begin
               [ExtractFileName(LM.Tree.Source.FileNames[LFi]), LLine])];
             Break;
           end;
+    end;
+    if (LLazySkip <> NIL_SYM) and not LLive then
+    begin
+      LSkip := RoutineSkip(AMid, LLazySkip);
+      if LSkip >= 0 then
+      begin
+        LRes.Kind := uvkSkip;
+        LRes.Skip := TPasUnusedSkip(LSkip);
+        Finish;
+        Exit(LRes);
+      end;
+    end;
+    if LDeferred and not LLive then
+    begin
+      LRKey := RoutineKeyOf(AMid, LRoutine);
+      if (LRKey <> -1) and (Integer(LRKey shr 32) = AMid) then
+      begin
+        LRes.Routine := LRKey;
+        LRes.Name := QualifiedName(LM, Integer(Cardinal(LRKey and
+          $FFFFFFFF))) + '.' + LS.Name;
+      end;
     end;
     if LLive then
       LRes.Kind := uvkLive
@@ -7028,6 +7245,25 @@ begin
     ARow.Kind := AValue.SymKind;
     ARow.Doubts := AValue.Doubts;
     ARow.Writes := AValue.Writes;
+    // The nested routines that are rows and use it: By, their doubts with it.
+    for var LD in AValue.DeadBy do
+    begin
+      var LDMid := Integer(LD shr 32);
+      var LDSym := Integer(Cardinal(LD and $FFFFFFFF));
+      var LDName := QualifiedName(FProj.Model(LDMid), LDSym);
+      ARow.By := ARow.By + [LDName];
+      for var LC in FCands do
+        if (LC.UnitId = LDMid) and (LC.Sym = LDSym) then
+        begin
+          if LC.Doubts <> nil then
+            ARow.Doubts := ARow.Doubts + [Format('%s, which uses it, has a '
+              + 'doubt of its own', [LDName])];
+          Break;
+        end;
+    end;
+    // Passed into dead parameters: made by them. Else assigned where it
+    // lives and read only by dead nested routines: only assigned, By the
+    // routines (uhOnlyWritten's "any other use by rows").
     if AValue.Edges <> nil then
     begin
       ARow.How := uhOnlyByUnused;
@@ -7042,6 +7278,8 @@ begin
     end
     else if AValue.Writes <> nil then
       ARow.How := uhOnlyWritten
+    else if AValue.DeadBy <> nil then
+      ARow.How := uhOnlyByUnused
     else
       ARow.How := uhUnused;
   finally
@@ -7292,6 +7530,7 @@ begin
     // headers are one), none of a routine that is a row itself.
     if AOptions <> [] then
     begin
+      LLint.FLazySkip := True;
       var LSeen := TDictionary<Int64, Boolean>.Create;
       try
         for var LMid in AMids do
@@ -7304,7 +7543,8 @@ begin
           begin
             var LS := LM.Symbols[LSym];
             if not (((uoParams in AOptions) and (LS.Kind = skParam)) or
-               ((uoLocals in AOptions) and (LS.Kind in [skVar, skConst]))) or
+               ((uoLocals in AOptions) and
+               (LS.Kind in [skVar, skConst, skType]))) or
                (LS.DeclNode = NIL_NODE) or (LS.Scope < 0) or
                (LS.Scope >= LM.Scopes.Count) or
                not (LM.Scopes[LS.Scope].Kind in [sckRoutine, sckBlock]) then
@@ -7315,6 +7555,33 @@ begin
                LSeen.TryAdd(TUnusedLint.K(LRow.UnitId, LRow.Sym), True) and
                not LLint.FUnused.ContainsKey(LV.Routine) then
               LKept.Add(LRow);
+          end;
+        end;
+        // A member of a local type that is a row goes with it (0.213.0), as
+        // one of a row type of the unit does (InRowType).
+        for var LIdx := LKept.Count - 1 downto 0 do
+        begin
+          var LR := LKept[LIdx];
+          var LM := ANav.Project.Model(LR.UnitId);
+          var LSc := LM.Symbols[LR.Sym].Scope;
+          var LInRow := False;
+          while (LSc >= 0) and (LSc < LM.Scopes.Count) and
+                (LM.Scopes[LSc].Kind = sckStruct) and
+                (LM.Scopes[LSc].StructSym <> NIL_SYM) do
+          begin
+            var LOwner := LM.Scopes[LSc].StructSym;
+            if (LM.Symbols[LOwner].Kind = skType) and
+               LSeen.ContainsKey(TUnusedLint.K(LR.UnitId, LOwner)) then
+            begin
+              LInRow := True;
+              Break;
+            end;
+            LSc := LM.Symbols[LOwner].Scope;
+          end;
+          if LInRow then
+          begin
+            LOut.Add(LR);
+            LKept.Delete(LIdx);
           end;
         end;
       finally
@@ -7362,6 +7629,64 @@ begin
   Result := CheckUnusedSymbols(ANav, ATargets, Default(TPasUnusedLibrary));
 end;
 
+// The routines nested in the routine a local of ATargets is declared in (a
+// var, const or type of a body, at any depth): weighed with it, so a local
+// only a dead nested routine uses is a row made by it, as in a whole run.
+function NestedRoutinesOfLocals(ANav: TPasNavigator;
+  const ATargets: TArray<TPasExtRef>): TArray<TPasExtRef>;
+var
+  LSeen: TDictionary<Int64, Boolean>;
+begin
+  Result := nil;
+  LSeen := TDictionary<Int64, Boolean>.Create;
+  try
+    for var LT in ATargets do
+      LSeen.AddOrSetValue(TUnusedLint.K(LT.UnitId, LT.Sym), True);
+    for var LT in ATargets do
+    begin
+      if (LT.UnitId < 0) or (LT.UnitId >= ANav.Project.ModelCount) or
+         not ANav.Project.EnsureHydrated(LT.UnitId) then
+        Continue;
+      var LM := ANav.Project.Model(LT.UnitId);
+      if (LT.Sym < 0) or (LT.Sym >= LM.SymCount) then
+        Continue;
+      var LS := LM.Symbols[LT.Sym];
+      if not (LS.Kind in [skVar, skConst, skType]) or
+         (LS.DeclNode = NIL_NODE) or (LS.Scope < 0) or
+         (LS.Scope >= LM.Scopes.Count) or
+         not (LM.Scopes[LS.Scope].Kind in [sckRoutine, sckBlock]) then
+        Continue;
+      var LRoutine := LM.Tree.Nodes[LS.DeclNode].Parent;
+      while (LRoutine <> NIL_NODE) and
+            (LM.Tree.Nodes[LRoutine].Kind <> nkRoutine) do
+        LRoutine := LM.Tree.Nodes[LRoutine].Parent;
+      if LRoutine = NIL_NODE then
+        Continue;
+      for var LSym := 0 to LM.SymCount - 1 do
+      begin
+        var LR := LM.Symbols[LSym];
+        if (LR.Kind <> skRoutine) or (LR.DeclNode = NIL_NODE) or
+           (LR.Scope < 0) or (LR.Scope >= LM.Scopes.Count) or
+           (LM.Scopes[LR.Scope].Kind <> sckRoutine) then
+          Continue;
+        var LN := LM.Tree.Nodes[LR.DeclNode].Parent;
+        while (LN <> NIL_NODE) and (LN <> LRoutine) do
+          LN := LM.Tree.Nodes[LN].Parent;
+        if (LN = LRoutine) and
+           LSeen.TryAdd(TUnusedLint.K(LT.UnitId, LSym), True) then
+        begin
+          var LExt: TPasExtRef;
+          LExt.UnitId := LT.UnitId;
+          LExt.Sym := LSym;
+          Result := Result + [LExt];
+        end;
+      end;
+    end;
+  finally
+    LSeen.Free;
+  end;
+end;
+
 function CheckUnusedSymbols(ANav: TPasNavigator;
   const ATargets: TArray<TPasExtRef>;
   const ALibrary: TPasUnusedLibrary): TArray<TPasUnusedCheck>;
@@ -7377,7 +7702,7 @@ begin
   SetLength(Result, Length(ATargets));
   // The declarations the targets' uses sit in are weighed too, and theirs,
   // round by round: a getter is dead when its property is.
-  LAll := ATargets;
+  LAll := ATargets + NestedRoutinesOfLocals(ANav, ATargets);
   LLint := TUnusedLint.Create(ANav);
   try
     LLint.SetLibrary(ALibrary);

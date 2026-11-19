@@ -1866,14 +1866,39 @@ doubt unchanged.
 
 ### 15.2 Parameters and locals (PasTree 0.204.0)
 
-`CheckUnusedSymbols` answers a parameter or a local (a `var` or `const` of
-a routine body, an inline one) by its own rule; `FindUnusedSymbols(ANav,
-AMids, AOptions, ...)` lists them as rows with `uoParams` / `uoLocals`
-(off by default: a parameter is part of a signature, and a local is dcc's
-to hint - H2164 never used, H2077 a value assigned never used, but nothing
-for "only ever assigned"). A row's `Name` is its routine's and its own
-(`TWork.Run.ADead`); a parameter or local of a routine that is a row is not
-listed - it goes with the routine.
+`CheckUnusedSymbols` answers a parameter or a local (a `var`, `const` or
+`type` of a routine body, an inline one) by its own rule;
+`FindUnusedSymbols(ANav, AMids, AOptions, ...)` lists them as rows with
+`uoParams` / `uoLocals` (off by default: a parameter is part of a
+signature). Locals are not left to dcc: its H2164 and H2077 cover a
+variable of an unmanaged type only - nothing for a constant or a type,
+nothing for a string, interface or dynamic array variable (initialized and
+finalized, so never "unused" to dcc), nothing for "only ever assigned" and
+nothing for a local read only by a dead nested routine. A row's `Name` is
+its routine's and its own (`TWork.Run.ADead`); a parameter or local of a
+routine that is a row is not listed - it goes with the routine, as does a
+member of a local type that is a row.
+
+A use inside a nested routine that is a row (the unit's own fixed point,
+final when locals are weighed) is a use by it (0.213.0): a local whose
+every use sits in such routines is a row "used only by unused X" (`By`
+naming them, their doubts inherited), one also assigned where it lives
+"only assigned" with the same `By` - `Outer.CDeadOnly`, read only by the
+dead `DeadHelper`. Asked alone (`CheckUnusedSymbols`), a local brings the
+routines nested in its routine into the weighing, so the verdict is the
+whole run's. Before 0.213.0 a local constant or type was never a row: its
+declaration's name, which carries no `nfName`, read as its own use. A use
+inside another local's declaration (`CMaxStay = 60 * CPerDay`, `L:
+TLocalRec`) is an edge to it, as a parameter passed on: dead when every
+name declared there is.
+
+What a whole run with `uoLocals` costs (pastree-mcp on a client group of
+1,970 own units, 32,000 locals in its main analysis: 10 s -> 13 s): a body
+is walked once for all its values (`TUnusedBody`); a local's routine is
+found only once it is read nowhere; an argument to a library routine is a
+read (its parameter is never weighed - weighing it hydrated its unit); and
+a parameter's skip (`RoutineSkip`, whose `AddressTaken` searches the
+group) is asked in a whole run only once the parameter is read nowhere.
 
 A parameter is weighed only where the signature is the routine's own to
 change. Not weighed (`TPasUnusedCheck.Skip`): a virtual, dynamic, override,
