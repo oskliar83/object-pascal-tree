@@ -4134,6 +4134,28 @@ const
     'procedure Ov(AOv: Integer); begin end;'#13#10 +
     'procedure Ov(const S: string); begin if S = '''' then Exit; end;'#13#10 +
     'procedure DeadRoutine(X: Integer); begin end;'#13#10 +
+    'procedure Outer;'#13#10 +
+    'const'#13#10 +
+    '  CDeadOnly = 5;'#13#10 +
+    '  CLive = 6;'#13#10 +
+    '  CPerDay = 1440;'#13#10 +
+    '  CMaxStay = 60 * CPerDay;'#13#10 +
+    'type'#13#10 +
+    '  TLocalDead = record X: Integer; end;'#13#10 +
+    '  TLocalRec = record Y: Integer; end;'#13#10 +
+    'var'#13#10 +
+    '  LDeadRead, LMgr: string;'#13#10 +
+    '  LRec: TLocalRec;'#13#10 +
+    '  function DeadHelper: Integer;'#13#10 +
+    '  var LT: TLocalDead;'#13#10 +
+    '  begin'#13#10 +
+    '    LT.X := CDeadOnly;'#13#10 +
+    '    Result := LT.X + Length(LDeadRead);'#13#10 +
+    '  end;'#13#10 +
+    'begin'#13#10 +
+    '  LDeadRead := ''a'';'#13#10 +
+    '  if CLive > 0 then Exit;'#13#10 +
+    'end;'#13#10 +
     'var'#13#10 +
     '  GH: THandler;'#13#10 +
     '  GW: TWork;'#13#10 +
@@ -4146,6 +4168,7 @@ const
     '  GN := SnippetRowFor(''x'', 1);'#13#10 +
     '  ByVar(GN);'#13#10 +
     '  Ov(GN); Ov(''s'');'#13#10 +
+    '  Outer;'#13#10 +
     '  if Assigned(GH) and (GN > 0) then GW.Free;'#13#10 +
     'end.'#13#10;
 var
@@ -4167,7 +4190,7 @@ var
     LM := LProj.Model(LMid);
     for var LI := 0 to LM.SymCount - 1 do
       if (LM.Symbols[LI].NameLower = LowerCase(AName)) and
-         (LM.Symbols[LI].Kind in [skParam, skVar]) and
+         (LM.Symbols[LI].Kind in [skParam, skVar, skConst, skType]) and
          (LM.Symbols[LI].DeclNode <> NIL_NODE) then
       begin
         Result.Sym := LI;
@@ -4260,6 +4283,49 @@ begin
       (Row('RowTag.ACommand') >= 0) and (Row('TWork.Run.LNever') >= 0) and
       (Row('DeadRoutine') >= 0) and (Row('DeadRoutine.X') < 0) and
       (Row('TWork.Run.AUsed') < 0) and (Row('TBase.Virt.A') < 0));
+    // Locals a dead nested routine alone uses go with it (0.213.0): a
+    // constant, a local type, a variable assigned in the body but read only
+    // there; a managed local never named is a row too (dcc hints none of
+    // them). The dead routine's own local is not listed - it goes with it.
+    LNames := '';
+    for var LR in LRows do
+    begin
+      LNames := LNames + LR.Name + '/' + IntToStr(Ord(LR.How));
+      for var LB in LR.By do
+        LNames := LNames + '<' + LB + '>';
+      LNames := LNames + ' ';
+    end;
+    var LDeadHelper := Row('DeadHelper');
+    Ok('unused locals: a constant, a type, a variable only a dead nested '
+      + 'routine uses (' + LNames + ')', (LDeadHelper >= 0) and
+      (Row('Outer.CDeadOnly') >= 0) and
+      (LRows[Row('Outer.CDeadOnly')].How = uhOnlyByUnused) and
+      (Length(LRows[Row('Outer.CDeadOnly')].By) = 1) and
+      SameText(LRows[Row('Outer.CDeadOnly')].By[0], 'DeadHelper') and
+      (Row('Outer.TLocalDead') >= 0) and
+      (LRows[Row('Outer.TLocalDead')].How = uhOnlyByUnused) and
+      (Row('Outer.LDeadRead') >= 0) and
+      (LRows[Row('Outer.LDeadRead')].How = uhOnlyWritten) and
+      (Length(LRows[Row('Outer.LDeadRead')].By) = 1) and
+      (Row('Outer.LMgr') >= 0) and
+      (LRows[Row('Outer.LMgr')].How = uhUnused) and
+      (Row('Outer.CLive') < 0) and (Row('DeadHelper.LT') < 0) and (Row('TLocalDead.X') < 0));
+    // A local only another dead local's declaration names goes with it: a
+    // constant in a dead constant's value, a type of a dead variable.
+    Ok('unused locals: used only in a dead local''s declaration (' + LNames +
+      ')', (Row('Outer.CMaxStay') >= 0) and (Row('Outer.CPerDay') >= 0) and
+      (LRows[Row('Outer.CPerDay')].How = uhOnlyByUnused) and
+      (Length(LRows[Row('Outer.CPerDay')].By) = 1) and
+      SameText(LRows[Row('Outer.CPerDay')].By[0], 'Outer.CMaxStay') and
+      (Row('Outer.LRec') >= 0) and (Row('Outer.TLocalRec') >= 0) and
+      (LRows[Row('Outer.TLocalRec')].How = uhOnlyByUnused));
+    LChecks := CheckUnusedSymbols(LNav, [SymOf('CDeadOnly'), SymOf('CLive'),
+      SymOf('TLocalDead')]);
+    LNames := Verdict(0) + '; ' + Verdict(1) + '; ' + Verdict(2);
+    Ok('unused locals: asked alone, the nested routines weighed too (' +
+      LNames + ')', (LChecks[0].Verdict = uvUnused) and
+      (LChecks[0].Row.How = uhOnlyByUnused) and
+      (LChecks[1].Verdict = uvUsed) and (LChecks[2].Verdict = uvUnused));
   finally
     LNav.Free;
     LProj.Free;

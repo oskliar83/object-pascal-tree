@@ -339,6 +339,13 @@ type
       out ASkips: TPasUnusedSkips;
       out AInRowTypes: TArray<TPasUnusedSymbol>): TArray<TPasUnusedSymbol>;
       overload;
+    // The same, with the parameters and locals AOptions asks for as rows
+    // (uoParams, uoLocals - PasTree.Sema.Lint.FindUnusedSymbols).
+    function FindUnusedSymbols(const AFiles: TArray<string>;
+      AOptions: TPasUnusedOptions; const ALibrary: TPasUnusedLibrary;
+      const AExported: TArray<string>; out ASkips: TPasUnusedSkips;
+      out AInRowTypes: TArray<TPasUnusedSymbol>): TArray<TPasUnusedSymbol>;
+      overload;
     // The verdict on each declaration AKeys names, in their order
     // (PasTree.Sema.Lint.CheckUnusedSymbols); uvNotFound for a key that
     // resolves to nothing here.
@@ -1425,6 +1432,15 @@ function TPasWorkspace.FindUnusedSymbols(const AFiles: TArray<string>;
   const ALibrary: TPasUnusedLibrary; const AExported: TArray<string>;
   out ASkips: TPasUnusedSkips;
   out AInRowTypes: TArray<TPasUnusedSymbol>): TArray<TPasUnusedSymbol>;
+begin
+  Result := FindUnusedSymbols(AFiles, [], ALibrary, AExported, ASkips,
+    AInRowTypes);
+end;
+
+function TPasWorkspace.FindUnusedSymbols(const AFiles: TArray<string>;
+  AOptions: TPasUnusedOptions; const ALibrary: TPasUnusedLibrary;
+  const AExported: TArray<string>; out ASkips: TPasUnusedSkips;
+  out AInRowTypes: TArray<TPasUnusedSymbol>): TArray<TPasUnusedSymbol>;
 var
   LFiles: TArray<string>;
   LLib: TPasUnusedLibrary;
@@ -1438,8 +1454,8 @@ begin
   // After Prepare: a rebuild renumbers the models.
   LLib := ALibrary;
   LLib.Units := LLib.Units + MidsOf(AExported);
-  Result := PasTree.Sema.Lint.FindUnusedSymbols(FNav, MidsOf(AFiles), [],
-    LLib, ASkips, AInRowTypes);
+  Result := PasTree.Sema.Lint.FindUnusedSymbols(FNav, MidsOf(AFiles),
+    AOptions, LLib, ASkips, AInRowTypes);
   Finish;
 end;
 
