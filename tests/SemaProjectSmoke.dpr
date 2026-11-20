@@ -14554,6 +14554,406 @@ begin
   end;
 end;
 
+// The lines of AModel's ACode diagnostics, ascending, joined by spaces.
+function DiagLinesOf(AModel: TPasSemaModel; const ACode: string): string;
+var
+  LLines: TList<Integer>;
+begin
+  LLines := TList<Integer>.Create;
+  try
+    for var LIdx := 0 to High(AModel.Diags) do
+      if AModel.Diags[LIdx].Code = ACode then
+        LLines.Add(AModel.Diags[LIdx].Line);
+    LLines.Sort;
+    Result := '';
+    for var LLine in LLines do
+    begin
+      if Result <> '' then
+        Result := Result + ' ';
+      Result := Result + IntToStr(LLine);
+    end;
+  finally
+    LLines.Free;
+  end;
+end;
+
+// An array or pointer type written inline is a type of its own, shared by
+// the names of one declaration (spec 8.1.1, 10.1.2): two declarations are
+// E2008 (both anonymous), an anonymous against a named one E2010 naming
+// the anonymous one by its shape (`array[0..2] of Integer`, nested arrays
+// for two dimensions, `Pointer`); `=` / `<>` take what the assignment
+// takes either way (E2015 for two static arrays not of characters); a
+// `[...]` goes to no static array (E2010 'TSA' and 'Set'); under {$T+} at
+// the statement two pointers of one base meet. The silent lines are legal
+// (dcc64 37.0, local/probe-park/sa-compat P1-P5, spec-audit ArrCompat,
+// PCompat, PCompat3).
+procedure TestAnonArrayPtrCompat;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_anoncompat');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'AnonCmp.dpr'),
+    'program AnonCmp;'#10 +                                  // 1
+    'type'#10 +                                              // 2
+    '  TDA = array of Integer;'#10 +                         // 3
+    '  TSA = array[0..1] of Integer;'#10 +                   // 4
+    '  PInt = ^Integer;'#10 +                                // 5
+    '  TCA = array[0..3] of Char;'#10 +                      // 6
+    'const N = 3;'#10 +                                      // 7
+    'var'#10 +                                               // 8
+    '  A1: array of Integer;'#10 +                           // 9
+    '  A2: array of Integer;'#10 +                           // 10
+    '  A3, A4: array of Integer;'#10 +                       // 11
+    '  D1: TDA;'#10 +                                        // 12
+    '  S1: array[0..N-1] of Integer;'#10 +                   // 13
+    '  S2: array[0..1, 2..3] of Integer;'#10 +               // 14
+    '  S3, S4: array[0..1] of Integer;'#10 +                 // 15
+    '  T1: TSA;'#10 +                                        // 16
+    '  P1: ^Integer;'#10 +                                   // 17
+    '  P2: ^Integer;'#10 +                                   // 18
+    '  P3, P4: ^Integer;'#10 +                               // 19
+    '  C: PInt;'#10 +                                        // 20
+    '  F: ^Byte;'#10 +                                       // 21
+    '  G: Pointer;'#10 +                                     // 22
+    '  C1, C2: TCA;'#10 +                                    // 23
+    '  C3: array[0..3] of Char;'#10 +                        // 24
+    '  I: Integer;'#10 +                                     // 25
+    '  R: record X1: array of Integer; X2: array of Integer; X3, X4: ^Integer; end;'#10 + // 26
+    'procedure TP;'#10 +                                     // 27
+    'begin'#10 +                                             // 28
+    '  {$T+}'#10 +                                           // 29
+    '  P1 := C; C := P1; P3 := P1;'#10 +                     // 30
+    '  if P1 = C then ;'#10 +                                // 31
+    '  F := @I;'#10 +                                        // 32
+    '  P1 := @I;'#10 +                                       // 33
+    '  C := F;'#10 +                                         // 34
+    '  {$T-}'#10 +                                           // 35
+    'end;'#10 +                                              // 36
+    'begin'#10 +                                             // 37
+    '  A1 := A2;'#10 +                                       // 38 E2008
+    '  A3 := A4;'#10 +                                       // 39
+    '  A1 := D1;'#10 +                                       // 40 E2010
+    '  T1 := S1;'#10 +                                       // 41 E2010
+    '  T1 := S2;'#10 +                                       // 42 E2010
+    '  S3 := S4;'#10 +                                       // 43
+    '  P1 := P2;'#10 +                                       // 44 E2008
+    '  P3 := P4;'#10 +                                       // 45
+    '  P1 := C;'#10 +                                        // 46 E2010
+    '  C := F;'#10 +                                         // 47 E2010
+    '  F := G; G := C; P1 := nil; P1 := @I;'#10 +            // 48
+    '  A1 := nil; A1 := [1, 2];'#10 +                        // 49
+    '  if A1 = A2 then ;'#10 +                               // 50 E2008
+    '  if A3 = A4 then ;'#10 +                               // 51
+    '  if S3 = S4 then ;'#10 +                               // 52 E2015
+    '  if T1 = T1 then ;'#10 +                               // 53 E2015
+    '  if C1 = C2 then ; if C1 = C3 then ;'#10 +             // 54
+    '  if P1 = C then ;'#10 +                                // 55 E2010
+    '  if C = G then ; if C = nil then ; if P3 <> P4 then ;'#10 + // 56
+    '  T1 := [1, 2];'#10 +                                   // 57 E2010
+    '  S3 := [];'#10 +                                       // 58 E2010
+    '  C3 := ''abc'';'#10 +                                  // 59
+    '  R.X1 := R.X2;'#10 +                                   // 60 E2008
+    '  R.X3 := R.X4;'#10 +                                   // 61
+    '  if A1 = D1 then ;'#10 +                               // 62 E2010
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'AnonCmp.dpr'));
+    LM := ModelByName('anoncmp');
+    Ok('anoncompat: E2008 lines [' + DiagLinesOf(LM, 'E2008') + ']',
+      DiagLinesOf(LM, 'E2008') = '32 38 44 50 60');
+    Ok('anoncompat: E2010 lines [' + DiagLinesOf(LM, 'E2010') + ']',
+      DiagLinesOf(LM, 'E2010') = '34 40 41 42 46 47 55 57 58 62');
+    Ok('anoncompat: E2015 lines [' + DiagLinesOf(LM, 'E2015') + ']',
+      DiagLinesOf(LM, 'E2015') = '52 53');
+    Ok('anoncompat: an anonymous dynamic array is `array of Integer`',
+      DiagHasText(LM, 'E2010', '''array of Integer'' and ''TDA'''));
+    Ok('anoncompat: bounds folded',
+      DiagHasText(LM, 'E2010', '''TSA'' and ''array[0..2] of Integer'''));
+    Ok('anoncompat: two dimensions nest',
+      DiagHasText(LM, 'E2010',
+        '''TSA'' and ''array[0..1] of array[2..3] of Integer'''));
+    Ok('anoncompat: an anonymous pointer is Pointer',
+      DiagHasText(LM, 'E2010', '''Pointer'' and ''PInt''') and
+      DiagHasText(LM, 'E2010', '''PInt'' and ''Pointer'''));
+    Ok('anoncompat: a [...] for a static array is Set',
+      DiagHasText(LM, 'E2010', '''TSA'' and ''Set''') and
+      DiagHasText(LM, 'E2010', '''array[0..1] of Integer'' and ''Set'''));
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
+// A typed `var` / `out` parameter takes its own type alone (spec 6.2.2,
+// 10.1.2): E2033 naming the formal type, then the actual one - two typed
+// pointers to one base under {$T+} too, a Byte for an Integer, a distinct
+// copy, a descendant class, a typed pointer for Pointer, a field or an
+// element. An alias, a value cast, an overload set (6.3.1), an untyped and
+// an open-array parameter are silent (dcc64 37.0, local/probe-park/
+// sa-compat VarId.dpr, V1.dpr; spec-audit PCompat2).
+procedure TestVarParamIdentity;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_varid');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'VarId.dpr'),
+    'program VarId;'#10 +                                          // 1
+    '{$T+}'#10 +                                                   // 2
+    'type'#10 +                                                    // 3
+    '  PInt = ^Integer;'#10 +                                      // 4
+    '  PInt2 = ^Integer;'#10 +                                     // 5
+    '  PInt3 = PInt;'#10 +                                         // 6
+    '  TB = class end;'#10 +                                       // 7
+    '  TD = class(TB) end;'#10 +                                   // 8
+    '  TDI = type Integer;'#10 +                                   // 9
+    '  TAl = Integer;'#10 +                                        // 10
+    'procedure Take(var X: PInt); begin end;'#10 +                 // 11
+    'procedure TI(var I: Integer); begin end;'#10 +                // 12
+    'procedure TOut(out I: Integer); begin end;'#10 +              // 13
+    'procedure TObj(var O: TB); begin end;'#10 +                   // 14
+    'procedure TP(var P: Pointer); begin end;'#10 +                // 15
+    'procedure TOv(var I: Integer); overload; begin end;'#10 +     // 16
+    'procedure TOv(B: Byte); overload; begin end;'#10 +            // 17
+    'procedure TU(var X); begin end;'#10 +                         // 18
+    'procedure TOA(var A: array of Integer); begin end;'#10 +      // 19
+    'var'#10 +                                                     // 20
+    '  C: PInt; D: PInt2; E: PInt3;'#10 +                          // 21
+    '  I: Integer; Bt: Byte; DI: TDI; Al: TAl; LW: Cardinal;'#10 + // 22
+    '  B: TB; Dd: TD; P: Pointer; AI: array of Integer;'#10 +      // 23
+    '  R: record F: Byte; end;'#10 +                               // 24
+    '  Arr: array[0..1] of Byte;'#10 +                             // 25
+    'begin'#10 +                                                   // 26
+    '  Take(C); Take(E);'#10 +                                     // 27
+    '  Take(D);'#10 +                                              // 28 E2033
+    '  TI(I); TI(Al);'#10 +                                        // 29
+    '  TI(Bt);'#10 +                                               // 30 E2033
+    '  TOut(Bt);'#10 +                                             // 31 E2033
+    '  TI(DI);'#10 +                                               // 32 E2033
+    '  TObj(B);'#10 +                                              // 33
+    '  TObj(Dd);'#10 +                                             // 34 E2033
+    '  TP(P);'#10 +                                                // 35
+    '  TP(C);'#10 +                                                // 36 E2033
+    '  TI(Integer(LW));'#10 +                                      // 37
+    '  TOv(Bt); TU(Bt); TOA(AI);'#10 +                             // 38
+    '  TI(R.F);'#10 +                                              // 39 E2033
+    '  TI(Arr[0]);'#10 +                                           // 40 E2033
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'VarId.dpr'));
+    LM := ModelByName('varid');
+    Ok('varid: E2033 lines [' + DiagLinesOf(LM, 'E2033') + ']',
+      DiagLinesOf(LM, 'E2033') = '28 30 31 32 34 36 39 40');
+    Ok('varid: the formal type first',
+      DiagHasText(LM, 'E2033', 'identical: PInt and PInt2') and
+      DiagHasText(LM, 'E2033', 'identical: TB and TD') and
+      DiagHasText(LM, 'E2033', 'identical: Pointer and PInt') and
+      DiagHasText(LM, 'E2033', 'identical: Integer and TDI'));
+    Ok('varid: nothing else', DiagCount(LM, 'E2010') = 0);
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
+// Property declarations and their uses (spec 13.1.1, 13.1.2, 13.1.4,
+// 13.1.5): a field for an array property and an accessor whose index
+// parameter is of another type are E2008; a default value of a string or a
+// real E2146 (a Byte's compiles); a bare `default;` on a property with no
+// index E2132 (E2131's beside a default array property - not reported);
+// an element of the array a read-only property returns is writable
+// (`C2.L[0] := 1`, System.Classes' `aList.List[I] := nil`);
+// an assignment to a property with no `write` E2129 - through `with`, an
+// interface, a bare redeclaration, an element - and a read of one with no
+// `read` E2130; a redeclaration that adds `write` is writable, a value
+// argument is not judged (dcc64 37.0, local/probe-park/sa-compat
+// PropChk.dpr, Q1-Q3; spec-audit QArr).
+procedure TestPropertyAccessChecks;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_propchk');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    '  IInterface = interface end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'PropChk.dpr'),
+    'program PropChk;'#10 +                                               // 1
+    'type'#10 +                                                           // 2
+    '  TR = record A: Integer; end; TDA = array of Integer;'#10 +                              // 3
+    '  IR = interface'#10 +                                               // 4
+    '    function GetX: Integer;'#10 +                                    // 5
+    '    property X: Integer read GetX;'#10 +                             // 6
+    '  end;'#10 +                                                         // 7
+    '  TC = class'#10 +                                                   // 8
+    '  private'#10 +                                                      // 9
+    '    FArr: array[0..3] of Integer;'#10 +                              // 10
+    '    FS: string; FD: Double; FI: Integer; FR: TR; FCu: Currency; FB: Byte;'#10 + // 11
+    '    function GetI(I: Integer): Integer;'#10 +                        // 12
+    '    function GetBad(I: string): Integer;'#10 +                      // 13
+    '    procedure SetBad(I: Integer; V: string);'#10 +                   // 14
+    '    procedure SetI(V: Integer);'#10 +                                // 15
+    '    procedure SetA(I: Integer; V: Integer);'#10 +                    // 16
+    '  public'#10 +                                                       // 17
+    '    property A[I: Integer]: Integer read FArr;'#10 +                 // 18 E2008
+    '    property B[I: Integer]: Integer read GetBad;'#10 +               // 19 E2008
+    '    property C[I: Integer]: Integer read GetI write SetBad;'#10 +    // 20 E2008
+    '    property G[I: Integer]: Integer read GetI write SetA; default;'#10 + // 21
+    '    property S: string read FS default ''x'';'#10 +                  // 22 E2146
+    '    property D: Double read FD default 1;'#10 +                      // 23 E2146
+    '    property Cu: Currency read FCu default 0;'#10 +                  // 24 E2146
+    '    property By: Byte read FB default 1;'#10 +                       // 25
+    '    property N: Integer read FI; default;'#10 +                      // 26 (E2131)
+    '    property RO: Integer read FI;'#10 +                              // 27
+    '    property WO: Integer write SetI;'#10 +                           // 28
+    '    property RR: TR read FR;'#10 +                                   // 29
+    '    property P2: Integer read FI;'#10 +                              // 30
+    '    property W[I: Integer]: Integer write SetA;'#10 +                // 31
+    '  end;'#10 +                                                         // 32
+    '  TD = class(TC)'#10 +                                               // 33
+    '  public'#10 +                                                       // 34
+    '    property P2 write SetI;'#10 +                                    // 35
+    '    property RO;'#10 +                                               // 36
+    '  end;'#10 +                                                         // 37
+    '  TC2 = class'#10 +                                                  // 38
+    '  private'#10 +                                                      // 39
+    '    FI: Integer; FL: TDA;'#10 +                                              // 40
+    '  public property L: TDA read FL;'#10 +                                                      // 41
+    '    property N2: Integer read FI; default;'#10 +                     // 42 E2132
+    '  end;'#10 +                                                         // 43
+    'function TC.GetI(I: Integer): Integer; begin Result := I; end;'#10 + // 44
+    'function TC.GetBad(I: string): Integer; begin Result := 0; end;'#10 + // 45
+    'procedure TC.SetBad(I: Integer; V: string); begin end;'#10 +         // 46
+    'procedure TC.SetI(V: Integer); begin end;'#10 +                      // 47
+    'procedure TC.SetA(I: Integer; V: Integer); begin end;'#10 +          // 48
+    'procedure PC(const X: Integer); begin end;'#10 +                     // 49
+    'var O: TC; D: TD; R: IR; X: Integer; C2: TC2;'#10 +                           // 50
+    'begin'#10 +                                                          // 51
+    '  O.RO := 1;'#10 +                                                   // 52 E2129
+    '  X := O.WO;'#10 +                                                   // 53 E2130
+    '  if O.WO = 1 then ;'#10 +                                           // 54 E2130
+    '  O.WO := 1;'#10 +                                                   // 55
+    '  D.P2 := 5;'#10 +                                                   // 56
+    '  O.P2 := 5;'#10 +                                                   // 57 E2129
+    '  with O do RO := 2;'#10 +                                           // 58 E2129
+    '  X := O.WO + 1;'#10 +                                               // 59 E2130
+    '  D.RO := 1;'#10 +                                                   // 60 E2129
+    '  R.X := 1;'#10 +                                                    // 61 E2129
+    '  O.G[0] := 1;'#10 +                                                 // 62
+    '  X := O.W[0];'#10 +                                                 // 63 E2130
+    '  O.W[0] := 1;'#10 +                                                 // 64
+    '  with O do X := W[1];'#10 +                                         // 65 E2130
+    '  X := O.RO + O.G[1];'#10 +                                          // 66
+    '  PC(O.RO); C2.L[0] := 1;'#10 +                                                   // 67
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'PropChk.dpr'));
+    LM := ModelByName('propchk');
+    Ok('propchk: E2008 lines [' + DiagLinesOf(LM, 'E2008') + ']',
+      DiagLinesOf(LM, 'E2008') = '18 19 20');
+    Ok('propchk: E2146 lines [' + DiagLinesOf(LM, 'E2146') + ']',
+      DiagLinesOf(LM, 'E2146') = '22 23 24');
+    Ok('propchk: E2132 lines [' + DiagLinesOf(LM, 'E2132') + ']',
+      DiagLinesOf(LM, 'E2132') = '42');
+    Ok('propchk: E2129 lines [' + DiagLinesOf(LM, 'E2129') + ']',
+      DiagLinesOf(LM, 'E2129') = '52 57 58 60 61');
+    Ok('propchk: E2130 lines [' + DiagLinesOf(LM, 'E2130') + ']',
+      DiagLinesOf(LM, 'E2130') = '53 54 59 63 65');
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
+// Generic method inference (spec 16.5.1): E2531 where no parameter's type
+// mentions a type parameter (`Make`, `Make()`, a parameter of another type
+// with a default); E2532 where two arguments bound to one type parameter
+// differ - two values (a Byte and an Integer, a class and its descendant)
+// or two categories (an integer and a real literal, an integer and a
+// character, a string and a character). A literal of the other's category,
+// written type arguments, `nil` twice and an open-array element are not
+// reported (dcc64 37.0, local/probe-park/sa-compat G1.dpr; spec-audit
+// G03b).
+procedure TestGenericInferErrors;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_ginfer');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'GInf.dpr'),
+    'program GInf;'#10 +                                                  // 1
+    'type'#10 +                                                           // 2
+    '  TB = class end; TD = class(TB) end;'#10 +                          // 3
+    '  TU = class'#10 +                                                   // 4
+    '    class function Max<T>(const A, B: T): T; static;'#10 +           // 5
+    '    class function Make<T>: T; static;'#10 +                         // 6
+    '    class function First<T>(const A: array of T): T; static;'#10 +   // 7
+    '    class function Dflt<T>(const A: Integer = 0): T; static;'#10 +   // 8
+    '  end;'#10 +                                                         // 9
+    'class function TU.Max<T>(const A, B: T): T; begin Result := A; end;'#10 + // 10
+    'class function TU.Make<T>: T; begin Result := Default(T); end;'#10 + // 11
+    'class function TU.First<T>(const A: array of T): T; begin Result := A[0]; end;'#10 + // 12
+    'class function TU.Dflt<T>(const A: Integer = 0): T; begin Result := Default(T); end;'#10 + // 13
+    'var I: Integer; D: Double; B: Byte; S: string; O1: TB; O2: TD; C: Char; P: Pointer;'#10 + // 14
+    'begin'#10 +                                                          // 15
+    '  D := TU.Max(3, 7.5);'#10 +                                         // 16 E2532
+    '  I := TU.Make;'#10 +                                                // 17 E2531
+    '  D := TU.Max(1, ''a'');'#10 +                                       // 18 E2532
+    '  P := TU.Max(nil, nil);'#10 +                                       // 19
+    '  I := TU.Max(B, I);'#10 +                                           // 20 E2532
+    '  O1 := TU.Max(O1, O2);'#10 +                                        // 21 E2532
+    '  S := TU.Max(S, ''a'');'#10 +                                       // 22 E2532
+    '  D := TU.Max(D, 1);'#10 +                                           // 23 E2532
+    '  C := TU.Max(C, ''a'');'#10 +                                       // 24
+    '  D := TU.Max(1.5, 2.5);'#10 +                                       // 25
+    '  I := TU.Max(I, I);'#10 +                                           // 26
+    '  I := TU.First([1, 2]);'#10 +                                       // 27
+    '  I := TU.Dflt;'#10 +                                                // 28 E2531
+    '  I := TU.Make();'#10 +                                              // 29 E2531
+    '  I := TU.Max<Integer>(1, 2);'#10 +                                  // 30
+    '  I := TU.Make<Integer>;'#10 +                                       // 31
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'GInf.dpr'));
+    LM := ModelByName('ginf');
+    Ok('ginfer: E2531 lines [' + DiagLinesOf(LM, 'E2531') + ']',
+      DiagLinesOf(LM, 'E2531') = '17 28 29');
+    Ok('ginfer: E2532 lines [' + DiagLinesOf(LM, 'E2532') + ']',
+      DiagLinesOf(LM, 'E2532') = '16 18 20 21 22 23');
+    Ok('ginfer: the method named',
+      DiagHasText(LM, 'E2531', 'Method ''Make'' requires') and
+      DiagHasText(LM, 'E2532', 'for method ''Max'''));
+    Ok('ginfer: no E2010 [' + DiagLinesOf(LM, 'E2010') + ']',
+      DiagCount(LM, 'E2010') = 0);
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // Pointers in implicit conversion and overload ranking (6.3.1, 10.1.2, 4.8;
 // local/type-conv-2026-11/n7): a typed pointer type is nominal under {$T-}
 // (YA: PI for PI2 out), typed pointers of one base meet under {$T+} at the
@@ -23220,6 +23620,10 @@ begin
   TestLightLintReach;
   TestLightFind;
   TestHelperCarrier;
+  TestAnonArrayPtrCompat;
+  TestVarParamIdentity;
+  TestPropertyAccessChecks;
+  TestGenericInferErrors;
 
   if GCounter.Finish('SemaProjectSmoke') then
     ExitCode := 1;
