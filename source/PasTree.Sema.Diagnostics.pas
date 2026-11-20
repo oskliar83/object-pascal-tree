@@ -101,6 +101,13 @@ const
     'E2015 Operator not applicable to this operand type';
   // E2008 names nothing either: `I + True`, `Ch + I` (4.2.1).
   SE2008_IncompatibleTypes = 'E2008 Incompatible types';
+  // Property declarations (13.1.4, 13.1.5) and their uses (13.1.1).
+  SE2132_DefaultNotArrayProperty =
+    'E2132 Default property must be an array property';
+  SE2146_DefaultValueType =
+    'E2146 Default values must be of ordinal, pointer or small set type';
+  SE2129_ReadOnlyProperty = 'E2129 Cannot assign to a read-only property';
+  SE2130_WriteOnlyProperty = 'E2130 Cannot read a write-only property';
   // The formal type first, then the actual one (6.2.2).
   SE2033_VarParamNotIdentical =
     'E2033 Types of actual and formal var parameters must be identical: ' +

@@ -14403,6 +14403,119 @@ begin
   end;
 end;
 
+// Property declarations and their uses (spec 13.1.1, 13.1.2, 13.1.4,
+// 13.1.5): a field for an array property and an accessor whose index
+// parameter is of another type are E2008; a default value of a string or a
+// real E2146 (a Byte's compiles); a bare `default;` on a property with no
+// index E2132 (E2131's beside a default array property - not reported);
+// an element of the array a read-only property returns is writable
+// (`C2.L[0] := 1`, System.Classes' `aList.List[I] := nil`);
+// an assignment to a property with no `write` E2129 - through `with`, an
+// interface, a bare redeclaration, an element - and a read of one with no
+// `read` E2130; a redeclaration that adds `write` is writable, a value
+// argument is not judged (dcc64 37.0, local/probe-park/sa-compat
+// PropChk.dpr, Q1-Q3; spec-audit QArr).
+procedure TestPropertyAccessChecks;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_propchk');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    '  IInterface = interface end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'PropChk.dpr'),
+    'program PropChk;'#10 +                                               // 1
+    'type'#10 +                                                           // 2
+    '  TR = record A: Integer; end; TDA = array of Integer;'#10 +                              // 3
+    '  IR = interface'#10 +                                               // 4
+    '    function GetX: Integer;'#10 +                                    // 5
+    '    property X: Integer read GetX;'#10 +                             // 6
+    '  end;'#10 +                                                         // 7
+    '  TC = class'#10 +                                                   // 8
+    '  private'#10 +                                                      // 9
+    '    FArr: array[0..3] of Integer;'#10 +                              // 10
+    '    FS: string; FD: Double; FI: Integer; FR: TR; FCu: Currency; FB: Byte;'#10 + // 11
+    '    function GetI(I: Integer): Integer;'#10 +                        // 12
+    '    function GetBad(I: string): Integer;'#10 +                      // 13
+    '    procedure SetBad(I: Integer; V: string);'#10 +                   // 14
+    '    procedure SetI(V: Integer);'#10 +                                // 15
+    '    procedure SetA(I: Integer; V: Integer);'#10 +                    // 16
+    '  public'#10 +                                                       // 17
+    '    property A[I: Integer]: Integer read FArr;'#10 +                 // 18 E2008
+    '    property B[I: Integer]: Integer read GetBad;'#10 +               // 19 E2008
+    '    property C[I: Integer]: Integer read GetI write SetBad;'#10 +    // 20 E2008
+    '    property G[I: Integer]: Integer read GetI write SetA; default;'#10 + // 21
+    '    property S: string read FS default ''x'';'#10 +                  // 22 E2146
+    '    property D: Double read FD default 1;'#10 +                      // 23 E2146
+    '    property Cu: Currency read FCu default 0;'#10 +                  // 24 E2146
+    '    property By: Byte read FB default 1;'#10 +                       // 25
+    '    property N: Integer read FI; default;'#10 +                      // 26 (E2131)
+    '    property RO: Integer read FI;'#10 +                              // 27
+    '    property WO: Integer write SetI;'#10 +                           // 28
+    '    property RR: TR read FR;'#10 +                                   // 29
+    '    property P2: Integer read FI;'#10 +                              // 30
+    '    property W[I: Integer]: Integer write SetA;'#10 +                // 31
+    '  end;'#10 +                                                         // 32
+    '  TD = class(TC)'#10 +                                               // 33
+    '  public'#10 +                                                       // 34
+    '    property P2 write SetI;'#10 +                                    // 35
+    '    property RO;'#10 +                                               // 36
+    '  end;'#10 +                                                         // 37
+    '  TC2 = class'#10 +                                                  // 38
+    '  private'#10 +                                                      // 39
+    '    FI: Integer; FL: TDA;'#10 +                                              // 40
+    '  public property L: TDA read FL;'#10 +                                                      // 41
+    '    property N2: Integer read FI; default;'#10 +                     // 42 E2132
+    '  end;'#10 +                                                         // 43
+    'function TC.GetI(I: Integer): Integer; begin Result := I; end;'#10 + // 44
+    'function TC.GetBad(I: string): Integer; begin Result := 0; end;'#10 + // 45
+    'procedure TC.SetBad(I: Integer; V: string); begin end;'#10 +         // 46
+    'procedure TC.SetI(V: Integer); begin end;'#10 +                      // 47
+    'procedure TC.SetA(I: Integer; V: Integer); begin end;'#10 +          // 48
+    'procedure PC(const X: Integer); begin end;'#10 +                     // 49
+    'var O: TC; D: TD; R: IR; X: Integer; C2: TC2;'#10 +                           // 50
+    'begin'#10 +                                                          // 51
+    '  O.RO := 1;'#10 +                                                   // 52 E2129
+    '  X := O.WO;'#10 +                                                   // 53 E2130
+    '  if O.WO = 1 then ;'#10 +                                           // 54 E2130
+    '  O.WO := 1;'#10 +                                                   // 55
+    '  D.P2 := 5;'#10 +                                                   // 56
+    '  O.P2 := 5;'#10 +                                                   // 57 E2129
+    '  with O do RO := 2;'#10 +                                           // 58 E2129
+    '  X := O.WO + 1;'#10 +                                               // 59 E2130
+    '  D.RO := 1;'#10 +                                                   // 60 E2129
+    '  R.X := 1;'#10 +                                                    // 61 E2129
+    '  O.G[0] := 1;'#10 +                                                 // 62
+    '  X := O.W[0];'#10 +                                                 // 63 E2130
+    '  O.W[0] := 1;'#10 +                                                 // 64
+    '  with O do X := W[1];'#10 +                                         // 65 E2130
+    '  X := O.RO + O.G[1];'#10 +                                          // 66
+    '  PC(O.RO); C2.L[0] := 1;'#10 +                                                   // 67
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'PropChk.dpr'));
+    LM := ModelByName('propchk');
+    Ok('propchk: E2008 lines [' + DiagLinesOf(LM, 'E2008') + ']',
+      DiagLinesOf(LM, 'E2008') = '18 19 20');
+    Ok('propchk: E2146 lines [' + DiagLinesOf(LM, 'E2146') + ']',
+      DiagLinesOf(LM, 'E2146') = '22 23 24');
+    Ok('propchk: E2132 lines [' + DiagLinesOf(LM, 'E2132') + ']',
+      DiagLinesOf(LM, 'E2132') = '42');
+    Ok('propchk: E2129 lines [' + DiagLinesOf(LM, 'E2129') + ']',
+      DiagLinesOf(LM, 'E2129') = '52 57 58 60 61');
+    Ok('propchk: E2130 lines [' + DiagLinesOf(LM, 'E2130') + ']',
+      DiagLinesOf(LM, 'E2130') = '53 54 59 63 65');
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // Pointers in implicit conversion and overload ranking (6.3.1, 10.1.2, 4.8;
 // local/type-conv-2026-11/n7): a typed pointer type is nominal under {$T-}
 // (YA: PI for PI2 out), typed pointers of one base meet under {$T+} at the
@@ -23067,6 +23180,7 @@ begin
   TestHelperCarrier;
   TestAnonArrayPtrCompat;
   TestVarParamIdentity;
+  TestPropertyAccessChecks;
 
   if GCounter.Finish('SemaProjectSmoke') then
     ExitCode := 1;

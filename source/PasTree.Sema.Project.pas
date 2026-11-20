@@ -22735,16 +22735,83 @@ var
 
     // One accessor AAcc (a `read` / `write` specifier's name) against the
     // property: E2008 where its kind, parameter count or type differs.
+    // Does the struct scope AScope declare a default array property?
+    function ClassHasDefaultArray(AScope: Integer): Boolean;
+    begin
+      Result := False;
+      if (AScope = NIL_SCOPE) or (AScope >= LM.Scopes.Count) then
+        Exit;
+      for var LI := 0 to LM.Scopes[AScope].Symbols.Count - 1 do
+        if sfDefaultArrayProp in
+           LM.Symbols[LM.Scopes[AScope].Symbols[LI]].Flags then
+          Exit(True);
+    end;
+
+    // The type of each index parameter the property declaration ADecl
+    // writes, in order (`[I, J: Integer; const S: string]`); XNil for one
+    // not resolved.
+    function PropIndexXs(ADecl: Integer): TArray<TSemaXType>;
+    var
+      LParams, LParam, LChild, LNames, LType: Integer;
+      LX: TSemaXType;
+    begin
+      Result := nil;
+      LParams := LM.Tree.Nodes[ADecl].FirstChild;
+      while (LParams <> NIL_NODE) and
+            (LM.Tree.Nodes[LParams].Kind <> nkParams) do
+        LParams := LM.Tree.Nodes[LParams].NextSibling;
+      if LParams = NIL_NODE then
+        Exit;
+      LParam := LM.Tree.Nodes[LParams].FirstChild;
+      while LParam <> NIL_NODE do
+      begin
+        if LM.Tree.Nodes[LParam].Kind = nkParam then
+        begin
+          LNames := 0;
+          LType := NIL_NODE;
+          LChild := LM.Tree.Nodes[LParam].FirstChild;
+          while LChild <> NIL_NODE do
+          begin
+            if nfName in LM.Tree.Nodes[LChild].Flags then
+              Inc(LNames)
+            else if (LType = NIL_NODE) and not (LM.Tree.Nodes[LChild].Kind in
+                    [nkAttrGroup, nkDirective]) then
+              LType := LChild;
+            LChild := LM.Tree.Nodes[LChild].NextSibling;
+          end;
+          LX := XNil;
+          if LType <> NIL_NODE then
+            LX := ResolveTypeExprNested(AId, LType);
+          for var LI := 1 to LNames do
+            Result := Result + [LX];
+        end;
+        LParam := LM.Tree.Nodes[LParam].NextSibling;
+      end;
+    end;
+
     procedure CheckOne(AAcc, AProp: Integer; AWrite, AHasIndex: Boolean;
-      var APropX: TSemaXType; var AArr: Integer);
+      var APropX: TSemaXType; var AArr: Integer;
+      var AIdxXs: TArray<TSemaXType>; var AIdxRead: Boolean);
     var
       LMid, LSym, LScope, LCount, LLast: Integer;
       LDm: TPasSemaModel;
+      LPars: TArray<Integer>;
     begin
       if not (LM.Tree.Nodes[AAcc].Kind in [nkIdent, nkMember]) or
-         not TargetSym(AAcc, LMid, LSym) or
-         (FModels[LMid].Symbols[LSym].Kind <> skRoutine) then
-        Exit;   // a field, or nothing bound: the common case, cheapest first
+         not TargetSym(AAcc, LMid, LSym) then
+        Exit;
+      // A field for an ARRAY property (13.1.2): E2008, as a mismatched
+      // accessor.
+      if FModels[LMid].Symbols[LSym].Kind = skField then
+      begin
+        if AArr < 0 then
+          AArr := PropertyParamCount(AId, AProp);
+        if (AArr > 0) and not LM.HasDiagAt(AAcc) then
+          EmitAt(LM, AAcc, 'E2008', SE2008_IncompatibleTypes);
+        Exit;
+      end;
+      if FModels[LMid].Symbols[LSym].Kind <> skRoutine then
+        Exit;   // nothing bound
       LDm := FModels[LMid];
       // Overloaded - another declaration of the name in its scope chained to
       // it, before or after: dcc refuses one beside an `index` (E2271) yet
@@ -22762,6 +22829,7 @@ var
           begin
             Inc(LCount);
             LLast := LDm.Scopes[LScope].Symbols[LI];
+            LPars := LPars + [LLast];
           end;
       if AArr < 0 then
         AArr := PropertyParamCount(AId, AProp);
@@ -22777,6 +22845,23 @@ var
         EmitAt(LM, AAcc, 'E2008', SE2008_IncompatibleTypes);
         Exit;
       end;
+      // The array property's index parameters, in order (13.1.2:
+      // `GetBad(I: string)` for `[I: Integer]`).
+      if AArr > 0 then
+      begin
+        if not AIdxRead then
+        begin
+          AIdxXs := PropIndexXs(ADecl);
+          AIdxRead := True;
+        end;
+        if Length(AIdxXs) = AArr then
+          for var LK := 0 to AArr - 1 do
+            if Differ(SymDeclTypeX(LMid, LPars[LK]), AIdxXs[LK]) then
+            begin
+              EmitAt(LM, AAcc, 'E2008', SE2008_IncompatibleTypes);
+              Exit;
+            end;
+      end;
       if not XValid(APropX) then
         APropX := SymDeclTypeX(AId, AProp);
       if (not AWrite and Differ(SymDeclTypeX(LMid, LSym), APropX)) or
@@ -22788,8 +22873,10 @@ var
     LChild, LName, LProp, LArr, LN: Integer;
     LAccs: array[0..3] of Integer;
     LWrites: array[0..3] of Boolean;
-    LHasIndex, LIsWrite, LIsAcc: Boolean;
-    LPropX: TSemaXType;
+    LHasIndex, LIsWrite, LIsAcc, LIdxRead: Boolean;
+    LPropX, LCanon: TSemaXType;
+    LIdxXs: TArray<TSemaXType>;
+    LDefault, LBareDefault: Integer;
   begin
     LName := LM.Tree.Nodes[ADecl].FirstChild;
     while (LName <> NIL_NODE) and (LM.Tree.Nodes[LName].Kind <> nkIdent) do
@@ -22804,6 +22891,8 @@ var
     // in source order (an `index` may stand after them).
     LHasIndex := False;
     LN := 0;
+    LDefault := NIL_NODE;
+    LBareDefault := NIL_NODE;
     LChild := LM.Tree.Nodes[ADecl].FirstChild;
     while LChild <> NIL_NODE do
     begin
@@ -22818,7 +22907,12 @@ var
           begin
             LIsAcc := False;
             if LM.Tree.NodeTextEquals(LChild, 'index') then
-              LHasIndex := True;
+              LHasIndex := True
+            else if LM.Tree.NodeTextEquals(LChild, 'default') then
+              if LM.Tree.Nodes[LChild].FirstChild <> NIL_NODE then
+                LDefault := LM.Tree.Nodes[LChild].FirstChild
+              else
+                LBareDefault := LChild;
           end;
         if LIsAcc and (LN <= 3) and
            (LM.Tree.Nodes[LChild].FirstChild <> NIL_NODE) then
@@ -22832,8 +22926,33 @@ var
     end;
     LPropX := XNil;   // read only when an accessor's types are compared
     LArr := -1;       // likewise the index-parameter count
+    LIdxXs := nil;    // and the index parameters' types
+    LIdxRead := False;
     for var LI := 0 to LN - 1 do
-      CheckOne(LAccs[LI], LProp, LWrites[LI], LHasIndex, LPropX, LArr);
+      CheckOne(LAccs[LI], LProp, LWrites[LI], LHasIndex, LPropX, LArr,
+        LIdxXs, LIdxRead);
+    // 13.1.4: a bare `default;` marks the default ARRAY property - on any
+    // other, E2132. Beside a default array property of the same class dcc
+    // reports E2131 there instead: not judged.
+    if LBareDefault <> NIL_NODE then
+    begin
+      if LArr < 0 then
+        LArr := PropertyParamCount(AId, LProp);
+      if (LArr = 0) and not ClassHasDefaultArray(LM.Symbols[LProp].Scope) then
+        EmitAt(LM, LBareDefault, 'E2132', SE2132_DefaultNotArrayProperty);
+    end;
+    // 13.1.5: a default VALUE is an ordinal's, a pointer's or a small
+    // set's; a string's or a real's is E2146 (a large set's too - not
+    // judged here; a Variant's is E2026, not this one).
+    if LDefault <> NIL_NODE then
+    begin
+      if not XValid(LPropX) then
+        LPropX := SymDeclTypeX(AId, LProp);
+      LCanon := CanonTypeX(LPropX);
+      if XValid(LCanon) and not OpenX(LCanon) and
+         (XCatOf(LCanon) in [tcString, tcFloat]) then
+        EmitAt(LM, LDefault, 'E2146', SE2146_DefaultValueType);
+    end;
   end;
 
   // E2018 at a with target of no struct type (5.7, WithOpensX). Judged on a
@@ -23193,6 +23312,168 @@ var
         Inc(LPI);
         LArg := LM.Tree.Nodes[LArg].NextSibling;
       end;
+    end;
+
+    { Has the property (AMid, ASym) a `read` (AWrite False) or a `write`
+      (13.1.1)? Its declaration's specifier, or - for a redeclaration
+      without a type - the nearest declaration up the chain that names one
+      (PropertyRedeclPrev). Answers True - no verdict - where it cannot tell:
+      a unit whose text is released, a chain it cannot follow, a
+      dispinterface's (`readonly` / `writeonly` / `dispid`), an
+      `implements` delegation. }
+    function PropertyHasAccessor(AMid, ASym: Integer; AWrite: Boolean):
+      Boolean;
+    var
+      LDm: TPasSemaModel;
+      LDecl, LSpec, LPrevMid, LPrevSym, LDepth: Integer;
+      LOther: Boolean;
+    begin
+      Result := True;
+      for LDepth := 1 to 16 do
+      begin
+        LOther := False;
+        if (AMid < 0) or (ASym = NIL_SYM) then
+          Exit;
+        LDm := FModels[AMid];
+        if LDm.Demoted or (LDm.Symbols[ASym].Kind <> skProperty) then
+          Exit;
+        LDecl := LDm.Symbols[ASym].DeclNode;
+        if LDecl = NIL_NODE then
+          Exit;
+        LDecl := LDm.Tree.Nodes[LDecl].Parent;
+        if (LDecl = NIL_NODE) or
+           (LDm.Tree.Nodes[LDecl].Kind <> nkPropertyDecl) then
+          Exit;
+        LSpec := LDm.Tree.Nodes[LDecl].FirstChild;
+        while LSpec <> NIL_NODE do
+        begin
+          if LDm.Tree.Nodes[LSpec].Kind = nkPropSpec then
+          begin
+            if LDm.Tree.NodeTextEquals(LSpec, 'readonly') or
+               LDm.Tree.NodeTextEquals(LSpec, 'writeonly') or
+               LDm.Tree.NodeTextEquals(LSpec, 'dispid') or
+               LDm.Tree.NodeTextEquals(LSpec, 'implements') then
+              Exit;
+            if (AWrite and LDm.Tree.NodeTextEquals(LSpec, 'write')) or
+               (not AWrite and LDm.Tree.NodeTextEquals(LSpec, 'read')) then
+              Exit;
+            if (AWrite and LDm.Tree.NodeTextEquals(LSpec, 'read')) or
+               (not AWrite and LDm.Tree.NodeTextEquals(LSpec, 'write')) then
+              LOther := True;
+          end;
+          LSpec := LDm.Tree.Nodes[LSpec].NextSibling;
+        end;
+        // A property with a type of its own is a new one: the other
+        // accessor alone makes it read-only or write-only (one with
+        // neither, a declaration being typed, is no verdict).
+        if LDm.Symbols[ASym].TypeNode <> NIL_NODE then
+          Exit(not LOther);
+        if not PropertyRedeclPrev(AMid, ASym, LPrevMid, LPrevSym) then
+          Exit;
+        AMid := LPrevMid;
+        ASym := LPrevSym;
+      end;
+    end;
+
+    // The property a designator ANode names (`O.P`, `P`, `O.A[0]`): its
+    // name node, and the property; False for anything else.
+    function PropertyDesignator(ANode: Integer; out AName, AMid,
+      ASym: Integer): Boolean;
+    var
+      LCore: Integer;
+      LIndexed: Boolean;
+    begin
+      Result := False;
+      AName := NIL_NODE;
+      LCore := PeelParens(LM.Tree, ANode);
+      if LCore = NIL_NODE then
+        Exit;
+      LIndexed := LM.Tree.Nodes[LCore].Kind = nkIndex;
+      if LIndexed then
+        LCore := PeelParens(LM.Tree, LM.Tree.Nodes[LCore].FirstChild);
+      if LCore = NIL_NODE then
+        Exit;
+      case LM.Tree.Nodes[LCore].Kind of
+        nkIdent:
+          AName := LCore;
+        nkMember:
+          AName := LM.Tree.LastChild(LCore);
+      end;
+      Result := (AName <> NIL_NODE) and
+        (LM.Tree.Nodes[AName].Kind = nkIdent) and
+        TargetSym(AName, AMid, ASym) and
+        (FModels[AMid].Symbols[ASym].Kind = skProperty) and
+        // `P[I]` is the ARRAY property P's element; of any other property
+        // an element of its value (`aList.List[I] := nil` writes into the
+        // array a read-only TList.List returns - System.Classes).
+        (not LIndexed or (PropertyParamCount(AMid, ASym) > 0));
+    end;
+
+    // E2129 at an assignment to a property with no `write` (13.1.1).
+    procedure CheckReadOnlyTarget(AAssign, ADst: Integer);
+    var
+      LName, LMid, LSym: Integer;
+    begin
+      if PropertyDesignator(ADst, LName, LMid, LSym) and
+         not PropertyHasAccessor(LMid, LSym, True) and
+         not InUntypedWith(AAssign) and not LM.HasDiagAt(LName) then
+        EmitAt(LM, LName, 'E2129', SE2129_ReadOnlyProperty);
+    end;
+
+    { E2130 at a read of a property with no `read` (13.1.1): the name N of
+      a property, read - anything but a declaration's name, the target of an
+      assignment (CheckReadOnlyTarget's), an argument (a `var` one is
+      E2197, a value or `const` one not judged here), a property's own
+      specifier. }
+    procedure CheckWriteOnlyRead(N: Integer);
+    var
+      LMid, LSym, LD, LUp: Integer;
+    begin
+      if nfName in LM.Tree.Nodes[N].Flags then
+        Exit;
+      LD := N;
+      LUp := LM.Tree.Nodes[N].Parent;
+      if (LUp <> NIL_NODE) and (LM.Tree.Nodes[LUp].Kind = nkMember) then
+      begin
+        if LM.Tree.LastChild(LUp) <> N then
+          Exit;   // a qualifier, not the name read
+        LD := LUp;
+        LUp := LM.Tree.Nodes[LUp].Parent;
+      end;
+      if (LUp <> NIL_NODE) and (LM.Tree.Nodes[LUp].Kind = nkIndex) and
+         (LM.Tree.Nodes[LUp].FirstChild = LD) then
+      begin
+        LD := LUp;
+        LUp := LM.Tree.Nodes[LUp].Parent;
+      end;
+      while (LUp <> NIL_NODE) and (LM.Tree.Nodes[LUp].Kind = nkParen) do
+      begin
+        LD := LUp;
+        LUp := LM.Tree.Nodes[LUp].Parent;
+      end;
+      if LUp = NIL_NODE then
+        Exit;
+      case LM.Tree.Nodes[LUp].Kind of
+        nkAssign:
+          if LM.Tree.Nodes[LUp].FirstChild = LD then
+            Exit;
+        nkCall:
+          if LM.Tree.Nodes[LUp].FirstChild <> LD then
+            Exit;   // an argument
+        nkPropSpec, nkPropertyDecl, nkAttribute, nkAttrGroup:
+          Exit;
+        nkUnaryOp:
+          if (LM.Tree.Nodes[LUp].Aux >= 0) and
+             (LM.Tree.Nodes[LUp].Aux <= High(LM.Tree.Source.Visible)) and
+             (LM.Tree.Source.VisibleKind(LM.Tree.Nodes[LUp].Aux) = tkAt) then
+            Exit;   // `@O.P`: no read
+      end;
+      if not TargetSym(N, LMid, LSym) or
+         (FModels[LMid].Symbols[LSym].Kind <> skProperty) or
+         PropertyHasAccessor(LMid, LSym, False) or InUntypedWith(N) or
+         LM.HasDiagAt(N) then
+        Exit;
+      EmitAt(LM, N, 'E2130', SE2130_WriteOnlyProperty);
     end;
 
     // A `[...]` assigned to a static array (8.1.1): E2010 naming the
@@ -23765,7 +24046,10 @@ var
             CheckConv(N, LDst, LSrc, LSrc, GetX(LDst), GetX(LSrc));
             CheckStaticCtor(N, LDst, LSrc);
             CheckWriteTarget(N, LDst);
+            CheckReadOnlyTarget(N, LDst);
           end;
+        nkIdent:
+          CheckWriteOnlyRead(N);
         nkBinaryOp:
           CheckCompare(N);
         nkCall:
