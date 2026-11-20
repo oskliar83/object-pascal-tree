@@ -101,6 +101,11 @@ const
     'E2015 Operator not applicable to this operand type';
   // E2008 names nothing either: `I + True`, `Ch + I` (4.2.1).
   SE2008_IncompatibleTypes = 'E2008 Incompatible types';
+  // Generic method type-argument inference (16.5.1).
+  SE2531_ExplicitTypeArgs =
+    'E2531 Method ''%s'' requires explicit type argument(s)';
+  SE2532_InferDifferentTypes = 'E2532 Couldn''t infer generic type ' +
+    'argument from different argument types for method ''%s''';
   // Property declarations (13.1.4, 13.1.5) and their uses (13.1.1).
   SE2132_DefaultNotArrayProperty =
     'E2132 Default property must be an array property';

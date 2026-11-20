@@ -23476,6 +23476,155 @@ var
       EmitAt(LM, N, 'E2130', SE2130_WriteOnlyProperty);
     end;
 
+    { 16.5.1: a generic method called with no type arguments written infers
+      them from the arguments. E2531 when no parameter's type mentions a
+      type parameter at all (`Make<T>: T` called `Make` or `Make()`); E2532
+      when two arguments bound directly to one type parameter are of
+      different types - judged only where certain: two values neither of
+      which is a literal (`Max(B, I)`, `Max(O1, O2)`), or two of different
+      categories (`Max(3, 7.5)`, `Max(1, 'a')`, `Max(S, 'a')`). A literal
+      of the other's category is dcc's narrow literal type, not asked here
+      (`Max(I, 1)` is E2532, `Max(C, 'a')` compiles). AHead is the callee's
+      name designator, AArgs the call's arguments (none for a bare name);
+      the routine is a lone generic method - no overload set, no override. }
+    procedure CheckGenericInfer(ACall, AHead: Integer;
+      const AArgs: TArray<Integer>);
+
+      function IsLiteral(ANode: Integer): Boolean;
+      var
+        LCore: Integer;
+      begin
+        LCore := PeelParens(LM.Tree, ANode);
+        if (LCore <> NIL_NODE) and
+           (LM.Tree.Nodes[LCore].Kind = nkUnaryOp) and
+           (LM.Tree.Nodes[LCore].FirstChild <> NIL_NODE) then
+          LCore := PeelParens(LM.Tree, LM.Tree.Nodes[LCore].FirstChild);
+        Result := (LCore = NIL_NODE) or (LM.Tree.Nodes[LCore].Kind in
+          [nkIntLit, nkRealLit, nkStrLit, nkCaretChar, nkNilLit]);
+      end;
+
+      // An argument's category - a one-character literal is a Char's
+      // (`Max(C, 'a')` compiles, `Max(S, 'a')` is E2532).
+      function ArgCat(ANode: Integer; const ACanon: TSemaXType): TSemaTypeCat;
+      begin
+        if IsOneCharLiteralNode(LM.Tree, PeelParens(LM.Tree, ANode)) then
+          Result := tcChar
+        else
+          Result := XCatOf(ACanon);
+      end;
+
+    var
+      LName, LMid, LSym, LI, LJ: Integer;
+      LOm: TPasSemaModel;
+      LIdents, LPars: TArray<Integer>;
+      LParX, LAx, LBx: TSemaXType;
+      LAnyOpen: Boolean;
+      LBound: TArray<Integer>;     // per argument: its type parameter's
+                                   // index in LIdents, -1 none
+    begin
+      LName := PeelParens(LM.Tree, AHead);
+      if (LName = NIL_NODE) or
+         not (LM.Tree.Nodes[LName].Kind in [nkIdent, nkMember]) or
+         not TargetSym(LName, LMid, LSym) then
+        Exit;
+      if LM.Tree.Nodes[LName].Kind = nkMember then
+        LName := LM.Tree.LastChild(LName);
+      LOm := FModels[LMid];
+      if (LOm.Symbols[LSym].Kind <> skRoutine) or
+         (LOm.Symbols[LSym].NextOverload <> NIL_SYM) or
+         (LOm.Symbols[LSym].Flags * [sfBuiltin, sfOverload,
+          sfOverloadDirective, sfOverrideDirective] <> []) then
+        Exit;
+      LIdents := GenericParamIdents(LMid, LSym);
+      if Length(LIdents) = 0 then
+        Exit;
+      if InUntypedWith(ACall) then
+        Exit;
+      LPars := XParamSyms(LMid, LSym);
+      if Length(AArgs) > Length(LPars) then
+        Exit;
+      // E2531: every parameter's type read and none open - nothing to
+      // infer any type parameter from.
+      LAnyOpen := False;
+      for LI := 0 to High(LPars) do
+      begin
+        LParX := DeclTypeX(LMid, LPars[LI]);
+        if not XValid(LParX) or OpenX(LParX) or
+           (LOm.Symbols[LPars[LI]].TypeNode = NIL_NODE) or
+           (LOm.Tree.Nodes[LOm.Symbols[LPars[LI]].TypeNode].Kind =
+            nkArrayType) then
+        begin
+          LAnyOpen := True;
+          Break;
+        end;
+      end;
+      if not LAnyOpen then
+      begin
+        EmitAt(LM, LName, 'E2531', Format(SE2531_ExplicitTypeArgs,
+          [LOm.Symbols[LSym].Name]));
+        Exit;
+      end;
+      // E2532: the arguments bound directly to one type parameter.
+      SetLength(LBound, Length(AArgs));
+      for LI := 0 to High(AArgs) do
+      begin
+        LBound[LI] := -1;
+        LParX := DeclTypeX(LMid, LPars[LI]);
+        if XValid(LParX) and (LParX.UnitId = LMid) and
+           (LOm.Symbols[LParX.Sym].Kind = skGenericParam) then
+          for LJ := 0 to High(LIdents) do
+            if LIdents[LJ] = LOm.Symbols[LParX.Sym].DeclNode then
+              LBound[LI] := LJ;
+      end;
+      for LI := 0 to High(AArgs) do
+      begin
+        if LBound[LI] < 0 then
+          Continue;
+        for LJ := LI + 1 to High(AArgs) do
+        begin
+          if LBound[LJ] <> LBound[LI] then
+            Continue;
+          LAx := GetX(AArgs[LI]);
+          LBx := GetX(AArgs[LJ]);
+          if not XValid(LAx) or not XValid(LBx) or
+             Unreliable(ACall, AArgs[LI], LAx) or
+             Unreliable(ACall, AArgs[LJ], LBx) then
+            Continue;
+          LAx := CanonTypeX(LAx);
+          LBx := CanonTypeX(LBx);
+          if not XValid(LAx) or not XValid(LBx) or
+             (XCatOf(LAx) in [tcUnknown, tcNil]) or
+             (XCatOf(LBx) in [tcUnknown, tcNil]) then
+            Continue;
+          // A literal is typed by its category here (a one-character one
+          // is a Char), two values by their types.
+          if (ArgCat(AArgs[LI], LAx) <> ArgCat(AArgs[LJ], LBx)) or
+             (not IsLiteral(AArgs[LI]) and not IsLiteral(AArgs[LJ]) and
+              (LAx.Inst = NIL_INST) and (LBx.Inst = NIL_INST) and
+              not XSameType(LAx, LBx)) then
+          begin
+            EmitAt(LM, LName, 'E2532', Format(SE2532_InferDifferentTypes,
+              [LOm.Symbols[LSym].Name]));
+            Exit;
+          end;
+        end;
+      end;
+    end;
+
+    // The call ACall's arguments, in order.
+    function CallArgs(ACall: Integer): TArray<Integer>;
+    var
+      LArg: Integer;
+    begin
+      Result := nil;
+      LArg := CallFirstArg(LM.Tree, ACall);
+      while LArg <> NIL_NODE do
+      begin
+        Result := Result + [LArg];
+        LArg := LM.Tree.Nodes[LArg].NextSibling;
+      end;
+    end;
+
     // A `[...]` assigned to a static array (8.1.1): E2010 naming the
     // array and `Set`, whatever the brackets hold (`T1 := []` too); a
     // dynamic array takes it (8.2.2).
@@ -24047,13 +24196,26 @@ var
             CheckStaticCtor(N, LDst, LSrc);
             CheckWriteTarget(N, LDst);
             CheckReadOnlyTarget(N, LDst);
+            // A generic function named alone as the value (`I :=
+            // TU.Make`): called with no arguments.
+            if (LM.Tree.Nodes[PeelParens(LM.Tree, LSrc)].Kind in
+                [nkIdent, nkMember]) and
+               (XCatOf(CanonTypeX(GetX(LDst))) <> tcProc) then
+              CheckGenericInfer(N, LSrc, nil);
           end;
         nkIdent:
           CheckWriteOnlyRead(N);
         nkBinaryOp:
           CheckCompare(N);
         nkCall:
-          CheckVarArgs(N);
+          begin
+            CheckVarArgs(N);
+            LDst := LM.Tree.Nodes[N].FirstChild;
+            if (LDst <> NIL_NODE) and
+               (LM.Tree.Nodes[PeelParens(LM.Tree, LDst)].Kind in
+                [nkIdent, nkMember]) then
+              CheckGenericInfer(N, LDst, CallArgs(N));
+          end;
         nkWithStmt:
           begin
             CheckWithTargets(N);

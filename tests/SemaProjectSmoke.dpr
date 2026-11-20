@@ -14516,6 +14516,78 @@ begin
   end;
 end;
 
+// Generic method inference (spec 16.5.1): E2531 where no parameter's type
+// mentions a type parameter (`Make`, `Make()`, a parameter of another type
+// with a default); E2532 where two arguments bound to one type parameter
+// differ - two values (a Byte and an Integer, a class and its descendant)
+// or two categories (an integer and a real literal, an integer and a
+// character, a string and a character). A literal of the other's category,
+// written type arguments, `nil` twice and an open-array element are not
+// reported (dcc64 37.0, local/probe-park/sa-compat G1.dpr; spec-audit
+// G03b).
+procedure TestGenericInferErrors;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_ginfer');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'GInf.dpr'),
+    'program GInf;'#10 +                                                  // 1
+    'type'#10 +                                                           // 2
+    '  TB = class end; TD = class(TB) end;'#10 +                          // 3
+    '  TU = class'#10 +                                                   // 4
+    '    class function Max<T>(const A, B: T): T; static;'#10 +           // 5
+    '    class function Make<T>: T; static;'#10 +                         // 6
+    '    class function First<T>(const A: array of T): T; static;'#10 +   // 7
+    '    class function Dflt<T>(const A: Integer = 0): T; static;'#10 +   // 8
+    '  end;'#10 +                                                         // 9
+    'class function TU.Max<T>(const A, B: T): T; begin Result := A; end;'#10 + // 10
+    'class function TU.Make<T>: T; begin Result := Default(T); end;'#10 + // 11
+    'class function TU.First<T>(const A: array of T): T; begin Result := A[0]; end;'#10 + // 12
+    'class function TU.Dflt<T>(const A: Integer = 0): T; begin Result := Default(T); end;'#10 + // 13
+    'var I: Integer; D: Double; B: Byte; S: string; O1: TB; O2: TD; C: Char; P: Pointer;'#10 + // 14
+    'begin'#10 +                                                          // 15
+    '  D := TU.Max(3, 7.5);'#10 +                                         // 16 E2532
+    '  I := TU.Make;'#10 +                                                // 17 E2531
+    '  D := TU.Max(1, ''a'');'#10 +                                       // 18 E2532
+    '  P := TU.Max(nil, nil);'#10 +                                       // 19
+    '  I := TU.Max(B, I);'#10 +                                           // 20 E2532
+    '  O1 := TU.Max(O1, O2);'#10 +                                        // 21 E2532
+    '  S := TU.Max(S, ''a'');'#10 +                                       // 22 E2532
+    '  D := TU.Max(D, 1);'#10 +                                           // 23 E2532
+    '  C := TU.Max(C, ''a'');'#10 +                                       // 24
+    '  D := TU.Max(1.5, 2.5);'#10 +                                       // 25
+    '  I := TU.Max(I, I);'#10 +                                           // 26
+    '  I := TU.First([1, 2]);'#10 +                                       // 27
+    '  I := TU.Dflt;'#10 +                                                // 28 E2531
+    '  I := TU.Make();'#10 +                                              // 29 E2531
+    '  I := TU.Max<Integer>(1, 2);'#10 +                                  // 30
+    '  I := TU.Make<Integer>;'#10 +                                       // 31
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'GInf.dpr'));
+    LM := ModelByName('ginf');
+    Ok('ginfer: E2531 lines [' + DiagLinesOf(LM, 'E2531') + ']',
+      DiagLinesOf(LM, 'E2531') = '17 28 29');
+    Ok('ginfer: E2532 lines [' + DiagLinesOf(LM, 'E2532') + ']',
+      DiagLinesOf(LM, 'E2532') = '16 18 20 21 22 23');
+    Ok('ginfer: the method named',
+      DiagHasText(LM, 'E2531', 'Method ''Make'' requires') and
+      DiagHasText(LM, 'E2532', 'for method ''Max'''));
+    Ok('ginfer: no E2010 [' + DiagLinesOf(LM, 'E2010') + ']',
+      DiagCount(LM, 'E2010') = 0);
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // Pointers in implicit conversion and overload ranking (6.3.1, 10.1.2, 4.8;
 // local/type-conv-2026-11/n7): a typed pointer type is nominal under {$T-}
 // (YA: PI for PI2 out), typed pointers of one base meet under {$T+} at the
@@ -23181,6 +23253,7 @@ begin
   TestAnonArrayPtrCompat;
   TestVarParamIdentity;
   TestPropertyAccessChecks;
+  TestGenericInferErrors;
 
   if GCounter.Finish('SemaProjectSmoke') then
     ExitCode := 1;
