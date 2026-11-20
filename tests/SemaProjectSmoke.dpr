@@ -10971,6 +10971,87 @@ begin
   end;
 end;
 
+{ Spec 10.1.1 (dcc64 37.0, 2026-11-20): an undeclared pointer or class
+  reference target in a type section is a placeholder in the section's
+  scope - E2003 at the first target, none at a later one naming it, E2004
+  at a later declaration of the name in that scope (any kind; a unit's
+  implementation for an interface target). A nested routine's scope and a
+  name a used unit declares are no clash; a target completed in its own
+  section is legal. }
+procedure TestPointerTargetPlaceholder;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_ptrfwd');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10'  TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UP.pas'),
+    'unit UP;'#10 +                                        // 1
+    'interface'#10 +                                       // 2
+    'type PA = ^TA;'#10 +                                  // 3 E2003
+    'implementation'#10 +                                  // 4
+    'type TA = record end;'#10 +                           // 5 E2004
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'PT.dpr'),
+    'program PT;'#10 +                                     // 1
+    'uses UP;'#10 +                                        // 2
+    'type'#10 +                                            // 3
+    '  PA = ^TA;'#10 +                                     // 4 E2003
+    '  PB = ^TB;'#10 +                                     // 5 E2003
+    '  PC = ^TObject;'#10 +                                // 6 System's
+    '  CD = class of TD;'#10 +                             // 7 E2003
+    '  PA2 = ^TA;'#10 +                                    // 8 placeholder
+    'var'#10 +                                             // 9
+    '  TA: Integer;'#10 +                                  // 10 E2004
+    'const'#10 +                                           // 11
+    '  TB = 5;'#10 +                                       // 12 E2004
+    'type'#10 +                                            // 13
+    '  TObject = record X: Integer; end;'#10 +             // 14
+    '  TD = class end;'#10 +                               // 15 E2004
+    'procedure R;'#10 +                                    // 16
+    'type PH = ^TH;'#10 +                                  // 17 E2003
+    'type TH = record end;'#10 +                           // 18 E2004
+    'type PK = ^TK;'#10 +                                  // 19 E2003
+    'begin end;'#10 +                                      // 20
+    'type'#10 +                                            // 21
+    '  TK = record end;'#10 +                              // 22 R's PK
+    '  PN = ^TN;'#10 +                                     // 23 legal
+    '  TN = record Next: PN; end;'#10 +                    // 24
+    '  PF = ^TF;'#10 +                                     // 25 E2003
+    'procedure TF; begin end;'#10 +                        // 26 E2004
+    'procedure S;'#10 +                                    // 27
+    'type PM = ^TM;'#10 +                                  // 28 E2003
+    '  procedure TM; begin end;'#10 +                      // 29 E2004
+    'begin end;'#10 +                                      // 30
+    'begin'#10 +                                           // 31
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'PT.dpr'));
+    LM := ModelByName('pt');
+    Ok('ptrfwd: E2003 at the first target of each name [' +
+      DiagSites(LM, 'E2003') + ']',
+      DiagSites(LM, 'E2003') = '4:9 5:9 7:17 17:12 19:12 25:9 28:12');
+    Ok('ptrfwd: E2004 at the later same-scope declaration [' +
+      DiagSites(LM, 'E2004') + ']',
+      DiagSites(LM, 'E2004') = '10:3 12:3 15:3 18:6 26:11 29:13');
+    Ok('ptrfwd: naming it', DiagHasText(LM, 'E2004',
+      'Identifier redeclared: ''TD'''));
+    Ok('ptrfwd: nothing else [' + IntToStr(Length(LM.Diags)) + ']',
+      Length(LM.Diags) = 13);
+    LM := ModelByName('up');
+    Ok('ptrfwd: interface target, implementation declaration [' +
+      DiagSites(LM, 'E2003') + ' / ' + DiagSites(LM, 'E2004') + ']',
+      (DiagSites(LM, 'E2003') = '3:12') and (DiagSites(LM, 'E2004') = '5:6'));
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 { Spec 14.1.1 (dcc64 37.0, 2026-11-13): in an interface's first bracket a
   typed TGUID constant or a variable is dropped with W1074 naming it, no
   GUID; a true constant there is the GUID, after a dropped item of a comma
@@ -22781,6 +22862,7 @@ begin
   TestAttributeImplHeaderParam;
   TestGuidClauseDrops;
   TestForwardPosition;
+  TestPointerTargetPlaceholder;
   TestHeadingPairE2037;
   TestLateUnitMembers;
   TestAttributeGuidAndPositions;

@@ -1471,6 +1471,8 @@ type
     function UsesNamed(AM: TPasSemaModel; const AText: string): Integer;
     procedure EmitE2003(AModel: TPasSemaModel; ANode: Integer;
       AId: Integer = -1);
+    function PointerTargetPlaceholder(AModel: TPasSemaModel;
+      ANode: Integer): Boolean;
     function UnknownAncestryX(const AX: TSemaXType): Boolean;
     procedure EmitAt(AModel: TPasSemaModel; ANode: Integer;
       const ACode, AMsg: string; const ANote: string = '');
@@ -10910,8 +10912,85 @@ begin
       EmitAt(AModel, LAttr, 'W1074', SW1074_UnknownCustomAttribute);
     Exit;
   end;
+  if PointerTargetPlaceholder(AModel, ANode) then
+    Exit;
   EmitAt(AModel, ANode, 'E2003', Format(SE2003_UndeclaredIdentifier,
     [AModel.Tree.NodeText(ANode)]));
+end;
+
+{ An undeclared target of a pointer type `^T` or a class reference `class of
+  T` in a `type` section (spec 10.1.1): dcc enters the name into the
+  section's scope as a placeholder. A later declaration of that name in the
+  same scope - a later type section, a variable, a constant, a routine; in a
+  unit's interface, the implementation section too - is then E2004 at that
+  declaration, and a later pointer target naming it there is no second
+  E2003 (dcc64 37.0, 2026-11-20). A declaration in a nested routine's scope
+  is no clash, and a name a used unit declares never reaches here
+  (`^TObject` binds System's). True: ANode is such a second reference and
+  reports nothing. Called on the E2003 path only. }
+function TPasSemaProject.PointerTargetPlaceholder(AModel: TPasSemaModel;
+  ANode: Integer): Boolean;
+
+  function IsTarget(AAt: Integer): Boolean;
+  var
+    LUp: Integer;
+  begin
+    Result := False;
+    LUp := AModel.Tree.Nodes[AAt].Parent;
+    if (LUp = NIL_NODE) or not (AModel.Tree.Nodes[LUp].Kind in
+       [nkPointerType, nkClassOf]) then
+      Exit;
+    LUp := AModel.Tree.Nodes[LUp].Parent;
+    if (LUp = NIL_NODE) or (AModel.Tree.Nodes[LUp].Kind <> nkTypeDecl) then
+      Exit;
+    LUp := AModel.Tree.Nodes[LUp].Parent;
+    Result := (LUp <> NIL_NODE) and (AModel.Tree.Nodes[LUp].Kind = nkTypeSec);
+  end;
+
+  function ScopeOf(AAt: Integer): Integer;
+  begin
+    Result := NIL_SCOPE;
+    while (AAt <> NIL_NODE) and (AAt <= High(AModel.NodeScope)) do
+    begin
+      Result := AModel.NodeScope[AAt];
+      if Result <> NIL_SCOPE then
+        Exit;
+      AAt := AModel.Tree.Nodes[AAt].Parent;
+    end;
+  end;
+
+var
+  LScope, LSym, LDecl, LTok: Integer;
+  LName: string;
+begin
+  Result := False;
+  if (AModel.Tree.Nodes[ANode].Kind <> nkIdent) or not IsTarget(ANode) then
+    Exit;
+  LScope := ScopeOf(ANode);
+  if LScope = NIL_SCOPE then
+    Exit;
+  LName := AModel.Tree.NodeText(ANode);
+  LTok := AModel.Tree.Nodes[ANode].FirstToken;
+  // An earlier target of the name in this scope made the placeholder.
+  for var LN := 0 to High(AModel.Tree.Nodes) do
+    if (LN <> ANode) and (AModel.Tree.Nodes[LN].Kind = nkIdent) and
+       (AModel.Tree.Nodes[LN].FirstToken < LTok) and
+       IsTarget(LN) and SameText(AModel.Tree.NodeText(LN), LName) and
+       (ScopeOf(LN) = LScope) then
+      Exit(True);
+  LSym := AModel.FindLocal(LScope, LowerCase(LName));
+  if (LSym = NIL_SYM) and (LScope = AModel.InterfaceScope) and
+     (AModel.ImplementationScope <> NIL_SCOPE) then
+    LSym := AModel.FindLocal(AModel.ImplementationScope, LowerCase(LName));
+  if LSym = NIL_SYM then
+    Exit;
+  LDecl := AModel.Symbols[LSym].DeclNode;
+  if (LDecl = NIL_NODE) or (LDecl > High(AModel.Tree.Nodes)) or
+     (AModel.Tree.Nodes[LDecl].FirstToken <= LTok) or
+     AModel.HasDiagAt(LDecl) then
+    Exit;
+  EmitAt(AModel, LDecl, 'E2004', Format(SE2004_IdentifierRedeclared,
+    [AModel.Tree.NodeText(LDecl)]));
 end;
 
 class function TPasSemaProject.TokenLineCol(AModel: TPasSemaModel;
