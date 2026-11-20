@@ -14904,6 +14904,72 @@ begin
   end;
 end;
 
+// Default parameter values (spec 6.2.5): every list on its own - a
+// method's in the class and at its body, a procedural type's - E2268 for a
+// type that takes none (open array, Variant, record, static array), then
+// E2239 for `var` / `out` / `const [Ref]`, E2026 for a dynamic array's that
+// is not nil, E2238 for each parameter without a default after one (an
+// E2268 one counts, an E2239 one does not); legal defaults stay silent
+// (dcc64 37.0; spec-audit g3 Defaults*, local/p P3-P5).
+procedure TestParamDefaults;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_pdflt');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'PDflt.dpr'),
+    'program PDflt;'#10 +                                                // 1
+    'type'#10 +                                                          // 2
+    '  TR = record F: Integer; end;'#10 +                                // 3
+    '  TArr = array[0..1] of Integer;'#10 +                              // 4
+    '  TDA = array of Integer;'#10 +                                     // 5
+    '  TC = class'#10 +                                                  // 6
+    '    procedure M(var A: Integer = 0);'#10 +                          // 7 E2239
+    '    procedure N(A: Integer = 1; B: Integer = 2);'#10 +              // 8
+    '  end;'#10 +                                                        // 9
+    '  TP = procedure(A: Variant = 1);'#10 +                             // 10 E2268
+    'procedure TC.M(var A: Integer = 0); begin end;'#10 +                // 11 E2239
+    'procedure TC.N(A: Integer = 1; B: Integer = 2); begin end;'#10 +    // 12
+    'procedure A1(out A: Integer = 0); begin end;'#10 +                  // 13 E2239
+    'procedure A2(A: Integer = 0; B: Integer; C: Integer); begin end;'#10 + // 14 E2238 x2
+    'procedure A3(const A: array of Integer = nil); begin end;'#10 +     // 15 E2268
+    'procedure A4(V: Variant = 1; B: Integer); begin end;'#10 +          // 16 E2268 E2238
+    'procedure A5(R: TR = nil); begin end;'#10 +                         // 17 E2268
+    'procedure A6(A: TArr = nil); begin end;'#10 +                       // 18 E2268
+    'procedure A7(D: TDA = nil; E: TDA = [1]); begin end;'#10 +          // 19 E2026
+    'procedure A8(var A: Integer = 0; B: Integer); begin end;'#10 +      // 20 E2239
+    'procedure A9(const [Ref] A: Integer = 0); begin end;'#10 +          // 21 E2239
+    'procedure B1(A: Integer = 1; const B); begin end;'#10 +             // 22 E2238
+    'procedure B2(const A: Integer = 0; S: string = ''x''; P: Pointer = nil;'#10 + // 23
+    '  O: TObject = nil; C: Char = ''q''; D: TDA = nil); begin end;'#10 + // 24
+    'procedure B3(A: Integer; B: Integer = 1); begin end;'#10 +          // 25
+    'begin'#10 +                                                         // 26
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'PDflt.dpr'));
+    LM := ModelByName('pdflt');
+    Ok('pdflt: E2239 lines [' + DiagLinesOf(LM, 'E2239') + ']',
+      DiagLinesOf(LM, 'E2239') = '7 11 13 20 21');
+    Ok('pdflt: E2268 lines [' + DiagLinesOf(LM, 'E2268') + ']',
+      DiagLinesOf(LM, 'E2268') = '10 15 16 17 18');
+    Ok('pdflt: E2238 lines [' + DiagLinesOf(LM, 'E2238') + ']',
+      DiagLinesOf(LM, 'E2238') = '14 14 16 22');
+    Ok('pdflt: E2026 lines [' + DiagLinesOf(LM, 'E2026') + ']',
+      DiagLinesOf(LM, 'E2026') = '19');
+    Ok('pdflt: names', DiagHasText(LM, 'E2238', 'required for ''C''') and
+      DiagHasText(LM, 'E2239', 'parameter ''A'' must be'));
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // Property declarations and their uses (spec 13.1.1, 13.1.2, 13.1.4,
 // 13.1.5): a field for an array property and an accessor whose index
 // parameter is of another type are E2008; a default value of a string or a
@@ -23758,6 +23824,7 @@ begin
   TestHelperCarrier;
   TestAnonArrayPtrCompat;
   TestVarParamIdentity;
+  TestParamDefaults;
   TestPropertyAccessChecks;
   TestGenericInferErrors;
 

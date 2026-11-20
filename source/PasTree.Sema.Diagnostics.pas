@@ -117,6 +117,12 @@ const
   SE2033_VarParamNotIdentical =
     'E2033 Types of actual and formal var parameters must be identical: ' +
     '%s and %s';
+  // Default parameter values (6.2.5); the parameter's name.
+  SE2238_DefaultRequired = 'E2238 Default value required for ''%s''';
+  SE2239_DefaultByValue =
+    'E2239 Default parameter ''%s'' must be by-value or const';
+  SE2268_NoDefaultForType =
+    'E2268 Parameters of this type cannot have default values';
   // A `uses` name with no SOURCE on any search path. dcc's own code, but its
   // wording is "Unit not found: 'X' or binary equivalents (.dcu)" because the
   // compiler accepts a precompiled unit; a source analyzer cannot, so the

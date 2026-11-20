@@ -23873,6 +23873,106 @@ var
       CheckConv(N, LType, LInit, LInit, LDstX, LSrcX);
     end;
 
+    { The default values of a parameter list N (nkParams; 6.2.5), in order,
+      every list - a routine's, a forward or interface one and its
+      implementation alike, a procedural type's: E2268 for a type that takes
+      none - an open array, a Variant / OleVariant, a record or `object`, a
+      static array (an untyped one is the parser's) - asked before the mode;
+      E2239 for a `var` / `out` / `const [Ref]` one; E2026 for a dynamic
+      array's that is not `nil`. A default (E2268's and E2026's too, not
+      E2239's) makes each later parameter without one E2238, an untyped one
+      too. dcc64 37.0, 2026-11-20 (local/p P3-P5). }
+    procedure CheckParamDefaults(N: Integer);
+    var
+      LParam, LChild, LName, LType, LDflt, LAttr: Integer;
+      LSeen, LByRef: Boolean;
+      LX: TSemaXType;
+    begin
+      LSeen := False;
+      LParam := LM.Tree.Nodes[N].FirstChild;
+      while LParam <> NIL_NODE do
+      begin
+        if LM.Tree.Nodes[LParam].Kind = nkParam then
+        begin
+          LName := NIL_NODE;
+          LType := NIL_NODE;
+          LDflt := NIL_NODE;
+          LByRef := LM.Tree.Nodes[LParam].Flags * [nfVar, nfOut] <> [];
+          LChild := LM.Tree.Nodes[LParam].FirstChild;
+          while LChild <> NIL_NODE do
+          begin
+            if LM.Tree.Nodes[LChild].Kind = nkAttrGroup then
+            begin
+              LAttr := LM.Tree.Nodes[LChild].FirstChild;
+              while LAttr <> NIL_NODE do
+              begin
+                if (LM.Tree.Nodes[LAttr].Kind = nkAttribute) and
+                   (LM.Tree.Nodes[LAttr].Aux = amaRef) then
+                  LByRef := True;
+                LAttr := LM.Tree.Nodes[LAttr].NextSibling;
+              end;
+            end
+            else if nfName in LM.Tree.Nodes[LChild].Flags then
+            begin
+              if LName = NIL_NODE then
+                LName := LChild;
+            end
+            else if LType = NIL_NODE then
+              LType := LChild
+            else if LDflt = NIL_NODE then
+              LDflt := LChild;
+            LChild := LM.Tree.Nodes[LChild].NextSibling;
+          end;
+          if LName = NIL_NODE then
+            Exit;   // a list being typed
+          if LDflt = NIL_NODE then
+          begin
+            if LSeen then
+            begin
+              LChild := LName;
+              while LChild <> NIL_NODE do
+              begin
+                if nfName in LM.Tree.Nodes[LChild].Flags then
+                  EmitAt(LM, LChild, 'E2238', Format(SE2238_DefaultRequired,
+                    [LM.Tree.NodeText(LChild)]));
+                LChild := LM.Tree.Nodes[LChild].NextSibling;
+              end;
+            end;
+          end
+          else if LM.Tree.Nodes[LType].Kind = nkArrayType then
+          begin
+            EmitAt(LM, LName, 'E2268', SE2268_NoDefaultForType);
+            LSeen := True;
+          end
+          else
+          begin
+            LX := ResolveTypeExprNested(AId, LType);
+            if XValid(LX) then
+              LX := CanonTypeX(LX);
+            if XValid(LX) and not OpenX(LX) and
+               ((XCatOf(LX) in [tcVariant, tcRecord]) or
+                (XCatOf(LX) = tcArray) and IsStaticArrayX(LX)) then
+            begin
+              EmitAt(LM, LName, 'E2268', SE2268_NoDefaultForType);
+              LSeen := True;
+            end
+            else if LByRef then
+              EmitAt(LM, LName, 'E2239', Format(SE2239_DefaultByValue,
+                [LM.Tree.NodeText(LName)]))
+            else
+            begin
+              if XValid(LX) and not OpenX(LX) and IsDynArrayTypeX(LX) and
+                 (LM.Tree.Nodes[PeelParens(LM.Tree, LDflt)].Kind <>
+                  nkNilLit) then
+                EmitAt(LM, LDflt, 'E2026', SE2026_ConstantExpected);
+              LSeen := True;
+            end;
+          end;
+        end;
+        LParam := LM.Tree.Nodes[LParam].NextSibling;
+      end;
+    end;
+
     procedure CheckFor(N: Integer);
     var
       LVar, LFrom, LTo: Integer;
@@ -24673,6 +24773,8 @@ var
           end;
         nkPropertyDecl:
           CheckAccessors(N);
+        nkParams:
+          CheckParamDefaults(N);
         nkMember:
           begin
             LDst := LM.Tree.Nodes[N].FirstChild;
