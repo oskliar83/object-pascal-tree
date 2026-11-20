@@ -4144,6 +4144,43 @@ function BuildCustomCases(GPP: TPasPreprocessor; GSM: TPasSourceManager):
       end;
   end;
 
+  // The parse diagnostics of ASrc, every one, as `line:col msg; ` - must be
+  // exactly AExpected (spec-audit rows: dcc's one error, no cascade).
+  function DiagListCase(const ASection, AName, ASrc, AExpected: string):
+    TPasCustomCase;
+  begin
+    Result.Section := ASection;
+    Result.Name := AName;
+    Result.Run :=
+      function: TPasCheckResult
+      var
+        LPre: TPasPreprocessed;
+        LDiags: TArray<TPasParseDiag>;
+        LText: string;
+        LLine, LCol: Integer;
+      begin
+        LPre := GPP.ProcessText('u.pas', ASrc);
+        TPasParser.ParseFile(LPre, LDiags);
+        LText := '';
+        for var LDiag in LDiags do
+        begin
+          LLine := 0;
+          LCol := 0;
+          if (LDiag.VisIndex >= 0) and (LDiag.VisIndex <= High(LPre.Visible)) then
+            with LPre.Visible[LDiag.VisIndex] do
+              LPre.Files[FileId].OffsetToLineCol(
+                LPre.Files[FileId].Tokens[TokenIndex].Start, LLine, LCol);
+          LText := LText + Format('%d:%d %s; ', [LLine, LCol, LDiag.Msg]);
+        end;
+        Result.Passed := LText = AExpected;
+        if Result.Passed then
+          Result.Message := ''
+        else
+          Result.Message := Format('  want "%s"'#13#10'  got  "%s"',
+            [AExpected, LText]) + sLineBreak;
+      end;
+  end;
+
   // B2-01: a typed constant whose FIRST element is an aggregate of AValues
   // values - longer than the 4096-token scan cap it once had - parses clean.
   function LongAggregateCase(AValues: Integer): TPasCustomCase;
@@ -4510,6 +4547,39 @@ begin
   Result := Result + [OutParamAuxCase, PackageHeadTokensCase,
     PackageStrayTextCase, FusedGreaterEqualCase, WithBodyCase,
     CheckerCorruptionCase];
+  // Spec audit g6 X09 and its neighbours (18.1, 5.5.4; dcc64 37.0): a
+  // `finally`, `except` or `until` no construct of the list owns is one
+  // E2029 naming the word the list wanted, at that word.
+  Result := Result + [
+    DiagListCase('18.1', 'SA X09: try except finally',
+      'program X09;'#13#10'var G: Integer;'#13#10'begin'#13#10 +
+      '  try G := 1; except G := 2; finally G := 3; end;'#13#10'end.'#13#10,
+      '4:30 "end" expected, found "finally"; '),
+    DiagListCase('18.1', 'SA X09: try finally except',
+      'program T1;'#13#10'var G: Integer;'#13#10'begin'#13#10 +
+      '  try G := 1; finally G := 2; except G := 3; end;'#13#10'end.'#13#10,
+      '4:31 "end" expected, found "except"; '),
+    DiagListCase('18.1', 'SA X09: except in a begin',
+      'program T2;'#13#10'var G: Integer;'#13#10'begin'#13#10 +
+      '  begin G := 1; except G := 2; end;'#13#10'end.'#13#10,
+      '4:17 "end" expected, found "except"; '),
+    DiagListCase('5.5.4', 'SA X09: until in a begin',
+      'program T5;'#13#10'var G: Integer;'#13#10'begin'#13#10 +
+      '  begin G := 1; until G = 2; end;'#13#10'end.'#13#10,
+      '4:17 "end" expected, found "until"; '),
+    DiagListCase('5.5.4', 'SA X09: finally in a repeat',
+      'program T4;'#13#10'var G: Integer;'#13#10'begin'#13#10 +
+      '  repeat G := 1; finally G := 2; until G = 2;'#13#10'end.'#13#10,
+      '4:18 "until" expected, found "finally"; '),
+    DiagListCase('18.1', 'SA X09: finally after on handlers',
+      'program T6;'#13#10'var G: Integer;'#13#10'begin'#13#10 +
+      '  try G := 1; except on E: TObject do G := 2; finally G := 3; end;' +
+      #13#10'end.'#13#10,
+      '4:47 "end" expected, found "finally"; '),
+    DiagListCase('18.1', 'SA X09: two except parts',
+      'program T8;'#13#10'var G: Integer;'#13#10'begin'#13#10 +
+      '  try G := 1; except G := 2; except G := 3; end;'#13#10'end.'#13#10,
+      '4:30 "end" expected, found "except"; ')];
 end;
 
 

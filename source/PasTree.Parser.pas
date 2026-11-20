@@ -1524,13 +1524,29 @@ var
   LStmt, LLast: Integer;
   LAfterSemi: Boolean;
   LKind, LTerm: TPasTokenKind;
-  LStop: set of TPasTokenKind;
+  LStop, LStray: set of TPasTokenKind;
+  LWant: string;
 begin
   // Everything that ends the list, as one set: a test below reads CurKind
   // once, not once per terminator (AtAny) and once per other word.
   LStop := SECTION_WORDS + [tkEndOfFile];
   for LTerm in ATerminators do
     Include(LStop, LTerm);
+  // A `finally`, `except` or `until` that ends no construct of this list
+  // (18.1, 5.5.4): dcc reports the word the list wanted - `try S except T
+  // finally U end` is E2029 'END' expected but 'FINALLY' found, `repeat S
+  // finally` 'UNTIL' expected. The list reads on past the word, so the
+  // statements after it keep their nodes. Not in a try's own body, where
+  // `finally` / `except` end the list and a stray `until` is the try's error.
+  LStray := [];
+  LWant := '';
+  if not (tkFinally in LStop) then
+    if tkUntil in LStop then
+      LWant := 'until'
+    else if tkEnd in LStop then
+      LWant := 'end';
+  if LWant <> '' then
+    LStray := [tkFinally, tkExcept, tkUntil] - LStop;
   Inc(FBlockDepth);
   try
   LLast := NIL_NODE;
@@ -1542,6 +1558,12 @@ begin
     LKind := CurKind;
     if LKind in LStop then
       Break;
+    if LKind in LStray then
+    begin
+      Error('"' + LWant + '" expected, found "' + CurText + '"');
+      Next;
+      Continue;
+    end;
     if LKind = tkElse then
     begin
       // An `else` no enclosing construct of this list owns (it is not a
@@ -1569,7 +1591,7 @@ begin
     FB.Adopt(ABlock, LStmt);
     LLast := LStmt;
     LKind := CurKind;
-    if (LKind in LStop) or (LKind in [tkSemicolon, tkElse]) then
+    if (LKind in LStop + LStray) or (LKind in [tkSemicolon, tkElse]) then
       Continue;   // the loop's head decides
     // Recovery: missing separator - resync to ';' or a terminator.
     Error('";" expected');
@@ -1844,6 +1866,22 @@ begin
         ParseBlockUntil(LElse, [tkEnd]);
         FB.SetLast(LElse, FPos - 1);
         FB.Adopt(LPart, LElse);
+      end
+      else if CurKind in [tkFinally, tkExcept, tkUntil] then
+      begin
+        // `except on E: X do S; finally U end`: as after a catch-all list
+        // (ParseBlockUntil), E2029 'END' expected but 'FINALLY' found, and
+        // the statements after the word keep their nodes - a block of the
+        // try node of its own, after the part (dcc64 37.0).
+        FB.SetLast(LPart, FPos - 1);
+        FB.Adopt(LNode, LPart);
+        LPart := NIL_NODE;
+        Error('"end" expected, found "' + CurText + '"');
+        Next;
+        LElse := FB.AddNode(nkBlock, NIL_NODE, FPos);
+        ParseBlockUntil(LElse, [tkEnd]);
+        FB.SetLast(LElse, FPos - 1);
+        FB.Adopt(LNode, LElse);
       end;
     end
     else
@@ -1854,8 +1892,11 @@ begin
       FB.SetLast(LBody, FPos - 1);
       FB.Adopt(LPart, LBody);
     end;
-    FB.SetLast(LPart, FPos - 1);
-    FB.Adopt(LNode, LPart);
+    if LPart <> NIL_NODE then
+    begin
+      FB.SetLast(LPart, FPos - 1);
+      FB.Adopt(LNode, LPart);
+    end;
   end
   else
     Error('"finally" or "except" expected');
