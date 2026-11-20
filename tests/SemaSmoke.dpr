@@ -3789,9 +3789,11 @@ begin
     'procedure P;'#10 +
     'var LI: Integer; LD: Double; LCh: Char; LS: string;'#10 +
     '  LE: (eA, eB); LSet: TSetB; LA: TDyn; LC: TCls; LIf: TIntf;'#10 +
-    '  LB: Boolean;'#10 +
+    '  LB: Boolean; LBB: ByteBool;'#10 +
     'begin'#10 +
     '  if LI then LB := True;'#10 +
+    '  LI := if LI then 1 else 2;'#10 +
+    '  LB := if LS then True else False;'#10 +
     '  while LD do LB := True;'#10 +
     '  repeat until LS;'#10 +
     '  if LCh then LB := True;'#10 +
@@ -3802,9 +3804,11 @@ begin
     '  if LB then LB := False;'#10 +          // legal from here down
     '  while LB and (LI > 0) do LB := False;'#10 +
     '  repeat until LI = 0;'#10 +
+    '  LI := if LB then 1 else 2;'#10 +
+    '  LI := if LBB then 1 else if LI > 0 then 2 else 3;'#10 +
     'end;'#10 +
     'end.'#10);
-  Ok('e2012: one per definitely-non-Boolean guard', DiagCount('E2012') = 8);
+  Ok('e2012: one per definitely-non-Boolean guard', DiagCount('E2012') = 10);
   Ok('e2012: dcc''s wording',
     DiagHasText('E2012', 'Type of expression must be BOOLEAN'));
   GModel.Free;
@@ -3830,6 +3834,9 @@ begin
     '  if AStop then LB := True;'#10 +
     '  if LV then LB := True;'#10 +
     '  if LR then LB := True;'#10 +
+    '  LB := if LV then True else False;'#10 +
+    '  LB := if AStop then True else False;'#10 +
+    '  LB := if LR then True else False;'#10 +
     '  case LV of 1: LB := True; end;'#10 +
     'end;'#10 +
     'end.'#10);
