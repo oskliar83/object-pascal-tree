@@ -101,6 +101,10 @@ const
     'E2015 Operator not applicable to this operand type';
   // E2008 names nothing either: `I + True`, `Ch + I` (4.2.1).
   SE2008_IncompatibleTypes = 'E2008 Incompatible types';
+  // The formal type first, then the actual one (6.2.2).
+  SE2033_VarParamNotIdentical =
+    'E2033 Types of actual and formal var parameters must be identical: ' +
+    '%s and %s';
   // A `uses` name with no SOURCE on any search path. dcc's own code, but its
   // wording is "Unit not found: 'X' or binary equivalents (.dcu)" because the
   // compiler accepts a precompiled unit; a source analyzer cannot, so the

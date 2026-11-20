@@ -22860,9 +22860,6 @@ var
 
   procedure CheckAssigns;
 
-    // One value going to one target (2.6.1): ASrc typed ASrcX to the target
-    // ADst typed ADstX, at the statement or declaration AStmt; the E2010 at
-    // AAt. ADst / ASrc are the nodes Unreliable reads.
     // The type of an array or pointer written inline at the declaration of
     // the variable or field ANode names - or ANode itself, such a type slot
     // - the unnamed symbol the resolver declared for it (TPasSemaResolver
@@ -22937,6 +22934,9 @@ var
       Result := not OpenInside(LD) and not OpenInside(LS);
     end;
 
+    // One value going to one target (2.6.1): ASrc typed ASrcX to the target
+    // ADst typed ADstX, at the statement or declaration AStmt; the E2010 at
+    // AAt. ADst / ASrc are the nodes Unreliable reads.
     function CheckConv(AStmt, ADst, ASrc, AAt: Integer; const ADstX,
       ASrcX: TSemaXType): Boolean;
     var
@@ -23082,6 +23082,117 @@ var
       else
         EmitAtToken(LM, N, LTok, 'E2010', Format(SE2010_IncompatibleTypes,
           [XTypeText(LLX), XTypeText(LRX)]));
+    end;
+
+    { E2033 at an argument of a typed `var` / `out` parameter whose type is
+      not the parameter's own (6.2.2): type IDENTITY - one declaration, or
+      one builtin alias group - the formal type named first. Asked in the
+      subset typed reliably alone: the call's head binds one routine that is
+      no overload set's (no overload, no override, nothing builtin, no
+      generic, no varargs), the parameter has a written type that is no
+      open array, no ShortString, no file and nothing open or nested in a
+      generic, and the argument is a variable, field or parameter named -
+      an element, a dereference, a value cast of one - typed by nothing
+      unreliable. An overload set's candidates are 6.3.1's (out, no E2033);
+      a property or a constant is E2197's. }
+    procedure CheckVarArgs(N: Integer);
+
+      // A designator dcc takes for a `var` argument, as far as this check
+      // asks: a variable, field or parameter, an element or a dereference
+      // of anything, a value cast of one.
+      function VarDesignator(ANode: Integer): Boolean;
+      var
+        LCore, LMid, LSym, LHead: Integer;
+      begin
+        Result := False;
+        LCore := PeelParens(LM.Tree, ANode);
+        if LCore = NIL_NODE then
+          Exit;
+        case LM.Tree.Nodes[LCore].Kind of
+          nkIdent, nkMember:
+            Result := not IsTypeDesignator(LCore) and
+              TargetSym(LCore, LMid, LSym) and
+              (FModels[LMid].Symbols[LSym].Kind in [skVar, skField, skParam]);
+          nkIndex, nkDeref:
+            Result := True;
+          nkCall:
+            begin
+              LHead := PeelParens(LM.Tree, LM.Tree.Nodes[LCore].FirstChild);
+              Result := (LHead <> NIL_NODE) and
+                (LM.Tree.Nodes[LHead].Kind in [nkIdent, nkMember]) and
+                IsTypeDesignator(LHead) and
+                (CallFirstArg(LM.Tree, LCore) <> NIL_NODE) and
+                (LM.Tree.Nodes[CallFirstArg(LM.Tree, LCore)].NextSibling =
+                 NIL_NODE) and
+                VarDesignator(CallFirstArg(LM.Tree, LCore));
+            end;
+        end;
+      end;
+
+      // A type this check judges: known, no file, no ShortString, nothing
+      // generic about it.
+      function Judged(const ACanon: TSemaXType): Boolean;
+      begin
+        Result := XValid(ACanon) and (ACanon.Inst = NIL_INST) and
+          not (XCatOf(ACanon) in [tcUnknown, tcFile]) and
+          not OpenX(ACanon) and not NestedInGenericX(ACanon) and
+          not ((FModels[ACanon.UnitId].Symbols[ACanon.Sym].Kind =
+                skBuiltinType) and
+               (FModels[ACanon.UnitId].Symbols[ACanon.Sym].NameLower =
+                'shortstring'));
+      end;
+
+    var
+      LHead, LMid, LSym, LArg, LPDecl: Integer;
+      LPars: TArray<Integer>;
+      LPI: Integer;
+      LOm: TPasSemaModel;
+      LParX, LArgX, LPc, LAc: TSemaXType;
+    begin
+      LHead := PeelParens(LM.Tree, LM.Tree.Nodes[N].FirstChild);
+      if (LHead = NIL_NODE) or
+         not (LM.Tree.Nodes[LHead].Kind in [nkIdent, nkMember]) or
+         not TargetSym(LHead, LMid, LSym) then
+        Exit;
+      LOm := FModels[LMid];
+      if (LOm.Symbols[LSym].Kind <> skRoutine) or
+         (LOm.Symbols[LSym].NextOverload <> NIL_SYM) or
+         (LOm.Symbols[LSym].Flags * [sfBuiltin, sfOverload,
+          sfOverloadDirective, sfOverrideDirective, sfVarArgs] <> []) or
+         (GenericParamCount(LMid, LSym) > 0) then
+        Exit;
+      LArg := CallFirstArg(LM.Tree, N);
+      if LArg = NIL_NODE then
+        Exit;
+      LPars := XParamSyms(LMid, LSym);
+      LPI := 0;
+      while LArg <> NIL_NODE do
+      begin
+        if LPI > High(LPars) then
+          Exit;   // more arguments than parameters: not this check's call
+        LPDecl := LOm.Symbols[LPars[LPI]].DeclNode;
+        while (LPDecl <> NIL_NODE) and
+              (LOm.Tree.Nodes[LPDecl].Kind <> nkParam) do
+          LPDecl := LOm.Tree.Nodes[LPDecl].Parent;
+        if (LPDecl <> NIL_NODE) and
+           (LOm.Tree.Nodes[LPDecl].Flags * [nfVar, nfOut] <> []) and
+           (LOm.Symbols[LPars[LPI]].TypeNode <> NIL_NODE) and
+           (LOm.Tree.Nodes[LOm.Symbols[LPars[LPI]].TypeNode].Kind <>
+            nkArrayType) and
+           VarDesignator(LArg) then
+        begin
+          LParX := DeclTypeX(LMid, LPars[LPI]);
+          LArgX := GetX(LArg);
+          LPc := CanonTypeX(LParX);
+          LAc := CanonTypeX(LArgX);
+          if Judged(LPc) and Judged(LAc) and not XSameType(LPc, LAc) and
+             not InUntypedWith(N) and not Unreliable(N, LArg, LArgX) then
+            EmitAt(LM, LArg, 'E2033', Format(SE2033_VarParamNotIdentical,
+              [XTypeText(LPc), XTypeText(LAc)]));
+        end;
+        Inc(LPI);
+        LArg := LM.Tree.Nodes[LArg].NextSibling;
+      end;
     end;
 
     // A `[...]` assigned to a static array (8.1.1): E2010 naming the
@@ -23657,6 +23768,8 @@ var
           end;
         nkBinaryOp:
           CheckCompare(N);
+        nkCall:
+          CheckVarArgs(N);
         nkWithStmt:
           begin
             CheckWithTargets(N);

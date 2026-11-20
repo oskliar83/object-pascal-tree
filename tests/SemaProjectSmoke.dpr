@@ -14325,6 +14325,84 @@ begin
   end;
 end;
 
+// A typed `var` / `out` parameter takes its own type alone (spec 6.2.2,
+// 10.1.2): E2033 naming the formal type, then the actual one - two typed
+// pointers to one base under {$T+} too, a Byte for an Integer, a distinct
+// copy, a descendant class, a typed pointer for Pointer, a field or an
+// element. An alias, a value cast, an overload set (6.3.1), an untyped and
+// an open-array parameter are silent (dcc64 37.0, local/probe-park/
+// sa-compat VarId.dpr, V1.dpr; spec-audit PCompat2).
+procedure TestVarParamIdentity;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_varid');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'VarId.dpr'),
+    'program VarId;'#10 +                                          // 1
+    '{$T+}'#10 +                                                   // 2
+    'type'#10 +                                                    // 3
+    '  PInt = ^Integer;'#10 +                                      // 4
+    '  PInt2 = ^Integer;'#10 +                                     // 5
+    '  PInt3 = PInt;'#10 +                                         // 6
+    '  TB = class end;'#10 +                                       // 7
+    '  TD = class(TB) end;'#10 +                                   // 8
+    '  TDI = type Integer;'#10 +                                   // 9
+    '  TAl = Integer;'#10 +                                        // 10
+    'procedure Take(var X: PInt); begin end;'#10 +                 // 11
+    'procedure TI(var I: Integer); begin end;'#10 +                // 12
+    'procedure TOut(out I: Integer); begin end;'#10 +              // 13
+    'procedure TObj(var O: TB); begin end;'#10 +                   // 14
+    'procedure TP(var P: Pointer); begin end;'#10 +                // 15
+    'procedure TOv(var I: Integer); overload; begin end;'#10 +     // 16
+    'procedure TOv(B: Byte); overload; begin end;'#10 +            // 17
+    'procedure TU(var X); begin end;'#10 +                         // 18
+    'procedure TOA(var A: array of Integer); begin end;'#10 +      // 19
+    'var'#10 +                                                     // 20
+    '  C: PInt; D: PInt2; E: PInt3;'#10 +                          // 21
+    '  I: Integer; Bt: Byte; DI: TDI; Al: TAl; LW: Cardinal;'#10 + // 22
+    '  B: TB; Dd: TD; P: Pointer; AI: array of Integer;'#10 +      // 23
+    '  R: record F: Byte; end;'#10 +                               // 24
+    '  Arr: array[0..1] of Byte;'#10 +                             // 25
+    'begin'#10 +                                                   // 26
+    '  Take(C); Take(E);'#10 +                                     // 27
+    '  Take(D);'#10 +                                              // 28 E2033
+    '  TI(I); TI(Al);'#10 +                                        // 29
+    '  TI(Bt);'#10 +                                               // 30 E2033
+    '  TOut(Bt);'#10 +                                             // 31 E2033
+    '  TI(DI);'#10 +                                               // 32 E2033
+    '  TObj(B);'#10 +                                              // 33
+    '  TObj(Dd);'#10 +                                             // 34 E2033
+    '  TP(P);'#10 +                                                // 35
+    '  TP(C);'#10 +                                                // 36 E2033
+    '  TI(Integer(LW));'#10 +                                      // 37
+    '  TOv(Bt); TU(Bt); TOA(AI);'#10 +                             // 38
+    '  TI(R.F);'#10 +                                              // 39 E2033
+    '  TI(Arr[0]);'#10 +                                           // 40 E2033
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'VarId.dpr'));
+    LM := ModelByName('varid');
+    Ok('varid: E2033 lines [' + DiagLinesOf(LM, 'E2033') + ']',
+      DiagLinesOf(LM, 'E2033') = '28 30 31 32 34 36 39 40');
+    Ok('varid: the formal type first',
+      DiagHasText(LM, 'E2033', 'identical: PInt and PInt2') and
+      DiagHasText(LM, 'E2033', 'identical: TB and TD') and
+      DiagHasText(LM, 'E2033', 'identical: Pointer and PInt') and
+      DiagHasText(LM, 'E2033', 'identical: Integer and TDI'));
+    Ok('varid: nothing else', DiagCount(LM, 'E2010') = 0);
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // Pointers in implicit conversion and overload ranking (6.3.1, 10.1.2, 4.8;
 // local/type-conv-2026-11/n7): a typed pointer type is nominal under {$T-}
 // (YA: PI for PI2 out), typed pointers of one base meet under {$T+} at the
@@ -22988,6 +23066,7 @@ begin
   TestLightFind;
   TestHelperCarrier;
   TestAnonArrayPtrCompat;
+  TestVarParamIdentity;
 
   if GCounter.Finish('SemaProjectSmoke') then
     ExitCode := 1;
