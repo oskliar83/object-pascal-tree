@@ -4188,6 +4188,28 @@ function BuildCustomCases(GPP: TPasPreprocessor; GSM: TPasSourceManager):
       end;
   end;
 
+  // A unit or program ASrc parses to the tree AExpected with ADiags parse
+  // diagnostics, and prints back (spec-audit declaration rows, sa2-decl).
+  function DeclTreeCase(const ASection, AName, ASrc, AExpected: string;
+    ADiags: Integer): TPasCustomCase;
+  begin
+    Result.Section := ASection;
+    Result.Name := AName;
+    Result.Run :=
+      function: TPasCheckResult
+      var
+        LPre: TPasPreprocessed;
+        LDiags: TArray<TPasParseDiag>;
+        LTree: TPasTree;
+      begin
+        LPre := GPP.ProcessText('u.pas', ASrc);
+        LTree := TPasParser.ParseFile(LPre, LDiags);
+        Result := CheckDump(ASrc, AExpected, LTree.Dump(0), LDiags, ADiags);
+        ApplyVerdict(Result, ASrc, GCustomTreeVerdict, LPre, LTree, False,
+          Length(LDiags) = 0);
+      end;
+  end;
+
   // B2-01: a typed constant whose FIRST element is an aggregate of AValues
   // values - longer than the 4096-token scan cap it once had - parses clean.
   function LongAggregateCase(AValues: Integer): TPasCustomCase;
@@ -4554,6 +4576,196 @@ begin
   Result := Result + [OutParamAuxCase, PackageHeadTokensCase,
     PackageStrayTextCase, FusedGreaterEqualCase, WithBodyCase,
     CheckerCorruptionCase];
+  // Spec audit declaration syntax (sa2-decl; dcc64 37.0).
+  Result := Result + [
+    // g6 A03, CB (2.2.4, 19.3.2): an attribute group before an enumeration
+    // element is the element's first child; the list parses clean.
+    DeclTreeCase('2.2.4', 'SA A03: attribute groups on enumeration elements',
+      'program A03;'#13#10'type'#13#10 +
+      '  TE = ([Tag] e1, [Tag, Tag][B(1)] e2 = 5, e3);'#13#10 +
+      'var V: ([Tag] v1);'#13#10'begin'#13#10'end.'#13#10,
+      'Program(Ident''A03'' TypeSec(TypeDecl(Ident''TE'' EnumType(' +
+      'EnumValue(AttrGroup(Attribute(Ident''Tag'')) Ident''e1'') ' +
+      'EnumValue(AttrGroup(Attribute(Ident''Tag'') Attribute(Ident''Tag'') ' +
+      'Attribute(Ident''B'' IntLit''1'')) Ident''e2'' IntLit''5'') ' +
+      'EnumValue(Ident''e3'')))) VarSec''var''(VarDecl(Ident''V''#name ' +
+      'EnumType(EnumValue(AttrGroup(Attribute(Ident''Tag'')) ' +
+      'Ident''v1'')))) Block)', 0),
+    DiagListCase('2.2.4', 'SA A03: a group with no element after it',
+      'program E2;'#13#10'type'#13#10'  TE = (e1, [Tag] );'#13#10 +
+      'begin'#13#10'end.'#13#10,
+      '3:19 enum element expected; '),
+    // g6 M1 (6.2.7): a value parameter's names with no type after them are
+    // one E2067; a name right after a name is read on as the next one.
+    DiagListCase('6.2.7', 'SA M1: constref',
+      'program M1;'#13#10'procedure P(constref X: Integer); begin end;' +
+      #13#10'begin end.'#13#10,
+      '2:22 Missing parameter type; '),
+    DiagListCase('6.2.7', 'SA M1: no type, closing bracket',
+      'program M4;'#13#10'procedure P(A, B); begin end;'#13#10 +
+      'type TP = procedure(A: Integer; B);'#13#10'begin end.'#13#10,
+      '2:17 Missing parameter type; 3:34 Missing parameter type; '),
+    DiagListCase('6.2.7', 'SA M1: no type, semicolon',
+      'program M8;'#13#10'procedure P(A; B: Integer); begin end;'#13#10 +
+      'begin end.'#13#10,
+      '2:14 Missing parameter type; '),
+    DiagListCase('6.2.7', 'SA M1: untyped var, const, out stay legal',
+      'program M9;'#13#10 +
+      'procedure P(var A, B; const C; out D; [Ref] const E; out: Integer);' +
+      ' begin end;'#13#10'begin end.'#13#10,
+      ''),
+    DeclTreeCase('6.2.7', 'SA M1: both names of `constref X: T` are read',
+      'program M1;'#13#10'procedure P(constref X: Integer); begin end;' +
+      #13#10'begin end.'#13#10,
+      'Program(Ident''M1'' Routine''procedure''(Ident''P''#name ' +
+      'Params(Param(Ident''constref''#name Ident''X''#name ' +
+      'Ident''Integer'')) RoutineBody(Block)) Block)', 1),
+    // g4 RVar2 (9.1.3): a field after the variant part is a further branch
+    // for dcc - its name a label, E2003 there, the record's `end` the
+    // E2029; the tree keeps the fields as fields, in that branch.
+    DiagListCase('9.1.3', 'SA RVar2: a field after the variant part',
+      'program RVar2;'#13#10'type'#13#10'  TV = record'#13#10 +
+      '    case Integer of'#13#10'      0: (I: Integer);'#13#10 +
+      '    A: Integer;'#13#10'  end;'#13#10'begin'#13#10'end.'#13#10,
+      '6:5 Undeclared identifier: ''A''; 7:3 type expected, found "end"; '),
+    DiagListCase('9.1.3', 'SA RVar2: two fields after it',
+      'program V1;'#13#10'type'#13#10'  TV = record'#13#10 +
+      '    case Integer of'#13#10'      0: (I: Integer);'#13#10 +
+      '    A: Integer;'#13#10'    B: Byte;'#13#10'  end;'#13#10 +
+      'begin'#13#10'end.'#13#10,
+      '6:5 Undeclared identifier: ''A''; 8:3 ")" expected, found "end"; '),
+    DiagListCase('9.1.3', 'SA RVar2: no semicolon after it',
+      'program V3;'#13#10'type'#13#10'  TV = record'#13#10 +
+      '    case Integer of'#13#10'      0: (I: Integer);'#13#10 +
+      '    A: Integer'#13#10'  end;'#13#10'begin'#13#10'end.'#13#10,
+      '6:5 Undeclared identifier: ''A''; 7:3 "," or ":" expected, found "end"; '),
+    DiagListCase('9.1.3', 'SA RVar2: a literal label with no (',
+      'program V5;'#13#10'type'#13#10'  TV = record'#13#10 +
+      '    case Integer of'#13#10'      0: (I: Integer);'#13#10 +
+      '    1: Integer;'#13#10'  end;'#13#10'begin'#13#10'end.'#13#10,
+      '6:8 "(" expected; 7:3 type expected, found "end"; '),
+    DeclTreeCase('9.1.3', 'SA RVar2: the fields stay fields',
+      'program RVar2;'#13#10'type'#13#10'  TV = record'#13#10 +
+      '    case Integer of'#13#10'      0: (I: Integer);'#13#10 +
+      '    A: Integer;'#13#10'    B: Byte;'#13#10'  end;'#13#10 +
+      'begin'#13#10'end.'#13#10,
+      'Program(Ident''RVar2'' TypeSec(TypeDecl(Ident''TV'' RecordType(' +
+      'VariantPart(Ident''Integer'' VariantBranch(IntLit''0'' ' +
+      'VarDecl(Ident''I''#name Ident''Integer'')) VariantBranch(' +
+      'VarDecl(Ident''A''#name Ident''Integer'') VarDecl(Ident''B''#name ' +
+      'Ident''Byte'')))))) Block)', 2),
+    DiagListCase('9.1.3', 'SA RVar2: legal variant parts stay clean',
+      'program V0;'#13#10'type'#13#10'  TV = record'#13#10 +
+      '    A: Integer;'#13#10'    case T: Byte of'#13#10 +
+      '      0: (I: Integer);'#13#10'      1, 2: (J: Byte;'#13#10 +
+      '        case Boolean of True: (K: Word));'#13#10'  end;'#13#10 +
+      'begin'#13#10'end.'#13#10,
+      ''),
+    // g4 RVis2 (11.2.1): `strict` before public / published is one E2375
+    // at the second word; the section is read as written.
+    DiagListCase('11.2.1', 'SA RVis2: strict public, strict published',
+      'program RVis2;'#13#10'type'#13#10'  TR = record'#13#10 +
+      '  strict public'#13#10'    A: Integer;'#13#10'  end;'#13#10 +
+      '  TC = class'#13#10'  strict public'#13#10'    B: Integer;'#13#10 +
+      '  strict published'#13#10'    C: TObject;'#13#10'  end;'#13#10 +
+      'begin'#13#10'end.'#13#10,
+      '4:10 PRIVATE or PROTECTED expected; ' +
+      '8:10 PRIVATE or PROTECTED expected; ' +
+      '10:10 PRIVATE or PROTECTED expected; '),
+    DeclTreeCase('11.2.1', 'SA RVis2: the strict public section',
+      'program RVis2;'#13#10'type'#13#10'  TC = class'#13#10 +
+      '  strict public'#13#10'    B: Integer;'#13#10'  end;'#13#10 +
+      'begin'#13#10'end.'#13#10,
+      'Program(Ident''RVis2'' TypeSec(TypeDecl(Ident''TC'' ClassType(' +
+      'Visibility''public''#strict VarDecl(Ident''B''#name ' +
+      'Ident''Integer'')))) Block)', 1),
+    DiagListCase('11.2.1', 'SA RVis2: strict private / protected stay clean',
+      'program RVis0;'#13#10'type'#13#10'  TC = class'#13#10 +
+      '  strict private'#13#10'    A, strict: Integer;'#13#10 +
+      '  strict'#13#10'  protected'#13#10'    B: Integer;'#13#10 +
+      '  end;'#13#10'begin'#13#10'end.'#13#10,
+      ''),
+    // g1 EmptyVar, EmptyRs (B, DeclSection): a section word with no
+    // declaration after it is E2029 at the next token - in a program, a
+    // routine, a unit; in a struct only `const` / `type` before no
+    // visibility word.
+    DiagListCase('B', 'SA EmptyVar: var, const, type',
+      'program EmptyVar;'#13#10'var'#13#10'const'#13#10'type'#13#10 +
+      'begin'#13#10'end.'#13#10,
+      '3:1 identifier expected, found "const"; ' +
+      '4:1 identifier expected, found "type"; ' +
+      '5:1 identifier expected, found "begin"; '),
+    DiagListCase('B', 'SA EmptyRs: resourcestring, threadvar, local var',
+      'program EmptyRs;'#13#10'resourcestring'#13#10'threadvar'#13#10 +
+      'procedure P;'#13#10'var'#13#10'begin'#13#10'end;'#13#10 +
+      'begin'#13#10'end.'#13#10,
+      '3:1 identifier expected, found "threadvar"; ' +
+      '4:1 identifier expected, found "procedure"; ' +
+      '6:1 identifier expected, found "begin"; '),
+    DiagListCase('B', 'SA EmptyVar: in a unit',
+      'unit S3;'#13#10'interface'#13#10'var'#13#10'implementation' +
+      #13#10'const'#13#10'end.'#13#10,
+      '4:1 identifier expected, found "implementation"; ' +
+      '6:1 identifier expected, found "end"; '),
+    DiagListCase('B', 'SA EmptyVar: const / type in a struct',
+      'program S6;'#13#10'type'#13#10'  TC = class'#13#10'  const' +
+      #13#10'  end;'#13#10'  TE = class'#13#10'  type'#13#10 +
+      '  class var'#13#10'    Y: Integer;'#13#10'  end;'#13#10 +
+      'begin'#13#10'end.'#13#10,
+      '5:3 identifier expected, found "end"; ' +
+      '8:3 identifier expected, found "class"; '),
+    DiagListCase('B', 'SA EmptyVar: what a struct may leave empty',
+      'program S5;'#13#10'type'#13#10'  TR = record'#13#10 +
+      '    class var'#13#10'  end;'#13#10'  TG = class'#13#10'  var' +
+      #13#10'    procedure P;'#13#10'  const'#13#10'  public'#13#10 +
+      '  type'#13#10'  strict private'#13#10'    X: Integer;'#13#10 +
+      '  end;'#13#10'procedure TG.P; begin end;'#13#10'begin'#13#10 +
+      'end.'#13#10,
+      ''),
+    // g1 FinOnly, UnitIn (1.2.1): a unit's `finalization` with no
+    // `initialization`, and `in 'file'` in a unit's `uses`, are E2029; the
+    // section and the path are still read.
+    DiagListCase('1.2.1', 'SA FinOnly: finalization alone',
+      'unit UFin;'#13#10'interface'#13#10'implementation'#13#10 +
+      'finalization'#13#10'  Writeln(''fin'');'#13#10'end.'#13#10,
+      '4:1 declaration expected, found "finalization"; '),
+    DiagListCase('1.2.1', 'SA UnitIn: in a unit''s uses',
+      'unit UIn;'#13#10'interface'#13#10'uses UA, UB in ''UB.pas'';' +
+      #13#10'implementation'#13#10'uses UC in ''UC.pas'';'#13#10 +
+      'end.'#13#10,
+      '3:13 "," or ";" expected, found "in"; ' +
+      '5:9 "," or ";" expected, found "in"; '),
+    DiagListCase('1.2.1', 'SA FinOnly, UnitIn: the legal shapes',
+      'unit UOk;'#13#10'interface'#13#10'uses UA;'#13#10 +
+      'implementation'#13#10'initialization'#13#10'finalization'#13#10 +
+      '  Writeln(''fin'');'#13#10'end.'#13#10,
+      ''),
+    DiagListCase('1.2.1', 'SA UnitIn: a program''s uses takes in',
+      'program P;'#13#10'uses UA in ''UA.pas'';'#13#10'begin'#13#10 +
+      'end.'#13#10,
+      ''),
+    // g5 G02, G08 (16.4.1): `string` is no constraint name, and an
+    // implementation header repeats no constraint - one E2029 each.
+    DiagListCase('16.4.1', 'SA G02: a string constraint',
+      'program G3;'#13#10'type'#13#10'  TA<T: string; K> = class end;' +
+      #13#10'  TB<T: TObject, string> = class end;'#13#10'begin'#13#10 +
+      'end.'#13#10,
+      '3:9 identifier expected, found "string"; ' +
+      '4:18 identifier expected, found "string"; '),
+    DiagListCase('16.4.1', 'SA G08: constraints in implementation headers',
+      'program G08;'#13#10'type'#13#10'  TL<T: class; K> = class'#13#10 +
+      '    procedure Sort;'#13#10'    procedure M<U: class, constructor>;' +
+      #13#10'  end;'#13#10'procedure TL<T: class; K: record>.Sort; ' +
+      'begin end;'#13#10'procedure TL<T; K>.M<U: class>; begin end;' +
+      #13#10'begin'#13#10'end.'#13#10,
+      '7:15 ",", ";" or ">" expected, found ":"; ' +
+      '8:23 ",", ";" or ">" expected, found ":"; '),
+    DiagListCase('16.4.1', 'SA G08: the legal shapes',
+      'program G0;'#13#10'type'#13#10'  TL<T: class, constructor; ' +
+      'K: record> = class'#13#10'    procedure M<U: TObject>;'#13#10 +
+      '  end;'#13#10'procedure TL<T; K>.M<U>; begin end;'#13#10 +
+      'begin'#13#10'end.'#13#10,
+      '')];
   // Spec audit g6 X09 and its neighbours (18.1, 5.5.4; dcc64 37.0): a
   // `finally`, `except` or `until` no construct of the list owns is one
   // E2029 naming the word the list wanted, at that word.

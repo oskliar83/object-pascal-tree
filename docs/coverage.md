@@ -461,6 +461,18 @@ of less work, not a gap in following the language; its consequences are in
   multi-dimensional row (`High(M[0])` of `array[a, b] of T`) has no bounds
   type.
 
+## 09-records.md
+
+### 9.1.3 Variant records (`case` part)
+- a field after the variant part (`A: Integer;` on its own line after a
+  branch) gets dcc's diagnostics - `E2003 Undeclared identifier: 'A'` at
+  the name, the E2029 at the record's `end` - but stays a field in the
+  tree, as the same text is while the author types the next field below a
+  `case`. A name that IS a declared constant is dcc's `'(' expected`
+  instead; it gets the E2003 here. A list of labels on that line (`A, B:
+  Integer;`) is read as labels: each undeclared one is reported, where dcc
+  shows the first alone.
+
 ## 11-classes.md
 
 ### 11.2.1 `private` / `protected` / `public` / `published` (+ `strict`)
@@ -576,6 +588,11 @@ of less work, not a gap in following the language; its consequences are in
   a .dcu - leaves the argument unchecked. dcc, which has that unit, knows;
   without its declaration there is nothing to follow, and a verdict would
   be a guess.
+- the declaration's own constraint list is not judged: the combinations
+  and kinds dcc refuses there (E2507 `class, record`, E2516 `record,
+  constructor`, E2510 `TObject` / `Integer`, E2552 `class, TBase`, E2553
+  and the other repeats) are not reported. Its syntax is: `<T: string>`
+  and a constraint repeated in an implementation header are E2029.
 
 ## 17-anonymous-methods.md
 

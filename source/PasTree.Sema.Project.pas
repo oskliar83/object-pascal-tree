@@ -6379,7 +6379,7 @@ begin
   begin
     if LM.Tree.Nodes[LChild].Kind <> nkEnumValue then
       Exit;
-    LName := LM.Tree.Nodes[LChild].FirstChild;
+    LName := PasSkipAttrGroups(LM.Tree, LM.Tree.Nodes[LChild].FirstChild);
     if LName = NIL_NODE then
       Exit;
     LValue := LM.Tree.Nodes[LName].NextSibling;
@@ -6453,7 +6453,7 @@ begin
   begin
     if LM.Tree.Nodes[LChild].Kind <> nkEnumValue then
       Exit(False);
-    LName := LM.Tree.Nodes[LChild].FirstChild;
+    LName := PasSkipAttrGroups(LM.Tree, LM.Tree.Nodes[LChild].FirstChild);
     if LName = NIL_NODE then
       Exit(False);
     LValue := LM.Tree.Nodes[LName].NextSibling;

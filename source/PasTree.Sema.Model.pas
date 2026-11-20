@@ -3832,8 +3832,12 @@ begin
     LVis := Tree.Source.Visible[LTok];
     Tree.Source.Files[LVis.FileId].OffsetToLineCol(
       Tree.Source.Files[LVis.FileId].Tokens[LVis.TokenIndex].Start, LLine, LCol);
-    AddDiag(MakeDiag('E2029', 'E2029 ' + ADiags[LIdx].Msg, NIL_NODE,
-      LVis.FileId, LLine, LCol));
+    if ADiags[LIdx].Code <> '' then
+      AddDiag(MakeDiag(ADiags[LIdx].Code, ADiags[LIdx].Code + ' ' +
+        ADiags[LIdx].Msg, ADiags[LIdx].Node, LVis.FileId, LLine, LCol))
+    else
+      AddDiag(MakeDiag('E2029', 'E2029 ' + ADiags[LIdx].Msg, NIL_NODE,
+        LVis.FileId, LLine, LCol));
   end;
   // The LEXER's diagnostics too, from every file of the model (includes have
   // their own token stream and their own FileId). Until now only the demo's

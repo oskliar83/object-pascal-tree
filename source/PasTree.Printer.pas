@@ -2027,11 +2027,21 @@ begin
       end;
     nkEnumValue:
       begin
-        Child(ANode, C0);
-        if C1 <> NIL_NODE then
+        // `([Tag] e1)`: the element's attribute groups before its name.
+        while (C0 <> NIL_NODE) and (Kind(C0) = nkAttrGroup) do
         begin
-          Kw('=', ANode);
-          Child(ANode, C1);
+          Child(ANode, C0);
+          C0 := Next(C0);
+        end;
+        if C0 <> NIL_NODE then
+        begin
+          Child(ANode, C0);
+          C1 := Next(C0);
+          if C1 <> NIL_NODE then
+          begin
+            Kw('=', ANode);
+            Child(ANode, C1);
+          end;
         end;
       end;
     nkArrayType:

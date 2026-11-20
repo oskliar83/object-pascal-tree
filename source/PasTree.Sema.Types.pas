@@ -6450,8 +6450,9 @@ begin
   begin
     if ATree.Nodes[LCur].Kind = nkEnumValue then
     begin
-      // nkEnumValue children: the name, then an optional value.
-      LValue := ATree.Nodes[LCur].FirstChild;
+      // nkEnumValue children: attribute groups, the name, then an optional
+      // value.
+      LValue := PasSkipAttrGroups(ATree, ATree.Nodes[LCur].FirstChild);
       if LValue <> NIL_NODE then
         LValue := ATree.Nodes[LValue].NextSibling;
       if LValue = NIL_NODE then
@@ -8097,8 +8098,9 @@ const
             begin
               if Kind(LElem) = nkEnumValue then
               begin
-                // nkEnumValue children: the name, then an optional value.
-                LValue := Child(LElem);
+                // nkEnumValue children: attribute groups, the name, then an
+                // optional value.
+                LValue := PasSkipAttrGroups(T, Child(LElem));
                 if LValue <> NIL_NODE then
                   LValue := Sib(LValue);
                 if LValue = NIL_NODE then

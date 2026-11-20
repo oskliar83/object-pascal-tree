@@ -11767,6 +11767,84 @@ begin
   end;
 end;
 
+{ Spec audit, declaration syntax (dcc64 37.0, 2026-11-20; sa2-decl):
+  the rows a parse fix closes, as the project analysis reports them. }
+procedure TestSpecAuditDeclSyntax;
+const
+  SYS = 'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class constructor Create; end;'#10 +
+    '  IInterface = interface end;'#10 +
+    '  TCustomAttribute = class(TObject) end;'#10 +
+    'implementation'#10'constructor TObject.Create; begin end;'#10 +
+    'end.'#10;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+
+  function Run(const AName, ASrc: string): TPasSemaModel;
+  begin
+    TFile.WriteAllText(TPath.Combine(LDir, AName + '.dpr'), ASrc);
+    FreeAndNil(GProj);
+    GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+    GProj.AnalyzeProject(TPath.Combine(LDir, AName + '.dpr'));
+    Result := ModelByName(LowerCase(AName));
+  end;
+
+begin
+  LDir := FreshDir('pastree_sema_sa2decl');
+  GProj := nil;
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'), SYS);
+  try
+    // g6 A03 (2.2.4, 19.3.2): a group on an enumeration element is checked
+    // as any other - W1074 for an unknown name, E2010 for a class that is
+    // no attribute, E2003 in its arguments; the ordinals are unchanged.
+    LM := Run('A03',
+      'program A03;'#10 +                                                // 1
+      'type'#10 +                                                        // 2
+      '  TagAttribute = class(TCustomAttribute) end;'#10 +               // 3
+      '  TE = ([Tag] e1, [Tag, Tag] e2 = 5, e3);'#10 +                   // 4
+      '  TF = ([Zork] f1);'#10 +                                         // 5 W1074
+      '  TG = ([TObject] g1);'#10 +                                      // 6 E2010
+      '  TArgAttribute = class(TCustomAttribute)'#10 +                   // 7
+      '    constructor Create(I: Integer); end;'#10 +                    // 8
+      '  TH = (h0, [TArg(Undecl)] h1);'#10 +                             // 9 E2003
+      'const K: array[Ord(e3)..6] of Byte = (0);'#10 +                   // 10
+      'constructor TArgAttribute.Create(I: Integer); begin end;'#10 +    // 11
+      'begin'#10'end.'#10);
+    Ok('sa2decl: A03 - enum element groups checked [' +
+      DiagSites(LM, 'W1074') + '/' + DiagSites(LM, 'E2010') + '/' +
+      DiagSites(LM, 'E2003') + '/' + IntToStr(Length(LM.Diags)) + ']',
+      (Copy(DiagSites(LM, 'W1074'), 1, 2) = '5:') and
+      (Copy(DiagSites(LM, 'E2010'), 1, 2) = '6:') and
+      (Copy(DiagSites(LM, 'E2003'), 1, 2) = '9:') and
+      (Length(LM.Diags) = 3));
+    // g6 CB: the legal shape is silent.
+    LM := Run('CB',
+      'program CB;'#10 +
+      'type AAttribute = class(TCustomAttribute) end;'#10 +
+      'type TE = (e1, [A] e2);'#10 +
+      'var V: ([A] v1, v2);'#10 +
+      'begin V := v2; end.'#10);
+    Ok('sa2decl: CB - silent [' + IntToStr(Length(LM.Diags)) + ']',
+      Length(LM.Diags) = 0);
+    // g4 RVar2 (9.1.3): the field after the variant part is a label, the
+    // record's `end` the parse error - nothing else.
+    LM := Run('RVar2',
+      'program RVar2;'#10'type'#10'  TV = record'#10 +
+      '    case Integer of'#10'      0: (I: Integer);'#10 +
+      '    A: Integer;'#10'  end;'#10'begin'#10'end.'#10);
+    Ok('sa2decl: RVar2 - E2003 at the label, E2029 at end [' +
+      DiagSites(LM, 'E2003') + '/' + DiagSites(LM, 'E2029') + '/' +
+      IntToStr(Length(LM.Diags)) + ']',
+      (DiagSites(LM, 'E2003') = '6:5') and (DiagSites(LM, 'E2029') = '7:3')
+      and (Length(LM.Diags) = 2));
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 { Spec 19.3.2 (dcc64 37.0, 2026-11-14, local/fu-attrs P1-P7): an attribute
   with its arguments is a call of its class's Create. One candidate: the
   arguments converted left to right, the first that does not is E2010 at it,
@@ -23680,6 +23758,7 @@ begin
   TestAttributeE2289;
   TestAttributeE2289Lists;
   TestAttributeE2289Hidden;
+  TestSpecAuditDeclSyntax;
   TestAttributeExprHead;
   TestAttributeW1074LeafGuess;
   TestE2003LeafGuess;
