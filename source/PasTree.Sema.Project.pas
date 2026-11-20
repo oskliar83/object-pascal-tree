@@ -23427,6 +23427,97 @@ var
           [XTypeText(LLX), XTypeText(LRX)]));
     end;
 
+    // Is ANode (through parentheses) an open-array parameter named - and
+    // ATxt its type as dcc names it, `array of T` (`array of TVarRec` for
+    // `array of const`)? Such a parameter types as nothing (6.2.6).
+    function OpenArrayParamOf(ANode: Integer; out ATxt: string): Boolean;
+    var
+      LCore, LMid, LSym: Integer;
+      LElemX: TSemaXType;
+    begin
+      Result := False;
+      ATxt := '';
+      LCore := PeelParens(LM.Tree, ANode);
+      if (LCore = NIL_NODE) or (LM.Tree.Nodes[LCore].Kind <> nkIdent) or
+         not TargetSym(LCore, LMid, LSym) or
+         (FModels[LMid].Symbols[LSym].Kind <> skParam) or
+         (FModels[LMid].Symbols[LSym].TypeNode = NIL_NODE) or
+         (FModels[LMid].Tree.Nodes[FModels[LMid].Symbols[LSym].TypeNode]
+           .Kind <> nkArrayType) then
+        Exit;
+      LElemX := InlineArrayElemX(LMid, LSym);
+      if not XValid(LElemX) or OpenX(CanonTypeX(LElemX)) then
+        Exit;
+      ATxt := 'array of ' + XTypeText(LElemX);
+      Result := True;
+    end;
+
+    { An open-array parameter used as a value inside its routine (6.2.6):
+      it is no dynamic array. Assigned to a typed target, E2010 naming the
+      target and `array of T` - a string target takes an `array of Char`,
+      and neither a string nor a pointer target is judged; assigned to (a
+      `var` one), E2008 from another open array, E2010 from `[...]` ('Set'),
+      nil ('Pointer') or a typed value; `SetLength(A, ...)` E2008. dcc64
+      37.0, 2026-11-20 (spec 6.2.6; local/p P9). }
+    procedure CheckOpenArrayValue(AAssign, ADst, ASrc: Integer);
+    var
+      LDstTxt, LSrcTxt: string;
+      LSrcCore: Integer;
+      LX: TSemaXType;
+    begin
+      if InUntypedWith(AAssign) then
+        Exit;
+      if OpenArrayParamOf(ADst, LDstTxt) and
+         (LM.Tree.Nodes[PeelParens(LM.Tree, ADst)].Kind = nkIdent) then
+      begin
+        LSrcCore := PeelParens(LM.Tree, ASrc);
+        if OpenArrayParamOf(ASrc, LSrcTxt) then
+          EmitAt(LM, ASrc, 'E2008', SE2008_IncompatibleTypes)
+        else if LM.Tree.Nodes[LSrcCore].Kind = nkSetCtor then
+          EmitAt(LM, ASrc, 'E2010', Format(SE2010_IncompatibleTypes,
+            [LDstTxt, 'Set']))
+        else if LM.Tree.Nodes[LSrcCore].Kind = nkNilLit then
+          EmitAt(LM, ASrc, 'E2010', Format(SE2010_IncompatibleTypes,
+            [LDstTxt, 'Pointer']))
+        else
+        begin
+          LX := GetX(ASrc);
+          if XValid(LX) and not OpenX(CanonTypeX(LX)) and
+             not Unreliable(AAssign, ASrc, LX) then
+            EmitAt(LM, ASrc, 'E2010', Format(SE2010_IncompatibleTypes,
+              [LDstTxt, XTypeText(LX)]));
+        end;
+        Exit;
+      end;
+      if not OpenArrayParamOf(ASrc, LSrcTxt) then
+        Exit;
+      LX := GetX(ADst);
+      if XValid(LX) and not OpenX(CanonTypeX(LX)) and
+         (not (XCatOf(CanonTypeX(LX)) in [tcUnknown, tcString, tcPointer]) or
+          IsDynArrayTypeX(CanonTypeX(LX))) and
+         not Unreliable(AAssign, ADst, LX) then
+        EmitAt(LM, ASrc, 'E2010', Format(SE2010_IncompatibleTypes,
+          [XTypeText(LX), LSrcTxt]));
+    end;
+
+    // `SetLength(A, ...)` of an open-array parameter A: E2008 (6.2.6).
+    procedure CheckSetLengthOpen(N: Integer);
+    var
+      LHead, LMid, LSym, LArg: Integer;
+      LTxt: string;
+    begin
+      LHead := PeelParens(LM.Tree, LM.Tree.Nodes[N].FirstChild);
+      if (LHead = NIL_NODE) or (LM.Tree.Nodes[LHead].Kind <> nkIdent) or
+         not TargetSym(LHead, LMid, LSym) or
+         not (sfBuiltin in FModels[LMid].Symbols[LSym].Flags) or
+         (FModels[LMid].Symbols[LSym].NameLower <> 'setlength') then
+        Exit;
+      LArg := CallFirstArg(LM.Tree, N);
+      if (LArg <> NIL_NODE) and OpenArrayParamOf(LArg, LTxt) and
+         not InUntypedWith(N) then
+        EmitAt(LM, LArg, 'E2008', SE2008_IncompatibleTypes);
+    end;
+
     { E2033 at an argument of a typed `var` / `out` parameter whose type is
       not the parameter's own (6.2.2): type IDENTITY - one declaration, or
       one builtin alias group - the formal type named first. Asked in the
@@ -23515,6 +23606,8 @@ var
         LOpen, LByRef: Boolean;
         LOm: TPasSemaModel;
         LCat: TSemaTypeCat;
+        LTxt: string;
+        LPX: TSemaXType;
       begin
         LOm := FModels[AMid];
         // The shapes the scorer does not read: a constant for an open array,
@@ -23543,6 +23636,26 @@ var
           begin
             EmitAt(LM, LArg, 'E2197', SE2197_ConstObjectToVar);
             Exit;
+          end;
+          // An open array passed on to a parameter of a named type: no
+          // dynamic array (6.2.6) - E2010 for a value one, E2033 for a
+          // `var` / `out` one; a string or a pointer one is not judged.
+          if not LOpen and (LOm.Symbols[APars[LPI]].TypeNode <> NIL_NODE) and
+             OpenArrayParamOf(LCore, LTxt) then
+          begin
+            LPX := DeclTypeX(AMid, APars[LPI]);
+            if XValid(LPX) and not OpenX(CanonTypeX(LPX)) and
+               (not (XCatOf(CanonTypeX(LPX)) in [tcUnknown, tcString,
+                 tcPointer]) or IsDynArrayTypeX(CanonTypeX(LPX))) then
+            begin
+              if LByRef then
+                EmitAt(LM, LArg, 'E2033', Format(SE2033_VarParamNotIdentical,
+                  [XTypeText(LPX), LTxt]))
+              else
+                EmitAt(LM, LArg, 'E2010', Format(SE2010_IncompatibleTypes,
+                  [XTypeText(LPX), LTxt]));
+              Exit;
+            end;
           end;
           if LByRef and (LM.Tree.Nodes[LCore].Kind in [nkIdent, nkMember]) and
              TargetSym(LCore, LCMid, LCSym) and
@@ -23600,11 +23713,16 @@ var
             // declaration's shape, as dcc names it.
             if not XValid(LWhyArgX) then
               LWhyArgX := InlineTypeX(LWhyArg);
-            if not LByRef and XValid(LWhyArgX) and XValid(LWhyParX) and
+            if not LByRef and XValid(LWhyParX) and
                (LM.Tree.Nodes[LCore].Kind in [nkIdent, nkMember, nkIndex,
                 nkDeref]) then
-              EmitAt(LM, LWhyArg, 'E2010', Format(SE2010_IncompatibleTypes,
-                ['array of ' + XTypeText(LWhyParX), XTypeText(LWhyArgX)]));
+              if XValid(LWhyArgX) then
+                EmitAt(LM, LWhyArg, 'E2010', Format(SE2010_IncompatibleTypes,
+                  ['array of ' + XTypeText(LWhyParX), XTypeText(LWhyArgX)]))
+              // An open array passed on: `array of T` (`PK(A)`).
+              else if OpenArrayParamOf(LWhyArg, LTxt) then
+                EmitAt(LM, LWhyArg, 'E2010', Format(SE2010_IncompatibleTypes,
+                  ['array of ' + XTypeText(LWhyParX), LTxt]));
           end;
           awOpenNotVar:
             if not LByRef and
@@ -24962,6 +25080,7 @@ var
             CheckStaticCtor(N, LDst, LSrc);
             CheckWriteTarget(N, LDst);
             CheckReadOnlyTarget(N, LDst);
+            CheckOpenArrayValue(N, LDst, LSrc);
             // A generic function named alone as the value (`I :=
             // TU.Make`): called with no arguments.
             if (LM.Tree.Nodes[PeelParens(LM.Tree, LSrc)].Kind in
@@ -24979,6 +25098,7 @@ var
         nkCall:
           begin
             CheckVarArgs(N);
+            CheckSetLengthOpen(N);
             LDst := LM.Tree.Nodes[N].FirstChild;
             if (LDst <> NIL_NODE) and
                (LM.Tree.Nodes[PeelParens(LM.Tree, LDst)].Kind in

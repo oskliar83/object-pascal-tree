@@ -15106,6 +15106,64 @@ begin
   end;
 end;
 
+// An open-array parameter used as a value inside its routine (spec 6.2.6):
+// no dynamic array - E2010 assigned to a typed target or passed to a
+// dynamic-array parameter (E2033 for a `var` one) or to `array of const`,
+// E2008 for SetLength and from another open array, E2010 for `[]` and nil
+// assigned to a `var` one; a string target, `@A`, `Length(A)`, passing it
+// on to `array of T` and a value open array's element stay silent (dcc64
+// 37.0; spec-audit g3 OpenArr; local/p P9).
+procedure TestOpenArrayValue;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_oav');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'OAV.dpr'),
+    'program OAV;'#10 +                                                  // 1
+    'type TDA = array of Integer; TSA = array[0..1] of Integer;'#10 +    // 2
+    'procedure PD(const A: TDA); begin end;'#10 +                        // 3
+    'procedure PDV(var A: TDA); begin end;'#10 +                         // 4
+    'procedure P(const A: array of Integer); begin end;'#10 +            // 5
+    'procedure L1(var A, B: array of Integer); begin A := B; end;'#10 +  // 6 E2008
+    'procedure L2(const A: array of Integer); var D: TDA; begin D := A; end;'#10 + // 7 E2010
+    'procedure L3(const A: array of Integer); var S: TSA; begin S := A; end;'#10 + // 8 E2010
+    'procedure L4(var A: array of Integer); begin SetLength(A, 1); end;'#10 + // 9 E2008
+    'procedure L5(const A: array of Integer); begin PD(A); end;'#10 +    // 10 E2010
+    'procedure L6(var A: array of Integer); begin PDV(A); end;'#10 +     // 11 E2033
+    'procedure L7(var A: array of Integer); begin A := []; end;'#10 +    // 12 E2010
+    'procedure L8(var A: array of Integer); begin A := nil; end;'#10 +   // 13 E2010
+    'procedure M1(const AC: array of Char); var S: string; begin S := AC; end;'#10 + // 14
+    'procedure M2(const A: array of Integer); var Q: Pointer; I: Integer;'#10 + // 15
+    '  begin Q := @A; I := Length(A); P(A); end;'#10 +                   // 16
+    'procedure M3(A: array of Integer); begin A[0] := 1; end;'#10 +      // 17
+    'begin'#10 +                                                         // 18
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'OAV.dpr'));
+    LM := ModelByName('oav');
+    Ok('oav: E2008 lines [' + DiagLinesOf(LM, 'E2008') + ']',
+      DiagLinesOf(LM, 'E2008') = '6 9');
+    Ok('oav: E2010 lines [' + DiagLinesOf(LM, 'E2010') + ']',
+      DiagLinesOf(LM, 'E2010') = '7 8 10 12 13');
+    Ok('oav: E2033 lines [' + DiagLinesOf(LM, 'E2033') + ']',
+      DiagLinesOf(LM, 'E2033') = '11');
+    Ok('oav: texts',
+      DiagHasText(LM, 'E2010', '''TDA'' and ''array of Integer''') and
+      DiagHasText(LM, 'E2010', '''array of Integer'' and ''Set''') and
+      DiagHasText(LM, 'E2033', 'TDA and array of Integer'));
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // Property declarations and their uses (spec 13.1.1, 13.1.2, 13.1.4,
 // 13.1.5): a field for an array property and an accessor whose index
 // parameter is of another type are E2008; a default value of a string or a
@@ -23963,6 +24021,7 @@ begin
   TestParamDefaults;
   TestArgShapes;
   TestConstParamWrites;
+  TestOpenArrayValue;
   TestPropertyAccessChecks;
   TestGenericInferErrors;
 
