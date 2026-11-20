@@ -15083,6 +15083,266 @@ begin
   end;
 end;
 
+// Default parameter values (spec 6.2.5): every list on its own - a
+// method's in the class and at its body, a procedural type's - E2268 for a
+// type that takes none (open array, Variant, record, static array), then
+// E2239 for `var` / `out` / `const [Ref]`, E2026 for a dynamic array's that
+// is not nil, E2238 for each parameter without a default after one (an
+// E2268 one counts, an E2239 one does not); legal defaults stay silent
+// (dcc64 37.0; spec-audit g3 Defaults*, local/p P3-P5).
+procedure TestParamDefaults;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_pdflt');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'PDflt.dpr'),
+    'program PDflt;'#10 +                                                // 1
+    'type'#10 +                                                          // 2
+    '  TR = record F: Integer; end;'#10 +                                // 3
+    '  TArr = array[0..1] of Integer;'#10 +                              // 4
+    '  TDA = array of Integer;'#10 +                                     // 5
+    '  TC = class'#10 +                                                  // 6
+    '    procedure M(var A: Integer = 0);'#10 +                          // 7 E2239
+    '    procedure N(A: Integer = 1; B: Integer = 2);'#10 +              // 8
+    '  end;'#10 +                                                        // 9
+    '  TP = procedure(A: Variant = 1);'#10 +                             // 10 E2268
+    'procedure TC.M(var A: Integer = 0); begin end;'#10 +                // 11 E2239
+    'procedure TC.N(A: Integer = 1; B: Integer = 2); begin end;'#10 +    // 12
+    'procedure A1(out A: Integer = 0); begin end;'#10 +                  // 13 E2239
+    'procedure A2(A: Integer = 0; B: Integer; C: Integer); begin end;'#10 + // 14 E2238 x2
+    'procedure A3(const A: array of Integer = nil); begin end;'#10 +     // 15 E2268
+    'procedure A4(V: Variant = 1; B: Integer); begin end;'#10 +          // 16 E2268 E2238
+    'procedure A5(R: TR = nil); begin end;'#10 +                         // 17 E2268
+    'procedure A6(A: TArr = nil); begin end;'#10 +                       // 18 E2268
+    'procedure A7(D: TDA = nil; E: TDA = [1]); begin end;'#10 +          // 19 E2026
+    'procedure A8(var A: Integer = 0; B: Integer); begin end;'#10 +      // 20 E2239
+    'procedure A9(const [Ref] A: Integer = 0); begin end;'#10 +          // 21 E2239
+    'procedure B1(A: Integer = 1; const B); begin end;'#10 +             // 22 E2238
+    'procedure B2(const A: Integer = 0; S: string = ''x''; P: Pointer = nil;'#10 + // 23
+    '  O: TObject = nil; C: Char = ''q''; D: TDA = nil); begin end;'#10 + // 24
+    'procedure B3(A: Integer; B: Integer = 1); begin end;'#10 +          // 25
+    'begin'#10 +                                                         // 26
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'PDflt.dpr'));
+    LM := ModelByName('pdflt');
+    Ok('pdflt: E2239 lines [' + DiagLinesOf(LM, 'E2239') + ']',
+      DiagLinesOf(LM, 'E2239') = '7 11 13 20 21');
+    Ok('pdflt: E2268 lines [' + DiagLinesOf(LM, 'E2268') + ']',
+      DiagLinesOf(LM, 'E2268') = '10 15 16 17 18');
+    Ok('pdflt: E2238 lines [' + DiagLinesOf(LM, 'E2238') + ']',
+      DiagLinesOf(LM, 'E2238') = '14 14 16 22');
+    Ok('pdflt: E2026 lines [' + DiagLinesOf(LM, 'E2026') + ']',
+      DiagLinesOf(LM, 'E2026') = '19');
+    Ok('pdflt: names', DiagHasText(LM, 'E2238', 'required for ''C''') and
+      DiagHasText(LM, 'E2239', 'parameter ''A'' must be'));
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
+// Arguments that are no variable, at a lone routine's call (spec 6.2.2,
+// 6.2.6, 6.2.7): against an open array a constant is E2192, a variable of
+// another type E2010 naming it (an inline array by its shape), an
+// operator's value of the element type E2010 - E2036 for a string one; a
+// `var` open array takes no `[...]` (E2197); a `var` parameter, typed or
+// untyped, takes no literal, operator, property, function result or
+// `const` parameter (E2197); an untyped `const` one no number or nil
+// (E2036). Variables, typed constants, function results for an open array,
+// constructors and an overload set stay silent (dcc64 37.0; spec-audit g3
+// OpenArr, OpenOne2, UntypedC, Params; local/p P1, P2, P6, P7).
+procedure TestArgShapes;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_argsh');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'ArgSh.dpr'),
+    'program ArgSh;'#10 +                                                // 1
+    'type'#10 +                                                          // 2
+    '  TC = class FI: Integer; property PI: Integer read FI write FI; end;'#10 + // 3
+    'const K = 5; KS = ''ab''; KT: Integer = 3;'#10 +                    // 4
+    'procedure P(const A: array of Integer); begin end;'#10 +            // 5
+    'procedure PS(const A: array of string); begin end;'#10 +            // 6
+    'procedure PB(const A: array of Boolean); begin end;'#10 +           // 7
+    'procedure PW(var A: array of Integer); begin end;'#10 +             // 8
+    'procedure V(var X: Integer); begin end;'#10 +                       // 9
+    'procedure U(var X); begin end;'#10 +                                // 10
+    'procedure CU(const X); begin end;'#10 +                             // 11
+    'procedure Ov(var X: Integer); overload; begin end;'#10 +            // 12
+    'procedure Ov(X: Double); overload; begin end;'#10 +                 // 13
+    'function GI: Integer; begin Result := 0; end;'#10 +                 // 14
+    'var I: Integer; B: Boolean; S: string; O: TC; BY: Byte;'#10 +       // 15
+    '  SB: array[0..1] of Byte; AI: array of Integer;'#10 +              // 16
+    'procedure C1(const X: Integer); begin V(X); end;'#10 +              // 17 E2197
+    'begin'#10 +                                                         // 18
+    '  P(5);'#10 +                                                       // 19 E2192
+    '  P(K + 1);'#10 +                                                   // 20 E2192
+    '  P(nil);'#10 +                                                     // 21 E2192
+    '  PS(KS);'#10 +                                                     // 22 E2192
+    '  P(I * 2);'#10 +                                                   // 23 E2010
+    '  PS(S + ''a'');'#10 +                                              // 24 E2036
+    '  P(SB);'#10 +                                                      // 25 E2010
+    '  P(BY);'#10 +                                                      // 26 E2010
+    '  PW([1, 2]);'#10 +                                                 // 27 E2197
+    '  V(5);'#10 +                                                       // 28 E2197
+    '  V(O.PI);'#10 +                                                    // 29 E2197
+    '  V(GI);'#10 +                                                      // 30 E2197
+    '  U(I + 1);'#10 +                                                   // 31 E2197
+    '  CU(5);'#10 +                                                      // 32 E2036
+    '  CU(nil);'#10 +                                                    // 33 E2036
+    '  P(I); P(KT); P(GI); P(AI); P([1, 2]); P([I, BY]); PS(S);'#10 +    // 34
+    '  PB(B); PW(AI); PW(I); V(I); U(I); CU(I); CU(''abc''); CU(KS);'#10 + // 35
+    '  Ov(5);'#10 +                                                      // 36
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'ArgSh.dpr'));
+    LM := ModelByName('argsh');
+    Ok('argsh: E2192 lines [' + DiagLinesOf(LM, 'E2192') + ']',
+      DiagLinesOf(LM, 'E2192') = '19 20 21 22');
+    Ok('argsh: E2010 lines [' + DiagLinesOf(LM, 'E2010') + ']',
+      DiagLinesOf(LM, 'E2010') = '23 25 26');
+    Ok('argsh: E2036 lines [' + DiagLinesOf(LM, 'E2036') + ']',
+      DiagLinesOf(LM, 'E2036') = '24 32 33');
+    Ok('argsh: E2197 lines [' + DiagLinesOf(LM, 'E2197') + ']',
+      DiagLinesOf(LM, 'E2197') = '17 27 28 29 30 31');
+    Ok('argsh: E2010 texts',
+      DiagHasText(LM, 'E2010', '''array of Integer'' and ''Integer''') and
+      DiagHasText(LM, 'E2010', '''array of Integer'' and ''array[0..1] of Byte''') and
+      DiagHasText(LM, 'E2010', '''array of Integer'' and ''Byte'''));
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
+// A write to a `const` parameter (spec 6.2.3): E2064 for the parameter
+// itself, a field of a record one at any depth (through `with` too), an
+// element of a static array one or of a `const` open array; a dynamic
+// array's element, a class's field, a dereference and a value open array's
+// element stay writable (dcc64 37.0; spec-audit g3 Params, OpenArr; local/p
+// P8).
+procedure TestConstParamWrites;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_cpw');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'CPW.dpr'),
+    'program CPW;'#10 +                                                  // 1
+    'type'#10 +                                                          // 2
+    '  TS = record G: Integer; end;'#10 +                                // 3
+    '  TDA = array of Integer;'#10 +                                     // 4
+    '  TR = record F: Integer; S: TS; A: array[0..1] of Integer; D: TDA; end;'#10 + // 5
+    '  TA = array[0..1] of Integer;'#10 +                                // 6
+    '  TC = class F: Integer; end;'#10 +                                 // 7
+    '  PInt = ^Integer;'#10 +                                            // 8
+    'procedure A1(const X: Integer); begin X := 1; end;'#10 +            // 9 E2064
+    'procedure A2(const R: TR); begin R.F := 1; end;'#10 +               // 10 E2064
+    'procedure A3(const R: TR); begin R.S.G := 1; end;'#10 +             // 11 E2064
+    'procedure A4(const R: TR); begin R.A[0] := 1; end;'#10 +            // 12 E2064
+    'procedure A5(const A: TA); begin A[0] := 1; end;'#10 +              // 13 E2064
+    'procedure A6(const R: TR); begin with R do F := 1; end;'#10 +       // 14 E2064
+    'procedure A7(const O: TC); begin O := nil; end;'#10 +               // 15 E2064
+    'procedure A8(const A: array of Integer); begin A[0] := 1; end;'#10 + // 16 E2064
+    'procedure B1(const R: TR); begin R.D[0] := 1; end;'#10 +            // 17
+    'procedure B2(const O: TC); begin O.F := 1; end;'#10 +               // 18
+    'procedure B3(const P: PInt); begin P^ := 1; end;'#10 +              // 19
+    'procedure B4(A: array of Integer); begin A[0] := 1; end;'#10 +      // 20
+    'procedure B5(X: Integer; var Y: Integer; out Z: Integer);'#10 +     // 21
+    '  begin X := 1; Y := 1; Z := 1; end;'#10 +                          // 22
+    'procedure B6(const D: TDA); begin D[0] := 1; end;'#10 +             // 23
+    'begin'#10 +                                                         // 24
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'CPW.dpr'));
+    LM := ModelByName('cpw');
+    Ok('cpw: E2064 lines [' + DiagLinesOf(LM, 'E2064') + ']',
+      DiagLinesOf(LM, 'E2064') = '9 10 11 12 13 14 15 16');
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
+// An open-array parameter used as a value inside its routine (spec 6.2.6):
+// no dynamic array - E2010 assigned to a typed target or passed to a
+// dynamic-array parameter (E2033 for a `var` one) or to `array of const`,
+// E2008 for SetLength and from another open array, E2010 for `[]` and nil
+// assigned to a `var` one; a string target, `@A`, `Length(A)`, passing it
+// on to `array of T` and a value open array's element stay silent (dcc64
+// 37.0; spec-audit g3 OpenArr; local/p P9).
+procedure TestOpenArrayValue;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_oav');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'OAV.dpr'),
+    'program OAV;'#10 +                                                  // 1
+    'type TDA = array of Integer; TSA = array[0..1] of Integer;'#10 +    // 2
+    'procedure PD(const A: TDA); begin end;'#10 +                        // 3
+    'procedure PDV(var A: TDA); begin end;'#10 +                         // 4
+    'procedure P(const A: array of Integer); begin end;'#10 +            // 5
+    'procedure L1(var A, B: array of Integer); begin A := B; end;'#10 +  // 6 E2008
+    'procedure L2(const A: array of Integer); var D: TDA; begin D := A; end;'#10 + // 7 E2010
+    'procedure L3(const A: array of Integer); var S: TSA; begin S := A; end;'#10 + // 8 E2010
+    'procedure L4(var A: array of Integer); begin SetLength(A, 1); end;'#10 + // 9 E2008
+    'procedure L5(const A: array of Integer); begin PD(A); end;'#10 +    // 10 E2010
+    'procedure L6(var A: array of Integer); begin PDV(A); end;'#10 +     // 11 E2033
+    'procedure L7(var A: array of Integer); begin A := []; end;'#10 +    // 12 E2010
+    'procedure L8(var A: array of Integer); begin A := nil; end;'#10 +   // 13 E2010
+    'procedure M1(const AC: array of Char); var S: string; begin S := AC; end;'#10 + // 14
+    'procedure M2(const A: array of Integer); var Q: Pointer; I: Integer;'#10 + // 15
+    '  begin Q := @A; I := Length(A); P(A); end;'#10 +                   // 16
+    'procedure M3(A: array of Integer); begin A[0] := 1; end;'#10 +      // 17
+    'begin'#10 +                                                         // 18
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'OAV.dpr'));
+    LM := ModelByName('oav');
+    Ok('oav: E2008 lines [' + DiagLinesOf(LM, 'E2008') + ']',
+      DiagLinesOf(LM, 'E2008') = '6 9');
+    Ok('oav: E2010 lines [' + DiagLinesOf(LM, 'E2010') + ']',
+      DiagLinesOf(LM, 'E2010') = '7 8 10 12 13');
+    Ok('oav: E2033 lines [' + DiagLinesOf(LM, 'E2033') + ']',
+      DiagLinesOf(LM, 'E2033') = '11');
+    Ok('oav: texts',
+      DiagHasText(LM, 'E2010', '''TDA'' and ''array of Integer''') and
+      DiagHasText(LM, 'E2010', '''array of Integer'' and ''Set''') and
+      DiagHasText(LM, 'E2033', 'TDA and array of Integer'));
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // Property declarations and their uses (spec 13.1.1, 13.1.2, 13.1.4,
 // 13.1.5): a field for an array property and an accessor whose index
 // parameter is of another type are E2008; a default value of a string or a
@@ -23939,6 +24199,10 @@ begin
   TestHelperCarrier;
   TestAnonArrayPtrCompat;
   TestVarParamIdentity;
+  TestParamDefaults;
+  TestArgShapes;
+  TestConstParamWrites;
+  TestOpenArrayValue;
   TestPropertyAccessChecks;
   TestGenericInferErrors;
 
