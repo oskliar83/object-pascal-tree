@@ -23191,7 +23191,23 @@ var
             LScope := FModels[LMid].Symbols[LSym].Scope;
             if (LScope <> NIL_SCOPE) and
                (FModels[LMid].Scopes[LScope].StructSym <> NIL_SYM) then
-              Exit;   // a member: dcc sees none in an attribute's arguments
+            begin
+              // A member named alone is not judged. Qualified by its type, a
+              // class var and a function - a class or static one,
+              // `TObject.ClassName` - are no constants (19.3.2: E2026 for
+              // `T01.ClassName`, `TK.CV`, `TRec.F`); a member constant
+              // (`TK.KS`) is one. A field is never one, whatever holds it.
+              if LM.Tree.Nodes[LCore].Kind = nkMember then
+                case FModels[LMid].Symbols[LSym].Kind of
+                  skVar, skField:
+                    Result := True;
+                  skRoutine:
+                    Result := not (sfBuiltin in
+                      FModels[LMid].Symbols[LSym].Flags) and
+                      (FModels[LMid].Symbols[LSym].TypeNode <> NIL_NODE);
+                end;
+              Exit;
+            end;
             case FModels[LMid].Symbols[LSym].Kind of
               skVar:
                 Result := True;
@@ -23261,6 +23277,8 @@ var
       constructor redoes the unit that names the attribute (the pair test of
       SelectConsumers), as it redoes a call. }
     procedure CheckAttrArgs(AAttr: Integer);
+    type
+      TAttrParMode = (amPlain, amByRef, amOpen, amOfConst);
     const
       MAX_ARGS = 32;
     var
@@ -23274,7 +23292,10 @@ var
       LPars: TArray<Integer>;
       LParXs: TArray<TArray<TSemaXType>>;
       LReqs, LTots: TArray<Integer>;
-      LVariadic, LOk, LJoin: Boolean;
+      // A single candidate's parameter modes: amPlain, amByRef (var / out),
+      // amOpen (`array of T`, its element type in LParXs), amOfConst.
+      LModes: TArray<TAttrParMode>;
+      LVariadic, LOk, LJoin, LSingle, LNonConst: Boolean;
       LFit: TPasExtRef;
       LNames: TArray<string>;
       LName: string;
@@ -23284,6 +23305,65 @@ var
         LF, LC: Integer;
       begin
         NodeLineCol(LM, AArg, LF, Result, LC);
+      end;
+
+      // A var / out parameter's argument dcc certainly takes for no constant
+      // (19.3.2: `[TVar(GV)]` is E2026): a variable named alone, of exactly
+      // the parameter's type. A constant there is dcc's E2197, another type
+      // its E2033 - not judged.
+      function AttrVarArg(AArg: Integer; const AArgX,
+        AParX: TSemaXType): Boolean;
+      var
+        LCore, LVMid, LVSym, LVScope: Integer;
+        LA, LP: TSemaXType;
+      begin
+        Result := False;
+        LCore := PeelParens(LM.Tree, AArg);
+        if (LCore = NIL_NODE) or (LM.Tree.Nodes[LCore].Kind <> nkIdent) or
+           not XValid(AArgX) or not TargetSym(LCore, LVMid, LVSym) or
+           (FModels[LVMid].Symbols[LVSym].Kind <> skVar) then
+          Exit;
+        LVScope := FModels[LVMid].Symbols[LVSym].Scope;
+        if (LVScope <> NIL_SCOPE) and
+           (FModels[LVMid].Scopes[LVScope].StructSym <> NIL_SYM) then
+          Exit;
+        LA := CanonTypeX(AArgX);
+        LP := CanonTypeX(AParX);
+        Result := XValid(LA) and XValid(LP) and (LA.UnitId = LP.UnitId) and
+          (LA.Sym = LP.Sym) and (LA.Inst = LP.Inst);
+      end;
+
+      // An open array parameter's argument dcc certainly takes for no
+      // constant (19.3.2: `[TArr([1, 2])]` is E2026): a `[...]` - for
+      // `array of const` any, for `array of T` one whose every element is a
+      // single value converting to T (an element that does not is dcc's
+      // E2010). A constant that is no `[...]` is dcc's E2192 - not judged.
+      function AttrOpenArg(AArg: Integer; AOfConst: Boolean;
+        const AElemX: TSemaXType): Boolean;
+      var
+        LCore, LEl: Integer;
+        LElX: TSemaXType;
+      begin
+        Result := False;
+        LCore := PeelParens(LM.Tree, AArg);
+        if (LCore = NIL_NODE) or (LM.Tree.Nodes[LCore].Kind <> nkSetCtor) then
+          Exit;
+        if AOfConst then
+          Exit(True);
+        LEl := LM.Tree.Nodes[LCore].FirstChild;
+        while LEl <> NIL_NODE do
+        begin
+          if LM.Tree.Nodes[LEl].Kind in [nkRange, nkError, nkMissing] then
+            Exit;
+          LElX := GetX(LEl);
+          if not XValid(LElX) or
+             (XCatOf(CanonTypeX(LElX)) = tcUnknown) or
+             Unreliable(AAttr, LEl, LElX) or
+             (AssignConvX(AAttr, LEl, AElemX, LElX) = TSemaConv.scNone) then
+            Exit;
+          LEl := LM.Tree.Nodes[LEl].NextSibling;
+        end;
+        Result := True;
       end;
 
     begin
@@ -23373,7 +23453,14 @@ var
           Exit;
         LArgs[LN] := LArg;
         LArgX[LN] := GetX(LArg);
-        if not XValid(LArgX[LN]) or
+        // A `[...]` may go to an open array, judged there by its elements;
+        // any other parameter takes it typed.
+        if (PeelParens(LM.Tree, LArg) <> NIL_NODE) and
+           (LM.Tree.Nodes[PeelParens(LM.Tree, LArg)].Kind = nkSetCtor) and
+           (not XValid(LArgX[LN]) or
+            (XCatOf(CanonTypeX(LArgX[LN])) = tcUnknown)) then
+          LArgX[LN] := XNil
+        else if not XValid(LArgX[LN]) or
            (XCatOf(CanonTypeX(LArgX[LN])) = tcUnknown) or
            Unreliable(AAttr, LArg, LArgX[LN]) then
           Exit;
@@ -23387,6 +23474,9 @@ var
       SetLength(LNames, Length(LCands));
       LMaxTot := -1;
       LMinReq := MaxInt;
+      LSingle := (Length(LCands) = 1) and not (sfOverloadDirective in
+        FModels[LCands[0].UnitId].Symbols[LCands[0].Sym].Flags);
+      LModes := nil;
       for LI := 0 to High(LCands) do
       begin
         LMid := LCands[LI].UnitId;
@@ -23398,25 +23488,56 @@ var
         if Length(LPars) <> LTot then
           Exit;
         SetLength(LParXs[LI], LTot);
+        if LSingle then
+          SetLength(LModes, LTot);
         LName := '';
         for var LP := 0 to LTot - 1 do
         begin
-          if (FModels[LMid].Symbols[LPars[LP]].TypeNode = NIL_NODE) or
-             (FModels[LMid].Tree.Nodes[FModels[LMid].Symbols[LPars[LP]].TypeNode].
-               Kind = nkArrayType) then
-            Exit;
-          LParX := DeclTypeX(LMid, LPars[LP]);
-          if not XValid(LParX) or OpenX(LParX) or NestedInGenericX(LParX) or
-             (XCatOf(CanonTypeX(LParX)) in [tcUnknown, tcRecord, tcVariant,
-               tcProc, tcArray, tcFile]) then
+          var LPType := FModels[LMid].Symbols[LPars[LP]].TypeNode;
+          if LPType = NIL_NODE then
             Exit;
           LPDecl := FModels[LMid].Symbols[LPars[LP]].DeclNode;
           while (LPDecl <> NIL_NODE) and
                 (FModels[LMid].Tree.Nodes[LPDecl].Kind <> nkParam) do
             LPDecl := FModels[LMid].Tree.Nodes[LPDecl].Parent;
-          if (LPDecl = NIL_NODE) or
-             (FModels[LMid].Tree.Nodes[LPDecl].Flags * [nfVar, nfOut] <> []) then
+          if LPDecl = NIL_NODE then
             Exit;
+          // An open array or a var / out parameter: a single candidate's
+          // only, whose argument is judged by its own rule below.
+          if FModels[LMid].Tree.Nodes[LPType].Kind = nkArrayType then
+          begin
+            if not LSingle or
+               (FModels[LMid].Tree.Nodes[LPDecl].Flags * [nfVar, nfOut] <> []) then
+              Exit;
+            if FModels[LMid].Tree.Nodes[LPType].Aux = 1 then
+            begin
+              LModes[LP] := amOfConst;
+              LParXs[LI][LP] := XNil;
+              Continue;
+            end;
+            LParX := ResolveTypeExprNested(LMid,
+              PasArrayElemNode(FModels[LMid].Tree, LPType));
+            if not XValid(LParX) or OpenX(LParX) or NestedInGenericX(LParX) or
+               (XCatOf(CanonTypeX(LParX)) in [tcUnknown, tcRecord, tcVariant,
+                 tcProc, tcArray, tcFile]) then
+              Exit;
+            LModes[LP] := amOpen;
+            LParXs[LI][LP] := LParX;
+            Continue;
+          end;
+          LParX := DeclTypeX(LMid, LPars[LP]);
+          if not XValid(LParX) or OpenX(LParX) or NestedInGenericX(LParX) or
+             (XCatOf(CanonTypeX(LParX)) in [tcUnknown, tcRecord, tcVariant,
+               tcProc, tcArray, tcFile]) then
+            Exit;
+          if FModels[LMid].Tree.Nodes[LPDecl].Flags * [nfVar, nfOut] <> [] then
+          begin
+            if not LSingle then
+              Exit;
+            LModes[LP] := amByRef;
+          end
+          else if LSingle then
+            LModes[LP] := amPlain;
           LParXs[LI][LP] := LParX;
           if LName <> '' then
             LName := LName + ', ';
@@ -23435,14 +23556,33 @@ var
       if LM.Tree.Source.VisibleKind(LTok) <> tkRParen then
         Inc(LTok);
       LFit := LCands[0];
-      if (Length(LCands) = 1) and not (sfOverloadDirective in
-         FModels[LFit.UnitId].Symbols[LFit.Sym].Flags) then
+      LNonConst := False;
+      if LSingle then
       begin
         LM.CallTargetX.AddOrSetValue(AAttr, LFit);
+        // The arguments an open array or a var / out parameter takes: one
+        // dcc certainly finds no constant (E2026 below), or not judged.
+        for LI := 0 to Min(LN, LTots[0]) - 1 do
+          case LModes[LI] of
+            amPlain:
+              if not XValid(LArgX[LI]) then
+                Exit;
+            amByRef:
+              if AttrVarArg(LArgs[LI], LArgX[LI], LParXs[0][LI]) then
+                LNonConst := True
+              else
+                Exit;
+            amOpen, amOfConst:
+              if AttrOpenArg(LArgs[LI], LModes[LI] = amOfConst,
+                 LParXs[0][LI]) then
+                LNonConst := True
+              else
+                Exit;
+          end;
         LErrLine := -1;
         for LI := 0 to Min(LN, LTots[0]) - 1 do
-          if CheckConv(AAttr, LRef, LArgs[LI], LArgs[LI], LParXs[0][LI],
-             LArgX[LI]) then
+          if (LModes[LI] = amPlain) and CheckConv(AAttr, LRef, LArgs[LI],
+             LArgs[LI], LParXs[0][LI], LArgX[LI]) then
           begin
             LErrLine := ArgLine(LArgs[LI]);
             Break;
@@ -23466,6 +23606,9 @@ var
       end
       else
       begin
+        for LI := 0 to LN - 1 do
+          if not XValid(LArgX[LI]) then
+            Exit;   // an untyped `[...]`: no open array among the candidates
         LFits := 0;
         for LI := 0 to High(LCands) do
         begin
@@ -23504,8 +23647,13 @@ var
         end;
       end;
       // The call fits: its arguments must be constants.
+      if LNonConst then
+      begin
+        EmitAtToken(LM, AAttr, LTok, 'E2026', SE2026_ConstantExpected);
+        Exit;
+      end;
       for LI := 0 to LN - 1 do
-        if not IsConstArgX(AId, LArgs[LI]) and
+        if XValid(LArgX[LI]) and not IsConstArgX(AId, LArgs[LI]) and
            CertainlyNotConst(LArgs[LI], 0) then
         begin
           EmitAtToken(LM, AAttr, LTok, 'E2026', SE2026_ConstantExpected);

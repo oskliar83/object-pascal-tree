@@ -11533,6 +11533,85 @@ end;
   and a constructor of another name are no candidates. The attribute binds
   the constructor it calls (CallTargetX), and an edit of it - or a
   constructor added to the class - redoes the unit that names it. }
+{ Spec 19.3.2 (dcc64 37.0, 2026-11-20, local/probe-park/sa-decl AN.dpr):
+  E2026 at the `)` for an open-array constructor `[...]` (`array of T` with
+  every element converting, `array of const` any), a variable for a var or
+  out parameter, and a type-qualified function, class or static, or class
+  var. A member constant is a constant; a constant for an open array (E2192)
+  or a var parameter (E2197), an element of another type (E2010) and a
+  variable of another type for a var parameter (E2033) are other errors,
+  not judged here. }
+procedure TestAttributeArgsNonConst;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_attrnc');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class constructor Create; class function ClassName: string; end;'#10 +
+    '  TCustomAttribute = class(TObject) end;'#10 +
+    'implementation'#10'constructor TObject.Create; begin end;'#10 +
+    'class function TObject.ClassName: string; begin Result := ''''; end;'#10 +
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'AN.dpr'),
+    'program AN;'#10 +                                                // 1
+    'type'#10 +                                                       // 2
+    '  TArrAttribute = class(TCustomAttribute) constructor Create(const A: array of Integer); end;'#10 + // 3
+    '  TArcAttribute = class(TCustomAttribute) constructor Create(const A: array of const); end;'#10 + // 4
+    '  TVarAttribute = class(TCustomAttribute) constructor Create(var I: Integer); end;'#10 + // 5
+    '  TOutAttribute = class(TCustomAttribute) constructor Create(out I: Integer); end;'#10 + // 6
+    '  TStrAttribute = class(TCustomAttribute) constructor Create(const S: string); end;'#10 + // 7
+    '  TIntAttribute = class(TCustomAttribute) constructor Create(I: Integer); end;'#10 + // 8
+    '  TRec = record class function F: Integer; static; const K = 3; end;'#10 + // 9
+    '  TK = class const KS = ''k''; class function G: string; class var CV: Integer; end;'#10 + // 10
+    'const CI = 7; TypedC: Integer = 5;'#10 +                         // 11
+    'var GV: Integer; GB: Byte;'#10 +                                 // 12
+    'type'#10 +                                                       // 13
+    '  [TArr([1, 2])] T01 = class end;'#10 +                          // 14 E2026
+    '  [TArr([])] T02 = class end;'#10 +                              // 15 E2026
+    '  [TArc([1, ''a''])] T03 = class end;'#10 +                      // 16 E2026
+    '  [TVar(GV)] T04 = class end;'#10 +                              // 17 E2026
+    '  [TOut(GV)] T05 = class end;'#10 +                              // 18 E2026
+    '  [TStr(TK.ClassName)] T06 = class end;'#10 +                    // 19 E2026
+    '  [TInt(TRec.F)] T07 = class end;'#10 +                          // 20 E2026
+    '  [TStr(TK.G)] T08 = class end;'#10 +                            // 21 E2026
+    '  [TInt(TK.CV)] T09 = class end;'#10 +                           // 22 E2026
+    '  [TStr(''a'' + TK.G)] T10 = class end;'#10 +                    // 23 E2026
+    '  [TInt(TRec.K)] T11 = class end;'#10 +                          // 24 valid
+    '  [TStr(TK.KS)] T12 = class end;'#10 +                           // 25 valid
+    '  [TArr(CI)] T13 = class end;'#10 +                              // 26 E2192
+    '  [TVar(5)] T14 = class end;'#10 +                               // 27 E2197
+    '  [TVar(CI)] T15 = class end;'#10 +                              // 28 E2197
+    '  [TVar(TypedC)] T16 = class end;'#10 +                          // 29 E2197
+    '  [TArr([''x''])] T17 = class end;'#10 +                         // 30 E2010
+    '  [TVar(GB)] T18 = class end;'#10 +                              // 31 E2033
+    '  [TInt(CI)] T19 = class end;'#10 +                              // 32 valid
+    'constructor TArrAttribute.Create(const A: array of Integer); begin end;'#10 +
+    'constructor TArcAttribute.Create(const A: array of const); begin end;'#10 +
+    'constructor TVarAttribute.Create(var I: Integer); begin end;'#10 +
+    'constructor TOutAttribute.Create(out I: Integer); begin end;'#10 +
+    'constructor TStrAttribute.Create(const S: string); begin end;'#10 +
+    'constructor TIntAttribute.Create(I: Integer); begin end;'#10 +
+    'class function TRec.F: Integer; begin Result := 1; end;'#10 +
+    'class function TK.G: string; begin Result := ''''; end;'#10 +
+    'begin'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'AN.dpr'));
+    LM := ModelByName('an');
+    Ok('attrnc: E2026 at the ) [' + DiagSites(LM, 'E2026') + ']',
+      DiagSites(LM, 'E2026') = '14:15 15:11 16:17 17:11 18:11 19:21 ' +
+      '20:15 21:13 22:14 23:19');
+    Ok('attrnc: nothing else [' + IntToStr(Length(LM.Diags)) + ']',
+      Length(LM.Diags) = 10);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 procedure TestAttributeCtorArgs;
 const
   UA_STR =
@@ -22855,6 +22934,7 @@ begin
   TestAttributeSuffixFirst;
   TestAttributeW1074;
   TestAttributeCtorArgs;
+  TestAttributeArgsNonConst;
   TestAttributeE2289;
   TestAttributeExprHead;
   TestAttributeW1074LeafGuess;
