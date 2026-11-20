@@ -1777,8 +1777,14 @@ begin
   end
   else if CurKind = tkIdentifier then
   begin
-    FB.Adopt(LNode, FB.AddNode(nkIdent, NIL_NODE, FPos));
+    LVar := FB.AddNode(nkIdent, NIL_NODE, FPos);
     Next;
+    // 5.5.1: dcc reads a whole designator as the counter - `for R.F :=`,
+    // `for A[0] :=`, `for P^ in` - and rejects it semantically (E1019), so
+    // the loop keeps its shape. A plain name stays the nkIdent child.
+    if CurKind in [tkDot, tkLBracket, tkCaret] then
+      LVar := ParseSelectors(LVar);
+    FB.Adopt(LNode, LVar);
   end
   else
     Error('loop variable expected');

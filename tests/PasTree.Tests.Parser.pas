@@ -30,7 +30,7 @@ uses
   PasTree.TestKit;
 
 const
-  STMT_CASES: array[0..154] of TPasCaseRow = (
+  STMT_CASES: array[0..157] of TPasCaseRow = (
     // ---- 5.1.1 assignment ----
     (Section: '5.1.1'; Name: 'assign'; Source: 'X := 42;';
      Expected: 'Block(Assign(Ident''X'' IntLit''42''))'; ExpectDiags: 0),
@@ -316,6 +316,20 @@ const
      Source: 'for Item in MyList do Process(Item);';
      Expected: 'Block(ForInStmt(Ident''Item'' Ident''MyList'' ExprStmt(' +
        'Call(Ident''Process'' Ident''Item''))))'; ExpectDiags: 0),
+    // Spec audit g3 ForCtr / ForInVar: dcc reads a whole designator as the
+    // counter and rejects it semantically (E1019) - the loop keeps its shape.
+    (Section: '5.5.1'; Name: 'SA ForCtr: field designator counter';
+     Source: 'for R.F := 1 to 2 do;';
+     Expected: 'Block(ForStmt(Member(Ident''R'' Ident''F'') IntLit''1'' ' +
+       'IntLit''2'' EmptyStmt))'; ExpectDiags: 0),
+    (Section: '5.5.1'; Name: 'SA ForCtr: element designator counter';
+     Source: 'for A[0] := 1 to 2 do;';
+     Expected: 'Block(ForStmt(Index(Ident''A'' IntLit''0'') IntLit''1'' ' +
+       'IntLit''2'' EmptyStmt))'; ExpectDiags: 0),
+    (Section: '5.5.2'; Name: 'SA ForInVar: dereference as element';
+     Source: 'for P^ in L do;';
+     Expected: 'Block(ForInStmt(Deref(Ident''P'') Ident''L'' EmptyStmt))';
+     ExpectDiags: 0),
     (Section: '5.5.3'; Name: 'while'; Source: 'while not Done do Step;';
      Expected: 'Block(WhileStmt(UnaryOp''not''(Ident''Done'') ExprStmt(' +
        'Ident''Step'')))'; ExpectDiags: 0),

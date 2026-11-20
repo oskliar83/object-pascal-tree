@@ -23877,9 +23877,39 @@ var
     var
       LVar, LFrom, LTo: Integer;
       LVarX: TSemaXType;
+
+      // 5.5.1: an integer constant bound outside an integer counter's range
+      // (`for B := 0 to 300` over a Byte) is E1012, as in an assignment
+      // (dcc64 37.0, spec audit g3 ForCtr line 16).
+      function BoundOutside(ABound: Integer): Boolean;
+      var
+        LV: Int64;
+      begin
+        Result := (XCatOf(CanonTypeX(LVarX)) = tcInteger) and
+          IsConstExprX(AId, ABound) and
+          FoldedIntValue(LM.Tree, ABound, 0, ConstFactsX(AId),
+            OrdNameValueX(AId), LV);
+        if not Result then
+          Exit;
+        // A subrange's bounds, or a builtin integer's (Byte, ShortInt...).
+        var LF := OrdFactsX(AId, NIL_NODE, LVarX);
+        var LLo: Double := LF.Lo;
+        var LHi: Double := LF.Hi;
+        var LKind: TPasCondKind;
+        if not LF.HasRange then
+          LF.HasRange := (LF.Builtin <> '') and
+            PasBuiltinOrdinalRange(LF.Builtin, FTarget, LLo, LHi, LKind);
+        Result := LF.HasRange and (LLo <= LHi) and
+          ((LV < LLo) or (LV > LHi)) and
+          not InUntypedWith(N) and not Unreliable(N, LVar, LVarX);
+      end;
+
     begin
       LVar := LM.Tree.Nodes[N].FirstChild;
       if LVar = NIL_NODE then
+        Exit;
+      // A designator counter (`for R.F :=`) is the resolver's E1019.
+      if not (LM.Tree.Nodes[LVar].Kind in [nkIdent, nkInlineVar]) then
         Exit;
       LFrom := LM.Tree.Nodes[LVar].NextSibling;
       if LFrom = NIL_NODE then
@@ -23893,8 +23923,13 @@ var
       // One report per loop, as dcc gives (diag/fix DgBad line 13).
       if CheckConv(N, LVar, LFrom, LFrom, LVarX, GetX(LFrom)) then
         Exit;
-      if LTo <> NIL_NODE then
-        CheckConv(N, LVar, LTo, LTo, LVarX, GetX(LTo));
+      if (LTo <> NIL_NODE) and
+         CheckConv(N, LVar, LTo, LTo, LVarX, GetX(LTo)) then
+        Exit;
+      if BoundOutside(LFrom) then
+        EmitAt(LM, LFrom, 'E1012', SE1012_ConstViolatesBounds)
+      else if (LTo <> NIL_NODE) and BoundOutside(LTo) then
+        EmitAt(LM, LTo, 'E1012', SE1012_ConstViolatesBounds);
     end;
 
     // A function called as a statement under {$X-} at the token after the
@@ -23949,7 +23984,7 @@ var
 
     procedure CheckForIn(N: Integer);
     var
-      LVar, LColl: Integer;
+      LVar, LColl, LCore, LHead, LMid, LSym: Integer;
       LVarX, LCollX, LElemX: TSemaXType;
     begin
       LVar := LM.Tree.Nodes[N].FirstChild;
@@ -23958,8 +23993,47 @@ var
       LColl :=LM.Tree.Nodes[LVar].NextSibling;
       if LColl = NIL_NODE then
         Exit;
+      // 5.5.2 (dcc64 37.0, spec audit g3 ForInVar, local/probe-park/sa2-stmt
+      // C1): a TYPE written as the collection is E2029 '(' expected but 'DO'
+      // found (dcc reads on for a cast); `nil` is a Pointer collection.
+      LCore := PeelParens(LM.Tree, LColl);
+      if (LCore <> NIL_NODE) and not InUntypedWith(N) then
+      begin
+        if LM.Tree.Nodes[LCore].Kind = nkNilLit then
+        begin
+          EmitAt(LM, LColl, 'E2430', Format(SE2430_ForInCollection,
+            ['Pointer']));
+          Exit;
+        end;
+        LHead := LCore;
+        if LM.Tree.Nodes[LHead].Kind = nkTypeArgs then
+          LHead := LM.Tree.Nodes[LHead].FirstChild;
+        if (LHead <> NIL_NODE) and
+           (LM.Tree.Nodes[LHead].Kind in [nkIdent, nkMember]) and
+           TargetSym(LHead, LMid, LSym) and
+           (FModels[LMid].Symbols[LSym].Kind in [skType, skBuiltinType]) then
+        begin
+          EmitAt(LM, LColl, 'E2029', SE2029_ForInTypeCollection);
+          Exit;
+        end;
+      end;
       LVarX := LoopVarX(LVar);
       LCollX := GetX(LColl);
+      // Anything that is no string, array, set or enumerable class, record
+      // or interface - a scalar, a pointer, a Variant - is E2430, a helper's
+      // GetEnumerator notwithstanding (5.5.2).
+      if XValid(LCollX) and (XCatOf(CanonTypeX(LCollX)) in [tcInteger,
+         tcFloat, tcEnum, tcBoolean, tcChar, tcPointer, tcVariant, tcNil]) and
+         // `for C in 'a'`: a one-character literal or constant is a string
+         // here, typed Char only by this pass.
+         not ((XCatOf(CanonTypeX(LCollX)) = tcChar) and
+              IsConstExprX(AId, LColl)) and
+         not InUntypedWith(N) and not Unreliable(N, LColl, LCollX) then
+      begin
+        EmitAt(LM, LColl, 'E2430', Format(SE2430_ForInCollection,
+          [XTypeText(LCollX)]));
+        Exit;
+      end;
       if not XValid(LVarX) or not XValid(LCollX) then
         Exit;
       LElemX := ForInElementX(AId, LColl, LCollX);

@@ -14712,6 +14712,141 @@ begin
   end;
 end;
 
+// The messages of AModel's ACode diagnostics, joined by ' | '.
+function DiagText(AModel: TPasSemaModel; const ACode: string): string;
+begin
+  Result := '';
+  for var LIdx := 0 to High(AModel.Diags) do
+    if AModel.Diags[LIdx].Code = ACode then
+    begin
+      if Result <> '' then
+        Result := Result + ' | ';
+      Result := Result + AModel.Diags[LIdx].Msg;
+    end;
+end;
+
+{ Spec 5.5.1 / 5.5.2 (dcc64 37.0; spec audit g3 ForCtr, ForInVar,
+  local/probe-park/sa2-stmt F1, B1, C1): what may be a `for` counter - a
+  local, `Result` or a value parameter of the innermost routine (an
+  anonymous method is one); a const parameter is E2064, a global only W1019
+  (not reported), the rest E1019 - an integer constant bound outside the
+  counter's range is E1012, and a for-in collection that is a scalar, a
+  pointer or `nil` is E2430, a type written there E2029. Each fixture line
+  is what dcc64 reports on it. }
+procedure TestForCounterChecks;
+const
+  SYS = 'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class constructor Create; end;'#10 +
+    '  IInterface = interface end;'#10 +
+    'implementation'#10'constructor TObject.Create; begin end;'#10 +
+    'end.'#10;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+
+  function Run(const AName, ASrc: string): TPasSemaModel;
+  begin
+    TFile.WriteAllText(TPath.Combine(LDir, AName + '.dpr'), ASrc);
+    FreeAndNil(GProj);
+    GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+    GProj.AnalyzeProject(TPath.Combine(LDir, AName + '.dpr'));
+    Result := ModelByName(LowerCase(AName));
+  end;
+
+begin
+  LDir := FreshDir('pastree_sema_forctr');
+  GProj := nil;
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'), SYS);
+  try
+    LM := Run('FC',
+      'program FC;'#10 +                                                  // 1
+      'type TR = record F: Integer; end;'#10 +                            // 2
+      '  TC = class FI: Integer; class var CV: Integer; procedure M; ' +
+      'end;'#10 +                                                         // 3
+      '  TArr = array of Integer; TProc = reference to procedure;'#10 +   // 4
+      'var G: Integer; R: TR; A: array[0..3] of Integer; PI: ^Integer;'#10 + // 5
+      'const TK: Integer = 0;'#10 +                                       // 6
+      'procedure TC.M; begin for FI := 0 to 1 do ; end;'#10 +             // 7 E1019
+      'procedure Glob; begin for G := 0 to 1 do ; end;'#10 +              // 8 W1019
+      'procedure Fld; begin for R.F := 0 to 1 do ; end;'#10 +             // 9 E1019
+      'procedure Elem; begin for A[0] := 0 to 1 do ; end;'#10 +           // 10 E1019
+      'procedure Dr; begin for PI^ := 0 to 1 do ; end;'#10 +              // 11 E1019
+      'procedure Par(P: Integer); begin for P := 0 to 1 do ; end;'#10 +   // 12
+      'procedure VarP(var P: Integer); begin for P := 0 to 1 do ; end;'#10 + // 13 E1019
+      'procedure OutP(out P: Integer); begin for P := 0 to 1 do ; end;'#10 + // 14 E1019
+      'procedure ConstP(const P: Integer); begin for P := 0 to 1 do ; ' +
+      'end;'#10 +                                                         // 15 E2064
+      'procedure Nest; var L: Integer; procedure Inner; var K: Integer; ' +
+      'begin for K := 0 to 1 do ; for L := 0 to 1 do ; end; ' +
+      'begin for L := 0 to 1 do ; end;'#10 +                              // 16 E1019
+      'function Fn: Integer; begin for Result := 0 to 1 do ; end;'#10 +   // 17
+      'procedure TCn; begin for TK := 0 to 1 do ; end;'#10 +              // 18 E1019
+      'procedure WithF; var LR: TR; begin with LR do for F := 0 to 1 do ;' +
+      ' end;'#10 +                                                        // 19 E1019
+      'procedure An; var L: Integer; P: TProc; begin P := procedure ' +
+      'begin for L := 0 to 1 do ; end; end;'#10 +                         // 20 E1019
+      'procedure An2; var P: TProc; begin P := procedure var K: Integer; ' +
+      'begin for K := 0 to 1 do ; end; end;'#10 +                         // 21
+      'procedure CVar; begin for TC.CV := 0 to 1 do ; end;'#10 +          // 22 E1019
+      'procedure BadB; var L: Byte; begin for L := 0 to 300 do ; end;'#10 + // 23 E1012
+      'procedure BadLo; var L: Byte; begin for L := -1 to 3 do ; end;'#10 + // 24 E1012
+      'procedure OkB; var L: Byte; begin for L := 0 to 255 do ; end;'#10 + // 25
+      'procedure Big; var L: Int64; begin for L := 0 to 5000000000 do ; ' +
+      'end;'#10 +                                                         // 26
+      'procedure ForIn; var X: Integer; LA: TArr; begin for X in LA do ; ' +
+      'for R.F in LA do ; end;'#10 +                                      // 27 E1019
+      'procedure ForInC(const X: Integer); var LA: TArr; ' +
+      'begin for X in LA do ; end;'#10 +                                  // 28 E2064
+      'begin'#10 +                                                        // 29
+      '  for G := 0 to 1 do ;'#10 +                                       // 30
+      'end.'#10);
+    Ok('forctr: E1019 where dcc64 reports it [' + DiagLinesOf(LM, 'E1019') +
+      ']', DiagLinesOf(LM, 'E1019') = '7 9 10 11 13 14 16 18 19 20 22 27');
+    Ok('forctr: E2064 for a const parameter [' + DiagLinesOf(LM, 'E2064') +
+      ']', DiagLinesOf(LM, 'E2064') = '15 28');
+    Ok('forctr: E1012 for a bound outside the counter [' +
+      DiagLinesOf(LM, 'E1012') + ']', DiagLinesOf(LM, 'E1012') = '23 24');
+    Ok('forctr: nothing else [' + IntToStr(Length(LM.Diags)) + ']',
+      Length(LM.Diags) = 16);
+    // The for-in collection (5.5.2, sa2-stmt C1).
+    LM := Run('FI',
+      'program FI;'#10 +                                                  // 1
+      'type TE = (e1, e2); PInt = ^Integer;'#10 +                         // 2
+      '  TArr<T> = array of T; TIA = array of Integer;'#10 +              // 3
+      'var C: Char; B: Boolean; I: Integer; D: Double; E: TE; P: PInt;'#10 + // 4
+      '  S: string; LA: TIA; ST: set of Byte;'#10 +                       // 5
+      'begin'#10 +                                                        // 6
+      '  for I in I do ;'#10 +                                            // 7 E2430
+      '  for D in D do ;'#10 +                                            // 8 E2430
+      '  for E in E do ;'#10 +                                            // 9 E2430
+      '  for B in B do ;'#10 +                                            // 10 E2430
+      '  for C in C do ;'#10 +                                            // 11 E2430
+      '  for I in P do ;'#10 +                                            // 12 E2430
+      '  for I in nil do ;'#10 +                                          // 13 E2430
+      '  for I in TIA do ;'#10 +                                          // 14 E2029
+      '  for I in TArr<Integer> do ;'#10 +                                // 15 E2029
+      '  for C in S do ;'#10 +                                            // 16
+      '  for C in ''a'' do ;'#10 +                                        // 17
+      '  for I in LA do ;'#10 +                                           // 18
+      '  for I in ST do ;'#10 +                                           // 19
+      '  for I in P^ do ;'#10 +                                           // 20 E2430
+      'end.'#10);
+    Ok('forin: E2430 for a scalar, a pointer, nil [' +
+      DiagLinesOf(LM, 'E2430') + ']',
+      DiagLinesOf(LM, 'E2430') = '7 8 9 10 11 12 13 20');
+    Ok('forin: E2029 for a type as the collection [' +
+      DiagLinesOf(LM, 'E2029') + ']', DiagLinesOf(LM, 'E2029') = '14 15');
+    Ok('forin: Integer named [' + DiagText(LM, 'E2430') + ']',
+      Pos('collection type ''Integer''', DiagText(LM, 'E2430')) > 0);
+    Ok('forin: nothing else [' + IntToStr(Length(LM.Diags)) + ']',
+      Length(LM.Diags) = 10);
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // An array or pointer type written inline is a type of its own, shared by
 // the names of one declaration (spec 8.1.1, 10.1.2): two declarations are
 // E2008 (both anonymous), an anonymous against a named one E2010 naming
@@ -23680,6 +23815,7 @@ begin
   TestAttributeE2289;
   TestAttributeE2289Lists;
   TestAttributeE2289Hidden;
+  TestForCounterChecks;
   TestAttributeExprHead;
   TestAttributeW1074LeafGuess;
   TestE2003LeafGuess;

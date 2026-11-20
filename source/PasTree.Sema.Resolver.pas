@@ -250,6 +250,7 @@ type
     procedure BindNestedToWith(ABody, AWithScope: Integer);
     procedure ResolveWithStmts;
     procedure CheckForCounters;
+    procedure CheckCounterPlace(AFor: Integer);
     procedure CheckBareRaises;
     procedure CheckCaptures;
     procedure CheckSlicePositions;
@@ -5169,6 +5170,7 @@ begin
   begin
     if not (KindOf(LIdx) in [nkForStmt, nkForInStmt]) then
       Continue;
+    CheckCounterPlace(LIdx);
     LSym := CounterSym(LIdx);
     if LSym = NIL_SYM then
       Continue;
@@ -5183,6 +5185,104 @@ begin
     end;
     Scan(LBody, LSym, FModel.Symbols[LSym].Name);
   end;
+end;
+
+{ 5.5.1 / 5.5.2: what may be a `for` counter or a for-in element variable
+  (dcc64 37.0, spec audit g3 ForCtr / ForInVar, local/probe-park/sa2-stmt
+  F1): a local variable, `Result` or a value parameter of the innermost
+  routine - an anonymous method is a routine of its own here. A const
+  parameter is E2064; a unit- or program-level variable only dcc's W1019
+  inside a routine (not reported) and silent in a main block; anything else
+  is E1019 - a designator (`R.F`, `A[0]`, `P^`, `O.FI`), a field (a method's
+  own, a `with` target's), a class var, a typed constant, a var, out or
+  untyped parameter, an enclosing routine's local. A unit-qualified name
+  (`Prog.G`) is the global it names. }
+procedure TPasSemaResolver.CheckCounterPlace(AFor: Integer);
+var
+  LCtr, LSym, LScope, LHere, LDecl, LParam, LFileId, LLine, LCol: Integer;
+  LCode, LMsg: string;
+
+  // The routine scope (sckRoutine, an anonymous method's too) AScope lies
+  // in, NIL_SCOPE for none.
+  function RoutineOf(AScope: Integer): Integer;
+  begin
+    Result := AScope;
+    while (Result <> NIL_SCOPE) and
+          (FModel.Scopes[Result].Kind <> sckRoutine) do
+      Result := FModel.Scopes[Result].Parent;
+  end;
+
+begin
+  LCtr := FirstChild(AFor);
+  if (LCtr = NIL_NODE) or (KindOf(LCtr) = nkInlineVar) then
+    Exit;
+  if FModel.InUnopenedWithBody(LCtr) then
+    Exit;
+  LCode := 'E1019';
+  LMsg := SE1019_ForCounterNotLocal;
+  if KindOf(LCtr) <> nkIdent then
+  begin
+    // `Prog.G` / `Unit.G`: the global, W1019 at most. A qualifier this
+    // pass did not bind (the program's own name) says nothing either.
+    if (KindOf(LCtr) = nkMember) and (FirstChild(LCtr) <> NIL_NODE) and
+       (KindOf(FirstChild(LCtr)) = nkIdent) and
+       ((FModel.RefMap[FirstChild(LCtr)] = NIL_SYM) or
+        (FModel.Symbols[FModel.RefMap[FirstChild(LCtr)]].Kind = skUnitRef)) then
+      Exit;
+  end
+  else
+  begin
+    LSym := FModel.RefMap[LCtr];
+    if LSym = NIL_SYM then
+      Exit;
+    case FModel.Symbols[LSym].Kind of
+      skField:
+        ;
+      skConst:
+        // A typed constant; a true one is not this check's question.
+        if FModel.Symbols[LSym].TypeNode = NIL_NODE then
+          Exit;
+      skVar, skParam:
+        begin
+          LScope := FModel.Symbols[LSym].Scope;
+          if (LScope = NIL_SCOPE) or
+             (FModel.Scopes[LScope].Kind = sckStruct) then
+            // a class var: E1019
+          else
+          begin
+            LScope := RoutineOf(LScope);
+            if LScope = NIL_SCOPE then
+              Exit;   // a global: W1019 in a routine, not reported
+            if (AFor > High(FModel.NodeScope)) then
+              Exit;
+            LHere := RoutineOf(FModel.NodeScope[AFor]);
+            if LScope = LHere then
+            begin
+              if FModel.Symbols[LSym].Kind = skVar then
+                Exit;
+              LDecl := FModel.Symbols[LSym].DeclNode;
+              if LDecl = NIL_NODE then
+                Exit;
+              LParam := FTree.Nodes[LDecl].Parent;
+              if (LParam = NIL_NODE) or (KindOf(LParam) <> nkParam) then
+                Exit;
+              if nfConst in FTree.Nodes[LParam].Flags then
+              begin
+                LCode := 'E2064';
+                LMsg := SE2064_LeftSideCannotBeAssigned;
+              end
+              else if not ((nfVar in FTree.Nodes[LParam].Flags) or
+                           (nfOut in FTree.Nodes[LParam].Flags)) then
+                Exit;   // a value parameter
+            end;
+          end;
+        end;
+    else
+      Exit;
+    end;
+  end;
+  NodePos(LCtr, LFileId, LLine, LCol);
+  FModel.AddDiag(MakeDiag(LCode, LMsg, LCtr, LFileId, LLine, LCol));
 end;
 
 { The flat checks' shared pieces (CheckBareRaises, CheckSlicePositions). A

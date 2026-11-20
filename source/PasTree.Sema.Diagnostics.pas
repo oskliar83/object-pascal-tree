@@ -82,6 +82,13 @@ const
   SE2362_CannotAccessProtected = 'E2362 Cannot access protected symbol %s';
   SE2032_ForCounterNotOrdinal =
     'E2032 For loop control variable must have ordinal type';
+  SE1019_ForCounterNotLocal =
+    'E1019 For loop control variable must be simple local variable';
+  SE1012_ConstViolatesBounds =
+    'E1012 Constant expression violates subrange bounds';
+  SE2430_ForInCollection =
+    'E2430 for-in statement cannot operate on collection type ''%s''';
+  SE2029_ForInTypeCollection = 'E2029 ''('' expected but ''DO'' found';
   SE2005_NotATypeIdentifier   = 'E2005 ''%s'' is not a type identifier';
   // E2010 takes two type names (dst, src). E2015 takes NOTHING - dcc's own
   // wording names no operator, so the template has no %s and every call site
