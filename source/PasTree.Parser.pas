@@ -1913,6 +1913,12 @@ begin
   else
     Result := FB.AddNode(nkInlineVar, NIL_NODE, FPos);
   Next;
+  // `var [A] I := 1;` and `var [Zork] I: Integer := 1;` (W1074) compile
+  // (19.3.2, dcc64 37.0): the group leads the declaration's children, as a
+  // var section's nkVarDecl has it. Read as `name expected` it was a stray
+  // E2029 and the name went undeclared (spec audit g6 A06).
+  if CurKind = tkLBracket then
+    FB.Adopt(Result, ParseAttrGroups);
   if CurKind = tkIdentifier then
   begin
     FB.Adopt(Result, AddName);

@@ -12713,8 +12713,9 @@ var
     end the walk at its own `end` - to the struct's `end`); a procedure,
     constructor or destructor with a body (Result: at the token after the
     routine); a type declaration of a class or an interface (Result: into
-    its members). Anything else, a record's list included (the walk goes
-    on past a record's `end`), is not read. }
+    its members); a plain group in a declaration list, standing alone or
+    on a constant (ListEnd). Anything else, a record's list included (the
+    walk goes on past a record's `end`), is not read. }
   function DanglingEnd(AAttr: Integer; AResult: Boolean): Integer;
   var
     LGroup, LUp, LCur, LStruct, LFirst, LLast: Integer;
@@ -12781,6 +12782,49 @@ var
       end;
     end;
 
+    { A plain group in a declaration list - a unit's interface or
+      implementation, a program's or library's declarations, a routine's -
+      that nothing in its own section took; ACur is the list's node after it
+      (past APrev). The routine after it takes it; a section WORD ends it
+      (`[A] type T1 = ...`, `const [A] C = 1;` NEWLINE `var V: Integer;`),
+      and so do a routine's `begin`, `implementation`, a unit's legacy
+      `begin` and its final `end` - E2289 at that token. A program's `begin`
+      and a unit's `initialization` take it with no diagnostic (spec 19.3.2,
+      dcc64 37.0, spec audit g6 U1-U6, C4, CU; local/probe-park/sa-parser
+      R1-R24). }
+    function ListEnd(AList, APrev, ACur: Integer): Integer;
+    var
+      LTok: Integer;
+    begin
+      Result := -1;
+      if not (LM.Tree.Nodes[AList].Kind in [nkProgram, nkLibrary,
+         nkInterfaceSec, nkImplementationSec, nkRoutineBody]) then
+        Exit;
+      while (ACur <> NIL_NODE) and (LM.Tree.Nodes[ACur].Kind = nkAttrGroup) do
+      begin
+        APrev := ACur;
+        ACur := LM.Tree.Nodes[ACur].NextSibling;
+      end;
+      if ACur <> NIL_NODE then
+        LTok := LM.Tree.Nodes[ACur].FirstToken
+      else
+        LTok := LM.Tree.Nodes[APrev].LastToken + 1;
+      if (LTok < 0) or (LTok > High(LM.Tree.Source.Visible)) then
+        Exit;
+      case LM.Tree.Source.VisibleKind(LTok) of
+        tkType, tkConst, tkResourcestring, tkVar, tkThreadvar, tkLabel,
+        tkImplementation:
+          Result := LTok;
+        tkBegin:
+          if LM.Tree.Nodes[AList].Kind in [nkRoutineBody,
+             nkImplementationSec] then
+            Result := LTok;
+        tkEnd:
+          if LM.Tree.Nodes[AList].Kind = nkImplementationSec then
+            Result := LTok;
+      end;
+    end;
+
   begin
     Result := -1;
     LGroup := LM.Tree.Nodes[AAttr].Parent;
@@ -12824,7 +12868,26 @@ var
             // constant (which never does) and, for Result:, any.
             LStruct := BodyOf(LUp);
             if LStruct = NIL_NODE then
-              Exit;
+            begin
+              // `const [A] C = 1;` in a declaration list: past the rest of
+              // the section (constants and groups), then ListEnd.
+              LCur := LM.Tree.Nodes[LUp].Parent;
+              if AResult or (LM.Tree.Nodes[LUp].Kind <> nkConstDecl) or
+                 (LCur = NIL_NODE) or
+                 (LM.Tree.Nodes[LCur].Kind <> nkConstSec) or
+                 (LM.Tree.Nodes[LCur].Parent = NIL_NODE) then
+                Exit;
+              LFirst := LM.Tree.Nodes[LUp].NextSibling;
+              while LFirst <> NIL_NODE do
+              begin
+                if not (LM.Tree.Nodes[LFirst].Kind in [nkConstDecl,
+                   nkAttrGroup]) then
+                  Exit;
+                LFirst := LM.Tree.Nodes[LFirst].NextSibling;
+              end;
+              Exit(ListEnd(LM.Tree.Nodes[LCur].Parent, LCur,
+                LM.Tree.Nodes[LCur].NextSibling));
+            end;
             if not AResult and (LM.Tree.Nodes[LUp].Kind <> nkConstDecl) then
               Exit;
             LCur := LM.Tree.Nodes[LUp].NextSibling;
@@ -12876,9 +12939,9 @@ var
     else
       // A group before a routine in a declaration list: the routine after
       // it (past more groups) takes it or, for Result:, ends it with its
-      // body.
+      // body; a plain one reads ListEnd.
       if not AResult then
-        Exit;
+        Exit(ListEnd(LUp, LGroup, LM.Tree.Nodes[LGroup].NextSibling));
       LCur := LM.Tree.Nodes[LGroup].NextSibling;
       while (LCur <> NIL_NODE) and (LM.Tree.Nodes[LCur].Kind = nkAttrGroup) do
         LCur := LM.Tree.Nodes[LCur].NextSibling;

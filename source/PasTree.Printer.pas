@@ -758,6 +758,12 @@ begin
   else
     Kw('var', ANode);
   LChild := T.Nodes[ANode].FirstChild;
+  // `var [A] I := 1`: the group before the names.
+  while (LChild <> NIL_NODE) and (Kind(LChild) = nkAttrGroup) do
+  begin
+    Child(ANode, LChild);
+    LChild := Next(LChild);
+  end;
   LFirst := True;
   while (LChild <> NIL_NODE) and (nfName in T.Nodes[LChild].Flags) do
   begin

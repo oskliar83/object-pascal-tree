@@ -2965,7 +2965,14 @@ begin
         var LSymCount := 0;
         var LType := NIL_NODE;
         // The names carry nfName; LName ends on the first child after them.
+        // A leading attribute group (`var [A] I := 1`) is visited, as a var
+        // section's (DeclareNamesAndType).
         LName := FirstChild(ANode);
+        while (LName <> NIL_NODE) and (KindOf(LName) = nkAttrGroup) do
+        begin
+          Collect(LName, AScope);
+          LName := NextSib(LName);
+        end;
         while (LName <> NIL_NODE) and IsDeclName(LName) do
         begin
           if LSymCount = Length(LSyms) then

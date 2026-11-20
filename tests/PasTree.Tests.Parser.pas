@@ -30,7 +30,7 @@ uses
   PasTree.TestKit;
 
 const
-  STMT_CASES: array[0..153] of TPasCaseRow = (
+  STMT_CASES: array[0..154] of TPasCaseRow = (
     // ---- 5.1.1 assignment ----
     (Section: '5.1.1'; Name: 'assign'; Source: 'X := 42;';
      Expected: 'Block(Assign(Ident''X'' IntLit''42''))'; ExpectDiags: 0),
@@ -681,6 +681,13 @@ const
      Expected: 'Block(InlineVar(Ident''A''#name ' +
        'ArrayType(Subrange(IntLit''0'' ' +
        'IntLit''1'') Ident''Byte'')))'; ExpectDiags: 0),
+    // 19.3.2 (dcc64 37.0, spec audit g6 A06): an inline var takes an
+    // attribute group before its names.
+    (Section: '19.3.2'; Name: 'inline var with an attribute group';
+     Source: 'var [A] [B(1)] I: Integer := 1;';
+     Expected: 'Block(InlineVar#init(AttrGroup(Attribute(Ident''A'') ' +
+       'Attribute(Ident''B'' IntLit''1'')) Ident''I''#name ' +
+       'Ident''Integer'' IntLit''1''))'; ExpectDiags: 0),
     (Section: '3.1.3'; Name: 'inline var with a set type';
      Source: 'var S: set of Byte;';
      Expected: 'Block(InlineVar(Ident''S''#name SetType(Ident''Byte'')))';

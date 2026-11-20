@@ -11441,6 +11441,116 @@ begin
   end;
 end;
 
+{ Spec 19.3.2 (dcc64 37.0; spec audit g6 U1-U6, C4, CU, A06;
+  local/probe-park/sa-parser R1-R24): a plain group in a declaration list
+  that nothing in its own section takes - a constant never does - goes to
+  the routine after it; a section word ends it, and so do a routine's
+  `begin`, `implementation`, a unit's legacy `begin` and its `end`: E2289 at
+  that token. A program's `begin` and a unit's `initialization` take it
+  silently; a var, a type and an inline var (`var [A] I := 1`) take their
+  own group. }
+procedure TestAttributeE2289Lists;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+const
+  ATTR = 'type AAttribute = class(TCustomAttribute) end;'#10;
+begin
+  LDir := FreshDir('pastree_sema_attre2289l');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class constructor Create; end;'#10 +
+    '  IInterface = interface end;'#10 +
+    '  TCustomAttribute = class(TObject) end;'#10 +
+    'implementation'#10'constructor TObject.Create; begin end;'#10 +
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UL1.pas'),
+    'unit UL1;'#10'interface'#10 + ATTR +                // 1-3
+    'const [A] C = 1;'#10 +                              // 4
+    'implementation'#10 +                                // 5 E2289 (CU)
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UL2.pas'),
+    'unit UL2;'#10'interface'#10 + ATTR +                // 1-3
+    'const [A] C = 1;'#10 +                              // 4
+    'type T = Integer;'#10 +                             // 5 E2289
+    'implementation'#10 +                                // 6
+    'const [A] D = 1;'#10 +                              // 7
+    'end.'#10);                                          // 8 E2289
+  TFile.WriteAllText(TPath.Combine(LDir, 'UL3.pas'),
+    'unit UL3;'#10'interface'#10 + ATTR +                // 1-3
+    'implementation'#10 +                                // 4
+    'const [A] C = 1;'#10 +                              // 5
+    'initialization'#10 +                                // 6 takes it
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UL4.pas'),
+    'unit UL4;'#10'interface'#10 + ATTR +                // 1-3
+    'implementation'#10 +                                // 4
+    'const [A] C = 1;'#10 +                              // 5
+    'begin'#10 +                                         // 6 E2289
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'DL.dpr'),
+    'program DL;'#10 +                                   // 1
+    'uses UL1, UL2, UL3, UL4;'#10 +                      // 2
+    ATTR +                                               // 3
+    'type T0 = class end; [A]'#10 +                      // 4
+    'type T1 = class end;'#10 +                          // 5 E2289 (U1)
+    'var V: Integer; [A]'#10 +                           // 6
+    'type T2 = class end;'#10 +                          // 7 E2289 (U2)
+    'procedure Q; begin end; [A]'#10 +                   // 8
+    'const C = 1;'#10 +                                  // 9 E2289 (U3)
+    'const [A] C2 = 1; D2 = 2;'#10 +                     // 10
+    'var V2: Integer;'#10 +                              // 11 E2289
+    'const [A] C3 = 1;'#10 +                             // 12
+    'resourcestring S = ''x'';'#10 +                     // 13 E2289
+    'procedure P1; const [A] LC = 2;'#10 +               // 14
+    'begin end;'#10 +                                    // 15 E2289 (C4)
+    'procedure P2; [A]'#10 +                             // 16
+    'begin end;'#10 +                                    // 17 E2289
+    'procedure P3; const [A] LC = 2;'#10 +               // 18
+    'var L: Integer; begin end;'#10 +                    // 19 E2289
+    'procedure P4; [A] const LC = 2; begin end;'#10 +    // 20 E2289 at const
+    'procedure P5; const [A] LC = 2;'#10 +               // 21
+    'label 1; begin 1: end;'#10 +                        // 22 E2289
+    'procedure P6; const [A] LC = 2;'#10 +               // 23
+    '  procedure N; begin end;'#10 +                     // 24 takes it
+    'begin end;'#10 +                                    // 25
+    'const [A] C4 = 1; procedure P7; begin end;'#10 +    // 26 takes it
+    'procedure P8; var [A] L: Integer; begin end;'#10 +  // 27 takes it
+    'procedure P9; begin var [A] I := 1; I := I + 1; end;'#10 + // 28 (A06)
+    'type T3 = Integer; [A] T4 = Integer;'#10 +          // 29 takes it
+    'var V3: Integer; [A]'#10 +                          // 30
+    'begin'#10 +                                         // 31 takes it
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'DL.dpr'));
+    LM := ModelByName('dl');
+    Ok('attre2289l: a program''s lists [' + DiagSites(LM, 'E2289') + ']',
+      DiagSites(LM, 'E2289') =
+      '5:1 7:1 9:1 11:1 13:1 15:1 17:1 19:1 20:19 22:1');
+    Ok('attre2289l: ...and nothing else [' + IntToStr(Length(LM.Diags)) + ']',
+      (Length(LM.Diags) = 10) and
+      DiagHasText(LM, 'E2289', 'Unresolved custom attribute: AAttribute'));
+    LM := ModelByName('ul1');
+    Ok('attre2289l: before implementation [' + DiagSites(LM, 'E2289') + ']',
+      (DiagSites(LM, 'E2289') = '5:1') and (Length(LM.Diags) = 1));
+    LM := ModelByName('ul2');
+    Ok('attre2289l: before a type section and the unit''s end [' +
+      DiagSites(LM, 'E2289') + ']',
+      (DiagSites(LM, 'E2289') = '5:1 8:1') and (Length(LM.Diags) = 2));
+    LM := ModelByName('ul3');
+    Ok('attre2289l: initialization takes it [' + DiagSites(LM, 'E2289') + ']',
+      Length(LM.Diags) = 0);
+    LM := ModelByName('ul4');
+    Ok('attre2289l: a legacy begin does not [' + DiagSites(LM, 'E2289') + ']',
+      (DiagSites(LM, 'E2289') = '6:1') and (Length(LM.Diags) = 1));
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 { Spec 19.3.2 (dcc64 37.0, 2026-11-14, local/fu-attrs P1-P7): an attribute
   with its arguments is a call of its class's Create. One candidate: the
   arguments converted left to right, the first that does not is E2010 at it,
@@ -22775,6 +22885,7 @@ begin
   TestAttributeW1074;
   TestAttributeCtorArgs;
   TestAttributeE2289;
+  TestAttributeE2289Lists;
   TestAttributeExprHead;
   TestAttributeW1074LeafGuess;
   TestE2003LeafGuess;
