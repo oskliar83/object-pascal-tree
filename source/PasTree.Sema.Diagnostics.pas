@@ -316,7 +316,7 @@ begin
   Result := (ACode = 'E2029') or (ACode = 'E2066') or (ACode = 'E2038') or
     (ACode = 'E2052') or
     (ACode = 'E2057') or (ACode = 'E2026') or (ACode = 'E2657') or
-    (ACode = 'WLEX');
+    (ACode = 'E2067') or (ACode = 'E2375') or (ACode = 'WLEX');
 end;
 
 function MakeDiag(const ACode, AMsg: string; ADeclNode, AFileId, ALine,

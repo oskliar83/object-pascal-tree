@@ -2384,6 +2384,13 @@ begin
     if KindOf(LChild) = nkEnumValue then
     begin
       LName := FirstChild(LChild);
+      // `([Tag] e1)` - the element's attribute group: its names are
+      // references, resolved where the element's value is (19.3.2).
+      while (LName <> NIL_NODE) and (KindOf(LName) = nkAttrGroup) do
+      begin
+        Collect(LName, LValScope);
+        LName := NextSib(LName);
+      end;
       if (LName <> NIL_NODE) and (KindOf(LName) = nkIdent) then
       begin
         // A value of a NAMED enum is typed as that enum (2.2.4) - it is a

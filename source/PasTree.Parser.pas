@@ -59,6 +59,10 @@ type
     // `TSeGlyphAlign = kgfaCenter)`) is token-identical to one - real code in
     // Vcl.StyleAPI, 35 false diagnostics before this guard.
     FParamDepth: Integer;
+    // The visible index of the first constraint's `:` the last
+    // ParseGenericParamsOpt read, -1 none: a routine implementation header
+    // may not repeat constraints (ParseRoutine, 16.4.1).
+    FGenColon: Integer;
     // Nesting depth of statement blocks: inside one, `Ident =` or `Ident :`
     // on its own line is an expression continued after a wrapped `.` (a
     // client unit: `TTag(X).` NEWLINE `TransType = Trans_stored)`) or a case
@@ -168,6 +172,8 @@ type
     // AtMissingOperator, else E2029 `AWant expected`.
     procedure MissingSeparator(const AWant: string; ANode: Integer;
       AInParens: Boolean);
+    // After a section word: a declaration must follow (EmptySectionCheck).
+    procedure EmptySectionCheck;
     // expressions
     function ParseExpression(AEqualEnds: Boolean = False): Integer;
     function ParseSimpleExpr: Integer;
@@ -227,7 +233,8 @@ type
     procedure ParseMoreNames(ADecl: Integer; AAttrs: Boolean;
       const AMissing: string);
     function ParseQualifiedName: Integer;
-    function ParseUsesClause: Integer;
+    // AUnit: a unit's clause, where `in 'file'` is E2029.
+    function ParseUsesClause(AUnit: Boolean = False): Integer;
     function ParseProgramParams(ALibrary: Boolean): Integer;
     function AttrIsName: Boolean;
     function GuidNameAhead: Boolean;
@@ -664,6 +671,21 @@ begin
     ErrorCode('E2066', 'Missing operator or semicolon', ANode)
   else
     Error(AWant + ' expected');
+end;
+
+{ B.x (DeclSection): a `var`, `threadvar`, `const`, `resourcestring` or
+  `type` word needs a declaration after it - `var` then `const`, `type`
+  then `begin`, `resourcestring` then `threadvar` are each `E2029
+  Identifier expected but 'CONST' found` at that token (dcc64 37.0, spec
+  audit g1 EmptyVar, EmptyRs). In a class or a record a visibility word may
+  end a `const` or `type` section at once (`const public` compiles, sa2-decl
+  S1, S6) - it is an identifier token, so it passes here; a struct's `var`
+  is not asked (ParseVarSection). An attribute group passes too: what it
+  stands before is judged where it is read. }
+procedure TPasParser.EmptySectionCheck;
+begin
+  if not (CurKind in [tkIdentifier, tkLBracket]) then
+    Error('identifier expected, found "' + CurText + '"');
 end;
 
 procedure TPasParser.Error(const AMsg: string);
@@ -2299,7 +2321,7 @@ begin
   end;
 end;
 
-function TPasParser.ParseUsesClause: Integer;
+function TPasParser.ParseUsesClause(AUnit: Boolean): Integer;
 var
   LItem: Integer;
 begin
@@ -2323,6 +2345,11 @@ begin
     FB.Adopt(LItem, ParseQualifiedName);
     if CurKind = tkIn then
     begin
+      // A unit's `uses` takes no `in 'file'` (1.2.1; dcc64 37.0, spec audit
+      // g1 UnitIn: `',' or ';' expected but 'IN' found`); the path is still
+      // read into the item.
+      if AUnit then
+        Error('"," or ";" expected, found "in"');
       Next;
       if CurKind = tkStringLiteral then
       begin
@@ -2759,7 +2786,7 @@ function TPasParser.ParseEnumType: Integer;
 var
   LValue: Integer;
 begin
-  // 2.2.4: ( name [= const], ... )
+  // 2.2.4: ( [attrs] name [= const], ... )
   Result := FB.AddNode(nkEnumType, NIL_NODE, FPos);
   Next; // (
   while not (CurKind in [tkRParen, tkEndOfFile]) do
@@ -2773,6 +2800,11 @@ begin
       Break;
     end;
     LValue := FB.AddNode(nkEnumValue, NIL_NODE, FPos);
+    // An attribute group before an element, `([Tag] e1, [A, B] e2 = 5)`, is
+    // the element's first child, as a parameter's is (2.2.4, 19.3.2; dcc64
+    // 37.0, spec audit g6 A03, CB: compiles, the group checked as any other).
+    if CurKind = tkLBracket then
+      FB.Adopt(LValue, ParseAttrGroups);
     if CurKind = tkIdentifier then
     begin
       FB.Adopt(LValue, FB.AddNode(nkIdent, NIL_NODE, FPos));
@@ -2780,8 +2812,11 @@ begin
     end
     else
     begin
+      // `(e1, )`, `(e1, [Tag])`: one E2029 at the `)`, which still closes
+      // the list (dcc64 37.0: `Identifier expected but ')' found` alone).
       Error('enum element expected');
-      Next;
+      if CurKind <> tkRParen then
+        Next;
     end;
     if CurKind = tkEqual then
     begin
@@ -3087,8 +3122,11 @@ begin
     // field genuinely named `private` must be written `&private`, and the
     // &-escaped token slice starts with '&', so the word compare misses it -
     // the disambiguation falls out of the lexer (B.3).
+    // `strict public`, `strict published`, `strict automated`: one E2375 at
+    // the second word, the section read as written (11.2.1; dcc64 37.0,
+    // spec audit g4 RVis2).
     LStrict := IsWord('strict') and (FPos < FLast) and
-      (VisLevel(FPos + 1) in [1, 2]);
+      (VisLevel(FPos + 1) > 0);
     if LStrict or ((CurKind = tkIdentifier) and (VisLevel(FPos) > 0)) then
     begin
       LVis := FB.AddNode(nkVisibility, NIL_NODE, FPos);
@@ -3096,6 +3134,8 @@ begin
       begin
         FB.AddFlag(LVis, nfNegated); // reuse flag slot: strict marker
         Next;
+        if VisLevel(FPos) > 2 then
+          ErrorCode('E2375', 'PRIVATE or PROTECTED expected', LVis);
       end;
       FB.SetAux(LVis, VisLevel(FPos));
       Next;
@@ -3272,10 +3312,11 @@ end;
 
 procedure TPasParser.ParseVariantPart(AOwner: Integer);
 var
-  LPart, LBranch: Integer;
+  LPart, LBranch, LBranches, LStart: Integer;
   LLabels: Boolean;
 begin
   // 9.1.3: case [tag:] OrdinalType of const,...: ( fields [variant] ); ...
+  LBranches := 0;
   LPart := FB.AddNode(nkVariantPart, NIL_NODE, FPos);
   Next; // case
   // `case` alone above `Reserve: array...` while typing: that field is not
@@ -3321,9 +3362,41 @@ begin
     // `Reserve: array...` on its own line after `case Tag: Byte of` while
     // typing is the next FIELD, not a branch: a branch label is followed by
     // `: (`. The variant part ends here, without it.
-    if AtLineDeclHead and (PeekKind(1) = tkColon) and (PeekKind(2) <> tkLParen) then
+    if AtLineDeclHead and (PeekKind(1) = tkColon) and
+       (PeekKind(2) <> tkLParen) then
     begin
-      Error('variant branch expected');
+      if (LBranches = 0) or (FB.Kind(AOwner) = nkVariantBranch) then
+      begin
+        Error('variant branch expected');
+        Break;
+      end;
+      // After a branch, `A: Integer;` on its own line is a field after the
+      // variant part - a further branch for dcc, `A` its label: `E2003
+      // Undeclared identifier: 'A'` there, and the record's `end` the
+      // E2029, by what the branch still wants: a type after `A: Integer;`,
+      // a `)` after more fields, a `,` or `:` with no `;` (9.1.3; dcc64
+      // 37.0, spec audit g4 RVar2, local/probe-park/sa2-decl V1-V3). The
+      // tree keeps the fields as fields, in that branch - the same text is
+      // the author typing the next field below a `case` (ResilienceSmoke).
+      LBranch := FB.AddNode(nkVariantBranch, NIL_NODE, FPos);
+      ErrorCode('E2003', Format('Undeclared identifier: ''%s''', [CurText]),
+        LBranch);
+      while CurKind = tkIdentifier do
+      begin
+        LStart := FPos;
+        ParseFieldList(LBranch, [tkEnd, tkCase]);
+        if FPos = LStart then
+          Break;
+      end;
+      if CurKind = tkEnd then
+        if FB.ChildCount(LBranch) > 1 then
+          Error('")" expected, found "end"')
+        else if VisKind(FPos - 1) = tkSemicolon then
+          Error('type expected, found "end"')
+        else
+          Error('"," or ":" expected, found "end"');
+      FB.SetLast(LBranch, FPos - 1);
+      FB.Adopt(LPart, LBranch);
       Break;
     end;
     LBranch := FB.AddNode(nkVariantBranch, NIL_NODE, FPos);
@@ -3340,6 +3413,47 @@ begin
       until False;
     finally
       FVariantLabels := LLabels;
+    end;
+    // A field after the variant part, `0: (I: Integer);` NEWLINE `A:
+    // Integer;` NEWLINE `end`, is read by dcc as a further branch: `A` a
+    // label (E2003 when undeclared, the resolver's), no `(` after its `:`
+    // (E2029, reported only where the label is no lone name - an
+    // undeclared one's E2003 stands on that line alone), and the record's
+    // `end` where the branch still wants a type, a `)` or a `,`/`:` (dcc64
+    // 37.0, spec audit g4 RVar2, local/probe-park/sa2-decl V1-V6). The type
+    // and the fields after it stay in the tree, in the branch.
+    if (LBranches > 0) and (FB.Kind(AOwner) <> nkVariantBranch) and
+       (CurKind = tkColon) and (PeekKind(1) <> tkLParen) then
+    begin
+      Next; // :
+      if (FB.ChildCount(LBranch) <> 1) or
+         (FB.Kind(FB.FirstChild(LBranch)) <> nkIdent) then
+        Error('"(" expected');
+      if not (CurKind in [tkEnd, tkSemicolon, tkEndOfFile]) then
+        FB.Adopt(LBranch, ParseTypeExpr);
+      if CurKind <> tkSemicolon then
+        Error('"," or ":" expected, found "' + CurText + '"')
+      else
+      begin
+        Next;
+        if CurKind = tkEnd then
+          Error('type expected, found "end"')
+        else
+        begin
+          while not (CurKind in [tkEnd, tkEndOfFile]) do
+            if CurKind = tkIdentifier then
+              ParseFieldList(LBranch, [tkEnd, tkCase])
+            else if CurKind = tkLBracket then
+              FB.Adopt(LBranch, ParseAttrGroups)
+            else
+              Break;
+          if CurKind = tkEnd then
+            Error('")" expected, found "end"');
+        end;
+      end;
+      FB.SetLast(LBranch, FPos - 1);
+      FB.Adopt(LPart, LBranch);
+      Break;
     end;
     // An unfinished branch (`0` typed, nothing after it yet): the fields
     // behind it are the record's, not this branch's - stop before them.
@@ -3369,6 +3483,7 @@ begin
     Expect(tkRParen, '")"');
     FB.SetLast(LBranch, FPos - 1);
     FB.Adopt(LPart, LBranch);
+    Inc(LBranches);
     if CurKind = tkSemicolon then
       Next
     else
@@ -3416,12 +3531,22 @@ begin
     end;
     if CurKind = tkColon then
     begin
+      if FGenColon < 0 then
+        FGenColon := FPos;
       Next;
       repeat
         LCon := FB.AddNode(nkConstraint, NIL_NODE, FPos);
         case CurKind of
           tkClass, tkRecord, tkConstructor:
             Next;
+          tkString:
+            begin
+              // `string` is a reserved word, no type name: `<T: string>` is
+              // `E2029 Identifier expected but 'STRING' found` (16.4.1;
+              // dcc64 37.0, spec audit g5 G02). Read as the type it names.
+              Error('identifier expected, found "string"');
+              FB.Adopt(LCon, ParseTypeExpr);
+            end;
         else
           FB.Adopt(LCon, ParseTypeRef);
         end;
@@ -3451,6 +3576,7 @@ function TPasParser.ParseParamList(AClose: TPasTokenKind): Integer;
 var
   LParam, LAttrs: Integer;
   LKind: TPasTokenKind;
+  LByMode: Boolean;
 begin
   // 6.2: [attrs] [var|const|out] names [: [array of] T] [= default]
   Result := FB.AddNode(nkParams, NIL_NODE, FPos);
@@ -3477,6 +3603,7 @@ begin
     if LAttrs <> NIL_NODE then
       FB.Adopt(LParam, LAttrs);
     LKind := CurKind;
+    LByMode := LKind in [tkVar, tkConst];
     if LKind in [tkVar, tkConst] then
     begin
       // F18: the mode is a flag on the parameter - the word itself stands at
@@ -3502,6 +3629,7 @@ begin
       // Marked rather than just consumed, because a highlighter cannot colour
       // a directive word from the token alone - see nfOut.
       FB.AddFlag(LParam, nfOut);
+      LByMode := True;
       Next;
       LAttrs := ParseAttrGroups; // out [Ref] X, as `const [Ref] X` (dcc-probed)
       if LAttrs <> NIL_NODE then
@@ -3514,6 +3642,23 @@ begin
       // Attributes may precede EACH name in the list:
       // const [REF] CLSID, [REF] IID: TGUID  (Datasnap.DSIntf.pas)
       ParseMoreNames(LParam, True, 'parameter name expected');
+      // A value parameter needs a type (6.2.7): its names ended by `;` or
+      // the closing bracket, or by another name (FPC's `constref X: T`, `A
+      // B: T`), are dcc's `E2067 Missing parameter type`, once; another
+      // name is read on as the list's next (dcc then declares X, B; dcc64
+      // 37.0, spec audit g6 M1, local/probe-park/sa2-decl M2-M8).
+      if not LByMode and
+         ((CurKind in [tkSemicolon, AClose]) or ((CurKind = tkIdentifier) and
+          (PeekKind(1) in [tkColon, tkComma, tkSemicolon, AClose]))) then
+      begin
+        ErrorCode('E2067', 'Missing parameter type', LParam);
+        if CurKind = tkIdentifier then
+        begin
+          FB.Adopt(LParam, AddName);
+          Next;
+          ParseMoreNames(LParam, True, 'parameter name expected');
+        end;
+      end;
     end
     else
       Error('parameter name expected');
@@ -4238,9 +4383,20 @@ begin
     LSeg := AddName;
     Next;
     FB.Adopt(Result, LSeg);
+    FGenColon := -1;
     LGen := ParseGenericParamsOpt;
     if LGen <> NIL_NODE then
       FB.Adopt(Result, LGen);
+    // An implementation header repeats no constraint, neither the type's
+    // nor the method's own (`procedure TL<T: class>.Sort`, `procedure
+    // TL.M<U: class>`): one `E2029 ',', ';' or '>' expected but ':' found`
+    // at the first `:` (16.4.1; dcc64 37.0, spec audit g5 G08,
+    // local/probe-park/sa2-decl G1, G2). The constraints are still read.
+    if (CurKind = tkDot) and (FGenColon >= 0) then
+    begin
+      ErrorAt(FGenColon, '",", ";" or ">" expected, found ":"');
+      FGenColon := MaxInt;
+    end;
     while CurKind = tkDot do
     begin
       Next;
@@ -4254,6 +4410,11 @@ begin
         LGen := ParseGenericParamsOpt;
         if LGen <> NIL_NODE then
           FB.Adopt(Result, LGen);
+        if (FGenColon >= 0) and (FGenColon < MaxInt) then
+        begin
+          ErrorAt(FGenColon, '",", ";" or ">" expected, found ":"');
+          FGenColon := MaxInt;
+        end;
       end
       else
       begin
@@ -4574,7 +4735,10 @@ begin
   // 2.x: type name<...> = [type] TypeExpr | type of TypeRef; ...
   Result := FB.AddNode(nkTypeSec, NIL_NODE, FPos);
   if not AHeadless then
+  begin
     Next; // type
+    EmptySectionCheck;
+  end;
   while CurKind in [tkIdentifier, tkLBracket] do
   begin
     if IsVisibilityWord then
@@ -4672,7 +4836,10 @@ begin
      (AHeadless and AResource) then
     FB.SetAux(Result, 1);
   if not AHeadless then
+  begin
     Next;
+    EmptySectionCheck;
+  end;
   while CurKind in [tkIdentifier, tkLBracket] do
   begin
     if IsVisibilityWord then
@@ -4769,7 +4936,13 @@ begin
   if AClassVar then
     FB.SetAux(Result, 1)
   else if CurKind in [tkVar, tkThreadvar] then
+  begin
     Next;
+    // A struct's `var` may stand empty (dcc64 37.0, sa2-decl S5); a
+    // unit's, a program's or a routine's may not.
+    if not AInStruct then
+      EmptySectionCheck;
+  end;
   while CurKind in [tkIdentifier, tkLBracket] do
   begin
     if IsVisibilityWord then
@@ -5111,7 +5284,7 @@ begin
         LSec := LP.FB.AddNode(nkInterfaceSec, NIL_NODE, LP.FPos);
         LP.Expect(tkInterface, '"interface"');
         if LP.CurKind = tkUses then
-          LP.FB.Adopt(LSec, LP.ParseUsesClause);
+          LP.FB.Adopt(LSec, LP.ParseUsesClause(True));
         LP.ParseDeclSections(LSec, False, [tkImplementation]);
         LP.FB.SetLast(LSec, LP.FPos - 1);
         LP.FB.Adopt(LRoot, LSec);
@@ -5129,7 +5302,7 @@ begin
           LSec := LP.FB.AddNode(nkImplementationSec, NIL_NODE, LP.FPos);
           LP.Expect(tkImplementation, '"implementation"');
           if LP.CurKind = tkUses then
-            LP.FB.Adopt(LSec, LP.ParseUsesClause);
+            LP.FB.Adopt(LSec, LP.ParseUsesClause(True));
           LP.FB.SetLast(LSec, LP.FPos - 1);
           LP.FB.Adopt(LRoot, LSec);
         end;
@@ -5139,7 +5312,7 @@ begin
           LSec := LP.FB.AddNode(nkImplementationSec, NIL_NODE, LP.FPos);
           LP.Expect(tkImplementation, '"implementation"');
           if LP.CurKind = tkUses then
-            LP.FB.Adopt(LSec, LP.ParseUsesClause);
+            LP.FB.Adopt(LSec, LP.ParseUsesClause(True));
           repeat
             LP.ParseDeclSections(LSec, True,
               [tkInitialization, tkFinalization, tkBegin, tkEnd]);
@@ -5164,6 +5337,11 @@ begin
           end;
           if LP.CurKind = tkFinalization then
           begin
+            // No `finalization` without `initialization` (1.2.1; dcc64
+            // 37.0, spec audit g1 FinOnly: `Declaration expected but
+            // 'FINALIZATION' found`); the section is still read.
+            if LP.FB.Kind(LP.FB.LastChild(LRoot)) <> nkInitSec then
+              LP.Error('declaration expected, found "finalization"');
             LSec := LP.FB.AddNode(nkFinalSec, NIL_NODE, LP.FPos);
             LP.Next;
             repeat

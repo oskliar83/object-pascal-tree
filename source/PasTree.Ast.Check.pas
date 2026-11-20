@@ -2196,11 +2196,12 @@ var
               [LAux, LLo[LFirstKid]]);
         end;
       nkVisibility:
+        // `strict public` too: dcc's E2375, the section read as written.
         if (nfNegated in ATree.Nodes[ANode].Flags) and
-           not (WordAt(LLo[ANode], ['strict']) and (LAux in [1, 2])) then
+           not (WordAt(LLo[ANode], ['strict']) and (LAux in [1..5])) then
           AReport.Add(ccFlags, ANode, Site(ANode),
-            'Visibility is marked strict but does not read `strict ' +
-            'private` or `strict protected`');
+            'Visibility is marked strict but does not read `strict` and ' +
+            'a visibility word');
       // Aux 1 marks a procedural type's first directive after its `;` (F29):
       // on no other directive, and on that one always - inside the type's
       // span a `;` right before a directive is the type's own.
