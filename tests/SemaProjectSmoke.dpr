@@ -11501,9 +11501,12 @@ begin
     '[Result: Zork] procedure Q2; begin end;'#10 +       // 63 W1074 alone
     'begin'#10 +                                         // 64
     'end.'#10);
+  // Every walk end - dcc would show the first alone (TestAttributeE2289Hidden).
+  GSemaAllE2289 := True;
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
     GProj.AnalyzeProject(TPath.Combine(LDir, 'RT.dpr'));
+    GSemaAllE2289 := False;
     LM := ModelByName('rt');
     Ok('attre2289: E2289 where each walk ends [' + DiagSites(LM, 'E2289') +
       ']', DiagSites(LM, 'E2289') =
@@ -11516,6 +11519,7 @@ begin
       (DiagSites(LM, 'E2010') = '61:10') and
       (DiagSites(LM, 'W1074') = '63:2') and (Length(LM.Diags) = 10));
   finally
+    GSemaAllE2289 := False;
     GProj.Free;
     if TDirectory.Exists(LDir) then
       TDirectory.Delete(LDir, True);
@@ -11602,9 +11606,12 @@ begin
     'var V3: Integer; [A]'#10 +                          // 30
     'begin'#10 +                                         // 31 takes it
     'end.'#10);
+  // Every walk end first, then dcc's view: the first of a file alone.
+  GSemaAllE2289 := True;
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
     GProj.AnalyzeProject(TPath.Combine(LDir, 'DL.dpr'));
+    GSemaAllE2289 := False;
     LM := ModelByName('dl');
     Ok('attre2289l: a program''s lists [' + DiagSites(LM, 'E2289') + ']',
       DiagSites(LM, 'E2289') =
@@ -11626,7 +11633,135 @@ begin
     Ok('attre2289l: a legacy begin does not [' + DiagSites(LM, 'E2289') + ']',
       (DiagSites(LM, 'E2289') = '6:1') and (Length(LM.Diags) = 1));
   finally
+    GSemaAllE2289 := False;
     GProj.Free;
+  end;
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'DL.dpr'));
+    LM := ModelByName('dl');
+    Ok('attre2289l: dcc shows a file''s first alone [' +
+      DiagSites(LM, 'E2289') + ']', (DiagSites(LM, 'E2289') = '5:1') and
+      (Length(LM.Diags) = 1));
+    LM := ModelByName('ul2');
+    Ok('attre2289l: ...in a unit too [' + DiagSites(LM, 'E2289') + ']',
+      DiagSites(LM, 'E2289') = '5:1');
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
+{ Spec 19.3.2 (dcc64 37.0, 2026-11-20; spec audit g6 A01, A02, A06;
+  local/probe-park/sa-parser W1-W12): dcc reports an E2289 only while the
+  compile has no error yet - an earlier E2289, an E2003, an attribute
+  argument's E2034 / E2035, or one on its line, hides it; the argument
+  errors themselves are all reported. The groups below ARE dangling (each
+  alone is E2289); what dcc shows is the legal-looking rest. }
+procedure TestAttributeE2289Hidden;
+const
+  SYS = 'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class constructor Create; end;'#10 +
+    '  IInterface = interface end;'#10 +
+    '  TCustomAttribute = class(TObject) end;'#10 +
+    'implementation'#10'constructor TObject.Create; begin end;'#10 +
+    'end.'#10;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+
+  function Run(const AName, ASrc: string): TPasSemaModel;
+  begin
+    TFile.WriteAllText(TPath.Combine(LDir, AName + '.dpr'), ASrc);
+    FreeAndNil(GProj);
+    GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+    GProj.AnalyzeProject(TPath.Combine(LDir, AName + '.dpr'));
+    Result := ModelByName(LowerCase(AName));
+  end;
+
+begin
+  LDir := FreshDir('pastree_sema_attre2289h');
+  GProj := nil;   // the tests before freed it without clearing
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'), SYS);
+  try
+    // A01: the class's dangling group first, the rest hidden; the argument
+    // errors stay.
+    LM := Run('H1',
+      'program H1;'#10 +                                                 // 1
+      'type'#10 +                                                        // 2
+      '  TagAttribute = class(TCustomAttribute)'#10 +                    // 3
+      '    constructor Create(I: Integer); end;'#10 +                    // 4
+      '  TNoArg = class(TCustomAttribute) end;'#10 +                     // 5
+      '  TC = class'#10 +                                                // 6
+      '    [Tag(1)] const K = 1;'#10 +                                   // 7
+      '  end;'#10 +                                                      // 8 E2289
+      'constructor TagAttribute.Create(I: Integer); begin end;'#10 +     // 9
+      '[Tag(1)] const UC = 1;'#10 +                                      // 10
+      '[Tag(1)] var UV: Integer;'#10 +                                   // 11
+      '[Tag(1, 2)] type T5 = class end;'#10 +                            // 12 E2034
+      '[TNoArg(1)] type T6 = class end;'#10 +                            // 13 E2034
+      '[Tag] type T9 = class end;'#10 +                                  // 14 E2035
+      'procedure P; var [Tag(1)] L: Integer; begin L := 0; end;'#10 +    // 15
+      'begin'#10'end.'#10);
+    Ok('attre2289h: A01 - the first E2289, the argument errors [' +
+      DiagSites(LM, 'E2289') + '/' + DiagSites(LM, 'E2034') + '/' +
+      DiagSites(LM, 'E2035') + '/' + IntToStr(Length(LM.Diags)) + ']',
+      (DiagSites(LM, 'E2289') = '8:3') and
+      (Copy(DiagSites(LM, 'E2034'), 1, 3) = '12:') and
+      (Pos(' 13:', DiagSites(LM, 'E2034')) > 0) and
+      (Copy(DiagSites(LM, 'E2035'), 1, 3) = '14:') and
+      (Length(LM.Diags) = 4));
+    // A02: an argument error first hides the later groups.
+    LM := Run('H2',
+      'program H2;'#10 +                                                 // 1
+      'type'#10 +                                                        // 2
+      '  TDblAttribute = class(TCustomAttribute)'#10 +                   // 3
+      '    constructor Create(D: Double); end;'#10 +                     // 4
+      'constructor TDblAttribute.Create(D: Double); begin end;'#10 +     // 5
+      '[TDbl] type T1 = class end;'#10 +                                 // 6 E2035
+      '[TDbl(1)] type T4 = class end;'#10 +                              // 7
+      'begin'#10'end.'#10);
+    Ok('attre2289h: A02 - the E2035 alone [' + DiagSites(LM, 'E2035') +
+      '/' + IntToStr(Length(LM.Diags)) + ']',
+      (Copy(DiagSites(LM, 'E2035'), 1, 2) = '6:') and
+      (Length(LM.Diags) = 1));
+    // A06: the class's group first; the program's and the routine's
+    // sections' groups hidden; the inline var's is taken.
+    LM := Run('H3',
+      'program H3;'#10 +                                                 // 1
+      'type'#10 +                                                        // 2
+      '  AAttribute = class(TCustomAttribute) end;'#10 +                 // 3
+      '  TC = class'#10 +                                                // 4
+      '  const [A] K = 1;'#10 +                                          // 5
+      '  end;'#10 +                                                      // 6 E2289
+      'const [A] C = 1;'#10 +                                            // 7
+      'var [A] V: Integer;'#10 +                                         // 8
+      'procedure P;'#10 +                                                // 9
+      'const [A] LC = 2;'#10 +                                           // 10
+      'var [A] L: Integer;'#10 +                                         // 11
+      'begin'#10 +                                                       // 12
+      '  var [A] I := 1;'#10 +                                           // 13
+      'end;'#10 +                                                        // 14
+      'begin'#10'end.'#10);
+    Ok('attre2289h: A06 - line 6 alone [' + DiagSites(LM, 'E2289') + '/' +
+      IntToStr(Length(LM.Diags)) + ']',
+      (DiagSites(LM, 'E2289') = '6:3') and (Length(LM.Diags) = 1));
+    // W12: an error AFTER the group does not hide it.
+    LM := Run('H4',
+      'program H4;'#10 +                                                 // 1
+      'type'#10 +                                                        // 2
+      '  AAttribute = class(TCustomAttribute) end;'#10 +                 // 3
+      'var X: Integer; [A]'#10 +                                         // 4
+      'type T4 = class end;'#10 +                                        // 5 E2289
+      'procedure P; begin Undecl := 1; end;'#10 +                        // 6 E2003
+      'begin'#10'end.'#10);
+    Ok('attre2289h: W12 - a later error does not hide it [' +
+      DiagSites(LM, 'E2289') + '/' + DiagSites(LM, 'E2003') + ']',
+      (DiagSites(LM, 'E2289') = '5:1') and
+      (Copy(DiagSites(LM, 'E2003'), 1, 2) = '6:'));
+  finally
+    FreeAndNil(GProj);
     if TDirectory.Exists(LDir) then
       TDirectory.Delete(LDir, True);
   end;
@@ -23544,6 +23679,7 @@ begin
   TestNestedToReference;
   TestAttributeE2289;
   TestAttributeE2289Lists;
+  TestAttributeE2289Hidden;
   TestAttributeExprHead;
   TestAttributeW1074LeafGuess;
   TestE2003LeafGuess;

@@ -13225,8 +13225,12 @@ begin
         begin
           LResult := nfAttrTarget in LM.Tree.Nodes[LNode].Flags;
           LTok := DanglingEnd(LNode, LResult);
+          // Anchored on the group, not the attribute: the attribute's own
+          // argument errors (E2034, E2035, E2250), judged later, must still
+          // be reported - dcc reports them and hides the E2289 instead
+          // (TPasSemaModel.DropHiddenE2289; spec audit g6 A01, A02).
           if LTok >= 0 then
-            EmitAtToken(LM, LNode, LTok, 'E2289',
+            EmitAtToken(LM, LM.Tree.Nodes[LNode].Parent, LTok, 'E2289',
               Format(SE2289_UnresolvedCustomAttribute,
               [FModels[LAttrX.UnitId].Symbols[LAttrX.Sym].Name]));
         end;

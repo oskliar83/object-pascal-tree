@@ -1114,8 +1114,17 @@ type
     procedure CopyLoadState(AFrom: TPasSemaModel);
     { Cuts Diags back to its filled prefix. The project driver calls this at
       the end of every analysis entry point, BEFORE any consumer enumerates
-      Diags with Length/High. }
+      Diags with Length/High. Drops an E2289 that an error precedes in its
+      file (DropHiddenE2289). }
     procedure TrimDiags;
+    { dcc reports an E2289 only while the compile has no error yet (spec
+      19.3.2, dcc64 37.0, local/probe-park/sa-parser W1-W12): an E2003, an
+      argument's E2035, an earlier E2289 - any error before it, or on its
+      line - hides it. Emulated within a file: an E2289 goes when an E or F
+      diagnostic of the same file stands on an earlier line, on its line, or
+      (another E2289) earlier on its line. Errors of a unit compiled before
+      this one are not weighed. Off with GSemaAllE2289. }
+    procedure DropHiddenE2289;
     // How many Diags are filled (Length(Diags) is capacity until TrimDiags).
     property DiagCount: Integer read FDiagCount;
     { Is a diagnostic already anchored at this CST node? For a pass that can
@@ -1191,6 +1200,11 @@ type
 threadvar
   // The calling thread's sink, nil when it writes to the models directly.
   GSemaDiagSink: PSemaDiagSink;
+
+var
+  { Every E2289 where its group's walk ends, not only those dcc would show
+    (TPasSemaModel.DropHiddenE2289) - for tests of the walk and for tools. }
+  GSemaAllE2289: Boolean = False;
 
 { TSemaXType value helpers: the null value, its test, and a plain
   (uninstantiated) wrapper - so a caller of FindMemberX/WithTargetTypeX can
@@ -4029,8 +4043,54 @@ begin
   end;
 end;
 
+procedure TPasSemaModel.DropHiddenE2289;
+var
+  LIdx, LOther, LKept: Integer;
+  LAny, LHidden: Boolean;
+begin
+  if GSemaAllE2289 then
+    Exit;
+  LAny := False;
+  for LIdx := 0 to FDiagCount - 1 do
+    if Diags[LIdx].Code = 'E2289' then
+    begin
+      LAny := True;
+      Break;
+    end;
+  if not LAny then
+    Exit;
+  LKept := 0;
+  for LIdx := 0 to FDiagCount - 1 do
+  begin
+    LHidden := False;
+    if Diags[LIdx].Code = 'E2289' then
+      for LOther := 0 to FDiagCount - 1 do
+        if (LOther <> LIdx) and (Diags[LOther].Code <> '') and
+           CharInSet(Diags[LOther].Code[1], ['E', 'F']) and
+           (Diags[LOther].FileId = Diags[LIdx].FileId) and
+           ((Diags[LOther].Line < Diags[LIdx].Line) or
+            ((Diags[LOther].Line = Diags[LIdx].Line) and
+             ((Diags[LOther].Code <> 'E2289') or
+              (Diags[LOther].Col < Diags[LIdx].Col) or
+              ((Diags[LOther].Col = Diags[LIdx].Col) and
+               (LOther < LIdx))))) then
+        begin
+          LHidden := True;
+          Break;
+        end;
+    if not LHidden then
+    begin
+      if LKept <> LIdx then
+        Diags[LKept] := Diags[LIdx];
+      Inc(LKept);
+    end;
+  end;
+  FDiagCount := LKept;
+end;
+
 procedure TPasSemaModel.TrimDiags;
 begin
+  DropHiddenE2289;
   if Length(Diags) <> FDiagCount then
     SetLength(Diags, FDiagCount);
 end;
