@@ -14970,6 +14970,61 @@ begin
   end;
 end;
 
+// A write to a `const` parameter (spec 6.2.3): E2064 for the parameter
+// itself, a field of a record one at any depth (through `with` too), an
+// element of a static array one or of a `const` open array; a dynamic
+// array's element, a class's field, a dereference and a value open array's
+// element stay writable (dcc64 37.0; spec-audit g3 Params, OpenArr; local/p
+// P8).
+procedure TestConstParamWrites;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_cpw');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'CPW.dpr'),
+    'program CPW;'#10 +                                                  // 1
+    'type'#10 +                                                          // 2
+    '  TS = record G: Integer; end;'#10 +                                // 3
+    '  TDA = array of Integer;'#10 +                                     // 4
+    '  TR = record F: Integer; S: TS; A: array[0..1] of Integer; D: TDA; end;'#10 + // 5
+    '  TA = array[0..1] of Integer;'#10 +                                // 6
+    '  TC = class F: Integer; end;'#10 +                                 // 7
+    '  PInt = ^Integer;'#10 +                                            // 8
+    'procedure A1(const X: Integer); begin X := 1; end;'#10 +            // 9 E2064
+    'procedure A2(const R: TR); begin R.F := 1; end;'#10 +               // 10 E2064
+    'procedure A3(const R: TR); begin R.S.G := 1; end;'#10 +             // 11 E2064
+    'procedure A4(const R: TR); begin R.A[0] := 1; end;'#10 +            // 12 E2064
+    'procedure A5(const A: TA); begin A[0] := 1; end;'#10 +              // 13 E2064
+    'procedure A6(const R: TR); begin with R do F := 1; end;'#10 +       // 14 E2064
+    'procedure A7(const O: TC); begin O := nil; end;'#10 +               // 15 E2064
+    'procedure A8(const A: array of Integer); begin A[0] := 1; end;'#10 + // 16 E2064
+    'procedure B1(const R: TR); begin R.D[0] := 1; end;'#10 +            // 17
+    'procedure B2(const O: TC); begin O.F := 1; end;'#10 +               // 18
+    'procedure B3(const P: PInt); begin P^ := 1; end;'#10 +              // 19
+    'procedure B4(A: array of Integer); begin A[0] := 1; end;'#10 +      // 20
+    'procedure B5(X: Integer; var Y: Integer; out Z: Integer);'#10 +     // 21
+    '  begin X := 1; Y := 1; Z := 1; end;'#10 +                          // 22
+    'procedure B6(const D: TDA); begin D[0] := 1; end;'#10 +             // 23
+    'begin'#10 +                                                         // 24
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'CPW.dpr'));
+    LM := ModelByName('cpw');
+    Ok('cpw: E2064 lines [' + DiagLinesOf(LM, 'E2064') + ']',
+      DiagLinesOf(LM, 'E2064') = '9 10 11 12 13 14 15 16');
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // Property declarations and their uses (spec 13.1.1, 13.1.2, 13.1.4,
 // 13.1.5): a field for an array property and an accessor whose index
 // parameter is of another type are E2008; a default value of a string or a
@@ -23825,6 +23880,7 @@ begin
   TestAnonArrayPtrCompat;
   TestVarParamIdentity;
   TestParamDefaults;
+  TestConstParamWrites;
   TestPropertyAccessChecks;
   TestGenericInferErrors;
 

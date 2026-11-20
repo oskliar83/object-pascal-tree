@@ -22607,6 +22607,27 @@ var
     end;
   end;
 
+  // A `const` parameter (`const [Ref]` too; 6.2.3): no variable - a write
+  // to it, to a field of a record one, to an element of a static or open
+  // array one is E2064, as a write into a value is; a dynamic array's
+  // element, a class's field and a dereference stay variables.
+  function IsConstParam(AMid, ASym: Integer): Boolean;
+  var
+    LDm: TPasSemaModel;
+    LNode: Integer;
+  begin
+    Result := False;
+    if (AMid < 0) or (ASym = NIL_SYM) then
+      Exit;
+    LDm := FModels[AMid];
+    if LDm.Symbols[ASym].Kind <> skParam then
+      Exit;
+    LNode := LDm.Symbols[ASym].DeclNode;
+    while (LNode <> NIL_NODE) and (LDm.Tree.Nodes[LNode].Kind <> nkParam) do
+      LNode := LDm.Tree.Nodes[LNode].Parent;
+    Result := (LNode <> NIL_NODE) and (nfConst in LDm.Tree.Nodes[LNode].Flags);
+  end;
+
   function IsValueOnly(AAssign, B: Integer): Boolean; forward;
 
   // Does the unit hold a `with` at all? Asked for every bare field written,
@@ -22685,6 +22706,8 @@ var
                 Result := True;   // a paren-less call's result, a property's value
               skField:
                 Result := FieldOfValue(AAssign, B, LMid, LSym);
+              skParam:
+                Result := IsConstParam(LMid, LSym);
             end;
         nkIndex:
           begin
@@ -22725,6 +22748,9 @@ var
             skProperty:
               LHit := FieldOfValue(AAssign, ADst, LMid, LSym) and
                 PropertyWritesField(LMid, LSym);
+            skParam:
+              LHit := (LM.Tree.Nodes[ADst].Kind = nkIdent) and
+                IsConstParam(LMid, LSym);
           end;
       nkIndex:
         begin
@@ -22732,6 +22758,14 @@ var
           LHit := (LBase <> NIL_NODE) and
             not IsArrayPropertyDesignator(LBase) and
             IsValueOnly(AAssign, LBase) and StaticArrayAt(LBase);
+          // An element of a `const` open array (6.2.6).
+          if not LHit and (LBase <> NIL_NODE) and
+             (LM.Tree.Nodes[LBase].Kind = nkIdent) and
+             TargetSym(LBase, LMid, LSym) and IsConstParam(LMid, LSym) and
+             (FModels[LMid].Symbols[LSym].TypeNode <> NIL_NODE) and
+             (FModels[LMid].Tree.Nodes[FModels[LMid].Symbols[LSym].TypeNode]
+               .Kind = nkArrayType) then
+            LHit := True;
         end;
     end;
     if LHit and not InUntypedWith(AAssign) then
