@@ -4191,7 +4191,11 @@ function BuildCustomCases(GPP: TPasPreprocessor; GSM: TPasSourceManager):
             with LPre.Visible[LDiag.VisIndex] do
               LPre.Files[FileId].OffsetToLineCol(
                 LPre.Files[FileId].Tokens[TokenIndex].Start, LLine, LCol);
-          LText := LText + Format('%d:%d %s; ', [LLine, LCol, LDiag.Msg]);
+          if LDiag.Code <> '' then
+            LText := LText + Format('%d:%d %s %s; ',
+              [LLine, LCol, LDiag.Code, LDiag.Msg])
+          else
+            LText := LText + Format('%d:%d %s; ', [LLine, LCol, LDiag.Msg]);
         end;
         Result.Passed := LText = AExpected;
         if Result.Passed then
@@ -4601,6 +4605,58 @@ begin
       'program T8;'#13#10'var G: Integer;'#13#10'begin'#13#10 +
       '  try G := 1; except G := 2; except G := 3; end;'#13#10'end.'#13#10,
       '4:30 "end" expected, found "except"; ')];
+  // Chapter 05's missing separator (dcc64 37.0, local/probe-park/sa2-stmt
+  // S1-S42; spec audit g6 X10, X11, X07, g1 AnonCall2): an operand or a
+  // statement complete and another starting - E2066; any other token the
+  // E2029 it was; one report per token. Handlers take one `;` between them.
+  Result := Result + [
+    DiagListCase('5', 'SA E2066: two statements, no ;',
+      'program S1;'#13#10'begin'#13#10'  G := 1 G := 2;'#13#10'end.'#13#10,
+      '3:10 E2066 Missing operator or semicolon; '),
+    DiagListCase('5', 'SA E2066: a statement keyword after a statement',
+      'program S5;'#13#10'begin'#13#10'  G := 1 begin end;'#13#10'end.'#13#10,
+      '3:10 E2066 Missing operator or semicolon; '),
+    DiagListCase('5', 'SA E2066: ) stays E2029',
+      'program S21;'#13#10'begin'#13#10'  G := 1 ) ;'#13#10'end.'#13#10,
+      '3:10 ";" expected; '),
+    DiagListCase('5', 'SA E2066: two operands in parentheses, once',
+      'program S7;'#13#10'begin'#13#10'  G := (1 2);'#13#10'end.'#13#10,
+      '3:11 E2066 Missing operator or semicolon; '),
+    DiagListCase('5', 'SA E2066: two arguments, no comma',
+      'program S8;'#13#10'begin'#13#10'  Writeln(1 2);'#13#10'end.'#13#10,
+      '3:13 E2066 Missing operator or semicolon; '),
+    DiagListCase('17.2.1', 'SA AnonCall2: a literal called bare',
+      'program AnonCall2;'#13#10'begin'#13#10 +
+      '  Writeln(function: Integer begin Result := 7 end());'#13#10 +
+      'end.'#13#10,
+      '3:50 E2066 Missing operator or semicolon; '),
+    DiagListCase('5', 'SA E2066: an identifier in parentheses stays E2029',
+      'program A2;'#13#10'begin'#13#10'  Foo(1, G M4);'#13#10'end.'#13#10,
+      '3:12 ")" expected; '),
+    DiagListCase('18.3.1', 'SA X07: raise at P',
+      'program X07;'#13#10'var P: Pointer;'#13#10'begin'#13#10 +
+      '  raise at P;'#13#10'end.'#13#10,
+      '4:12 E2066 Missing operator or semicolon; '),
+    DiagListCase('18.1', 'SA X10: a doubled ; after a handler',
+      'program X10;'#13#10'begin'#13#10 +
+      '  try except on E: Exception do ; ; end;'#13#10'end.'#13#10,
+      '3:35 "end" expected, found ";"; '),
+    DiagListCase('18.1', 'SA X10: a doubled ; between handlers',
+      'program H51;'#13#10'begin'#13#10 +
+      '  try except on E: Exception do G := 1;; on E: EAbort do G := 2; ' +
+      'end;'#13#10'end.'#13#10,
+      '3:40 "end" expected, found ";"; '),
+    DiagListCase('18.1', 'SA X11: two handlers, no ;',
+      'program X11;'#13#10'begin'#13#10 +
+      '  try except on E: Exception do G := 1 on E: EAbort do G := 2; end;' +
+      #13#10'end.'#13#10,
+      '3:40 E2066 Missing operator or semicolon; '),
+    DiagListCase('18.1', 'SA X11: one ; between handlers, one after',
+      'program H56;'#13#10'begin'#13#10 +
+      '  try except on E: EAbort do ; on E: Exception do G := 1; end;' +
+      #13#10'  try except on E: EAbort do G := 1 else G := 2 end;' +
+      #13#10'end.'#13#10,
+      '')];
   // Spec audit g1 TwoUses / UsesLate (1.2.1; dcc64 37.0): a second `uses`,
   // or one after a declaration, is one E2029 at the word; the clause is
   // skipped through its `;`, and what follows parses as before.

@@ -301,7 +301,8 @@ end;
 
 function IsSyntaxDiagCode(const ACode: string): Boolean;
 begin
-  Result := (ACode = 'E2029') or (ACode = 'E2038') or (ACode = 'E2052') or
+  Result := (ACode = 'E2029') or (ACode = 'E2066') or (ACode = 'E2038') or
+    (ACode = 'E2052') or
     (ACode = 'E2057') or (ACode = 'E2026') or (ACode = 'E2657') or
     (ACode = 'WLEX');
 end;

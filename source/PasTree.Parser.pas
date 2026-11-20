@@ -30,6 +30,12 @@ type
   TPasParseDiag = record
     VisIndex: Integer;   // visible-stream position
     Msg: string;
+    // dcc's code when it is not E2029 ("X expected"), Msg then its text
+    // after the code (`Missing operator or semicolon` for E2066); empty for
+    // E2029. Node: the construct the diagnostic belongs to, NIL_NODE when
+    // none is named (TPasSemaModel.DropHiddenE2066 reads it).
+    Code: string;
+    Node: Integer;
   end;
 
   { How much of a unit ParseFile reads (ignored for a program, library or
@@ -150,6 +156,18 @@ type
     // An error at the visible token AVis, not the cursor; no stall guard -
     // the caller moves on.
     procedure ErrorAt(AVis: Integer; const AMsg: string);
+    // An error at the cursor with a code of its own (TPasParseDiag.Code),
+    // belonging to the construct ANode.
+    procedure ErrorCode(const ACode, AMsg: string; ANode: Integer);
+    // One operand or statement is complete and the cursor's token could
+    // start another: dcc's E2066 instead of an E2029 (MissingSeparator).
+    // AInParens: the operand stands inside `( )` - an argument list or a
+    // parenthesised expression.
+    function AtMissingOperator(AInParens: Boolean): Boolean;
+    // AWant (`";"`, `")"`) is missing after the construct ANode: E2066 when
+    // AtMissingOperator, else E2029 `AWant expected`.
+    procedure MissingSeparator(const AWant: string; ANode: Integer;
+      AInParens: Boolean);
     // expressions
     function ParseExpression(AEqualEnds: Boolean = False): Integer;
     function ParseSimpleExpr: Integer;
@@ -602,7 +620,50 @@ begin
     SetLength(FDiags, Length(FDiags) * 2 + 8);
   FDiags[FDiagCount].VisIndex := AVis;
   FDiags[FDiagCount].Msg := AMsg;
+  FDiags[FDiagCount].Code := '';
+  FDiags[FDiagCount].Node := NIL_NODE;
   Inc(FDiagCount);
+end;
+
+procedure TPasParser.ErrorCode(const ACode, AMsg: string; ANode: Integer);
+begin
+  Error(AMsg);
+  FDiags[FDiagCount - 1].Code := ACode;
+  FDiags[FDiagCount - 1].Node := ANode;
+end;
+
+{ Spec 05 (dcc64 37.0, local/probe-park/sa2-stmt S1-S42, A1-A20, H53): where
+  an expression or a statement is complete and no `;`, `)` or operator
+  follows, dcc says `E2066 Missing operator or semicolon` when the next token
+  is a literal, `nil`, `(` or one of begin, if, for, while, repeat, case,
+  with, raise, goto - or an identifier, outside parentheses only (`Foo(1, G
+  M4)` and `(1 G)` are ')' expected); any other token (`)`, `@`, `not`,
+  `var`, `try`, `inherited`, `do`) is E2029 "X expected but Y found". }
+function TPasParser.AtMissingOperator(AInParens: Boolean): Boolean;
+begin
+  Result := CurKind in [tkIntLiteral, tkRealLiteral, tkStringLiteral,
+    tkMultilineString, tkControlChar, tkCaretChar, tkNil, tkLParen, tkBegin,
+    tkIf, tkFor, tkWhile, tkRepeat, tkCase, tkWith, tkRaise, tkGoto];
+  if not Result and not AInParens then
+    Result := CurKind = tkIdentifier;
+end;
+
+procedure TPasParser.MissingSeparator(const AWant: string; ANode: Integer;
+  AInParens: Boolean);
+var
+  LE2066: Boolean;
+begin
+  // One report per token: `G := (1 2)` misses the `)` and then the `;` at
+  // the same `2`, and dcc says it once - an E2066 is never added where a
+  // diagnostic stands, nor anything after one.
+  LE2066 := AtMissingOperator(AInParens);
+  if (FDiagCount > 0) and (FDiags[FDiagCount - 1].VisIndex = FPos) and
+     (LE2066 or (FDiags[FDiagCount - 1].Code = 'E2066')) then
+    Exit;
+  if LE2066 then
+    ErrorCode('E2066', 'Missing operator or semicolon', ANode)
+  else
+    Error(AWant + ' expected');
 end;
 
 procedure TPasParser.Error(const AMsg: string);
@@ -611,6 +672,8 @@ begin
     SetLength(FDiags, Length(FDiags) * 2 + 8);
   FDiags[FDiagCount].VisIndex := FPos;
   FDiags[FDiagCount].Msg := AMsg;
+  FDiags[FDiagCount].Code := '';
+  FDiags[FDiagCount].Node := NIL_NODE;
   Inc(FDiagCount);
   // Anti-stall guard: repeated errors at one position mean some recovery
   // path is not consuming - force progress rather than loop forever.
@@ -880,7 +943,10 @@ begin
         Next;
         LChild := ParseExpression;
         FB.Adopt(LNode, LChild);
-        Expect(tkRParen, '")"');
+        if CurKind = tkRParen then
+          Next
+        else
+          MissingSeparator('")"', LNode, True);
         FB.SetLast(LNode, FPos - 1);
         Exit(ParseSelectors(LNode));
       end;
@@ -1187,8 +1253,13 @@ begin
     if CurKind = tkRParen then
       FB.Adopt(ACall, FB.AddNode(nkMissing, NIL_NODE, FPos));   // trailing comma
   end;
-  if not Expect(tkRParen, '")"') then
+  if CurKind = tkRParen then
+    Next
+  else
   begin
+    // E2066 when another operand follows (`Writeln(1 2)`, an anonymous
+    // method literal called with no parentheses around it, 17.2.1).
+    MissingSeparator('")"', ACall, True);
     // The list was cut short by a syntax error (`&4M4`, `%@461`, `4 +,`):
     // what was collected is not the argument count. The marker lets
     // CheckCalls skip the arity check instead of adding a false E2035 to the
@@ -1594,7 +1665,7 @@ begin
     if (LKind in LStop + LStray) or (LKind in [tkSemicolon, tkElse]) then
       Continue;   // the loop's head decides
     // Recovery: missing separator - resync to ';' or a terminator.
-    Error('";" expected');
+    MissingSeparator('";"', LStmt, False);
     // ...unless the token already STARTS the next statement: then the only
     // thing missing was the ';', and skipping to the next one would throw
     // that whole statement away (`var LB :=` on one line, `var LC := 5;` on
@@ -1862,8 +1933,23 @@ begin
         FB.Adopt(LOn, ParseStatement);
         FB.SetLast(LOn, FPos - 1);
         FB.Adopt(LPart, LOn);
-        while CurKind = tkSemicolon do
+        // 18.1: ONE `;` separates handlers (optional after the last); a
+        // second is no empty statement here - `on E: X do ; ; end` is
+        // E2029 'END' expected but ';' found - and two handlers with none
+        // between them are E2066 (`on A do X on B do Y`, dcc64 37.0, spec
+        // audit g6 X10, X11). The handlers after either stay in the list.
+        if CurKind = tkSemicolon then
+        begin
           Next;
+          if CurKind = tkSemicolon then
+          begin
+            Error('"end" expected, found ";"');
+            while CurKind = tkSemicolon do
+              Next;
+          end;
+        end
+        else if IsWord('on') then
+          ErrorCode('E2066', 'Missing operator or semicolon', LOn);
       end;
       if CurKind = tkElse then
       begin

@@ -14847,6 +14847,50 @@ begin
   end;
 end;
 
+{ Chapter 05's missing separator (dcc64 37.0, local/probe-park/sa2-stmt
+  S28-S30; spec audit g6 X07): an undeclared identifier ends dcc's reading
+  of its statement, so the parser's E2066 inside that statement goes; one
+  in another statement, or with the name declared, stays. }
+procedure TestMissingSeparatorHidden;
+const
+  SYS = 'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class constructor Create; end;'#10 +
+    '  IInterface = interface end;'#10 +
+    'implementation'#10'constructor TObject.Create; begin end;'#10 +
+    'end.'#10;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_e2066h');
+  GProj := nil;
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'), SYS);
+  try
+    TFile.WriteAllText(TPath.Combine(LDir, 'MS.dpr'),
+      'program MS;'#10 +                                                  // 1
+      'var P: Pointer; G: Integer; O: TObject;'#10 +                      // 2
+      'begin'#10 +                                                        // 3
+      '  raise at P;'#10 +                                                // 4 E2003
+      '  G := Zork G;'#10 +                                               // 5 E2003
+      '  G := 1 G := 2;'#10 +                                             // 6 E2066
+      '  raise O P;'#10 +                                                 // 7 E2066
+      'end.'#10);
+    GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'MS.dpr'));
+    LM := ModelByName('ms');
+    Ok('e2066h: E2003 alone where a name is undeclared [' +
+      DiagLinesOf(LM, 'E2003') + '/' + DiagLinesOf(LM, 'E2066') + ']',
+      (DiagLinesOf(LM, 'E2003') = '4 5') and
+      (DiagLinesOf(LM, 'E2066') = '6 7'));
+    Ok('e2066h: dcc''s text',
+      Pos('E2066 Missing operator or semicolon', DiagText(LM, 'E2066')) = 1);
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // An array or pointer type written inline is a type of its own, shared by
 // the names of one declaration (spec 8.1.1, 10.1.2): two declarations are
 // E2008 (both anonymous), an anonymous against a named one E2010 naming
@@ -23816,6 +23860,7 @@ begin
   TestAttributeE2289Lists;
   TestAttributeE2289Hidden;
   TestForCounterChecks;
+  TestMissingSeparatorHidden;
   TestAttributeExprHead;
   TestAttributeW1074LeafGuess;
   TestE2003LeafGuess;

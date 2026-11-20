@@ -1125,6 +1125,12 @@ type
       (another E2289) earlier on its line. Errors of a unit compiled before
       this one are not weighed. Off with GSemaAllE2289. }
     procedure DropHiddenE2289;
+    { An undeclared identifier ends dcc's reading of its statement (spec
+      5.1, dcc64 37.0, local/probe-park/sa2-stmt S28-S30, spec audit g6
+      X07): `raise at P` with `at` undeclared is only the E2003, `G := Zork
+      G` too. A parser E2066 (TPasParseDiag.Node, the construct it ends) goes
+      when an E2003 stands inside that construct before it. }
+    procedure DropHiddenE2066;
     // How many Diags are filled (Length(Diags) is capacity until TrimDiags).
     property DiagCount: Integer read FDiagCount;
     { Is a diagnostic already anchored at this CST node? For a pass that can
@@ -3832,8 +3838,12 @@ begin
     LVis := Tree.Source.Visible[LTok];
     Tree.Source.Files[LVis.FileId].OffsetToLineCol(
       Tree.Source.Files[LVis.FileId].Tokens[LVis.TokenIndex].Start, LLine, LCol);
-    AddDiag(MakeDiag('E2029', 'E2029 ' + ADiags[LIdx].Msg, NIL_NODE,
-      LVis.FileId, LLine, LCol));
+    if ADiags[LIdx].Code <> '' then
+      AddDiag(MakeDiag(ADiags[LIdx].Code, ADiags[LIdx].Code + ' ' +
+        ADiags[LIdx].Msg, ADiags[LIdx].Node, LVis.FileId, LLine, LCol))
+    else
+      AddDiag(MakeDiag('E2029', 'E2029 ' + ADiags[LIdx].Msg, NIL_NODE,
+        LVis.FileId, LLine, LCol));
   end;
   // The LEXER's diagnostics too, from every file of the model (includes have
   // their own token stream and their own FileId). Until now only the demo's
@@ -4088,8 +4098,58 @@ begin
   FDiagCount := LKept;
 end;
 
+procedure TPasSemaModel.DropHiddenE2066;
+var
+  LIdx, LOther, LKept, LUp: Integer;
+  LAny, LHidden: Boolean;
+begin
+  LAny := False;
+  for LIdx := 0 to FDiagCount - 1 do
+    if (Diags[LIdx].Code = 'E2066') and (Diags[LIdx].DeclNode <> NIL_NODE) then
+    begin
+      LAny := True;
+      Break;
+    end;
+  if not LAny then
+    Exit;
+  LKept := 0;
+  for LIdx := 0 to FDiagCount - 1 do
+  begin
+    LHidden := False;
+    if (Diags[LIdx].Code = 'E2066') and (Diags[LIdx].DeclNode <> NIL_NODE) then
+      for LOther := 0 to FDiagCount - 1 do
+        if (Diags[LOther].Code = 'E2003') and
+           (Diags[LOther].DeclNode <> NIL_NODE) and
+           (Diags[LOther].FileId = Diags[LIdx].FileId) and
+           ((Diags[LOther].Line < Diags[LIdx].Line) or
+            ((Diags[LOther].Line = Diags[LIdx].Line) and
+             (Diags[LOther].Col < Diags[LIdx].Col))) then
+        begin
+          LUp := Diags[LOther].DeclNode;
+          while (LUp >= 0) and (LUp < Length(Tree.Nodes)) and
+                (LUp <> Diags[LIdx].DeclNode) do
+            LUp := Tree.Nodes[LUp].Parent;
+          if LUp >= Length(Tree.Nodes) then
+            LUp := NIL_NODE;
+          if LUp <> NIL_NODE then
+          begin
+            LHidden := True;
+            Break;
+          end;
+        end;
+    if not LHidden then
+    begin
+      if LKept <> LIdx then
+        Diags[LKept] := Diags[LIdx];
+      Inc(LKept);
+    end;
+  end;
+  FDiagCount := LKept;
+end;
+
 procedure TPasSemaModel.TrimDiags;
 begin
+  DropHiddenE2066;
   DropHiddenE2289;
   if Length(Diags) <> FDiagCount then
     SetLength(Diags, FDiagCount);
