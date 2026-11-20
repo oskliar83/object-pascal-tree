@@ -4913,6 +4913,22 @@ begin
         end;
       tkSemicolon:
         Next;
+      tkUses:
+        begin
+          // A second `uses`, or one after a declaration (1.2.1): dcc reports
+          // the word once and skips the clause through its `;` - its units
+          // are not used (`uses NoSuch;` there is no F1026, a name of a unit
+          // it lists is E2003). Reported token by token it was four E2029 on
+          // one line (spec audit g1 TwoUses, UsesLate).
+          Error('declaration expected, found "' + CurText + '"');
+          Next;
+          while not (CurKind in SECTION_WORDS + [tkSemicolon, tkEndOfFile,
+            tkBegin, tkType, tkConst, tkResourcestring, tkVar, tkThreadvar,
+            tkProcedure, tkFunction, tkConstructor, tkDestructor, tkUses]) do
+            Next;
+          if CurKind = tkSemicolon then
+            Next;
+        end;
     else
       Error('declaration expected, found "' + CurText + '"');
       Next;

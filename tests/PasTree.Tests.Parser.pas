@@ -4580,6 +4580,30 @@ begin
       'program T8;'#13#10'var G: Integer;'#13#10'begin'#13#10 +
       '  try G := 1; except G := 2; except G := 3; end;'#13#10'end.'#13#10,
       '4:30 "end" expected, found "except"; ')];
+  // Spec audit g1 TwoUses / UsesLate (1.2.1; dcc64 37.0): a second `uses`,
+  // or one after a declaration, is one E2029 at the word; the clause is
+  // skipped through its `;`, and what follows parses as before.
+  Result := Result + [
+    DiagListCase('1.2.1', 'SA TwoUses: a second uses',
+      'program TwoUses;'#13#10'uses System.SysUtils;'#13#10 +
+      'uses System.Classes;'#13#10'begin'#13#10'end.'#13#10,
+      '3:1 declaration expected, found "uses"; '),
+    DiagListCase('1.2.1', 'SA UsesLate: a uses after a constant',
+      'program UsesLate;'#13#10'const A = 1;'#13#10 +
+      'uses System.SysUtils;'#13#10'begin'#13#10'end.'#13#10,
+      '3:1 declaration expected, found "uses"; '),
+    DiagListCase('1.2.1', 'SA UsesLate: a clause over three lines',
+      'program S5;'#13#10'uses System.SysUtils;'#13#10'uses'#13#10 +
+      '  System.Classes,'#13#10'  Other in ''o.pas'''#13#10'  ;'#13#10 +
+      'var L: Integer;'#13#10'begin'#13#10'end.'#13#10,
+      '3:1 declaration expected, found "uses"; '),
+    DiagListCase('1.2.1', 'SA UsesLate: in both sections of a unit',
+      'unit S4;'#13#10'interface'#13#10'const A = 1;'#13#10 +
+      'uses System.Classes;'#13#10'var B: Integer;'#13#10 +
+      'implementation'#13#10'uses System.SysUtils;'#13#10 +
+      'var C: Integer;'#13#10'uses System.Types;'#13#10'end.'#13#10,
+      '4:1 declaration expected, found "uses"; ' +
+      '9:1 declaration expected, found "uses"; ')];
 end;
 
 
