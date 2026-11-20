@@ -14970,6 +14970,87 @@ begin
   end;
 end;
 
+// Arguments that are no variable, at a lone routine's call (spec 6.2.2,
+// 6.2.6, 6.2.7): against an open array a constant is E2192, a variable of
+// another type E2010 naming it (an inline array by its shape), an
+// operator's value of the element type E2010 - E2036 for a string one; a
+// `var` open array takes no `[...]` (E2197); a `var` parameter, typed or
+// untyped, takes no literal, operator, property, function result or
+// `const` parameter (E2197); an untyped `const` one no number or nil
+// (E2036). Variables, typed constants, function results for an open array,
+// constructors and an overload set stay silent (dcc64 37.0; spec-audit g3
+// OpenArr, OpenOne2, UntypedC, Params; local/p P1, P2, P6, P7).
+procedure TestArgShapes;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_argsh');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'ArgSh.dpr'),
+    'program ArgSh;'#10 +                                                // 1
+    'type'#10 +                                                          // 2
+    '  TC = class FI: Integer; property PI: Integer read FI write FI; end;'#10 + // 3
+    'const K = 5; KS = ''ab''; KT: Integer = 3;'#10 +                    // 4
+    'procedure P(const A: array of Integer); begin end;'#10 +            // 5
+    'procedure PS(const A: array of string); begin end;'#10 +            // 6
+    'procedure PB(const A: array of Boolean); begin end;'#10 +           // 7
+    'procedure PW(var A: array of Integer); begin end;'#10 +             // 8
+    'procedure V(var X: Integer); begin end;'#10 +                       // 9
+    'procedure U(var X); begin end;'#10 +                                // 10
+    'procedure CU(const X); begin end;'#10 +                             // 11
+    'procedure Ov(var X: Integer); overload; begin end;'#10 +            // 12
+    'procedure Ov(X: Double); overload; begin end;'#10 +                 // 13
+    'function GI: Integer; begin Result := 0; end;'#10 +                 // 14
+    'var I: Integer; B: Boolean; S: string; O: TC; BY: Byte;'#10 +       // 15
+    '  SB: array[0..1] of Byte; AI: array of Integer;'#10 +              // 16
+    'procedure C1(const X: Integer); begin V(X); end;'#10 +              // 17 E2197
+    'begin'#10 +                                                         // 18
+    '  P(5);'#10 +                                                       // 19 E2192
+    '  P(K + 1);'#10 +                                                   // 20 E2192
+    '  P(nil);'#10 +                                                     // 21 E2192
+    '  PS(KS);'#10 +                                                     // 22 E2192
+    '  P(I * 2);'#10 +                                                   // 23 E2010
+    '  PS(S + ''a'');'#10 +                                              // 24 E2036
+    '  P(SB);'#10 +                                                      // 25 E2010
+    '  P(BY);'#10 +                                                      // 26 E2010
+    '  PW([1, 2]);'#10 +                                                 // 27 E2197
+    '  V(5);'#10 +                                                       // 28 E2197
+    '  V(O.PI);'#10 +                                                    // 29 E2197
+    '  V(GI);'#10 +                                                      // 30 E2197
+    '  U(I + 1);'#10 +                                                   // 31 E2197
+    '  CU(5);'#10 +                                                      // 32 E2036
+    '  CU(nil);'#10 +                                                    // 33 E2036
+    '  P(I); P(KT); P(GI); P(AI); P([1, 2]); P([I, BY]); PS(S);'#10 +    // 34
+    '  PB(B); PW(AI); PW(I); V(I); U(I); CU(I); CU(''abc''); CU(KS);'#10 + // 35
+    '  Ov(5);'#10 +                                                      // 36
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'ArgSh.dpr'));
+    LM := ModelByName('argsh');
+    Ok('argsh: E2192 lines [' + DiagLinesOf(LM, 'E2192') + ']',
+      DiagLinesOf(LM, 'E2192') = '19 20 21 22');
+    Ok('argsh: E2010 lines [' + DiagLinesOf(LM, 'E2010') + ']',
+      DiagLinesOf(LM, 'E2010') = '23 25 26');
+    Ok('argsh: E2036 lines [' + DiagLinesOf(LM, 'E2036') + ']',
+      DiagLinesOf(LM, 'E2036') = '24 32 33');
+    Ok('argsh: E2197 lines [' + DiagLinesOf(LM, 'E2197') + ']',
+      DiagLinesOf(LM, 'E2197') = '17 27 28 29 30 31');
+    Ok('argsh: E2010 texts',
+      DiagHasText(LM, 'E2010', '''array of Integer'' and ''Integer''') and
+      DiagHasText(LM, 'E2010', '''array of Integer'' and ''array[0..1] of Byte''') and
+      DiagHasText(LM, 'E2010', '''array of Integer'' and ''Byte'''));
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // A write to a `const` parameter (spec 6.2.3): E2064 for the parameter
 // itself, a field of a record one at any depth (through `with` too), an
 // element of a static array one or of a `const` open array; a dynamic
@@ -23880,6 +23961,7 @@ begin
   TestAnonArrayPtrCompat;
   TestVarParamIdentity;
   TestParamDefaults;
+  TestArgShapes;
   TestConstParamWrites;
   TestPropertyAccessChecks;
   TestGenericInferErrors;

@@ -18375,6 +18375,17 @@ end;
   added to the walk serves both modes by construction. }
 procedure TPasSemaProject.CrossType(AId: Integer; AProbe: TPasXProbe;
   ARoot: Integer);
+const
+  // LWhy: a `var` / `out` parameter's shape rule refused a value that is no
+  // variable (ByRefShapeRejects), an untyped `const` one's
+  // (UntypedConstShapeRejects), an open array's rule refused the value
+  // (OpenArrFitX -1) or took one of its element type that is no variable
+  // as no evidence (OpenArrayArgFit).
+  awNone = 0;
+  awByRefShape = 1;
+  awUntypedConst = 2;
+  awOpenMismatch = 3;
+  awOpenNotVar = 4;
 var
   LM: TPasSemaModel;
   LProbe: TPasXProbe;
@@ -18459,6 +18470,14 @@ var
   LSetArgCore: Integer;
   LSetIsConst: Boolean;
   LSetArg: ^TPasSetArg;
+  // Why ArgScore refused an argument, or scored a lone value against an
+  // open array as no evidence - recorded only while CheckVarArgs asks
+  // (LWhyOn) for a lone routine's call, the first argument it met
+  // (LWhyArg) with its type and the parameter's (an open array's element),
+  // which the check turns into dcc's code (6.2.2, 6.2.6, 6.2.7).
+  LWhyOn: Boolean;
+  LWhy, LWhyArg: Integer;
+  LWhyArgX, LWhyParX: TSemaXType;
 
   // The probe ElementX and PointeeOfDeclX are given: the walk's own in a
   // probe, where FX already holds the base; the pass's LFallback otherwise.
@@ -18989,6 +19008,18 @@ var
     LUsesHeads.AddOrSetValue(ANameLower, Result);
   end;
 
+  // Records why ArgScore judged the argument AArg as it did (LWhy's note),
+  // while CheckVarArgs asks - the first argument only.
+  procedure NoteWhy(AWhy, AArg: Integer; const AArgX, AParX: TSemaXType);
+  begin
+    if not LWhyOn or (LWhy <> awNone) or (AArg = NIL_NODE) then
+      Exit;
+    LWhy := AWhy;
+    LWhyArg := AArg;
+    LWhyArgX := AArgX;
+    LWhyParX := AParX;
+  end;
+
   // Conservative per-candidate match score, mirroring the intra-unit
   // TPasSemaTyper.ScoreArgs: per argument its fit (exact, assignable, ... -
   // ArgScore) times CConvScale plus a conversion's rank (ConvRank),
@@ -19483,7 +19514,10 @@ var
           if ByRefShapeRejects(LCoreKind, LHeadKind, AOpenArr and
              ((LCoreKind = nkSetCtor) or XValid(LArgX) and
               (XCatOf(CanonTypeX(LArgX)) = tcArray))) then
+          begin
+            NoteWhy(awByRefShape, AArg, LArgX, AParX);
             Exit(-1);
+          end;
           // A cast is a variable only when it keeps the size (`Integer(C)`
           // for a Cardinal, not `Integer(B)` for a Byte); a string cast to a
           // character pointer is a conversion (n8 Sets U, W: E2250).
@@ -19510,7 +19544,10 @@ var
                  (FModels[LHMid].Symbols[LHSym].NameLower = 'addr') or
                  (LHeadKind in [skType, skBuiltinType]) and
                  ByRefCastRejects(LCore, LHMid, LHSym, True))) then
+        begin
+          NoteWhy(awUntypedConst, AArg, LArgX, AParX);
           Exit(-1);
+        end;
       end;
       // An UNTYPED parameter ranks just above the argument's Variant line
       // (UntypedParamRank, 6.3.1): below every lossless conversion but
@@ -19648,6 +19685,13 @@ var
         ReadArrayArg(LCore, LArgX);
         Result := OpenArrFitX(LArgX, LCanonArgX, LCanonParX, AOfConst, LM.Tree,
           LCore, LArrArg^);
+        if LWhyOn and (LCoreKind <> nkSetCtor) then
+          if Result < 0 then
+            NoteWhy(awOpenMismatch, AArg, LArgX, AParX)
+          else if (Result = 0) and not LArrArg.IsVar and XValid(LArgX) and
+                  not OpenX(LCanonArgX) and
+                  XSameType(LCanonArgX, LCanonParX) then
+            NoteWhy(awOpenNotVar, AArg, LArgX, AParX);
         // A `var` open array is preferred to Pointer and to the single
         // element where a value one ties them (n6 Set B).
         if (Result > 0) and AByRef then
@@ -23393,7 +23437,20 @@ var
       generic, and the argument is a variable, field or parameter named -
       an element, a dereference, a value cast of one - typed by nothing
       unreliable. An overload set's candidates are 6.3.1's (out, no E2033);
-      a property or a constant is E2197's. }
+      a property or a constant is E2197's.
+      In the same calls, an argument that is no variable (ShapeArgs): the
+      first one the candidate's own scorer (ScoreCandidate, ArgScore) refuses
+      or takes as no evidence, in dcc's code - E2197 for a `var` / `out`
+      parameter (a literal, a constant, an operator, a property, a
+      function's result - and a `const` parameter passed on), E2036 for an
+      untyped `const` one; against a value or `const` open array a constant
+      is E2192 (`P(5)`, `P(K + 1)`, `P(nil)`, `P('abc')` for `array of
+      Integer`), a value of another type or an array of another element
+      E2010 `'array of T' and 'X'`, an operator's value of the element type
+      E2010 too - E2036 for a string or a Variant one (`PS(S + 'a')`); a
+      `var` open array takes no `[...]` (E2197) and no constant (E2192).
+      dcc64 37.0, 2026-11-20 (spec 6.2.2, 6.2.6, 6.2.7; local/p P1, P2,
+      P6). }
     procedure CheckVarArgs(N: Integer);
 
       // A designator dcc takes for a `var` argument, as far as this check
@@ -23439,6 +23496,132 @@ var
                 skBuiltinType) and
                (FModels[ACanon.UnitId].Symbols[ACanon.Sym].NameLower =
                 'shortstring'));
+      end;
+
+      // The nkParam that declares the parameter APar of model AMid.
+      function ParamNode(AMid, APar: Integer): Integer;
+      begin
+        Result := FModels[AMid].Symbols[APar].DeclNode;
+        while (Result <> NIL_NODE) and
+              (FModels[AMid].Tree.Nodes[Result].Kind <> nkParam) do
+          Result := FModels[AMid].Tree.Nodes[Result].Parent;
+      end;
+
+      // The arguments that are no variable - see the block comment.
+      procedure ShapeArgs(AHead, AMid, ASym: Integer;
+        const APars: TArray<Integer>);
+      var
+        LArg, LPI, LCore, LPDecl, LCMid, LCSym: Integer;
+        LOpen, LByRef: Boolean;
+        LOm: TPasSemaModel;
+        LCat: TSemaTypeCat;
+      begin
+        LOm := FModels[AMid];
+        // The shapes the scorer does not read: a constant for an open array,
+        // a `[...]` for a `var` one, a `const` parameter for a `var` one.
+        LArg := CallFirstArg(LM.Tree, N);
+        LPI := 0;
+        while (LArg <> NIL_NODE) and (LPI <= High(APars)) do
+        begin
+          LCore := PeelParens(LM.Tree, LArg);
+          LPDecl := ParamNode(AMid, APars[LPI]);
+          if (LCore = NIL_NODE) or (LPDecl = NIL_NODE) or
+             (LM.Tree.Nodes[LCore].Kind in [nkMissing, nkAmbiguous]) then
+            Exit;
+          LByRef := LOm.Tree.Nodes[LPDecl].Flags * [nfVar, nfOut] <> [];
+          LOpen := (LOm.Symbols[APars[LPI]].TypeNode <> NIL_NODE) and
+            (LOm.Tree.Nodes[LOm.Symbols[APars[LPI]].TypeNode].Kind =
+             nkArrayType);
+          if LOpen and ((LM.Tree.Nodes[LCore].Kind = nkNilLit) or
+             (LM.Tree.Nodes[LCore].Kind <> nkSetCtor) and
+             IsConstExprX(AId, LCore)) then
+          begin
+            EmitAt(LM, LArg, 'E2192', SE2192_ConstOpenArrayArg);
+            Exit;
+          end;
+          if LOpen and LByRef and (LM.Tree.Nodes[LCore].Kind = nkSetCtor) then
+          begin
+            EmitAt(LM, LArg, 'E2197', SE2197_ConstObjectToVar);
+            Exit;
+          end;
+          if LByRef and (LM.Tree.Nodes[LCore].Kind in [nkIdent, nkMember]) and
+             TargetSym(LCore, LCMid, LCSym) and
+             (FModels[LCMid].Symbols[LCSym].Kind = skParam) and
+             (ParamNode(LCMid, LCSym) <> NIL_NODE) and
+             (nfConst in FModels[LCMid].Tree.Nodes[
+               ParamNode(LCMid, LCSym)].Flags) then
+          begin
+            EmitAt(LM, LArg, 'E2197', SE2197_ConstObjectToVar);
+            Exit;
+          end;
+          Inc(LPI);
+          LArg := LM.Tree.Nodes[LArg].NextSibling;
+        end;
+        // The rest is the scorer's: why it refused the first argument.
+        LWhy := awNone;
+        LWhyOn := True;
+        try
+          ScoreCandidate(N, AMid, ASym, CtxAt(AHead));
+        finally
+          LWhyOn := False;
+        end;
+        if LWhy = awNone then
+          Exit;
+        LCore := PeelParens(LM.Tree, LWhyArg);
+        // The parameter it stands for, by position.
+        LArg := CallFirstArg(LM.Tree, N);
+        LPI := 0;
+        while (LArg <> NIL_NODE) and (LArg <> LWhyArg) do
+        begin
+          Inc(LPI);
+          LArg := LM.Tree.Nodes[LArg].NextSibling;
+        end;
+        if (LArg = NIL_NODE) or (LPI > High(APars)) then
+          Exit;
+        LPDecl := ParamNode(AMid, APars[LPI]);
+        if (LPDecl = NIL_NODE) or
+           Unreliable(N, LWhyArg, GetX(LWhyArg)) then
+          Exit;
+        LByRef := LOm.Tree.Nodes[LPDecl].Flags * [nfVar, nfOut] <> [];
+        LOpen := (LOm.Symbols[APars[LPI]].TypeNode <> NIL_NODE) and
+          (LOm.Tree.Nodes[LOm.Symbols[APars[LPI]].TypeNode].Kind =
+           nkArrayType);
+        case LWhy of
+          awByRefShape:
+            if not LOpen then
+              EmitAt(LM, LWhyArg, 'E2197', SE2197_ConstObjectToVar);
+          awUntypedConst:
+            EmitAt(LM, LWhyArg, 'E2036', SE2036_VariableRequired);
+          // A variable's type alone: an operator's or a call's value may be
+          // typed otherwise than dcc types it (`Ord(E)`, `B + 1`).
+          awOpenMismatch:
+          begin
+            // An array whose type is written inline types as nothing: its
+            // declaration's shape, as dcc names it.
+            if not XValid(LWhyArgX) then
+              LWhyArgX := InlineTypeX(LWhyArg);
+            if not LByRef and XValid(LWhyArgX) and XValid(LWhyParX) and
+               (LM.Tree.Nodes[LCore].Kind in [nkIdent, nkMember, nkIndex,
+                nkDeref]) then
+              EmitAt(LM, LWhyArg, 'E2010', Format(SE2010_IncompatibleTypes,
+                ['array of ' + XTypeText(LWhyParX), XTypeText(LWhyArgX)]));
+          end;
+          awOpenNotVar:
+            if not LByRef and
+               (LM.Tree.Nodes[LCore].Kind in [nkBinaryOp, nkUnaryOp]) then
+            begin
+              LCat := XCatOf(CanonTypeX(LWhyArgX));
+              if LCat in [tcString, tcVariant] then
+                EmitAt(LM, LWhyArg, 'E2036', SE2036_VariableRequired)
+              else if LCat in [tcInteger, tcFloat, tcChar, tcBoolean,
+                      tcEnum] then
+                // The element type named twice: the value is of it (an
+                // Extended product is a Double on Win64).
+                EmitAt(LM, LWhyArg, 'E2010', Format(SE2010_IncompatibleTypes,
+                  ['array of ' + XTypeText(LWhyParX),
+                   XTypeText(LWhyParX)]));
+            end;
+        end;
       end;
 
     var
@@ -23492,6 +23675,8 @@ var
         Inc(LPI);
         LArg := LM.Tree.Nodes[LArg].NextSibling;
       end;
+      if not InUntypedWith(N) then
+        ShapeArgs(LHead, LMid, LSym, LPars);
     end;
 
     { Has the property (AMid, ASym) a `read` (AWrite False) or a `write`
@@ -24851,6 +25036,7 @@ var
 begin
   LM := FModels[AId];
   LProbe := AProbe;
+  LWhyOn := False;
   LWithSeen := 0;
   LSpineSkip := NIL_NODE;
   LFallback := nil;
