@@ -2745,6 +2745,9 @@ type
     function Instance(AInst: Integer): TSemaInstance;
     // 'TList<Integer>'-style rendering of a cross-model type (for dumps/tests).
     function XTypeText(const AX: TSemaXType): string;
+    // The text dcc gives the type written as node ANode of model AMid - an
+    // inline array or pointer by its shape (XTypeText's anonymous types).
+    function TypeShapeText(AMid, ANode: Integer): string;
     // Analyze one unit + its direct uses; returns the main unit's model id.
     function AnalyzeFile(const AMainFile: string): Integer;
     { Analyze a whole PROJECT from its main source: loads the TRANSITIVE
@@ -11650,9 +11653,12 @@ begin
   // An ANONYMOUS struct's symbol has the struct node ITSELF as its declaration
   // - there is no name node and no nkTypeDecl above it (see DeclareAnonStruct).
   // So does an inline procedural type's (audit B3-38) and an anonymous method
-  // literal's (E3-39), and an `@X` under the TYPEDADDRESS switch (E3-20).
+  // literal's (E3-39), and an `@X` under the TYPEDADDRESS switch (E3-20),
+  // and an array or pointer type written inline in a variable's or field's
+  // type slot (TPasSemaResolver.DeclareAnonValueType).
   if LM.Tree.Nodes[LName].Kind in [nkRecordType, nkClassType, nkInterfaceType,
-     nkObjectType, nkHelperType, nkProcType, nkAnonMethod, nkUnaryOp] then
+     nkObjectType, nkHelperType, nkProcType, nkAnonMethod, nkUnaryOp,
+     nkArrayType, nkPointerType] then
     Exit(LName);
   LParent := LM.Tree.Nodes[LName].Parent;
   if (LParent = NIL_NODE) or (LM.Tree.Nodes[LParent].Kind <> nkTypeDecl) then
@@ -22857,34 +22863,132 @@ var
     // One value going to one target (2.6.1): ASrc typed ASrcX to the target
     // ADst typed ADstX, at the statement or declaration AStmt; the E2010 at
     // AAt. ADst / ASrc are the nodes Unreliable reads.
-    function CheckConv(AStmt, ADst, ASrc, AAt: Integer; const ADstX,
-      ASrcX: TSemaXType): Boolean;
+    // The type of an array or pointer written inline at the declaration of
+    // the variable or field ANode names - or ANode itself, such a type slot
+    // - the unnamed symbol the resolver declared for it (TPasSemaResolver
+    // .DeclareAnonValueType); XNil otherwise. The variable itself types as
+    // nothing.
+    function InlineTypeX(ANode: Integer): TSemaXType;
     var
-      LSrcName: string;
-      LDc, LSc: TSemaXType;
+      LCore, LMid, LSym, LAnon: Integer;
+    begin
+      Result := XNil;
+      LCore := PeelParens(LM.Tree, ANode);
+      if LCore = NIL_NODE then
+        Exit;
+      case LM.Tree.Nodes[LCore].Kind of
+        nkArrayType, nkPointerType:
+          if LM.AnonTypeSyms.TryGetValue(LCore, LAnon) then
+            Result := XPlain(AId, LAnon);
+        nkIdent, nkMember:
+          if TargetSym(LCore, LMid, LSym) and
+             (FModels[LMid].Symbols[LSym].Kind in [skVar, skField]) and
+             (FModels[LMid].Symbols[LSym].TypeNode <> NIL_NODE) and
+             FModels[LMid].AnonTypeSyms.TryGetValue(
+               FModels[LMid].Symbols[LSym].TypeNode, LAnon) then
+            Result := XPlain(LMid, LAnon);
+      end;
+    end;
+
+    // Is AX an inline array or pointer type (InlineTypeX)?
+    function AnonValueX(const AX: TSemaXType): Boolean;
+    var
+      LDecl: Integer;
+    begin
+      Result := False;
+      if not XValid(AX) or (AX.Inst <> NIL_INST) or
+         (FModels[AX.UnitId].Symbols[AX.Sym].Kind <> skType) or
+         (FModels[AX.UnitId].Symbols[AX.Sym].Name <> '') then
+        Exit;
+      LDecl := FModels[AX.UnitId].Symbols[AX.Sym].DeclNode;
+      Result := (LDecl <> NIL_NODE) and
+        (FModels[AX.UnitId].Tree.Nodes[LDecl].Kind in
+         [nkArrayType, nkPointerType]);
+    end;
+
+    // A pair one side of which InlineTypeX typed: judged when both are
+    // arrays or both pointers (8.1.1, 10.1.2) and neither's element or
+    // pointee is an open generic parameter - every other pair the
+    // variable meets keeps the verdict it had (none).
+    function InlinePairJudged(const ADstX, ASrcX: TSemaXType): Boolean;
+    var
+      LD, LS: TSemaXType;
+      LCat: TSemaTypeCat;
+
+      function OpenInside(const AX: TSemaXType): Boolean;
+      begin
+        if LCat = tcArray then
+          Result := OpenX(ArrayElemX(AX))
+        else
+          Result := OpenX(PointeeX(AX));
+      end;
+
     begin
       Result := False;
       if not XValid(ADstX) or not XValid(ASrcX) then
         Exit;
-      if AssignConvX(AStmt, ASrc, ADstX, ASrcX) <> TSemaConv.scNone then
+      LD := CanonTypeX(ADstX);
+      LS := CanonTypeX(ASrcX);
+      if not XValid(LD) or not XValid(LS) then
         Exit;
-      if InUntypedWith(AStmt) or Unreliable(AStmt, ADst, ADstX) or
-         Unreliable(AStmt, ASrc, ASrcX) then
+      LCat := XCatOf(LD);
+      if not (LCat in [tcArray, tcPointer]) or (XCatOf(LS) <> LCat) then
+        Exit;
+      Result := not OpenInside(LD) and not OpenInside(LS);
+    end;
+
+    function CheckConv(AStmt, ADst, ASrc, AAt: Integer; const ADstX,
+      ASrcX: TSemaXType): Boolean;
+    var
+      LSrcName: string;
+      LDc, LSc, LDstX, LSrcX: TSemaXType;
+    begin
+      Result := False;
+      // A side typed as nothing may be a variable or field whose array or
+      // pointer type is written inline (InlineTypeX): judged against an
+      // array or a pointer alone, the pairs 8.1.1 / 10.1.2 settle.
+      LDstX := ADstX;
+      LSrcX := ASrcX;
+      if not XValid(LDstX) or not XValid(LSrcX) then
+      begin
+        if not XValid(LDstX) then
+          LDstX := InlineTypeX(ADst);
+        if not XValid(LSrcX) then
+          LSrcX := InlineTypeX(ASrc);
+        // `@X` under {$T+} (an unnamed type of no category) for an inline
+        // pointer: AssignConvX's own rule.
+        if not InlinePairJudged(LDstX, LSrcX) and
+           not (AnonValueX(LDstX) and (XCatOf(LDstX) = tcPointer) and
+                XValid(LSrcX) and
+                LM.AnonTypeSyms.ContainsKey(PeelParens(LM.Tree, ASrc))) then
+          Exit;
+      end;
+      if AssignConvX(AStmt, ASrc, LDstX, LSrcX) <> TSemaConv.scNone then
+        Exit;
+      if InUntypedWith(AStmt) or Unreliable(AStmt, ADst, LDstX) or
+         Unreliable(AStmt, ASrc, LSrcX) then
         Exit;
       // Two instances of one generic: whether they are one type is the
       // instantiation's question, not a conversion's (FMX.ListView
       // .Appearances' `for LPair in FFactories`: TDictionary's TPair<K, V>
       // read in its frame against the variable's written TPair<...> - the
       // same text, two instances; diag gate 1).
-      LDc := CanonTypeX(ADstX);
-      LSc := CanonTypeX(ASrcX);
+      LDc := CanonTypeX(LDstX);
+      LSc := CanonTypeX(LSrcX);
       if XValid(LDc) and XValid(LSc) and (LDc.UnitId = LSc.UnitId) and
          (LDc.Sym = LSc.Sym) then
         Exit;
       Result := True;
+      // Two anonymous types: E2008, which names neither (8.1.1, 10.1.2).
+      if AnonValueX(LDstX) and (AnonValueX(LSrcX) or
+         LM.AnonTypeSyms.ContainsKey(PeelParens(LM.Tree, ASrc))) then
+      begin
+        EmitAt(LM, AAt, 'E2008', SE2008_IncompatibleTypes);
+        Exit;
+      end;
       // dcc names the nil literal's type `Pointer`, and `@X`'s under {$T+}
       // (4.8: `'PB' and 'Pointer'` for `PB := @I`).
-      if (XCatOf(ASrcX) = tcNil) or
+      if (XCatOf(LSrcX) = tcNil) or
          LM.AnonTypeSyms.ContainsKey(PeelParens(LM.Tree, ASrc)) then
         LSrcName := 'Pointer'
       // A one-character literal is a Char's (`I := 'a'` is `'Integer' and
@@ -22897,9 +23001,107 @@ var
         and (LM.Tree.Nodes[PeelParens(LM.Tree, ASrc)].Kind = nkRealLit) then
         LSrcName := 'Double'
       else
-        LSrcName := XTypeText(ASrcX);
+        LSrcName := XTypeText(LSrcX);
       EmitAt(LM, AAt, 'E2010', Format(SE2010_IncompatibleTypes,
-        [XTypeText(ADstX), LSrcName]), ConvNoteX(ADstX, ASrcX));
+        [XTypeText(LDstX), LSrcName]), ConvNoteX(LDstX, LSrcX));
+    end;
+
+    // A static array whose element is no character (one of a character
+    // compares as a string, 8.1.1).
+    function NonCharStaticArray(const ACanon: TSemaXType): Boolean;
+    var
+      LElem: TSemaXType;
+    begin
+      Result := False;
+      if not IsStaticArrayX(ACanon) then
+        Exit;
+      LElem := ArrayElemX(ACanon);
+      if XValid(LElem) then
+        LElem := CanonTypeX(LElem);
+      Result := XValid(LElem) and not (XCatOf(LElem) in [tcChar, tcUnknown]);
+    end;
+
+    // `=` / `<>` of two arrays or two pointers (8.1.1, 10.1.2, 10.1.4): two
+    // static arrays are E2015 whatever their types, unless of characters
+    // (compared as strings); two dynamic arrays or two typed pointers
+    // compare when the assignment takes either for the other (two pointers
+    // of one base under {$T+} at the operator), else it is the
+    // assignment's error with the operands in order - E2008 when both are
+    // anonymous. Withheld as CheckConv withholds; `@X` is its own rule's.
+    procedure CheckCompare(N: Integer);
+    var
+      LL, LR, LTok: Integer;
+      LLX, LRX, LLc, LRc: TSemaXType;
+    begin
+      LTok := LM.Tree.Nodes[N].Aux;
+      if (LTok < 0) or (LTok > High(LM.Tree.Source.Visible)) or
+         not (LM.Tree.Source.VisibleKind(LTok) in [tkEqual, tkNotEqual]) then
+        Exit;
+      LL := LM.Tree.Nodes[N].FirstChild;
+      if LL = NIL_NODE then
+        Exit;
+      LR := LM.Tree.Nodes[LL].NextSibling;
+      if LR = NIL_NODE then
+        Exit;
+      LLX := GetX(LL);
+      if not XValid(LLX) then
+        LLX := InlineTypeX(LL);
+      LRX := GetX(LR);
+      if not XValid(LRX) then
+        LRX := InlineTypeX(LR);
+      if not InlinePairJudged(LLX, LRX) then
+        Exit;
+      if LM.AnonTypeSyms.ContainsKey(PeelParens(LM.Tree, LL)) or
+         LM.AnonTypeSyms.ContainsKey(PeelParens(LM.Tree, LR)) then
+        Exit;
+      if InUntypedWith(N) or Unreliable(N, LL, LLX) or
+         Unreliable(N, LR, LRX) then
+        Exit;
+      LLc := CanonTypeX(LLX);
+      LRc := CanonTypeX(LRX);
+      if XCatOf(LLc) = tcArray then
+      begin
+        if NonCharStaticArray(LLc) and NonCharStaticArray(LRc) then
+        begin
+          EmitAtToken(LM, N, LTok, 'E2015', SE2015_OperatorNotApplicable);
+          Exit;
+        end;
+        if not IsDynArrayTypeX(LLc) or not IsDynArrayTypeX(LRc) then
+          Exit;
+      end;
+      if (XConvX(LLX, LRX) <> TSemaConv.scNone) or
+         (XConvX(LRX, LLX) <> TSemaConv.scNone) then
+        Exit;
+      if (XCatOf(LLc) = tcPointer) and
+         (Length(LM.Tree.Source.SwitchEvents) > 0) and
+         LM.Tree.Source.SwitchAt(LTok, optT) and
+         (TypedPointersMeetX(LLc, LRc, True) <> -1) then
+        Exit;
+      if AnonValueX(LLX) and AnonValueX(LRX) then
+        EmitAtToken(LM, N, LTok, 'E2008', SE2008_IncompatibleTypes)
+      else
+        EmitAtToken(LM, N, LTok, 'E2010', Format(SE2010_IncompatibleTypes,
+          [XTypeText(LLX), XTypeText(LRX)]));
+    end;
+
+    // A `[...]` assigned to a static array (8.1.1): E2010 naming the
+    // array and `Set`, whatever the brackets hold (`T1 := []` too); a
+    // dynamic array takes it (8.2.2).
+    procedure CheckStaticCtor(AAssign, ADst, ASrc: Integer);
+    var
+      LDstX: TSemaXType;
+    begin
+      if (PeelParens(LM.Tree, ASrc) = NIL_NODE) or
+         (LM.Tree.Nodes[PeelParens(LM.Tree, ASrc)].Kind <> nkSetCtor) then
+        Exit;
+      LDstX := GetX(ADst);
+      if not XValid(LDstX) then
+        LDstX := InlineTypeX(ADst);
+      if not XValid(LDstX) or not IsStaticArrayX(CanonTypeX(LDstX)) or
+         InUntypedWith(AAssign) or Unreliable(AAssign, ADst, LDstX) then
+        Exit;
+      EmitAt(LM, ASrc, 'E2010', Format(SE2010_IncompatibleTypes,
+        [XTypeText(LDstX), 'Set']));
     end;
 
     // The declared type of the variable a name node (or an nkInlineVar's
@@ -23450,8 +23652,11 @@ var
             if LSrc = NIL_NODE then
               Continue;
             CheckConv(N, LDst, LSrc, LSrc, GetX(LDst), GetX(LSrc));
+            CheckStaticCtor(N, LDst, LSrc);
             CheckWriteTarget(N, LDst);
           end;
+        nkBinaryOp:
+          CheckCompare(N);
         nkWithStmt:
           begin
             CheckWithTargets(N);
@@ -23853,6 +24058,58 @@ begin
   Result := InstanceRead(AInst);
 end;
 
+{ The text dcc names a type written as the node ANode of model AMid by
+  (8.1.1, 10.1.2): an inline pointer is `Pointer`; an array `array of E` or
+  `array[Lo..Hi] of E`, the bounds the index type's ordinal values (folded
+  by the oracle; the index as written when it cannot fold), each further
+  dimension a nested array; a named type its name (XTypeText). }
+function TPasSemaProject.TypeShapeText(AMid, ANode: Integer): string;
+var
+  LTree: TPasTree;
+  LElem, LIdx, LI: Integer;
+  LIdxs: TArray<Integer>;
+  LLo, LHi: Double;
+  LX: TSemaXType;
+begin
+  LTree := FModels[AMid].Tree;
+  case LTree.Nodes[ANode].Kind of
+    nkPointerType:
+      Exit('Pointer');
+    nkArrayType:
+      begin
+        LElem := PasArrayElemNode(LTree, ANode);
+        if LElem = NIL_NODE then
+          Exit(LTree.NodeSpanText(ANode));
+        Result := TypeShapeText(AMid, LElem);
+        LIdxs := nil;
+        LIdx := LTree.Nodes[ANode].FirstChild;
+        while (LIdx <> NIL_NODE) and (LIdx <> LElem) do
+        begin
+          LIdxs := LIdxs + [LIdx];
+          LIdx := LTree.Nodes[LIdx].NextSibling;
+        end;
+        if LIdxs = nil then
+          Exit('array of ' + Result);
+        // Built from the element outwards: the last dimension innermost.
+        for LI := High(LIdxs) downto 0 do
+          if OracleOrdinalRange(AMid, LIdxs[LI], 0, LLo, LHi) then
+            Result := 'array[' + IntToStr(Trunc(LLo)) + '..' +
+              IntToStr(Trunc(LHi)) + '] of ' + Result
+          else
+            Result := 'array[' + LTree.NodeSpanText(LIdxs[LI]) + '] of ' +
+              Result;
+      end;
+  else
+    begin
+      LX := ResolveTypeExprNested(AMid, ANode);
+      if XValid(LX) then
+        Result := XTypeText(LX)
+      else
+        Result := LTree.NodeSpanText(ANode);
+    end;
+  end;
+end;
+
 function TPasSemaProject.XTypeText(const AX: TSemaXType): string;
 var
   LIdx: Integer;
@@ -23863,6 +24120,14 @@ begin
   if not XValid(AX) then
     Exit('?');
   Result := FModels[AX.UnitId].Symbols[AX.Sym].Name;
+  // An array or pointer type written inline (DeclareAnonValueType): named
+  // by its shape, as dcc names it (8.1.1, 10.1.2).
+  if (Result = '') and (AX.Inst = NIL_INST) and
+     (FModels[AX.UnitId].Symbols[AX.Sym].Kind = skType) and
+     (FModels[AX.UnitId].Symbols[AX.Sym].DeclNode <> NIL_NODE) and
+     (FModels[AX.UnitId].Tree.Nodes[FModels[AX.UnitId].Symbols[AX.Sym]
+       .DeclNode].Kind in [nkArrayType, nkPointerType]) then
+    Exit(TypeShapeText(AX.UnitId, FModels[AX.UnitId].Symbols[AX.Sym].DeclNode));
   if AX.Inst <> NIL_INST then
   begin
     LInst := InstanceRead(AX.Inst);

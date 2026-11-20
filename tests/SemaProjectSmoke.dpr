@@ -14188,6 +14188,143 @@ begin
   end;
 end;
 
+// The lines of AModel's ACode diagnostics, ascending, joined by spaces.
+function DiagLinesOf(AModel: TPasSemaModel; const ACode: string): string;
+var
+  LLines: TList<Integer>;
+begin
+  LLines := TList<Integer>.Create;
+  try
+    for var LIdx := 0 to High(AModel.Diags) do
+      if AModel.Diags[LIdx].Code = ACode then
+        LLines.Add(AModel.Diags[LIdx].Line);
+    LLines.Sort;
+    Result := '';
+    for var LLine in LLines do
+    begin
+      if Result <> '' then
+        Result := Result + ' ';
+      Result := Result + IntToStr(LLine);
+    end;
+  finally
+    LLines.Free;
+  end;
+end;
+
+// An array or pointer type written inline is a type of its own, shared by
+// the names of one declaration (spec 8.1.1, 10.1.2): two declarations are
+// E2008 (both anonymous), an anonymous against a named one E2010 naming
+// the anonymous one by its shape (`array[0..2] of Integer`, nested arrays
+// for two dimensions, `Pointer`); `=` / `<>` take what the assignment
+// takes either way (E2015 for two static arrays not of characters); a
+// `[...]` goes to no static array (E2010 'TSA' and 'Set'); under {$T+} at
+// the statement two pointers of one base meet. The silent lines are legal
+// (dcc64 37.0, local/probe-park/sa-compat P1-P5, spec-audit ArrCompat,
+// PCompat, PCompat3).
+procedure TestAnonArrayPtrCompat;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_anoncompat');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'AnonCmp.dpr'),
+    'program AnonCmp;'#10 +                                  // 1
+    'type'#10 +                                              // 2
+    '  TDA = array of Integer;'#10 +                         // 3
+    '  TSA = array[0..1] of Integer;'#10 +                   // 4
+    '  PInt = ^Integer;'#10 +                                // 5
+    '  TCA = array[0..3] of Char;'#10 +                      // 6
+    'const N = 3;'#10 +                                      // 7
+    'var'#10 +                                               // 8
+    '  A1: array of Integer;'#10 +                           // 9
+    '  A2: array of Integer;'#10 +                           // 10
+    '  A3, A4: array of Integer;'#10 +                       // 11
+    '  D1: TDA;'#10 +                                        // 12
+    '  S1: array[0..N-1] of Integer;'#10 +                   // 13
+    '  S2: array[0..1, 2..3] of Integer;'#10 +               // 14
+    '  S3, S4: array[0..1] of Integer;'#10 +                 // 15
+    '  T1: TSA;'#10 +                                        // 16
+    '  P1: ^Integer;'#10 +                                   // 17
+    '  P2: ^Integer;'#10 +                                   // 18
+    '  P3, P4: ^Integer;'#10 +                               // 19
+    '  C: PInt;'#10 +                                        // 20
+    '  F: ^Byte;'#10 +                                       // 21
+    '  G: Pointer;'#10 +                                     // 22
+    '  C1, C2: TCA;'#10 +                                    // 23
+    '  C3: array[0..3] of Char;'#10 +                        // 24
+    '  I: Integer;'#10 +                                     // 25
+    '  R: record X1: array of Integer; X2: array of Integer; X3, X4: ^Integer; end;'#10 + // 26
+    'procedure TP;'#10 +                                     // 27
+    'begin'#10 +                                             // 28
+    '  {$T+}'#10 +                                           // 29
+    '  P1 := C; C := P1; P3 := P1;'#10 +                     // 30
+    '  if P1 = C then ;'#10 +                                // 31
+    '  F := @I;'#10 +                                        // 32
+    '  P1 := @I;'#10 +                                       // 33
+    '  C := F;'#10 +                                         // 34
+    '  {$T-}'#10 +                                           // 35
+    'end;'#10 +                                              // 36
+    'begin'#10 +                                             // 37
+    '  A1 := A2;'#10 +                                       // 38 E2008
+    '  A3 := A4;'#10 +                                       // 39
+    '  A1 := D1;'#10 +                                       // 40 E2010
+    '  T1 := S1;'#10 +                                       // 41 E2010
+    '  T1 := S2;'#10 +                                       // 42 E2010
+    '  S3 := S4;'#10 +                                       // 43
+    '  P1 := P2;'#10 +                                       // 44 E2008
+    '  P3 := P4;'#10 +                                       // 45
+    '  P1 := C;'#10 +                                        // 46 E2010
+    '  C := F;'#10 +                                         // 47 E2010
+    '  F := G; G := C; P1 := nil; P1 := @I;'#10 +            // 48
+    '  A1 := nil; A1 := [1, 2];'#10 +                        // 49
+    '  if A1 = A2 then ;'#10 +                               // 50 E2008
+    '  if A3 = A4 then ;'#10 +                               // 51
+    '  if S3 = S4 then ;'#10 +                               // 52 E2015
+    '  if T1 = T1 then ;'#10 +                               // 53 E2015
+    '  if C1 = C2 then ; if C1 = C3 then ;'#10 +             // 54
+    '  if P1 = C then ;'#10 +                                // 55 E2010
+    '  if C = G then ; if C = nil then ; if P3 <> P4 then ;'#10 + // 56
+    '  T1 := [1, 2];'#10 +                                   // 57 E2010
+    '  S3 := [];'#10 +                                       // 58 E2010
+    '  C3 := ''abc'';'#10 +                                  // 59
+    '  R.X1 := R.X2;'#10 +                                   // 60 E2008
+    '  R.X3 := R.X4;'#10 +                                   // 61
+    '  if A1 = D1 then ;'#10 +                               // 62 E2010
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'AnonCmp.dpr'));
+    LM := ModelByName('anoncmp');
+    Ok('anoncompat: E2008 lines [' + DiagLinesOf(LM, 'E2008') + ']',
+      DiagLinesOf(LM, 'E2008') = '32 38 44 50 60');
+    Ok('anoncompat: E2010 lines [' + DiagLinesOf(LM, 'E2010') + ']',
+      DiagLinesOf(LM, 'E2010') = '34 40 41 42 46 47 55 57 58 62');
+    Ok('anoncompat: E2015 lines [' + DiagLinesOf(LM, 'E2015') + ']',
+      DiagLinesOf(LM, 'E2015') = '52 53');
+    Ok('anoncompat: an anonymous dynamic array is `array of Integer`',
+      DiagHasText(LM, 'E2010', '''array of Integer'' and ''TDA'''));
+    Ok('anoncompat: bounds folded',
+      DiagHasText(LM, 'E2010', '''TSA'' and ''array[0..2] of Integer'''));
+    Ok('anoncompat: two dimensions nest',
+      DiagHasText(LM, 'E2010',
+        '''TSA'' and ''array[0..1] of array[2..3] of Integer'''));
+    Ok('anoncompat: an anonymous pointer is Pointer',
+      DiagHasText(LM, 'E2010', '''Pointer'' and ''PInt''') and
+      DiagHasText(LM, 'E2010', '''PInt'' and ''Pointer'''));
+    Ok('anoncompat: a [...] for a static array is Set',
+      DiagHasText(LM, 'E2010', '''TSA'' and ''Set''') and
+      DiagHasText(LM, 'E2010', '''array[0..1] of Integer'' and ''Set'''));
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // Pointers in implicit conversion and overload ranking (6.3.1, 10.1.2, 4.8;
 // local/type-conv-2026-11/n7): a typed pointer type is nominal under {$T-}
 // (YA: PI for PI2 out), typed pointers of one base meet under {$T+} at the
@@ -22850,6 +22987,7 @@ begin
   TestLightLintReach;
   TestLightFind;
   TestHelperCarrier;
+  TestAnonArrayPtrCompat;
 
   if GCounter.Finish('SemaProjectSmoke') then
     ExitCode := 1;

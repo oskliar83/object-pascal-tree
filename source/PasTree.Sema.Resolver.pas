@@ -205,6 +205,7 @@ type
     function ResolveSkipping(AScope: Integer; const ANameLower: string;
       ASkipSym: Integer): Integer;
     function DeclareAnonStruct(AScope, ANode: Integer): Integer;
+    procedure DeclareAnonValueType(AScope, AType: Integer);
     procedure CollectStruct(ANode, AOuter, ATypeSym: Integer);
     function VisibilityOf(ANode: Integer): TSemaVisibility;
     procedure CollectEnum(ANode, AOuter, ATypeSym: Integer);
@@ -1781,6 +1782,8 @@ begin
         FModel.Symbols[LSym].Flags + [sfFixedString];
   end;
   NotePendingAggregate(LType);
+  if AKind in [skVar, skField] then
+    DeclareAnonValueType(AScope, LType);
   // Collect the type expression and anything after it (init / default /
   // absolute) as nested content in this scope, so every node gets a scope.
   LChild := LType;
@@ -2098,6 +2101,37 @@ end;
 function TPasSemaResolver.DeclareAnonStruct(AScope, ANode: Integer): Integer;
 begin
   Result := FModel.AddSymbol(AScope, skType, '', ANode);
+end;
+
+{ An array or pointer type written inline in a variable's or a field's type
+  slot (`A: array of Integer`, `P: ^Integer`) is a type of its own, shared
+  by the names of that one declaration and by no other (spec 8.1.1, 10.1.2:
+  `A1 := A2` of two such declarations is E2008). It gets an unnamed type
+  symbol as an inline procedural type does (AnonTypeSyms), its category set
+  here - no type declaration names it for CategorizeTypes. Read only by the
+  project's compatibility checks (CrossType's CheckAssigns): the variable
+  itself stays typed as before. An open array is a parameter's and never
+  reaches here. }
+procedure TPasSemaResolver.DeclareAnonValueType(AScope, AType: Integer);
+var
+  LSym: Integer;
+begin
+  if AType = NIL_NODE then
+    Exit;
+  case KindOf(AType) of
+    nkArrayType:
+      if FTree.Nodes[AType].Aux = 1 then
+        Exit;
+    nkPointerType: ;
+  else
+    Exit;
+  end;
+  LSym := DeclareAnonStruct(AScope, AType);
+  if KindOf(AType) = nkArrayType then
+    FModel.Symbols[LSym].TypeCat := tcArray
+  else
+    FModel.Symbols[LSym].TypeCat := tcPointer;
+  FModel.AnonTypeSyms.AddOrSetValue(AType, LSym);
 end;
 
 procedure TPasSemaResolver.CollectStruct(ANode, AOuter, ATypeSym: Integer);
@@ -2983,6 +3017,8 @@ begin
         for var LIdx := 0 to LSymCount - 1 do
           FModel.Symbols[LSyms[LIdx]].TypeNode := LType;
         NotePendingAggregate(LType);
+        if LKind = skVar then
+          DeclareAnonValueType(AScope, LType);
         // Everything after the last NAME - the type expression and/or the
         // initializer - is ordinary content of this scope.
         while LName <> NIL_NODE do

@@ -7545,6 +7545,9 @@ begin
             if not (((uoParams in AOptions) and (LS.Kind = skParam)) or
                ((uoLocals in AOptions) and
                (LS.Kind in [skVar, skConst, skType]))) or
+               // An anonymous type's symbol (a local's inline array or
+               // pointer type) is no name of its own.
+               (LS.NameLower = '') or
                (LS.DeclNode = NIL_NODE) or (LS.Scope < 0) or
                (LS.Scope >= LM.Scopes.Count) or
                not (LM.Scopes[LS.Scope].Kind in [sckRoutine, sckBlock]) then

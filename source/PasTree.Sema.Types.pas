@@ -541,6 +541,9 @@ type
     // The same type (XSameType): one symbol, or two seeds of one builtin
     // alias group (PasBuiltinCanonSym), in one frame.
     function Same(const A, B: TSemaXType): Boolean;
+    // An array type written inline in a variable's or field's declaration
+    // (TPasSemaResolver.DeclareAnonValueType) - a type of its own (8.1.1).
+    function AnonArray(const AX: TSemaXType): Boolean;
     // A PChar / PAnsiChar (ConvPtrKindX), a parameter's conversion kind
     // (ParConvKindX).
     function PtrConvKind(const AX: TSemaXType): TSemaConvKind;
@@ -1905,6 +1908,22 @@ begin
       PasBuiltinCanonSym(Model(B), B.Sym, FPlatform)));
 end;
 
+function TSemaConvView.AnonArray(const AX: TSemaXType): Boolean;
+var
+  LM: TPasSemaModel;
+  LDecl: Integer;
+begin
+  Result := False;
+  if not XValid(AX) or (AX.Inst <> NIL_INST) then
+    Exit;
+  LM := Model(AX);
+  if (LM.Symbols[AX.Sym].Kind <> skType) or (LM.Symbols[AX.Sym].Name <> '') then
+    Exit;
+  LDecl := LM.Symbols[AX.Sym].DeclNode;
+  Result := (LDecl <> NIL_NODE) and (LDecl < Length(LM.Tree.Nodes)) and
+    (LM.Tree.Nodes[LDecl].Kind = nkArrayType);
+end;
+
 function TSemaConvView.PtrConvKind(const AX: TSemaXType): TSemaConvKind;
 var
   LC: TSemaXType;
@@ -2674,6 +2693,10 @@ begin
   if Open(ACanonPar) or Open(ACanonArg) then
     Exit;
   if APDyn <> AADyn then
+    Exit(-1);
+  // An array type written inline is its declaration's alone (8.1.1),
+  // whatever its element - one of several dimensions has none to read.
+  if AnonArray(ACanonPar) or AnonArray(ACanonArg) then
     Exit(-1);
   LPE := ArrayElem(ACanonPar);
   LAE := ArrayElem(ACanonArg);

@@ -2994,7 +2994,10 @@ begin
             skProperty]) or
           (AEnumValues and (Symbols[ASym].Kind = skEnumValue))) or
      (Symbols[ASym].DeclNode = NIL_NODE) or
-     (sfBuiltin in Symbols[ASym].Flags) then
+     (sfBuiltin in Symbols[ASym].Flags) or
+     // An anonymous type's synthetic symbol (an inline record, procedural,
+     // array or pointer type) has no name to list.
+     (Symbols[ASym].Name = '') then
     Exit;
   // LMember: a type's scope lies between the symbol and the routine scope,
   // so the symbol is a member of a type declared in the body, not a local.
