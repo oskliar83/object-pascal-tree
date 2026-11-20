@@ -1471,6 +1471,8 @@ type
     function UsesNamed(AM: TPasSemaModel; const AText: string): Integer;
     procedure EmitE2003(AModel: TPasSemaModel; ANode: Integer;
       AId: Integer = -1);
+    function PointerTargetPlaceholder(AModel: TPasSemaModel;
+      ANode: Integer): Boolean;
     function UnknownAncestryX(const AX: TSemaXType): Boolean;
     procedure EmitAt(AModel: TPasSemaModel; ANode: Integer;
       const ACode, AMsg: string; const ANote: string = '');
@@ -10910,8 +10912,85 @@ begin
       EmitAt(AModel, LAttr, 'W1074', SW1074_UnknownCustomAttribute);
     Exit;
   end;
+  if PointerTargetPlaceholder(AModel, ANode) then
+    Exit;
   EmitAt(AModel, ANode, 'E2003', Format(SE2003_UndeclaredIdentifier,
     [AModel.Tree.NodeText(ANode)]));
+end;
+
+{ An undeclared target of a pointer type `^T` or a class reference `class of
+  T` in a `type` section (spec 10.1.1): dcc enters the name into the
+  section's scope as a placeholder. A later declaration of that name in the
+  same scope - a later type section, a variable, a constant, a routine; in a
+  unit's interface, the implementation section too - is then E2004 at that
+  declaration, and a later pointer target naming it there is no second
+  E2003 (dcc64 37.0, 2026-11-20). A declaration in a nested routine's scope
+  is no clash, and a name a used unit declares never reaches here
+  (`^TObject` binds System's). True: ANode is such a second reference and
+  reports nothing. Called on the E2003 path only. }
+function TPasSemaProject.PointerTargetPlaceholder(AModel: TPasSemaModel;
+  ANode: Integer): Boolean;
+
+  function IsTarget(AAt: Integer): Boolean;
+  var
+    LUp: Integer;
+  begin
+    Result := False;
+    LUp := AModel.Tree.Nodes[AAt].Parent;
+    if (LUp = NIL_NODE) or not (AModel.Tree.Nodes[LUp].Kind in
+       [nkPointerType, nkClassOf]) then
+      Exit;
+    LUp := AModel.Tree.Nodes[LUp].Parent;
+    if (LUp = NIL_NODE) or (AModel.Tree.Nodes[LUp].Kind <> nkTypeDecl) then
+      Exit;
+    LUp := AModel.Tree.Nodes[LUp].Parent;
+    Result := (LUp <> NIL_NODE) and (AModel.Tree.Nodes[LUp].Kind = nkTypeSec);
+  end;
+
+  function ScopeOf(AAt: Integer): Integer;
+  begin
+    Result := NIL_SCOPE;
+    while (AAt <> NIL_NODE) and (AAt <= High(AModel.NodeScope)) do
+    begin
+      Result := AModel.NodeScope[AAt];
+      if Result <> NIL_SCOPE then
+        Exit;
+      AAt := AModel.Tree.Nodes[AAt].Parent;
+    end;
+  end;
+
+var
+  LScope, LSym, LDecl, LTok: Integer;
+  LName: string;
+begin
+  Result := False;
+  if (AModel.Tree.Nodes[ANode].Kind <> nkIdent) or not IsTarget(ANode) then
+    Exit;
+  LScope := ScopeOf(ANode);
+  if LScope = NIL_SCOPE then
+    Exit;
+  LName := AModel.Tree.NodeText(ANode);
+  LTok := AModel.Tree.Nodes[ANode].FirstToken;
+  // An earlier target of the name in this scope made the placeholder.
+  for var LN := 0 to High(AModel.Tree.Nodes) do
+    if (LN <> ANode) and (AModel.Tree.Nodes[LN].Kind = nkIdent) and
+       (AModel.Tree.Nodes[LN].FirstToken < LTok) and
+       IsTarget(LN) and SameText(AModel.Tree.NodeText(LN), LName) and
+       (ScopeOf(LN) = LScope) then
+      Exit(True);
+  LSym := AModel.FindLocal(LScope, LowerCase(LName));
+  if (LSym = NIL_SYM) and (LScope = AModel.InterfaceScope) and
+     (AModel.ImplementationScope <> NIL_SCOPE) then
+    LSym := AModel.FindLocal(AModel.ImplementationScope, LowerCase(LName));
+  if LSym = NIL_SYM then
+    Exit;
+  LDecl := AModel.Symbols[LSym].DeclNode;
+  if (LDecl = NIL_NODE) or (LDecl > High(AModel.Tree.Nodes)) or
+     (AModel.Tree.Nodes[LDecl].FirstToken <= LTok) or
+     AModel.HasDiagAt(LDecl) then
+    Exit;
+  EmitAt(AModel, LDecl, 'E2004', Format(SE2004_IdentifierRedeclared,
+    [AModel.Tree.NodeText(LDecl)]));
 end;
 
 class function TPasSemaProject.TokenLineCol(AModel: TPasSemaModel;
@@ -23175,7 +23254,23 @@ var
             LScope := FModels[LMid].Symbols[LSym].Scope;
             if (LScope <> NIL_SCOPE) and
                (FModels[LMid].Scopes[LScope].StructSym <> NIL_SYM) then
-              Exit;   // a member: dcc sees none in an attribute's arguments
+            begin
+              // A member named alone is not judged. Qualified by its type, a
+              // class var and a function - a class or static one,
+              // `TObject.ClassName` - are no constants (19.3.2: E2026 for
+              // `T01.ClassName`, `TK.CV`, `TRec.F`); a member constant
+              // (`TK.KS`) is one. A field is never one, whatever holds it.
+              if LM.Tree.Nodes[LCore].Kind = nkMember then
+                case FModels[LMid].Symbols[LSym].Kind of
+                  skVar, skField:
+                    Result := True;
+                  skRoutine:
+                    Result := not (sfBuiltin in
+                      FModels[LMid].Symbols[LSym].Flags) and
+                      (FModels[LMid].Symbols[LSym].TypeNode <> NIL_NODE);
+                end;
+              Exit;
+            end;
             case FModels[LMid].Symbols[LSym].Kind of
               skVar:
                 Result := True;
@@ -23245,6 +23340,8 @@ var
       constructor redoes the unit that names the attribute (the pair test of
       SelectConsumers), as it redoes a call. }
     procedure CheckAttrArgs(AAttr: Integer);
+    type
+      TAttrParMode = (amPlain, amByRef, amOpen, amOfConst);
     const
       MAX_ARGS = 32;
     var
@@ -23258,7 +23355,10 @@ var
       LPars: TArray<Integer>;
       LParXs: TArray<TArray<TSemaXType>>;
       LReqs, LTots: TArray<Integer>;
-      LVariadic, LOk, LJoin: Boolean;
+      // A single candidate's parameter modes: amPlain, amByRef (var / out),
+      // amOpen (`array of T`, its element type in LParXs), amOfConst.
+      LModes: TArray<TAttrParMode>;
+      LVariadic, LOk, LJoin, LSingle, LNonConst: Boolean;
       LFit: TPasExtRef;
       LNames: TArray<string>;
       LName: string;
@@ -23268,6 +23368,65 @@ var
         LF, LC: Integer;
       begin
         NodeLineCol(LM, AArg, LF, Result, LC);
+      end;
+
+      // A var / out parameter's argument dcc certainly takes for no constant
+      // (19.3.2: `[TVar(GV)]` is E2026): a variable named alone, of exactly
+      // the parameter's type. A constant there is dcc's E2197, another type
+      // its E2033 - not judged.
+      function AttrVarArg(AArg: Integer; const AArgX,
+        AParX: TSemaXType): Boolean;
+      var
+        LCore, LVMid, LVSym, LVScope: Integer;
+        LA, LP: TSemaXType;
+      begin
+        Result := False;
+        LCore := PeelParens(LM.Tree, AArg);
+        if (LCore = NIL_NODE) or (LM.Tree.Nodes[LCore].Kind <> nkIdent) or
+           not XValid(AArgX) or not TargetSym(LCore, LVMid, LVSym) or
+           (FModels[LVMid].Symbols[LVSym].Kind <> skVar) then
+          Exit;
+        LVScope := FModels[LVMid].Symbols[LVSym].Scope;
+        if (LVScope <> NIL_SCOPE) and
+           (FModels[LVMid].Scopes[LVScope].StructSym <> NIL_SYM) then
+          Exit;
+        LA := CanonTypeX(AArgX);
+        LP := CanonTypeX(AParX);
+        Result := XValid(LA) and XValid(LP) and (LA.UnitId = LP.UnitId) and
+          (LA.Sym = LP.Sym) and (LA.Inst = LP.Inst);
+      end;
+
+      // An open array parameter's argument dcc certainly takes for no
+      // constant (19.3.2: `[TArr([1, 2])]` is E2026): a `[...]` - for
+      // `array of const` any, for `array of T` one whose every element is a
+      // single value converting to T (an element that does not is dcc's
+      // E2010). A constant that is no `[...]` is dcc's E2192 - not judged.
+      function AttrOpenArg(AArg: Integer; AOfConst: Boolean;
+        const AElemX: TSemaXType): Boolean;
+      var
+        LCore, LEl: Integer;
+        LElX: TSemaXType;
+      begin
+        Result := False;
+        LCore := PeelParens(LM.Tree, AArg);
+        if (LCore = NIL_NODE) or (LM.Tree.Nodes[LCore].Kind <> nkSetCtor) then
+          Exit;
+        if AOfConst then
+          Exit(True);
+        LEl := LM.Tree.Nodes[LCore].FirstChild;
+        while LEl <> NIL_NODE do
+        begin
+          if LM.Tree.Nodes[LEl].Kind in [nkRange, nkError, nkMissing] then
+            Exit;
+          LElX := GetX(LEl);
+          if not XValid(LElX) or
+             (XCatOf(CanonTypeX(LElX)) = tcUnknown) or
+             Unreliable(AAttr, LEl, LElX) or
+             (AssignConvX(AAttr, LEl, AElemX, LElX) = TSemaConv.scNone) then
+            Exit;
+          LEl := LM.Tree.Nodes[LEl].NextSibling;
+        end;
+        Result := True;
       end;
 
     begin
@@ -23357,7 +23516,14 @@ var
           Exit;
         LArgs[LN] := LArg;
         LArgX[LN] := GetX(LArg);
-        if not XValid(LArgX[LN]) or
+        // A `[...]` may go to an open array, judged there by its elements;
+        // any other parameter takes it typed.
+        if (PeelParens(LM.Tree, LArg) <> NIL_NODE) and
+           (LM.Tree.Nodes[PeelParens(LM.Tree, LArg)].Kind = nkSetCtor) and
+           (not XValid(LArgX[LN]) or
+            (XCatOf(CanonTypeX(LArgX[LN])) = tcUnknown)) then
+          LArgX[LN] := XNil
+        else if not XValid(LArgX[LN]) or
            (XCatOf(CanonTypeX(LArgX[LN])) = tcUnknown) or
            Unreliable(AAttr, LArg, LArgX[LN]) then
           Exit;
@@ -23371,6 +23537,9 @@ var
       SetLength(LNames, Length(LCands));
       LMaxTot := -1;
       LMinReq := MaxInt;
+      LSingle := (Length(LCands) = 1) and not (sfOverloadDirective in
+        FModels[LCands[0].UnitId].Symbols[LCands[0].Sym].Flags);
+      LModes := nil;
       for LI := 0 to High(LCands) do
       begin
         LMid := LCands[LI].UnitId;
@@ -23382,25 +23551,56 @@ var
         if Length(LPars) <> LTot then
           Exit;
         SetLength(LParXs[LI], LTot);
+        if LSingle then
+          SetLength(LModes, LTot);
         LName := '';
         for var LP := 0 to LTot - 1 do
         begin
-          if (FModels[LMid].Symbols[LPars[LP]].TypeNode = NIL_NODE) or
-             (FModels[LMid].Tree.Nodes[FModels[LMid].Symbols[LPars[LP]].TypeNode].
-               Kind = nkArrayType) then
-            Exit;
-          LParX := DeclTypeX(LMid, LPars[LP]);
-          if not XValid(LParX) or OpenX(LParX) or NestedInGenericX(LParX) or
-             (XCatOf(CanonTypeX(LParX)) in [tcUnknown, tcRecord, tcVariant,
-               tcProc, tcArray, tcFile]) then
+          var LPType := FModels[LMid].Symbols[LPars[LP]].TypeNode;
+          if LPType = NIL_NODE then
             Exit;
           LPDecl := FModels[LMid].Symbols[LPars[LP]].DeclNode;
           while (LPDecl <> NIL_NODE) and
                 (FModels[LMid].Tree.Nodes[LPDecl].Kind <> nkParam) do
             LPDecl := FModels[LMid].Tree.Nodes[LPDecl].Parent;
-          if (LPDecl = NIL_NODE) or
-             (FModels[LMid].Tree.Nodes[LPDecl].Flags * [nfVar, nfOut] <> []) then
+          if LPDecl = NIL_NODE then
             Exit;
+          // An open array or a var / out parameter: a single candidate's
+          // only, whose argument is judged by its own rule below.
+          if FModels[LMid].Tree.Nodes[LPType].Kind = nkArrayType then
+          begin
+            if not LSingle or
+               (FModels[LMid].Tree.Nodes[LPDecl].Flags * [nfVar, nfOut] <> []) then
+              Exit;
+            if FModels[LMid].Tree.Nodes[LPType].Aux = 1 then
+            begin
+              LModes[LP] := amOfConst;
+              LParXs[LI][LP] := XNil;
+              Continue;
+            end;
+            LParX := ResolveTypeExprNested(LMid,
+              PasArrayElemNode(FModels[LMid].Tree, LPType));
+            if not XValid(LParX) or OpenX(LParX) or NestedInGenericX(LParX) or
+               (XCatOf(CanonTypeX(LParX)) in [tcUnknown, tcRecord, tcVariant,
+                 tcProc, tcArray, tcFile]) then
+              Exit;
+            LModes[LP] := amOpen;
+            LParXs[LI][LP] := LParX;
+            Continue;
+          end;
+          LParX := DeclTypeX(LMid, LPars[LP]);
+          if not XValid(LParX) or OpenX(LParX) or NestedInGenericX(LParX) or
+             (XCatOf(CanonTypeX(LParX)) in [tcUnknown, tcRecord, tcVariant,
+               tcProc, tcArray, tcFile]) then
+            Exit;
+          if FModels[LMid].Tree.Nodes[LPDecl].Flags * [nfVar, nfOut] <> [] then
+          begin
+            if not LSingle then
+              Exit;
+            LModes[LP] := amByRef;
+          end
+          else if LSingle then
+            LModes[LP] := amPlain;
           LParXs[LI][LP] := LParX;
           if LName <> '' then
             LName := LName + ', ';
@@ -23419,14 +23619,33 @@ var
       if LM.Tree.Source.VisibleKind(LTok) <> tkRParen then
         Inc(LTok);
       LFit := LCands[0];
-      if (Length(LCands) = 1) and not (sfOverloadDirective in
-         FModels[LFit.UnitId].Symbols[LFit.Sym].Flags) then
+      LNonConst := False;
+      if LSingle then
       begin
         LM.CallTargetX.AddOrSetValue(AAttr, LFit);
+        // The arguments an open array or a var / out parameter takes: one
+        // dcc certainly finds no constant (E2026 below), or not judged.
+        for LI := 0 to Min(LN, LTots[0]) - 1 do
+          case LModes[LI] of
+            amPlain:
+              if not XValid(LArgX[LI]) then
+                Exit;
+            amByRef:
+              if AttrVarArg(LArgs[LI], LArgX[LI], LParXs[0][LI]) then
+                LNonConst := True
+              else
+                Exit;
+            amOpen, amOfConst:
+              if AttrOpenArg(LArgs[LI], LModes[LI] = amOfConst,
+                 LParXs[0][LI]) then
+                LNonConst := True
+              else
+                Exit;
+          end;
         LErrLine := -1;
         for LI := 0 to Min(LN, LTots[0]) - 1 do
-          if CheckConv(AAttr, LRef, LArgs[LI], LArgs[LI], LParXs[0][LI],
-             LArgX[LI]) then
+          if (LModes[LI] = amPlain) and CheckConv(AAttr, LRef, LArgs[LI],
+             LArgs[LI], LParXs[0][LI], LArgX[LI]) then
           begin
             LErrLine := ArgLine(LArgs[LI]);
             Break;
@@ -23450,6 +23669,9 @@ var
       end
       else
       begin
+        for LI := 0 to LN - 1 do
+          if not XValid(LArgX[LI]) then
+            Exit;   // an untyped `[...]`: no open array among the candidates
         LFits := 0;
         for LI := 0 to High(LCands) do
         begin
@@ -23488,8 +23710,13 @@ var
         end;
       end;
       // The call fits: its arguments must be constants.
+      if LNonConst then
+      begin
+        EmitAtToken(LM, AAttr, LTok, 'E2026', SE2026_ConstantExpected);
+        Exit;
+      end;
       for LI := 0 to LN - 1 do
-        if not IsConstArgX(AId, LArgs[LI]) and
+        if XValid(LArgX[LI]) and not IsConstArgX(AId, LArgs[LI]) and
            CertainlyNotConst(LArgs[LI], 0) then
         begin
           EmitAtToken(LM, AAttr, LTok, 'E2026', SE2026_ConstantExpected);
@@ -23498,10 +23725,163 @@ var
     end;
 
   var
+    // The top-level routines CheckNestedToRef reported in.
+    LNestTops: TDictionary<Integer, Boolean>;
+
+    { 17.1.1, 17.3.1: a routine nested in another, named as a value where a
+      `reference to` type takes it - an assignment's source, an argument -
+      is `E2555 Cannot capture symbol 'Nested'` (a function too: `F := NF`
+      for a TFunc<Integer>). dcc reports it at the `end` of the top-level
+      routine holding the reference, whatever depth the nested routine and
+      the reference have, and stops at the first (dcc64 37.0, 2026-11-20,
+      local/probe-park/sa-decl W1-W10, X1): one report per top-level
+      routine, its first such name. A name inside an anonymous method
+      literal is CheckCaptures' (the resolver's E2555 at the name). Judged
+      where the target type is read: an assignment's destination, a
+      non-overloaded callee's parameter or the overload the call chose. }
+    procedure CheckNestedToRef(N: Integer);
+
+      function IsRefType(const AX: TSemaXType): Boolean;
+      var
+        LCx: TSemaXType;
+        LDef: Integer;
+      begin
+        Result := False;
+        if not XValid(AX) then
+          Exit;
+        LCx := CanonTypeX(AX);
+        if not XValid(LCx) then
+          Exit;
+        LDef := TypeDefNodeOf(LCx.UnitId, LCx.Sym);
+        Result := (LDef <> NIL_NODE) and
+          (FModels[LCx.UnitId].Tree.Nodes[LDef].Kind = nkProcType) and
+          (FModels[LCx.UnitId].Tree.Nodes[LDef].Aux = 2);
+      end;
+
+      // The declared type of the AIndex-th parameter of the routine the call
+      // ACall binds; XNil when not read.
+      function ArgParamX(ACall, AIndex: Integer): TSemaXType;
+      var
+        LHead, LMid, LSym: Integer;
+        LExt: TPasExtRef;
+        LPars: TArray<Integer>;
+      begin
+        Result := XNil;
+        LHead := PeelParens(LM.Tree, LM.Tree.Nodes[ACall].FirstChild);
+        if (LHead = NIL_NODE) or
+           not (LM.Tree.Nodes[LHead].Kind in [nkIdent, nkMember]) or
+           not TargetSym(LHead, LMid, LSym) or
+           (FModels[LMid].Symbols[LSym].Kind <> skRoutine) then
+          Exit;
+        if (FModels[LMid].Symbols[LSym].NextOverload <> NIL_SYM) or
+           (sfOverloadDirective in FModels[LMid].Symbols[LSym].Flags) then
+        begin
+          if not LM.CallTargetX.TryGetValue(ACall, LExt) then
+            Exit;
+          LMid := LExt.UnitId;
+          LSym := LExt.Sym;
+        end;
+        LPars := XParamSyms(LMid, LSym);
+        if (AIndex < 0) or (AIndex > High(LPars)) then
+          Exit;
+        Result := DeclTypeX(LMid, LPars[AIndex]);
+      end;
+
+    var
+      LSym, LDecl, LOwner, LUp, LAt, LTop, LIdx, LTok: Integer;
+      LTargetX: TSemaXType;
+    begin
+      if N > High(LM.RefMap) then
+        Exit;
+      LSym := LM.RefMap[N];
+      if (LSym = NIL_SYM) or (LM.Symbols[LSym].Kind <> skRoutine) then
+        Exit;
+      LDecl := LM.Symbols[LSym].DeclNode;
+      if (LDecl = NIL_NODE) or (LDecl = N) then
+        Exit;
+      // A nested routine: its routine node sits in a routine.
+      LOwner := LM.Tree.Nodes[LDecl].Parent;
+      if (LOwner = NIL_NODE) or (LM.Tree.Nodes[LOwner].Kind <> nkRoutine) then
+        Exit;
+      LOwner := LM.Tree.Nodes[LOwner].Parent;
+      while (LOwner <> NIL_NODE) and
+            not (LM.Tree.Nodes[LOwner].Kind in [nkRoutine, nkAnonMethod]) do
+        LOwner := LM.Tree.Nodes[LOwner].Parent;
+      if (LOwner = NIL_NODE) or (LM.Tree.Nodes[LOwner].Kind <> nkRoutine) then
+        Exit;
+      // Its position: the whole of an assignment's source, or an argument -
+      // written bare: in parentheses it is called (`TakeMy((B))` is E2035).
+      LAt := N;
+      LUp := LM.Tree.Nodes[LAt].Parent;
+      if LUp = NIL_NODE then
+        Exit;
+      LTargetX := XNil;
+      case LM.Tree.Nodes[LUp].Kind of
+        nkAssign:
+          if LM.Tree.Nodes[LM.Tree.Nodes[LUp].FirstChild].NextSibling = LAt then
+          begin
+            if InUntypedWith(LUp) then
+              Exit;
+            LTargetX := GetX(LM.Tree.Nodes[LUp].FirstChild);
+            if Unreliable(LUp, LM.Tree.Nodes[LUp].FirstChild, LTargetX) then
+              Exit;
+          end;
+        nkCall:
+          if LM.Tree.Nodes[LUp].FirstChild <> LAt then
+          begin
+            if InUntypedWith(LUp) then
+              Exit;
+            LIdx := -1;
+            var LArg := LM.Tree.Nodes[LM.Tree.Nodes[LUp].FirstChild].NextSibling;
+            var LI := 0;
+            while LArg <> NIL_NODE do
+            begin
+              if LArg = LAt then
+                LIdx := LI;
+              Inc(LI);
+              LArg := LM.Tree.Nodes[LArg].NextSibling;
+            end;
+            LTargetX := ArgParamX(LUp, LIdx);
+          end;
+      end;
+      if not IsRefType(LTargetX) then
+        Exit;
+      // Not inside a literal (CheckCaptures'), and the top-level routine.
+      LTop := NIL_NODE;
+      LUp := LM.Tree.Nodes[N].Parent;
+      while LUp <> NIL_NODE do
+      begin
+        case LM.Tree.Nodes[LUp].Kind of
+          nkAnonMethod:
+            Exit;
+          nkRoutine:
+            LTop := LUp;
+        end;
+        LUp := LM.Tree.Nodes[LUp].Parent;
+      end;
+      if LTop = NIL_NODE then
+        Exit;
+      if LNestTops = nil then
+        LNestTops := TDictionary<Integer, Boolean>.Create;
+      if LNestTops.ContainsKey(LTop) then
+        Exit;
+      LNestTops.Add(LTop, True);
+      // The routine's `end` - its last token, or the one before its `;`.
+      LTok := LM.Tree.Nodes[LTop].LastToken;
+      if (LTok < 0) or (LTok > High(LM.Tree.Source.Visible)) then
+        Exit;
+      if LM.Tree.Source.VisibleKind(LTok) = tkSemicolon then
+        Dec(LTok);
+      EmitAtToken(LM, N, LTok, 'E2555', Format(SE2555_CannotCapture,
+        [LM.Tree.NodeText(N)]));
+    end;
+
+  var
     N, LDst, LSrc: Integer;
   begin
     LCustomAttrRead := False;
     LCustomAttrX := XNil;
+    LNestTops := nil;
     for N := 0 to High(LM.Tree.Nodes) do
       case LM.Tree.Nodes[N].Kind of
         nkAssign:
@@ -23550,7 +23930,10 @@ var
             CheckCallStmt(N);
         nkAttribute:
           CheckAttrArgs(N);
+        nkIdent:
+          CheckNestedToRef(N);
       end;
+    FreeAndNil(LNestTops);
     // `A[0, 1]` over `array of TCells`: the comma list ran from the array
     // into a default property (13.1.4) - recorded by the walk.
     for N in LCommaStruct do

@@ -10971,6 +10971,87 @@ begin
   end;
 end;
 
+{ Spec 10.1.1 (dcc64 37.0, 2026-11-20): an undeclared pointer or class
+  reference target in a type section is a placeholder in the section's
+  scope - E2003 at the first target, none at a later one naming it, E2004
+  at a later declaration of the name in that scope (any kind; a unit's
+  implementation for an interface target). A nested routine's scope and a
+  name a used unit declares are no clash; a target completed in its own
+  section is legal. }
+procedure TestPointerTargetPlaceholder;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_ptrfwd');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10'  TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UP.pas'),
+    'unit UP;'#10 +                                        // 1
+    'interface'#10 +                                       // 2
+    'type PA = ^TA;'#10 +                                  // 3 E2003
+    'implementation'#10 +                                  // 4
+    'type TA = record end;'#10 +                           // 5 E2004
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'PT.dpr'),
+    'program PT;'#10 +                                     // 1
+    'uses UP;'#10 +                                        // 2
+    'type'#10 +                                            // 3
+    '  PA = ^TA;'#10 +                                     // 4 E2003
+    '  PB = ^TB;'#10 +                                     // 5 E2003
+    '  PC = ^TObject;'#10 +                                // 6 System's
+    '  CD = class of TD;'#10 +                             // 7 E2003
+    '  PA2 = ^TA;'#10 +                                    // 8 placeholder
+    'var'#10 +                                             // 9
+    '  TA: Integer;'#10 +                                  // 10 E2004
+    'const'#10 +                                           // 11
+    '  TB = 5;'#10 +                                       // 12 E2004
+    'type'#10 +                                            // 13
+    '  TObject = record X: Integer; end;'#10 +             // 14
+    '  TD = class end;'#10 +                               // 15 E2004
+    'procedure R;'#10 +                                    // 16
+    'type PH = ^TH;'#10 +                                  // 17 E2003
+    'type TH = record end;'#10 +                           // 18 E2004
+    'type PK = ^TK;'#10 +                                  // 19 E2003
+    'begin end;'#10 +                                      // 20
+    'type'#10 +                                            // 21
+    '  TK = record end;'#10 +                              // 22 R's PK
+    '  PN = ^TN;'#10 +                                     // 23 legal
+    '  TN = record Next: PN; end;'#10 +                    // 24
+    '  PF = ^TF;'#10 +                                     // 25 E2003
+    'procedure TF; begin end;'#10 +                        // 26 E2004
+    'procedure S;'#10 +                                    // 27
+    'type PM = ^TM;'#10 +                                  // 28 E2003
+    '  procedure TM; begin end;'#10 +                      // 29 E2004
+    'begin end;'#10 +                                      // 30
+    'begin'#10 +                                           // 31
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'PT.dpr'));
+    LM := ModelByName('pt');
+    Ok('ptrfwd: E2003 at the first target of each name [' +
+      DiagSites(LM, 'E2003') + ']',
+      DiagSites(LM, 'E2003') = '4:9 5:9 7:17 17:12 19:12 25:9 28:12');
+    Ok('ptrfwd: E2004 at the later same-scope declaration [' +
+      DiagSites(LM, 'E2004') + ']',
+      DiagSites(LM, 'E2004') = '10:3 12:3 15:3 18:6 26:11 29:13');
+    Ok('ptrfwd: naming it', DiagHasText(LM, 'E2004',
+      'Identifier redeclared: ''TD'''));
+    Ok('ptrfwd: nothing else [' + IntToStr(Length(LM.Diags)) + ']',
+      Length(LM.Diags) = 13);
+    LM := ModelByName('up');
+    Ok('ptrfwd: interface target, implementation declaration [' +
+      DiagSites(LM, 'E2003') + ' / ' + DiagSites(LM, 'E2004') + ']',
+      (DiagSites(LM, 'E2003') = '3:12') and (DiagSites(LM, 'E2004') = '5:6'));
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 { Spec 14.1.1 (dcc64 37.0, 2026-11-13): in an interface's first bracket a
   typed TGUID constant or a variable is dropped with W1074 naming it, no
   GUID; a true constant there is the GUID, after a dropped item of a comma
@@ -11562,6 +11643,181 @@ end;
   and a constructor of another name are no candidates. The attribute binds
   the constructor it calls (CallTargetX), and an edit of it - or a
   constructor added to the class - redoes the unit that names it. }
+{ Spec 19.3.2 (dcc64 37.0, 2026-11-20, local/probe-park/sa-decl AN.dpr):
+  E2026 at the `)` for an open-array constructor `[...]` (`array of T` with
+  every element converting, `array of const` any), a variable for a var or
+  out parameter, and a type-qualified function, class or static, or class
+  var. A member constant is a constant; a constant for an open array (E2192)
+  or a var parameter (E2197), an element of another type (E2010) and a
+  variable of another type for a var parameter (E2033) are other errors,
+  not judged here. }
+procedure TestAttributeArgsNonConst;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_attrnc');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class constructor Create; class function ClassName: string; end;'#10 +
+    '  TCustomAttribute = class(TObject) end;'#10 +
+    'implementation'#10'constructor TObject.Create; begin end;'#10 +
+    'class function TObject.ClassName: string; begin Result := ''''; end;'#10 +
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'AN.dpr'),
+    'program AN;'#10 +                                                // 1
+    'type'#10 +                                                       // 2
+    '  TArrAttribute = class(TCustomAttribute) constructor Create(const A: array of Integer); end;'#10 + // 3
+    '  TArcAttribute = class(TCustomAttribute) constructor Create(const A: array of const); end;'#10 + // 4
+    '  TVarAttribute = class(TCustomAttribute) constructor Create(var I: Integer); end;'#10 + // 5
+    '  TOutAttribute = class(TCustomAttribute) constructor Create(out I: Integer); end;'#10 + // 6
+    '  TStrAttribute = class(TCustomAttribute) constructor Create(const S: string); end;'#10 + // 7
+    '  TIntAttribute = class(TCustomAttribute) constructor Create(I: Integer); end;'#10 + // 8
+    '  TRec = record class function F: Integer; static; const K = 3; end;'#10 + // 9
+    '  TK = class const KS = ''k''; class function G: string; class var CV: Integer; end;'#10 + // 10
+    'const CI = 7; TypedC: Integer = 5;'#10 +                         // 11
+    'var GV: Integer; GB: Byte;'#10 +                                 // 12
+    'type'#10 +                                                       // 13
+    '  [TArr([1, 2])] T01 = class end;'#10 +                          // 14 E2026
+    '  [TArr([])] T02 = class end;'#10 +                              // 15 E2026
+    '  [TArc([1, ''a''])] T03 = class end;'#10 +                      // 16 E2026
+    '  [TVar(GV)] T04 = class end;'#10 +                              // 17 E2026
+    '  [TOut(GV)] T05 = class end;'#10 +                              // 18 E2026
+    '  [TStr(TK.ClassName)] T06 = class end;'#10 +                    // 19 E2026
+    '  [TInt(TRec.F)] T07 = class end;'#10 +                          // 20 E2026
+    '  [TStr(TK.G)] T08 = class end;'#10 +                            // 21 E2026
+    '  [TInt(TK.CV)] T09 = class end;'#10 +                           // 22 E2026
+    '  [TStr(''a'' + TK.G)] T10 = class end;'#10 +                    // 23 E2026
+    '  [TInt(TRec.K)] T11 = class end;'#10 +                          // 24 valid
+    '  [TStr(TK.KS)] T12 = class end;'#10 +                           // 25 valid
+    '  [TArr(CI)] T13 = class end;'#10 +                              // 26 E2192
+    '  [TVar(5)] T14 = class end;'#10 +                               // 27 E2197
+    '  [TVar(CI)] T15 = class end;'#10 +                              // 28 E2197
+    '  [TVar(TypedC)] T16 = class end;'#10 +                          // 29 E2197
+    '  [TArr([''x''])] T17 = class end;'#10 +                         // 30 E2010
+    '  [TVar(GB)] T18 = class end;'#10 +                              // 31 E2033
+    '  [TInt(CI)] T19 = class end;'#10 +                              // 32 valid
+    'constructor TArrAttribute.Create(const A: array of Integer); begin end;'#10 +
+    'constructor TArcAttribute.Create(const A: array of const); begin end;'#10 +
+    'constructor TVarAttribute.Create(var I: Integer); begin end;'#10 +
+    'constructor TOutAttribute.Create(out I: Integer); begin end;'#10 +
+    'constructor TStrAttribute.Create(const S: string); begin end;'#10 +
+    'constructor TIntAttribute.Create(I: Integer); begin end;'#10 +
+    'class function TRec.F: Integer; begin Result := 1; end;'#10 +
+    'class function TK.G: string; begin Result := ''''; end;'#10 +
+    'begin'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'AN.dpr'));
+    LM := ModelByName('an');
+    Ok('attrnc: E2026 at the ) [' + DiagSites(LM, 'E2026') + ']',
+      DiagSites(LM, 'E2026') = '14:15 15:11 16:17 17:11 18:11 19:21 ' +
+      '20:15 21:13 22:14 23:19');
+    Ok('attrnc: nothing else [' + IntToStr(Length(LM.Diags)) + ']',
+      Length(LM.Diags) = 10);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
+{ Spec 17.1.1, 17.3.1 (dcc64 37.0, 2026-11-20, local/probe-park/sa-decl
+  NR.dpr): a nested routine named bare where a `reference to` type takes it
+  - an assignment's source, an argument; a function too - is E2555 at the
+  `end` of the top-level routine holding the reference, one per routine
+  (the first): Inner, used in Deeper, is reported at Outer's end before
+  Nested. A nested routine called, a global routine, a method and a method
+  pointer to a reference, and a literal are legal. }
+procedure TestNestedToReference;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_nestref');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10'  TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NR.dpr'),
+    'program NR;'#10 +   // 1
+    'type'#10 +   // 2
+    '  TProc<T> = reference to procedure(Arg1: T);'#10 +   // 3
+    '  TFunc<TResult> = reference to function: TResult;'#10 +   // 4
+    '  TMyRef = reference to procedure(X: Integer);'#10 +   // 5
+    '  TPlain = procedure(X: Integer);'#10 +   // 6
+    '  TC = class procedure M; procedure MM(X: Integer); end;'#10 +   // 7
+    '  TMeth = procedure(X: Integer) of object;'#10 +   // 8
+    'procedure Take(const P: TProc<Integer>); begin end;'#10 +   // 9
+    'procedure TakeMy(P: TMyRef); begin end;'#10 +   // 10
+    'procedure TakePlain(P: TPlain); begin end;'#10 +   // 11
+    'procedure TC.MM(X: Integer); begin end;'#10 +   // 12
+    'procedure Glob(X: Integer); begin end;'#10 +   // 13
+    'procedure Outer;'#10 +   // 14
+    '  procedure Nested(X: Integer); begin end;'#10 +   // 15
+    '  procedure Deeper;'#10 +   // 16
+    '    procedure Inner(X: Integer); begin end;'#10 +   // 17
+    '  var R2: TProc<Integer>;'#10 +   // 18
+    '  begin'#10 +   // 19
+    '    R2 := Inner;'#10 +   // 20
+    '  end;'#10 +   // 21
+    'var R: TProc<Integer>;'#10 +   // 22
+    'begin'#10 +   // 23
+    '  R := Nested;'#10 +   // 24
+    '  Deeper;'#10 +   // 25
+    'end;'#10 +   // 26
+    'procedure TC.M;'#10 +   // 27
+    '  function NF: Integer; begin Result := 1; end;'#10 +   // 28
+    'var F: TFunc<Integer>; I: Integer;'#10 +   // 29
+    'begin'#10 +   // 30
+    '  I := NF;'#10 +   // 31
+    '  F := NF;'#10 +   // 32
+    'end;'#10 +   // 33
+    'procedure P2;'#10 +   // 34
+    '  procedure A(X: Integer); begin end;'#10 +   // 35
+    'begin'#10 +   // 36
+    '  Take(A);'#10 +   // 37
+    'end;'#10 +   // 38
+    'procedure P3;'#10 +   // 39
+    '  procedure B(X: Integer); begin end;'#10 +   // 40
+    'begin'#10 +   // 41
+    '  TakeMy(B);'#10 +   // 42
+    'end;'#10 +   // 43
+    'procedure Legal;'#10 +   // 44
+    '  procedure C(X: Integer); begin end;'#10 +   // 45
+    'var R: TProc<Integer>; MP: TMeth; O: TC;'#10 +   // 46
+    'begin'#10 +   // 47
+    '  C(1);'#10 +   // 48
+    '  R := Glob;'#10 +   // 49
+    '  R := O.MM;'#10 +   // 50
+    '  Take(Glob);'#10 +   // 51
+    '  R := procedure(X: Integer) begin Glob(X); end;'#10 +   // 52
+    '  MP := O.MM;'#10 +   // 53
+    '  R := MP;'#10 +   // 54
+    'end;'#10 +   // 55
+    'begin'#10 +   // 56
+    'end.'#10);  // 57
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'NR.dpr'));
+    LM := ModelByName('nr');
+    Ok('nestref: E2555 at each top-level routine''s end [' +
+      DiagSites(LM, 'E2555') + ']',
+      DiagSites(LM, 'E2555') = '26:1 33:1 38:1 43:1');
+    Ok('nestref: naming the first nested routine',
+      DiagHasText(LM, 'E2555', 'Cannot capture symbol ''Inner''') and
+      not DiagHasText(LM, 'E2555', '''Nested''') and
+      DiagHasText(LM, 'E2555', '''NF''') and
+      DiagHasText(LM, 'E2555', '''A''') and
+      DiagHasText(LM, 'E2555', '''B'''));
+    Ok('nestref: nothing else [' + IntToStr(Length(LM.Diags)) + ']',
+      Length(LM.Diags) = 4);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 procedure TestAttributeCtorArgs;
 const
   UA_STR =
@@ -22884,6 +23140,8 @@ begin
   TestAttributeSuffixFirst;
   TestAttributeW1074;
   TestAttributeCtorArgs;
+  TestAttributeArgsNonConst;
+  TestNestedToReference;
   TestAttributeE2289;
   TestAttributeE2289Lists;
   TestAttributeExprHead;
@@ -22892,6 +23150,7 @@ begin
   TestAttributeImplHeaderParam;
   TestGuidClauseDrops;
   TestForwardPosition;
+  TestPointerTargetPlaceholder;
   TestHeadingPairE2037;
   TestLateUnitMembers;
   TestAttributeGuidAndPositions;

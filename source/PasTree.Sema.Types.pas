@@ -7838,7 +7838,7 @@ procedure TPasSemaTyper.CheckConditionTypes;
 const
   // The statements CheckCondition judges - it ignores every other kind, so
   // the sweep does not call it per node. Keep in step with its case.
-  CCondStmts = [nkIfStmt, nkWhileStmt, nkRepeatStmt, nkCaseStmt];
+  CCondStmts = [nkIfStmt, nkWhileStmt, nkRepeatStmt, nkCaseStmt, nkInlineIf];
 var
   LIdx: Integer;
 begin
@@ -7864,7 +7864,8 @@ var
 begin
   LCond := NIL_NODE;
   case Kind(AStmt) of
-    nkIfStmt, nkWhileStmt:
+    // An inline if's condition is a statement's (spec 5.2.1, 5.4.1).
+    nkIfStmt, nkWhileStmt, nkInlineIf:
       LCond := Child(AStmt);
     nkRepeatStmt:
       // body block, then the `until` expression.

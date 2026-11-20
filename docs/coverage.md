@@ -284,6 +284,9 @@ of less work, not a gap in following the language; its consequences are in
   a real THEN branch with an integer ELSE literal, two unrelated string
   kinds - is untyped (an Integer and a Double variable are E2010 in dcc
   either way).
+- the condition's E2012 is the statements' check (CheckCondition); a
+  condition the project level re-types inside a `with` body
+  (RecheckWithBodies) is re-checked only when it is a statement's own.
 
 ### 5.5.2 `for … in` (for-in loop)
 - an untyped `for var E in C` element is typed from the collection at the
@@ -617,16 +620,19 @@ of less work, not a gap in following the language; its consequences are in
   is a parse error.
 - an attribute's arguments are checked against its constructors (E2010,
   E2034, E2035, E2250, E2026) only where every part is read reliably: a
-  record, Variant, procedural, array, untyped, `var` or `out` parameter in
-  the set (dcc takes a constant for a record or a Variant by its own rule -
+  record, Variant, procedural or untyped parameter in the set, an open
+  array or a `var` / `out` parameter of an overload set (dcc takes a
+  constant for a record or a Variant by its own rule -
   TValue's `[TV('x')]` compiles, `[TV(1)]` is E2026), a generic class, an
   argument typed by an overload choice and a helper's Create leave the
   attribute unchecked. A string of more than one character for a Char is
   not reported (the assignment's leniency), nor a constant out of a
   parameter's range (E1012 / W1012); E2026 only for a variable, a typed
-  constant, a declared function, `@X` and an operator over one of them
-  (`Length(GS)` passes). dcc reports one error a line; two failing
-  attributes on one line are two diagnostics here.
+  constant, a declared function, `@X`, a type-qualified function or class
+  var (`TK.G`, `TObject.ClassName`), an operator over one of them, an open
+  array's `[...]` and a `var` / `out` parameter's variable of its type
+  (`Length(GS)` passes; E2192, E2197 and E2033 are not reported). dcc
+  reports one error a line; two failing attributes on one line are two diagnostics here.
 
 ## B-lexical-grammar.md
 
