@@ -284,6 +284,9 @@ of less work, not a gap in following the language; its consequences are in
   a real THEN branch with an integer ELSE literal, two unrelated string
   kinds - is untyped (an Integer and a Double variable are E2010 in dcc
   either way).
+- the condition's E2012 is the statements' check (CheckCondition); a
+  condition the project level re-types inside a `with` body
+  (RecheckWithBodies) is re-checked only when it is a statement's own.
 
 ### 5.5.2 `for … in` (for-in loop)
 - an untyped `for var E in C` element is typed from the collection at the

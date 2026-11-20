@@ -23662,10 +23662,163 @@ var
     end;
 
   var
+    // The top-level routines CheckNestedToRef reported in.
+    LNestTops: TDictionary<Integer, Boolean>;
+
+    { 17.1.1, 17.3.1: a routine nested in another, named as a value where a
+      `reference to` type takes it - an assignment's source, an argument -
+      is `E2555 Cannot capture symbol 'Nested'` (a function too: `F := NF`
+      for a TFunc<Integer>). dcc reports it at the `end` of the top-level
+      routine holding the reference, whatever depth the nested routine and
+      the reference have, and stops at the first (dcc64 37.0, 2026-11-20,
+      local/probe-park/sa-decl W1-W10, X1): one report per top-level
+      routine, its first such name. A name inside an anonymous method
+      literal is CheckCaptures' (the resolver's E2555 at the name). Judged
+      where the target type is read: an assignment's destination, a
+      non-overloaded callee's parameter or the overload the call chose. }
+    procedure CheckNestedToRef(N: Integer);
+
+      function IsRefType(const AX: TSemaXType): Boolean;
+      var
+        LCx: TSemaXType;
+        LDef: Integer;
+      begin
+        Result := False;
+        if not XValid(AX) then
+          Exit;
+        LCx := CanonTypeX(AX);
+        if not XValid(LCx) then
+          Exit;
+        LDef := TypeDefNodeOf(LCx.UnitId, LCx.Sym);
+        Result := (LDef <> NIL_NODE) and
+          (FModels[LCx.UnitId].Tree.Nodes[LDef].Kind = nkProcType) and
+          (FModels[LCx.UnitId].Tree.Nodes[LDef].Aux = 2);
+      end;
+
+      // The declared type of the AIndex-th parameter of the routine the call
+      // ACall binds; XNil when not read.
+      function ArgParamX(ACall, AIndex: Integer): TSemaXType;
+      var
+        LHead, LMid, LSym: Integer;
+        LExt: TPasExtRef;
+        LPars: TArray<Integer>;
+      begin
+        Result := XNil;
+        LHead := PeelParens(LM.Tree, LM.Tree.Nodes[ACall].FirstChild);
+        if (LHead = NIL_NODE) or
+           not (LM.Tree.Nodes[LHead].Kind in [nkIdent, nkMember]) or
+           not TargetSym(LHead, LMid, LSym) or
+           (FModels[LMid].Symbols[LSym].Kind <> skRoutine) then
+          Exit;
+        if (FModels[LMid].Symbols[LSym].NextOverload <> NIL_SYM) or
+           (sfOverloadDirective in FModels[LMid].Symbols[LSym].Flags) then
+        begin
+          if not LM.CallTargetX.TryGetValue(ACall, LExt) then
+            Exit;
+          LMid := LExt.UnitId;
+          LSym := LExt.Sym;
+        end;
+        LPars := XParamSyms(LMid, LSym);
+        if (AIndex < 0) or (AIndex > High(LPars)) then
+          Exit;
+        Result := DeclTypeX(LMid, LPars[AIndex]);
+      end;
+
+    var
+      LSym, LDecl, LOwner, LUp, LAt, LTop, LIdx, LTok: Integer;
+      LTargetX: TSemaXType;
+    begin
+      if N > High(LM.RefMap) then
+        Exit;
+      LSym := LM.RefMap[N];
+      if (LSym = NIL_SYM) or (LM.Symbols[LSym].Kind <> skRoutine) then
+        Exit;
+      LDecl := LM.Symbols[LSym].DeclNode;
+      if (LDecl = NIL_NODE) or (LDecl = N) then
+        Exit;
+      // A nested routine: its routine node sits in a routine.
+      LOwner := LM.Tree.Nodes[LDecl].Parent;
+      if (LOwner = NIL_NODE) or (LM.Tree.Nodes[LOwner].Kind <> nkRoutine) then
+        Exit;
+      LOwner := LM.Tree.Nodes[LOwner].Parent;
+      while (LOwner <> NIL_NODE) and
+            not (LM.Tree.Nodes[LOwner].Kind in [nkRoutine, nkAnonMethod]) do
+        LOwner := LM.Tree.Nodes[LOwner].Parent;
+      if (LOwner = NIL_NODE) or (LM.Tree.Nodes[LOwner].Kind <> nkRoutine) then
+        Exit;
+      // Its position: the whole of an assignment's source, or an argument -
+      // written bare: in parentheses it is called (`TakeMy((B))` is E2035).
+      LAt := N;
+      LUp := LM.Tree.Nodes[LAt].Parent;
+      if LUp = NIL_NODE then
+        Exit;
+      LTargetX := XNil;
+      case LM.Tree.Nodes[LUp].Kind of
+        nkAssign:
+          if LM.Tree.Nodes[LM.Tree.Nodes[LUp].FirstChild].NextSibling = LAt then
+          begin
+            if InUntypedWith(LUp) then
+              Exit;
+            LTargetX := GetX(LM.Tree.Nodes[LUp].FirstChild);
+            if Unreliable(LUp, LM.Tree.Nodes[LUp].FirstChild, LTargetX) then
+              Exit;
+          end;
+        nkCall:
+          if LM.Tree.Nodes[LUp].FirstChild <> LAt then
+          begin
+            if InUntypedWith(LUp) then
+              Exit;
+            LIdx := -1;
+            var LArg := LM.Tree.Nodes[LM.Tree.Nodes[LUp].FirstChild].NextSibling;
+            var LI := 0;
+            while LArg <> NIL_NODE do
+            begin
+              if LArg = LAt then
+                LIdx := LI;
+              Inc(LI);
+              LArg := LM.Tree.Nodes[LArg].NextSibling;
+            end;
+            LTargetX := ArgParamX(LUp, LIdx);
+          end;
+      end;
+      if not IsRefType(LTargetX) then
+        Exit;
+      // Not inside a literal (CheckCaptures'), and the top-level routine.
+      LTop := NIL_NODE;
+      LUp := LM.Tree.Nodes[N].Parent;
+      while LUp <> NIL_NODE do
+      begin
+        case LM.Tree.Nodes[LUp].Kind of
+          nkAnonMethod:
+            Exit;
+          nkRoutine:
+            LTop := LUp;
+        end;
+        LUp := LM.Tree.Nodes[LUp].Parent;
+      end;
+      if LTop = NIL_NODE then
+        Exit;
+      if LNestTops = nil then
+        LNestTops := TDictionary<Integer, Boolean>.Create;
+      if LNestTops.ContainsKey(LTop) then
+        Exit;
+      LNestTops.Add(LTop, True);
+      // The routine's `end` - its last token, or the one before its `;`.
+      LTok := LM.Tree.Nodes[LTop].LastToken;
+      if (LTok < 0) or (LTok > High(LM.Tree.Source.Visible)) then
+        Exit;
+      if LM.Tree.Source.VisibleKind(LTok) = tkSemicolon then
+        Dec(LTok);
+      EmitAtToken(LM, N, LTok, 'E2555', Format(SE2555_CannotCapture,
+        [LM.Tree.NodeText(N)]));
+    end;
+
+  var
     N, LDst, LSrc: Integer;
   begin
     LCustomAttrRead := False;
     LCustomAttrX := XNil;
+    LNestTops := nil;
     for N := 0 to High(LM.Tree.Nodes) do
       case LM.Tree.Nodes[N].Kind of
         nkAssign:
@@ -23714,7 +23867,10 @@ var
             CheckCallStmt(N);
         nkAttribute:
           CheckAttrArgs(N);
+        nkIdent:
+          CheckNestedToRef(N);
       end;
+    FreeAndNil(LNestTops);
     // `A[0, 1]` over `array of TCells`: the comma list ran from the array
     // into a default property (13.1.4) - recorded by the walk.
     for N in LCommaStruct do

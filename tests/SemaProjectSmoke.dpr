@@ -11612,6 +11612,102 @@ begin
   end;
 end;
 
+{ Spec 17.1.1, 17.3.1 (dcc64 37.0, 2026-11-20, local/probe-park/sa-decl
+  NR.dpr): a nested routine named bare where a `reference to` type takes it
+  - an assignment's source, an argument; a function too - is E2555 at the
+  `end` of the top-level routine holding the reference, one per routine
+  (the first): Inner, used in Deeper, is reported at Outer's end before
+  Nested. A nested routine called, a global routine, a method and a method
+  pointer to a reference, and a literal are legal. }
+procedure TestNestedToReference;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_nestref');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10'  TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NR.dpr'),
+    'program NR;'#10 +   // 1
+    'type'#10 +   // 2
+    '  TProc<T> = reference to procedure(Arg1: T);'#10 +   // 3
+    '  TFunc<TResult> = reference to function: TResult;'#10 +   // 4
+    '  TMyRef = reference to procedure(X: Integer);'#10 +   // 5
+    '  TPlain = procedure(X: Integer);'#10 +   // 6
+    '  TC = class procedure M; procedure MM(X: Integer); end;'#10 +   // 7
+    '  TMeth = procedure(X: Integer) of object;'#10 +   // 8
+    'procedure Take(const P: TProc<Integer>); begin end;'#10 +   // 9
+    'procedure TakeMy(P: TMyRef); begin end;'#10 +   // 10
+    'procedure TakePlain(P: TPlain); begin end;'#10 +   // 11
+    'procedure TC.MM(X: Integer); begin end;'#10 +   // 12
+    'procedure Glob(X: Integer); begin end;'#10 +   // 13
+    'procedure Outer;'#10 +   // 14
+    '  procedure Nested(X: Integer); begin end;'#10 +   // 15
+    '  procedure Deeper;'#10 +   // 16
+    '    procedure Inner(X: Integer); begin end;'#10 +   // 17
+    '  var R2: TProc<Integer>;'#10 +   // 18
+    '  begin'#10 +   // 19
+    '    R2 := Inner;'#10 +   // 20
+    '  end;'#10 +   // 21
+    'var R: TProc<Integer>;'#10 +   // 22
+    'begin'#10 +   // 23
+    '  R := Nested;'#10 +   // 24
+    '  Deeper;'#10 +   // 25
+    'end;'#10 +   // 26
+    'procedure TC.M;'#10 +   // 27
+    '  function NF: Integer; begin Result := 1; end;'#10 +   // 28
+    'var F: TFunc<Integer>; I: Integer;'#10 +   // 29
+    'begin'#10 +   // 30
+    '  I := NF;'#10 +   // 31
+    '  F := NF;'#10 +   // 32
+    'end;'#10 +   // 33
+    'procedure P2;'#10 +   // 34
+    '  procedure A(X: Integer); begin end;'#10 +   // 35
+    'begin'#10 +   // 36
+    '  Take(A);'#10 +   // 37
+    'end;'#10 +   // 38
+    'procedure P3;'#10 +   // 39
+    '  procedure B(X: Integer); begin end;'#10 +   // 40
+    'begin'#10 +   // 41
+    '  TakeMy(B);'#10 +   // 42
+    'end;'#10 +   // 43
+    'procedure Legal;'#10 +   // 44
+    '  procedure C(X: Integer); begin end;'#10 +   // 45
+    'var R: TProc<Integer>; MP: TMeth; O: TC;'#10 +   // 46
+    'begin'#10 +   // 47
+    '  C(1);'#10 +   // 48
+    '  R := Glob;'#10 +   // 49
+    '  R := O.MM;'#10 +   // 50
+    '  Take(Glob);'#10 +   // 51
+    '  R := procedure(X: Integer) begin Glob(X); end;'#10 +   // 52
+    '  MP := O.MM;'#10 +   // 53
+    '  R := MP;'#10 +   // 54
+    'end;'#10 +   // 55
+    'begin'#10 +   // 56
+    'end.'#10);  // 57
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'NR.dpr'));
+    LM := ModelByName('nr');
+    Ok('nestref: E2555 at each top-level routine''s end [' +
+      DiagSites(LM, 'E2555') + ']',
+      DiagSites(LM, 'E2555') = '26:1 33:1 38:1 43:1');
+    Ok('nestref: naming the first nested routine',
+      DiagHasText(LM, 'E2555', 'Cannot capture symbol ''Inner''') and
+      not DiagHasText(LM, 'E2555', '''Nested''') and
+      DiagHasText(LM, 'E2555', '''NF''') and
+      DiagHasText(LM, 'E2555', '''A''') and
+      DiagHasText(LM, 'E2555', '''B'''));
+    Ok('nestref: nothing else [' + IntToStr(Length(LM.Diags)) + ']',
+      Length(LM.Diags) = 4);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 procedure TestAttributeCtorArgs;
 const
   UA_STR =
@@ -22935,6 +23031,7 @@ begin
   TestAttributeW1074;
   TestAttributeCtorArgs;
   TestAttributeArgsNonConst;
+  TestNestedToReference;
   TestAttributeE2289;
   TestAttributeExprHead;
   TestAttributeW1074LeafGuess;
