@@ -289,6 +289,7 @@ type
     Rtti: TPasRttiState;
     VarPropSetter: Boolean;
     LegacyIfEnd: Boolean;   // {$LEGACYIFEND ON}: each opener takes its own closer
+    PointerMath: Boolean;   // {$POINTERMATH ON} (10.1.4), positional
     MinEnumSize: Integer;
     Align: Integer;
   end;
@@ -361,6 +362,11 @@ type
     // {$SCOPEDENUMS} state changes, ascending by VisIndex; empty for the
     // overwhelming majority of units (the switch defaults to OFF).
     ScopedEnumsEvents: TArray<TPasStateEvent>;
+    // {$POINTERMATH} state changes, Value 1 / 0, ascending by VisIndex;
+    // empty for nearly every unit (OFF by default). A typed pointer has
+    // pointer math where the state is ON at the operator or was ON at the
+    // pointer type's declaration (10.1.4) - read through PointerMathAt.
+    PointerMathEvents: TArray<TPasStateEvent>;
     // Names a `$IF Declared(X)` guard asked about that no one could answer,
     // in source order, deduplicated. Empty unless the unit uses that guard AND
     // the run had no OnDeclared to ask - which is the signal a caller with a
@@ -420,6 +426,8 @@ type
     // The SCOPEDENUMS state in effect at visible-stream position AVisIndex
     // (False = unscoped, the default). Binary search over the event list.
     function ScopedEnumsAt(AVisIndex: Integer): Boolean;
+    // The POINTERMATH state in effect at AVisIndex (False = OFF, the default).
+    function PointerMathAt(AVisIndex: Integer): Boolean;
     // The minimum-enum-size in effect at AVisIndex (1 = the default).
     function MinEnumSizeAt(AVisIndex: Integer): Integer;
     // The record field-alignment CAP in effect at AVisIndex (8 = the default).
@@ -513,7 +521,7 @@ type
       lsOpenStrings, lsAssertions, lsDebugInfo, lsLocalSymbols,
       lsReferenceInfo, lsTypeInfo, lsDefinitionInfo, lsStackChecks, lsYD,
       lsAppType, lsImportedData, lsVarStringChecks, lsScopedEnums, lsRtti,
-      lsMinEnumSize, lsAlign, lsVarPropSetter, lsLegacyIfEnd);
+      lsMinEnumSize, lsAlign, lsVarPropSetter, lsLegacyIfEnd, lsPointerMath);
   private type
     // One open conditional: whether the code around it is live
     // (ParentActive), whether a branch has been taken (AnyTaken), whether the
@@ -541,6 +549,7 @@ type
     // journaled (TPasStateEvent) by their setters.
     FOpt: TPasOptState;
     FScopedEnumsEvents: TList<TPasStateEvent>;
+    FPointerMathEvents: TList<TPasStateEvent>;
     FMinEnumEvents: TList<TPasStateEvent>;
     FAlignEvents: TList<TPasStateEvent>;
     // PAS_SEMA_SWITCHES - journaled by AddOptionRef, which sees every option
@@ -618,6 +627,7 @@ type
       AKind: TPasOptionRefKind);
     procedure Journal(AEvents: TList<TPasStateEvent>; AValue: Integer);
     procedure SetScopedEnums(AValue: Boolean);
+    procedure SetPointerMath(AValue: Boolean);
     procedure SetMinEnumSize(AValue: Integer);
     procedure SetAlign(AValue: Integer);
     procedure ApplyRtti(const AArg: string);
@@ -858,7 +868,7 @@ const
     'LOCALSYMBOLS', 'REFERENCEINFO', 'TYPEINFO', 'DEFINITIONINFO',
     'STACKCHECKS', 'YD', 'APPTYPE', 'IMPORTEDDATA', 'VARSTRINGCHECKS',
     'SCOPEDENUMS', 'RTTI', 'MINENUMSIZE', 'ALIGN', 'VARPROPSETTER',
-    'LEGACYIFEND');
+    'LEGACYIFEND', 'POINTERMATH');
 
 // The long switch the word AText/ALen names (any case), lsNone for any other
 // - a length test first, so a passthrough word builds no string and compares
@@ -959,6 +969,11 @@ begin
     else
       LHi := LMid - 1;
   end;
+end;
+
+function TPasPreprocessed.PointerMathAt(AVisIndex: Integer): Boolean;
+begin
+  Result := StateAt(PointerMathEvents, AVisIndex, 0) <> 0;   // OFF
 end;
 
 function TPasPreprocessed.ScopedEnumsAt(AVisIndex: Integer): Boolean;
@@ -1152,6 +1167,7 @@ begin
   FSwitchStack := TStack<TPasOptState>.Create;
   FOptionRefs := TList<TPasOptionRef>.Create;
   FScopedEnumsEvents := TList<TPasStateEvent>.Create;
+  FPointerMathEvents := TList<TPasStateEvent>.Create;
   FMinEnumEvents := TList<TPasStateEvent>.Create;
   FAlignEvents := TList<TPasStateEvent>.Create;
   FSwitchEvents := TList<TPasStateEvent>.Create;
@@ -1427,6 +1443,7 @@ begin
   FFiles.Free;
   FFileNames.Free;
   FScopedEnumsEvents.Free;
+  FPointerMathEvents.Free;
   FMinEnumEvents.Free;
   FAlignEvents.Free;
   FSwitchEvents.Free;
@@ -1532,6 +1549,7 @@ begin
   FCondBase := 0;
   FSwitchStack.Clear;
   FScopedEnumsEvents.Clear;
+  FPointerMathEvents.Clear;
   FMinEnumEvents.Clear;
   FAlignEvents.Clear;
   FSwitchEvents.Clear;
@@ -1591,6 +1609,7 @@ begin
   Result.Visible := Copy(FVisible.List, 0, FVisible.Count);
   Result.Diagnostics := FDiags.ToArray;
   Result.ScopedEnumsEvents := FScopedEnumsEvents.ToArray;
+  Result.PointerMathEvents := FPointerMathEvents.ToArray;
   Result.UnresolvedDeclared := FUnresolvedDeclared.ToArray;
   Result.DeclaredAsks := FDeclaredAsks.ToArray;
   Result.UnresolvedSymbols := FUnresolvedSymbols.ToArray;
@@ -2049,6 +2068,7 @@ begin
       // setters first, which journal a change.
       var LOpt := FSwitchStack.Pop;
       SetScopedEnums(LOpt.ScopedEnums);
+      SetPointerMath(LOpt.PointerMath);
       SetMinEnumSize(LOpt.MinEnumSize);
       SetAlign(LOpt.Align);
       FOpt := LOpt;
@@ -2310,6 +2330,14 @@ begin
   end
   else if AKind = lsImportedData then SetSwitch('G')
   else if AKind = lsVarStringChecks then SetSwitch('V')
+  else if AKind = lsPointerMath then
+  begin
+    // Long-form only, positional (10.1.4): read at an operator and at a
+    // pointer type's declaration - see PointerMathEvents.
+    if not TryOnOff(AArg, LOn) then
+      Exit;
+    SetPointerMath(LOn);
+  end
   else if AKind = lsScopedEnums then
   begin
     // Long-form only (no single-letter twin). Positional: the resolver reads
@@ -2532,6 +2560,14 @@ begin
   LEvent.VisIndex := FVisible.Count;
   LEvent.Value := AValue;
   AEvents.Add(LEvent);
+end;
+
+procedure TPasPreprocessor.SetPointerMath(AValue: Boolean);
+begin
+  if FOpt.PointerMath = AValue then
+    Exit;
+  FOpt.PointerMath := AValue;
+  Journal(FPointerMathEvents, Ord(AValue));
 end;
 
 procedure TPasPreprocessor.SetScopedEnums(AValue: Boolean);

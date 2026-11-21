@@ -82,6 +82,14 @@ const
   SE2001_OrdinalTypeRequired = 'E2001 Ordinal type required';
   SE2012_MustBeBoolean = 'E2012 Type of expression must be BOOLEAN';
   SE2028_SetTooLarge = 'E2028 Sets may have at most 256 elements';
+  // Where a file type may not stand (10.2.1).
+  SE2002_FileTypeNotAllowed = 'E2002 File type not allowed here';
+  SE2024_InvalidResultType = 'E2024 Invalid function result type';
+  SE2155_NeedsFinalization =
+    'E2155 Type ''%s'' needs finalization - not allowed in file type';
+  // An interface reached by its GUID that has none (14.1.1).
+  SE2232_NoInterfaceGuid =
+    'E2232 Interface ''%s'' has no interface identification';
   // A `with` target of no struct type (5.7), and a write into a part of a
   // value that is no variable (5.1.1, 5.7). Neither names anything.
   SE2018_RecordObjectClassRequired =

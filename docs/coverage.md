@@ -246,6 +246,12 @@ of less work, not a gap in following the language; its consequences are in
   operator LogicalAnd(...): TClass` is `O is (R and C)` for dcc, `(O is R) and
   C` in the tree. Written `O is (R) and C` or `O is RA[0] and C` it parses as
   dcc groups it (dcc64 37.0, probed 2026-09-26).
+- `as` / `is` are judged with a type name on the right only; a GUID-less
+  interface's name as an argument is E2232 only where the call's head binds
+  a routine of the source - under an undeclared routine (dcc's E2232 beside
+  its E2003, `Supports` with no SysUtils) only the E2003 is reported. An
+  interface declared with any bracket counts as having a GUID, though dcc
+  may drop the bracket's items as attributes (14.1.1).
 
 ### 4.11.4 Result types of the value-returning intrinsics
 - the result rules are implemented in both typers from the spec's probe
@@ -493,6 +499,10 @@ of less work, not a gap in following the language; its consequences are in
   multi-dimensional row (`High(M[0])` of `array[a, b] of T`) has no bounds
   type.
 
+### 8.2.2 Dynamic arrays
+- `+` over a `[...]` operand is not judged, nor `+` of a static array with
+  a scalar (`S + 1`); `Copy` of a character array is taken for a string's.
+
 ## 09-records.md
 
 ### 9.1.3 Variant records (`case` part)
@@ -523,6 +533,19 @@ of less work, not a gap in following the language; its consequences are in
   says `E2015 Operator not applicable to this operand type`.
 - a record helper's `class operator` (dcc accepts the declaration) is not
   checked for its name or arity.
+
+## 10-pointers-files.md
+
+### 10.1.4 What each pointer kind supports
+- a typed pointer read from a .dcu carries no {$POINTERMATH} state and
+  counts as having pointer math; a character pointer beside a typed one
+  (`C - P`) and a character pointer with a real or Boolean operand
+  (`C + 1.5`, E2008) are not judged; `P[I]` over a pointer without pointer
+  math (E2016) is not reported, and `P - Q` types as the pointer, not as
+  the Int64 distance (`P := P - B` is no E2010 here).
+
+### 10.2.1 Typed, text, and untyped files
+- `=` of two files (E2008) is not judged.
 
 ## 11-classes.md
 
@@ -582,8 +605,9 @@ of less work, not a gap in following the language; its consequences are in
   builtin scalars: a getter returning another class or record than the
   property's, or an overloaded accessor (E2271 beside `index`; an array
   property's overloads, which dcc picks among, are bound by name), is not
-  judged; nor is the `index` constant against the accessor's parameter
-  type (`index 300` over a Byte, E2008). On the completion overlay a default
+  judged. The `index` parameter's own type is (Integer or an enumeration,
+  E2008 otherwise); an enumeration's subrange there is not judged. On the
+  completion overlay a default
   array property of a type declared in the edited unit is read off that
   type's last-good analysis, so one typed since then is not seen.
 

@@ -24376,6 +24376,32 @@ var
       end;
     end;
 
+    // Is AX a type an `index` specifier's parameter may not have - known
+    // to be neither Integer nor an enumeration (CheckOne)?
+    function BadIndexParamX(const AX: TSemaXType): Boolean;
+    var
+      LC: TSemaXType;
+      LS: string;
+    begin
+      Result := False;
+      LC := CanonTypeX(AX);
+      if not XValid(LC) or OpenX(LC) or NestedInGenericX(LC) then
+        Exit;
+      case XCatOf(LC) of
+        // An enumeration (its subranges not probed: nothing said either).
+        tcUnknown, tcEnum:
+          Exit;
+        tcInteger:
+          if FModels[LC.UnitId].Symbols[LC.Sym].Kind = skBuiltinType then
+          begin
+            LS := FModels[LC.UnitId].Symbols[LC.Sym].NameLower;
+            Exit((LS <> 'integer') and (LS <> 'longint') and
+              ((LS <> 'nativeint') or (FPlatform = pfWin64)));
+          end;
+      end;
+      Result := True;
+    end;
+
     procedure CheckOne(AAcc, AProp: Integer; AWrite, AHasIndex: Boolean;
       var APropX: TSemaXType; var AArr: Integer;
       var AIdxXs: TArray<TSemaXType>; var AIdxRead: Boolean);
@@ -24448,6 +24474,17 @@ var
               EmitAt(LM, AAcc, 'E2008', SE2008_IncompatibleTypes);
               Exit;
             end;
+      end;
+      // The `index` parameter, after the array ones (13.1.3): an Integer
+      // or an enumeration of one's own, whatever the constant (`index e1`
+      // for an Integer, `index 1` for a TE compile); Byte, Word, Cardinal,
+      // SmallInt, Int64, NativeInt on Win64, a subrange, a distinct `type
+      // Integer`, Boolean, a string are E2008.
+      if AHasIndex and (AArr >= 0) and (AArr <= High(LPars)) and
+         BadIndexParamX(SymDeclTypeX(LMid, LPars[AArr])) then
+      begin
+        EmitAt(LM, AAcc, 'E2008', SE2008_IncompatibleTypes);
+        Exit;
       end;
       if not XValid(APropX) then
         APropX := SymDeclTypeX(AId, AProp);
@@ -24565,6 +24602,13 @@ var
   end;
 
   procedure CheckAssigns;
+  const
+    // PtrOpKind's answers.
+    cpkNone = 0;
+    cpkUntyped = 1;
+    cpkChar = 2;
+    cpkMath = 3;
+    cpkPlain = 4;
 
     // The type of an array or pointer written inline at the declaration of
     // the variable or field ANode names - or ANode itself, such a type slot
@@ -24640,6 +24684,24 @@ var
       Result := not OpenInside(LD) and not OpenInside(LS);
     end;
 
+    // Does ANode name a variable or field whose file type is written inline
+    // (`C: file of Integer`, `U: file`) - typed as nothing?
+    function InlineFileVar(ANode: Integer): Boolean;
+    var
+      LCore, LMid, LSym, LType: Integer;
+    begin
+      Result := False;
+      LCore := PeelParens(LM.Tree, ANode);
+      if (LCore = NIL_NODE) or
+         not (LM.Tree.Nodes[LCore].Kind in [nkIdent, nkMember]) or
+         not TargetSym(LCore, LMid, LSym) or
+         not (FModels[LMid].Symbols[LSym].Kind in [skVar, skField]) then
+        Exit;
+      LType := FModels[LMid].Symbols[LSym].TypeNode;
+      Result := (LType <> NIL_NODE) and
+        (FModels[LMid].Tree.Nodes[LType].Kind = nkFileType);
+    end;
+
     // One value going to one target (2.6.1): ASrc typed ASrcX to the target
     // ADst typed ADstX, at the statement or declaration AStmt; the E2010 at
     // AAt. ADst / ASrc are the nodes Unreliable reads.
@@ -24650,6 +24712,19 @@ var
       LDc, LSc, LDstX, LSrcX: TSemaXType;
     begin
       Result := False;
+      // A file is assigned nothing, another file of its type included: an
+      // assignment to one is E2015 whatever the source (10.2.1; `T := '0'`,
+      // `T := nil`, `U := T`). A record or a static array holding a file
+      // copies as a whole.
+      if (LM.Tree.Nodes[AStmt].Kind = nkAssign) and
+         ((XValid(ADstX) and (XCatOf(CanonTypeX(ADstX)) = tcFile)) or
+          (not XValid(ADstX) and InlineFileVar(ADst))) then
+      begin
+        if InUntypedWith(AStmt) or Unreliable(AStmt, ADst, ADstX) then
+          Exit;
+        EmitAt(LM, AAt, 'E2015', SE2015_OperatorNotApplicable);
+        Exit(True);
+      end;
       // A side typed as nothing may be a variable or field whose array or
       // pointer type is written inline (InlineTypeX): judged against an
       // array or a pointer alone, the pairs 8.1.1 / 10.1.2 settle.
@@ -24866,6 +24941,486 @@ var
           [XTypeText(LLX), XTypeText(LRX)]));
     end;
 
+    // What a pointer operand takes under an arithmetic or ordering operator
+    // at visible token ATok (10.1.4): cpkNone - no pointer, or not known;
+    // cpkUntyped - the untyped Pointer, which never has pointer math;
+    // cpkChar - a predefined character pointer (PChar, PAnsiChar,
+    // PWideChar), which always has it and takes a string's operators
+    // besides; cpkMath - another typed pointer with pointer math, its type
+    // declared under {$POINTERMATH ON} (PByte is, in System) or the switch
+    // ON at ATok; cpkPlain - one without. An alias declared under the
+    // switch adds none (`PI4 = PInteger`); a `^Char` or `^Byte` of one's
+    // own has none. A type read from a .dcu carries no switch state: cpkMath.
+    function PtrOpKind(const AX: TSemaXType; ATok: Integer): Integer;
+    var
+      LC: TSemaXType;
+      LDef, LTok: Integer;
+      LDm: TPasSemaModel;
+    begin
+      Result := cpkNone;
+      if not XValid(AX) then
+        Exit;
+      LC := CanonTypeX(AX);
+      if not XValid(LC) or (XCatOf(LC) <> tcPointer) then
+        Exit;
+      if IsUntypedPointerX(LC) then
+        Exit(cpkUntyped);
+      LDm := FModels[LC.UnitId];
+      if LDm.Symbols[LC.Sym].Kind = skBuiltinType then
+      begin
+        if (LDm.Symbols[LC.Sym].NameLower = 'pchar') or
+           (LDm.Symbols[LC.Sym].NameLower = 'pwidechar') or
+           (LDm.Symbols[LC.Sym].NameLower = 'pansichar') then
+          Result := cpkChar;
+        Exit;
+      end;
+      LDef := TypeDefNodeOf(LC.UnitId, LC.Sym);
+      if (LDef = NIL_NODE) or
+         not (LDm.Tree.Nodes[LDef].Kind in [nkPointerType, nkUnaryOp]) then
+        Exit;
+      Result := cpkMath;
+      if (Length(LDm.Tree.Source.FileNames) > 0) and
+         TPasSourceManager.IsDcuPath(LDm.Tree.Source.FileNames[0]) then
+        Exit;
+      LTok := LDm.Tree.Nodes[LDef].FirstToken;
+      if ((Length(LDm.Tree.Source.PointerMathEvents) > 0) and
+          LDm.Tree.Source.PointerMathAt(LTok)) or
+         ((Length(LM.Tree.Source.PointerMathEvents) > 0) and
+          LM.Tree.Source.PointerMathAt(ATok)) then
+        Exit;
+      Result := cpkPlain;
+    end;
+
+    // Pointer arithmetic and ordering (10.1.4): `<` `<=` `>` `>=` and
+    // `P - Q` need two pointers with pointer math, `P + N`, `N + P` and
+    // `P - N` (N an integer) one; `P + Q`, `N - P` and the untyped Pointer
+    // take none, nor does an ordering against nil. Each is E2015 at the
+    // operator. A character pointer beside anything but an integer or an
+    // untyped Pointer is a string's business (`C > 'a'`, `C < nil`,
+    // `C - nil` compile) and left alone, as is every pair with an operand
+    // of no known type. Withheld as CheckCompare withholds.
+    procedure CheckPointerOps(N: Integer);
+    var
+      LL, LR, LTok, LKL, LKR: Integer;
+      LOp: TPasTokenKind;
+      LLX, LRX: TSemaXType;
+      LIntL, LIntR, LNilL, LNilR, LBad: Boolean;
+    begin
+      LTok := LM.Tree.Nodes[N].Aux;
+      if (LTok < 0) or (LTok > High(LM.Tree.Source.Visible)) then
+        Exit;
+      LOp := LM.Tree.Source.VisibleKind(LTok);
+      if not (LOp in [tkPlus, tkMinus, tkLess, tkLessEqual, tkGreater,
+         tkGreaterEqual]) then
+        Exit;
+      LL := LM.Tree.Nodes[N].FirstChild;
+      if LL = NIL_NODE then
+        Exit;
+      LR := LM.Tree.Nodes[LL].NextSibling;
+      if LR = NIL_NODE then
+        Exit;
+      LLX := GetX(LL);
+      if not XValid(LLX) then
+        LLX := InlineTypeX(LL);
+      LRX := GetX(LR);
+      if not XValid(LRX) then
+        LRX := InlineTypeX(LR);
+      LKL := PtrOpKind(LLX, LTok);
+      LKR := PtrOpKind(LRX, LTok);
+      if (LKL = cpkNone) and (LKR = cpkNone) then
+        Exit;
+      if not XValid(LLX) or not XValid(LRX) then
+        Exit;
+      LIntL := XCatOf(CanonTypeX(LLX)) = tcInteger;
+      LIntR := XCatOf(CanonTypeX(LRX)) = tcInteger;
+      LNilL := XCatOf(LLX) = tcNil;
+      LNilR := XCatOf(LRX) = tcNil;
+      LBad := False;
+      if (LKL <> cpkNone) and (LKR <> cpkNone) then
+      begin
+        // Two pointers: `+` never; `-` and ordering need math on both. A
+        // character pointer takes an untyped one (`P - @S[1]`, `P > @Buf[N]`
+        // in System) and is left alone beside a typed one.
+        if LOp = tkPlus then
+          LBad := True
+        else if (LKL = cpkChar) or (LKR = cpkChar) then
+          LBad := False
+        else if (LKL = cpkUntyped) or (LKR = cpkUntyped) then
+          LBad := True
+        else
+          LBad := (LKL = cpkPlain) or (LKR = cpkPlain);
+      end
+      else if LKL <> cpkNone then
+      begin
+        // A pointer on the left: `+ N` / `- N` need math, nil orders with
+        // no typed pointer but a character one.
+        if LIntR and (LOp in [tkPlus, tkMinus]) then
+          LBad := LKL in [cpkUntyped, cpkPlain]
+        else if LNilR and (LOp <> tkMinus) then
+          LBad := LKL in [cpkUntyped, cpkPlain, cpkMath]
+        else if LNilR then
+          LBad := LKL = cpkUntyped;
+      end
+      else
+      begin
+        // A pointer on the right: `N + P` as `P + N`, `N - P` never.
+        if LIntL and (LOp = tkPlus) then
+          LBad := LKR in [cpkUntyped, cpkPlain]
+        else if LIntL and (LOp = tkMinus) then
+          LBad := True
+        else if LNilL and (LOp <> tkMinus) then
+          LBad := LKR in [cpkUntyped, cpkPlain, cpkMath];
+      end;
+      if not LBad then
+        Exit;
+      if InUntypedWith(N) or Unreliable(N, LL, LLX) or
+         Unreliable(N, LR, LRX) then
+        Exit;
+      EmitAtToken(LM, N, LTok, 'E2015', SE2015_OperatorNotApplicable);
+    end;
+
+    // `+` over arrays (8.2.2): concatenation takes two dynamic arrays of
+    // one type - a static array of no characters on either side is E2008
+    // (`D + S`, `S + S2`), two different dynamic array types E2010 naming
+    // both as written (`TArray<Integer>` and `TArray<string>`, and a
+    // `TIA = array of Integer` against `TArray<Integer>`; an alias is the
+    // same type), a dynamic array with a scalar operand E2008 (`D + 1`,
+    // `DS + 'a'`, `D + nil`). A `[...]` operand takes the array's type and
+    // is not judged here. dcc64 37.0, 2026-11-21 (spec audit g3 ArrOps;
+    // local/probe-park/sa4-types AO1).
+    procedure CheckArrayPlus(N: Integer);
+
+      // Do two instances of one dynamic array generic hold one element
+      // type? Unknown counts as yes.
+      function SameElems(const A, B: TSemaXType): Boolean;
+      var
+        LA, LB: TSemaXType;
+      begin
+        LA := ArrayElemX(A);
+        LB := ArrayElemX(B);
+        if not XValid(LA) or not XValid(LB) then
+          Exit(True);
+        LA := CanonTypeX(LA);
+        LB := CanonTypeX(LB);
+        Result := XSameType(LA, LB) or OpenX(LA) or OpenX(LB) or
+          ((LA.UnitId = LB.UnitId) and (LA.Sym = LB.Sym) and
+           ((LA.Inst = LB.Inst) or (LA.Inst <> NIL_INST)));
+      end;
+
+    var
+      LL, LR, LTok: Integer;
+      LLX, LRX, LLc, LRc: TSemaXType;
+      LDynL, LDynR, LStatL, LStatR: Boolean;
+    begin
+      LTok := LM.Tree.Nodes[N].Aux;
+      if (LTok < 0) or (LTok > High(LM.Tree.Source.Visible)) or
+         (LM.Tree.Source.VisibleKind(LTok) <> tkPlus) then
+        Exit;
+      LL := LM.Tree.Nodes[N].FirstChild;
+      if LL = NIL_NODE then
+        Exit;
+      LR := LM.Tree.Nodes[LL].NextSibling;
+      if LR = NIL_NODE then
+        Exit;
+      LLX := GetX(LL);
+      if not XValid(LLX) then
+        LLX := InlineTypeX(LL);
+      LRX := GetX(LR);
+      if not XValid(LRX) then
+        LRX := InlineTypeX(LR);
+      if not XValid(LLX) or not XValid(LRX) then
+        Exit;
+      LLc := CanonTypeX(LLX);
+      LRc := CanonTypeX(LRX);
+      if not XValid(LLc) or not XValid(LRc) then
+        Exit;
+      LDynL := IsDynArrayTypeX(LLc);
+      LDynR := IsDynArrayTypeX(LRc);
+      LStatL := NonCharStaticArray(LLc);
+      LStatR := NonCharStaticArray(LRc);
+      if not (LDynL or LDynR or (LStatL and LStatR)) then
+        Exit;
+      if OpenX(LLc) or OpenX(LRc) then
+        Exit;
+      if InUntypedWith(N) or Unreliable(N, LL, LLX) or
+         Unreliable(N, LR, LRX) then
+        Exit;
+      if LStatL or LStatR then
+        EmitAtToken(LM, N, LTok, 'E2008', SE2008_IncompatibleTypes)
+      else if LDynL and LDynR then
+      begin
+        // Two instances of one generic (TArray<Integer>, TArray<string>)
+        // are one type when their elements are.
+        if (LLc.UnitId = LRc.UnitId) and (LLc.Sym = LRc.Sym) and
+           ((LLc.Inst = LRc.Inst) or SameElems(LLc, LRc)) then
+          Exit;
+        if XSameType(LLc, LRc) or
+           (XConvX(LLX, LRX) <> TSemaConv.scNone) or
+           (XConvX(LRX, LLX) <> TSemaConv.scNone) then
+          Exit;
+        EmitAtToken(LM, N, LTok, 'E2010', Format(SE2010_IncompatibleTypes,
+          [XTypeText(LLX), XTypeText(LRX)]));
+      end
+      else if (LDynL and (XCatOf(LRc) in [tcInteger, tcFloat, tcBoolean,
+                tcChar, tcString, tcNil, tcEnum])) or
+              (LDynR and (XCatOf(LLc) in [tcInteger, tcFloat, tcBoolean,
+                tcChar, tcString, tcNil, tcEnum])) then
+        EmitAtToken(LM, N, LTok, 'E2008', SE2008_IncompatibleTypes);
+    end;
+
+    // Is model AMid read from a .dcu (its text generated, not written)?
+    function DcuModel(AMid: Integer): Boolean;
+    begin
+      Result := (Length(FModels[AMid].Tree.Source.FileNames) > 0) and
+        TPasSourceManager.IsDcuPath(FModels[AMid].Tree.Source.FileNames[0]);
+    end;
+
+    // Is AX an interface declared with no GUID (14.1.1)? Its declaration
+    // holds no bracket at all - no nkGuid, and no attribute group either
+    // (whose items dcc may drop one by one, 14.1.1: counted as a GUID, so
+    // nothing is said). A forward declaration, a .dcu's type and anything
+    // not read say nothing (False).
+    function GuidLessIntfX(const AX: TSemaXType): Boolean;
+    var
+      LC: TSemaXType;
+      LDef, LChild: Integer;
+      LDm: TPasSemaModel;
+    begin
+      Result := False;
+      LC := CanonTypeX(AX);
+      if not XValid(LC) or (XCatOf(LC) <> tcInterface) or DcuModel(LC.UnitId)
+      then
+        Exit;
+      LDm := FModels[LC.UnitId];
+      if sfForward in LDm.Symbols[LC.Sym].Flags then
+        Exit;
+      LDef := TypeDefNodeOf(LC.UnitId, LC.Sym);
+      if (LDef = NIL_NODE) or (LDm.Tree.Nodes[LDef].Kind <> nkInterfaceType) or
+         (LDm.Tree.Nodes[LDef].FirstChild = NIL_NODE) then
+        Exit;
+      LChild := LDm.Tree.Nodes[LDef].FirstChild;
+      while LChild <> NIL_NODE do
+      begin
+        if LDm.Tree.Nodes[LChild].Kind in [nkGuid, nkAttrGroup] then
+          Exit;
+        LChild := LDm.Tree.Nodes[LChild].NextSibling;
+      end;
+      Result := True;
+    end;
+
+    // Is canonical AC declared `interface ... end` (no `reference to`)?
+    function IntfDeclX(const AC: TSemaXType): Boolean;
+    var
+      LDef: Integer;
+    begin
+      LDef := TypeDefNodeOf(AC.UnitId, AC.Sym);
+      Result := (LDef <> NIL_NODE) and
+        (FModels[AC.UnitId].Tree.Nodes[LDef].Kind = nkInterfaceType);
+    end;
+
+    // Does class AX - or an ancestor - list an interface (so that it has
+    // QueryInterface, 14.5.1)? Every heritage item after the ancestor is
+    // one. Tri-state as XDescent: a step not read is xdUnknown, and so is
+    // a class read from a .dcu.
+    function ClassListsIntfX(const AX: TSemaXType): TPasDescent;
+    var
+      LCur: TSemaXType;
+      LDef, LItem: Integer;
+      LHop: Boolean;
+    begin
+      LCur := CanonTypeX(AX);
+      for var LDepth := 1 to 32 do
+      begin
+        if not XValid(LCur) or DcuModel(LCur.UnitId) then
+          Exit(xdUnknown);
+        LDef := TypeDefNodeOf(LCur.UnitId, LCur.Sym);
+        if (LDef <> NIL_NODE) and
+           (FModels[LCur.UnitId].Tree.Nodes[LDef].Kind = nkClassType) then
+        begin
+          LItem := PasHeritageRef(FModels[LCur.UnitId].Tree, LDef);
+          if (LItem <> NIL_NODE) and
+             (FModels[LCur.UnitId].Tree.Nodes[LItem].NextSibling <> NIL_NODE)
+             and (FModels[LCur.UnitId].Tree.Nodes[FModels[LCur.UnitId].Tree
+               .Nodes[LItem].NextSibling].Kind in [nkIdent, nkMember,
+               nkTypeArgs]) then
+            Exit(xdYes);
+        end;
+        case XAncestryStepX(LCur, LDef, LHop) of
+          xdNo:
+            Exit(xdNo);
+          xdUnknown:
+            Exit(xdUnknown);
+        end;
+      end;
+      Result := xdUnknown;
+    end;
+
+    // `is` and `as` (4.9, 12.4.1, 14.5.1), right operand a type name:
+    // - an interface type on the right of `is` is E2015, whatever the left;
+    // - `O as I` with O of a class that lists no interface in its chain
+    //   (TObject, a plain class) is E2015; else, and from an interface,
+    //   `as` a GUID-less interface is E2232;
+    // - an instance of class L against a class R that is neither L's
+    //   ancestor nor its descendant is E2010 `'L' and 'R'` (`D is TCat`,
+    //   `D as TCat` for sibling classes; the hard cast compiles).
+    // Each at the operator. dcc64 37.0, 2026-10-30 (spec audit g4 IIsAs,
+    // g5 I01, I01b, I01c, I05, v V2).
+    procedure CheckIsAs(N: Integer);
+    var
+      LL, LR, LTok, LMid, LSym: Integer;
+      LOp: TPasTokenKind;
+      LLX, LRX, LLc, LRc: TSemaXType;
+      LLCat, LRCat: TSemaTypeCat;
+    begin
+      LTok := LM.Tree.Nodes[N].Aux;
+      if (LTok < 0) or (LTok > High(LM.Tree.Source.Visible)) then
+        Exit;
+      LOp := LM.Tree.Source.VisibleKind(LTok);
+      if not (LOp in [tkIs, tkAs]) then
+        Exit;
+      LL := LM.Tree.Nodes[N].FirstChild;
+      if LL = NIL_NODE then
+        Exit;
+      LR := LM.Tree.Nodes[LL].NextSibling;
+      if (LR = NIL_NODE) or
+         not (LM.Tree.Nodes[LR].Kind in [nkIdent, nkMember, nkTypeArgs]) then
+        Exit;
+      if (LM.Tree.Nodes[LR].Kind <> nkTypeArgs) and
+         (not TargetSym(LR, LMid, LSym) or
+          not (FModels[LMid].Symbols[LSym].Kind in [skType,
+            skBuiltinType])) then
+        Exit;
+      LRX := GetX(LR);
+      LLX := GetX(LL);
+      if not XValid(LRX) or not XValid(LLX) then
+        Exit;
+      LRc := CanonTypeX(LRX);
+      LLc := CanonTypeX(LLX);
+      if not XValid(LRc) or not XValid(LLc) or OpenX(LRc) or OpenX(LLc) then
+        Exit;
+      LRCat := XCatOf(LRc);
+      LLCat := XCatOf(LLc);
+      if InUntypedWith(N) or Unreliable(N, LL, LLX) then
+        Exit;
+      if LRCat = tcInterface then
+      begin
+        if LOp = tkIs then
+        begin
+          if LLCat in [tcClass, tcInterface] then
+            EmitAtToken(LM, N, LTok, 'E2015', SE2015_OperatorNotApplicable);
+          Exit;
+        end;
+        if (LLCat = tcClass) and (ClassListsIntfX(LLc) = xdNo) then
+          EmitAtToken(LM, N, LTok, 'E2015', SE2015_OperatorNotApplicable)
+        // A GUID-less target needs a query only where no static conversion
+        // reaches it: `Self as IAsyncResult` from a class listing it, a
+        // `reference to` value as its IComparer<T> compile (System.Types,
+        // System.Devices).
+        else if (((LLCat = tcInterface) and IntfDeclX(LLc)) or
+                 ((LLCat = tcClass) and (ClassListsIntfX(LLc) = xdYes))) and
+                GuidLessIntfX(LRc) and
+                (XConvX(LRX, LLX) = TSemaConv.scNone) then
+          EmitAtToken(LM, N, LTok, 'E2232', Format(SE2232_NoInterfaceGuid,
+            [XTypeText(LRX)]));
+        Exit;
+      end;
+      if (LRCat = tcClass) and (LLCat = tcClass) and
+         (XDescent(LLc, LRc) = xdNo) and (XDescent(LRc, LLc) = xdNo) then
+        EmitAtToken(LM, N, LTok, 'E2010', Format(SE2010_IncompatibleTypes,
+          [XTypeText(LLX), XTypeText(LRX)]));
+    end;
+
+    // The operator checks of a binary operator that are not CheckCompare's.
+    procedure CheckOperands(N: Integer);
+    begin
+      CheckPointerOps(N);
+      CheckArrayPlus(N);
+      CheckIsAs(N);
+    end;
+
+    // Where a file type may not stand (10.2.1), in one pass over the
+    // unit's nodes: a value parameter of a file type is E2002 at its type
+    // (`var`, `const`, `out` and `const [ref]` compile), a function's or a
+    // procedural type's file result E2024 - every header, a method's
+    // declaration and its implementation, a forward and its body alike;
+    // `file of` a file is E2002 and `file of` a type that needs
+    // finalization (IsManagedTypeNode: a long string, a dynamic array, an
+    // interface, Variant, a record or static array holding one) E2155,
+    // naming the element as written. dcc64 37.0, 2026-11-21 (spec audit g4
+    // FFile; local/probe-park/sa4-types FF1, FF2).
+    procedure CheckFileTypes;
+
+      function IsFileTypeNode(ANode: Integer): Boolean;
+      var
+        LX: TSemaXType;
+      begin
+        Result := False;
+        if ANode = NIL_NODE then
+          Exit;
+        if LM.Tree.Nodes[ANode].Kind = nkFileType then
+          Exit(True);
+        if not (LM.Tree.Nodes[ANode].Kind in [nkIdent, nkMember]) then
+          Exit;
+        LX := ResolveTypeExpr(AId, ANode, False);
+        Result := XValid(LX) and (XCatOf(CanonTypeX(LX)) = tcFile);
+      end;
+
+      // The result type of routine or procedural type AHead: its child
+      // written after a `:`.
+      function ResultTypeNode(AHead: Integer): Integer;
+      var
+        LTok: Integer;
+      begin
+        Result := LM.Tree.Nodes[AHead].FirstChild;
+        while Result <> NIL_NODE do
+        begin
+          if not (nfName in LM.Tree.Nodes[Result].Flags) and
+             not (LM.Tree.Nodes[Result].Kind in [nkParams, nkGenericParams,
+               nkDirective]) then
+          begin
+            LTok := LM.Tree.Nodes[Result].FirstToken - 1;
+            if (LTok >= 0) and (LTok <= High(LM.Tree.Source.Visible)) and
+               (LM.Tree.Source.VisibleKind(LTok) = tkColon) then
+              Exit;
+          end;
+          Result := LM.Tree.Nodes[Result].NextSibling;
+        end;
+      end;
+
+    var
+      N, LType, LElem: Integer;
+    begin
+      for N := 0 to High(LM.Tree.Nodes) do
+        case LM.Tree.Nodes[N].Kind of
+          nkParam:
+            if LM.Tree.Nodes[N].Flags * [nfVar, nfConst, nfOut] = [] then
+            begin
+              LType := LM.Tree.LastChild(N);
+              if (LType <> NIL_NODE) and
+                 not (nfName in LM.Tree.Nodes[LType].Flags) and
+                 IsFileTypeNode(LType) then
+                EmitAt(LM, LType, 'E2002', SE2002_FileTypeNotAllowed);
+            end;
+          nkRoutine, nkProcType:
+            begin
+              LType := ResultTypeNode(N);
+              if IsFileTypeNode(LType) then
+                EmitAt(LM, LType, 'E2024', SE2024_InvalidResultType);
+            end;
+          nkFileType:
+            begin
+              LElem := LM.Tree.Nodes[N].FirstChild;
+              if LElem = NIL_NODE then
+                Continue;
+              if IsFileTypeNode(LElem) then
+                EmitAt(LM, LElem, 'E2002', SE2002_FileTypeNotAllowed)
+              else if IsManagedTypeNode(AId, LElem, NIL_INST, 0) then
+                EmitAt(LM, LElem, 'E2155', Format(SE2155_NeedsFinalization,
+                  [LM.Tree.NodeSpanText(LElem)]));
+            end;
+        end;
+    end;
+
     // Is ANode (through parentheses) an open-array parameter named - and
     // ATxt its type as dcc names it, `array of T` (`array of TVarRec` for
     // `array of const`)? Such a parameter types as nothing (6.2.6).
@@ -24955,6 +25510,108 @@ var
       if (LArg <> NIL_NODE) and OpenArrayParamOf(LArg, LTxt) and
          not InUntypedWith(N) then
         EmitAt(LM, LArg, 'E2008', SE2008_IncompatibleTypes);
+    end;
+
+    // Is ANode's value a static array of no characters (one of characters
+    // is a string to Copy and Concat, 8.1.1)?
+    function NonCharStaticArg(AStmt, ANode: Integer): Boolean;
+    var
+      LX: TSemaXType;
+    begin
+      LX := GetX(ANode);
+      if not XValid(LX) then
+        LX := InlineTypeX(ANode);
+      Result := XValid(LX) and NonCharStaticArray(CanonTypeX(LX)) and
+        not Unreliable(AStmt, ANode, LX);
+    end;
+
+    // The arguments of intrinsic calls that take no such type (one pass
+    // per call, every row at the argument):
+    // - `Inc(U)` / `Dec(U, N)` of an untyped Pointer: E2001 (10.1.4); every
+    //   typed pointer steps by its pointee's size, with no directive.
+    // - a static array of no characters as `Copy`'s, `SetLength`'s or
+    //   `Delete`'s first argument, `Insert`'s second or any of `Concat`'s:
+    //   E2008 - those take a dynamic array (8.2.2; spec audit g3 ArrOps).
+    // - `Slice` of a dynamic array: E2016 - a static array or an open array
+    //   parameter only (8.3.1; g3 SliceDyn).
+    // - the name of an interface with no GUID as an argument of anything
+    //   but an intrinsic (`Supports(O, INoGuid)`, whatever the overloads
+    //   offer, and with the routine not declared too): E2232 - the name
+    //   passes its GUID (14.1.1). A cast `INoGuid(I)` is no call of it.
+    procedure CheckIntrinsicArgs(N: Integer);
+    var
+      LHead, LMid, LSym, LArg, LAMid, LASym: Integer;
+      LName: string;
+      LBuiltin: Boolean;
+    begin
+      LHead := PeelParens(LM.Tree, LM.Tree.Nodes[N].FirstChild);
+      if LHead = NIL_NODE then
+        Exit;
+      // A head that binds no routine says nothing: an intrinsic taking a
+      // type (`Default(IFoo)`) need not bind, and an undeclared routine
+      // (dcc's E2232 beside its E2003) is left to the E2003.
+      LBuiltin := not TargetSym(LHead, LMid, LSym) or
+        (FModels[LMid].Symbols[LSym].Kind <> skRoutine) or
+        (sfBuiltin in FModels[LMid].Symbols[LSym].Flags);
+      if not LBuiltin and not InUntypedWith(N) then
+      begin
+        LArg := LM.Tree.Nodes[LM.Tree.Nodes[N].FirstChild].NextSibling;
+        while LArg <> NIL_NODE do
+        begin
+          if (LM.Tree.Nodes[LArg].Kind in [nkIdent, nkMember]) and
+             TargetSym(LArg, LAMid, LASym) and
+             (FModels[LAMid].Symbols[LASym].Kind = skType) and
+             GuidLessIntfX(XPlain(LAMid, LASym)) then
+            EmitAt(LM, LArg, 'E2232', Format(SE2232_NoInterfaceGuid,
+              [FModels[LAMid].Symbols[LASym].Name]));
+          LArg := LM.Tree.Nodes[LArg].NextSibling;
+        end;
+      end;
+      if (LHead = NIL_NODE) or (LM.Tree.Nodes[LHead].Kind <> nkIdent) or
+         not TargetSym(LHead, LMid, LSym) or
+         not (sfBuiltin in FModels[LMid].Symbols[LSym].Flags) then
+        Exit;
+      LName := FModels[LMid].Symbols[LSym].NameLower;
+      if (LName <> 'inc') and (LName <> 'dec') and (LName <> 'copy') and
+         (LName <> 'setlength') and (LName <> 'delete') and
+         (LName <> 'insert') and (LName <> 'concat') and
+         (LName <> 'slice') then
+        Exit;
+      LArg := CallFirstArg(LM.Tree, N);
+      if (LArg = NIL_NODE) or InUntypedWith(N) then
+        Exit;
+      if (LName = 'inc') or (LName = 'dec') then
+      begin
+        if IsUntypedPointerX(GetX(LArg)) and
+           not Unreliable(N, LArg, GetX(LArg)) then
+          EmitAt(LM, LArg, 'E2001', SE2001_OrdinalTypeRequired);
+      end
+      else if LName = 'slice' then
+      begin
+        if IsDynArrayTypeX(CanonTypeX(GetX(LArg))) and
+           not Unreliable(N, LArg, GetX(LArg)) then
+          EmitAt(LM, LArg, 'E2016', SE2016_ArrayTypeRequired);
+      end
+      else if LName = 'concat' then
+      begin
+        while LArg <> NIL_NODE do
+        begin
+          if NonCharStaticArg(N, LArg) then
+          begin
+            EmitAt(LM, LArg, 'E2008', SE2008_IncompatibleTypes);
+            Exit;
+          end;
+          LArg := LM.Tree.Nodes[LArg].NextSibling;
+        end;
+      end
+      else
+      begin
+        // Insert's array is its second argument.
+        if LName = 'insert' then
+          LArg := LM.Tree.Nodes[LArg].NextSibling;
+        if (LArg <> NIL_NODE) and NonCharStaticArg(N, LArg) then
+          EmitAt(LM, LArg, 'E2008', SE2008_IncompatibleTypes);
+      end;
     end;
 
     { E2033 at an argument of a typed `var` / `out` parameter whose type is
@@ -27672,11 +28329,15 @@ var
             CheckNestedToRef(N);
           end;
         nkBinaryOp:
-          CheckCompare(N);
+          begin
+            CheckCompare(N);
+            CheckOperands(N);
+          end;
         nkCall:
           begin
             CheckVarArgs(N);
             CheckSetLengthOpen(N);
+            CheckIntrinsicArgs(N);
             LDst := LM.Tree.Nodes[N].FirstChild;
             if (LDst <> NIL_NODE) and
                (LM.Tree.Nodes[PeelParens(LM.Tree, LDst)].Kind in
@@ -27727,6 +28388,7 @@ var
       end;
     end;
     FreeAndNil(LNestTops);
+    CheckFileTypes;
     // `A[0, 1]` over `array of TCells`: the comma list ran from the array
     // into a default property (13.1.4) - recorded by the walk.
     for N in LCommaStruct do
