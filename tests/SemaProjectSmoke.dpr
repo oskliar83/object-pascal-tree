@@ -15367,6 +15367,315 @@ begin
   end;
 end;
 
+// A System for the type / expression checks of the spec audit's section 4:
+// PByte declared under {$POINTERMATH ON} as in the real one, a GUID'd
+// IInterface and a TInterfacedObject listing it.
+procedure WriteTypesSystem(const ADir: string);
+begin
+  TFile.WriteAllText(TPath.Combine(ADir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    '  TArray<T> = array of T;'#10 +
+    '  IInterface = interface [''{00000000-0000-0000-C000-000000000046}''] end;'#10 +
+    '  TInterfacedObject = class(TObject, IInterface) end;'#10 +
+    '  PInteger = ^Integer;'#10 +
+    '{$POINTERMATH ON}'#10 +
+    '  PByte = ^Byte;'#10 +
+    '{$POINTERMATH OFF}'#10 +
+    'implementation'#10'end.'#10);
+end;
+
+// Pointer arithmetic and ordering (spec 10.1.4): `<` / `-` of two pointers
+// need pointer math on both, `P + N` / `N + P` / `P - N` on the pointer;
+// a type has it when declared under {$POINTERMATH ON} (PByte) or where the
+// switch is ON at the operator, PChar always (and PChar takes an untyped
+// Pointer under `-` and ordering); an alias declared under the switch adds
+// none, nor has a `^Char` of one's own; an untyped Pointer has none and
+// `Inc(U)` of one is E2001 (dcc64 37.0; spec audit g4 PArith*,
+// local/probe-park/sa4-types PM1-PM4).
+procedure TestPointerArithmetic;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_ptrops');
+  WriteTypesSystem(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'PtrOps.dpr'),
+    'program PtrOps;'#10 +                                               // 1
+    'type'#10 +                                                          // 2
+    '{$POINTERMATH ON}'#10 +                                             // 3
+    '  PM = ^Integer;'#10 +                                              // 4
+    '{$POINTERMATH OFF}'#10 +                                            // 5
+    '  PI4 = PInteger; PC2 = ^Char;'#10 +                                // 6
+    'var P, Q: PInteger; M, M2: PM; B, B2: PByte; C, C2: PChar;'#10 +    // 7
+    '  U, V: Pointer; N: NativeInt; I4: PI4; X: PC2;'#10 +               // 8
+    'begin'#10 +                                                         // 9
+    '  if P < Q then ;'#10 +                                             // 10 E2015
+    '  N := P - Q;'#10 +                                                 // 11 E2015
+    '  P := P + 1;'#10 +                                                 // 12 E2015
+    '  P := 1 + P;'#10 +                                                 // 13 E2015
+    '  Inc(U);'#10 +                                                     // 14 E2001
+    '  Dec(U, 2);'#10 +                                                  // 15 E2001
+    '  if U < V then ;'#10 +                                             // 16 E2015
+    '  I4 := I4 + 1;'#10 +                                               // 17 E2015
+    '  X := X + 1;'#10 +                                                 // 18 E2015
+    '  if M < nil then ;'#10 +                                           // 19 E2015
+    '  N := M - P;'#10 +                                                 // 20 E2015
+    '  M := M + 1; M := 1 + M; N := M - M2; if M < M2 then ;'#10 +       // 21
+    '  B := B + 1; N := B2 - B; if B < B2 then ; N := B - M;'#10 +       // 22
+    '  C := C + 1; N := C2 - C; if C < C2 then ; if C < nil then ;'#10 + // 23
+    '  Inc(P); Dec(P, 2); Inc(M); if P = Q then ; if U = V then ;'#10 +  // 24
+    '  N := NativeInt(P) - NativeInt(Q); N := C - U; if C > U then ;'#10 + // 25
+    '{$POINTERMATH ON}'#10 +                                             // 26
+    '  if P < Q then ; N := P - Q; P := P + 1;'#10 +                     // 27
+    '{$POINTERMATH OFF}'#10 +                                            // 28
+    '  if P > Q then ;'#10 +                                             // 29 E2015
+    '  N := B - U;'#10 +                                                 // 30 E2015
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'PtrOps.dpr'));
+    LM := ModelByName('ptrops');
+    Ok('ptrops: E2015 lines [' + DiagLinesOf(LM, 'E2015') + ']',
+      DiagLinesOf(LM, 'E2015') = '10 11 12 13 16 17 18 19 20 29 30');
+    Ok('ptrops: E2001 lines [' + DiagLinesOf(LM, 'E2001') + ']',
+      DiagLinesOf(LM, 'E2001') = '14 15');
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
+// Where a file type may not stand (spec 10.2.1): an assignment to a file
+// is E2015 whatever the source (a record holding one copies), a value
+// parameter of a file type E2002 (var / const / out compile), a file result
+// E2024, `file of` a file E2002 and `file of` a type that needs
+// finalization E2155 naming it (dcc64 37.0; spec audit g4 FFile,
+// local/probe-park/sa4-types FF1, FF2).
+procedure TestFileTypeChecks;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_files');
+  WriteTypesSystem(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'FileT.dpr'),
+    'program FileT;'#10 +                                                // 1
+    'type'#10 +                                                          // 2
+    '  TR = record S: string; end;'#10 +                                 // 3
+    '  TR2 = record S: ShortString; F: Text; end;'#10 +                  // 4
+    '  TF1 = file of string;'#10 +                                       // 5 E2155
+    '  TF2 = file of TR;'#10 +                                           // 6 E2155
+    '  TF3 = file of TF1;'#10 +                                          // 7 E2002
+    '  TF4 = file of array of Integer;'#10 +                             // 8 E2155
+    '  TF5 = file of ShortString; TF6 = file of TObject;'#10 +           // 9
+    '  TP = procedure(F: file);'#10 +                                    // 10 E2002
+    '  TQ = function: Text;'#10 +                                        // 11 E2024
+    'procedure P1(F: Text); begin end;'#10 +                             // 12 E2002
+    'procedure P2(var F: Text; const G: TF5; out H: file); begin end;'#10 + // 13
+    'function G1: TF5; begin end;'#10 +                                  // 14 E2024
+    'var A, B: Text; C, D: file of Integer; R1, R2: TR2; I: Integer;'#10 + // 15
+    'begin'#10 +                                                         // 16
+    '  A := B;'#10 +                                                     // 17 E2015
+    '  C := D;'#10 +                                                     // 18 E2015
+    '  A := ''0'';'#10 +                                                 // 19 E2015
+    '  A := nil;'#10 +                                                   // 20 E2015
+    '  R1 := R2; I := 1;'#10 +                                           // 21
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'FileT.dpr'));
+    LM := ModelByName('filet');
+    Ok('filet: E2015 lines [' + DiagLinesOf(LM, 'E2015') + ']',
+      DiagLinesOf(LM, 'E2015') = '17 18 19 20');
+    Ok('filet: E2002 lines [' + DiagLinesOf(LM, 'E2002') + ']',
+      DiagLinesOf(LM, 'E2002') = '7 10 12');
+    Ok('filet: E2024 lines [' + DiagLinesOf(LM, 'E2024') + ']',
+      DiagLinesOf(LM, 'E2024') = '11 14');
+    Ok('filet: E2155 lines [' + DiagLinesOf(LM, 'E2155') + ']',
+      DiagLinesOf(LM, 'E2155') = '5 6 8');
+    Ok('filet: E2155 names the element',
+      DiagHasText(LM, 'E2155', '''TR'' needs') and
+      DiagHasText(LM, 'E2155', '''array of Integer'' needs'));
+    Ok('filet: no E2010 [' + DiagLinesOf(LM, 'E2010') + ']',
+      DiagLinesOf(LM, 'E2010') = '');
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
+// Array operands (spec 8.2.2, 8.3.1): `+` and Copy / SetLength / Delete /
+// Insert / Concat take dynamic arrays - a static one of no characters is
+// E2008; two different dynamic array types are E2010 (an alias is the same
+// type), a scalar beside one E2008; Slice of a dynamic array is E2016
+// (dcc64 37.0; spec audit g3 ArrOps, SliceDyn; local/probe-park/sa4-types
+// AO1).
+procedure TestArrayOperands;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_arrops');
+  WriteTypesSystem(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'ArrT.dpr'),
+    'program ArrT;'#10 +                                                 // 1
+    'type TIA = array of Integer; TIA2 = TArray<Integer>;'#10 +          // 2
+    'var S, S2: array[0..3] of Integer; D, D2: TArray<Integer>;'#10 +    // 3
+    '  DS: TArray<string>; IA: TIA; IA2: TIA2; Ch: array[0..3] of Char;'#10 + // 4
+    '  St: string;'#10 +                                                 // 5
+    'procedure P(const A: array of Integer); begin P(Slice(A, 2)); end;'#10 + // 6
+    'begin'#10 +                                                         // 7
+    '  D := D + S;'#10 +                                                 // 8 E2008
+    '  D := S + S2;'#10 +                                                // 9 E2008
+    '  D := D + DS;'#10 +                                                // 10 E2010
+    '  D := D + IA;'#10 +                                                // 11 E2010
+    '  D := D + 1;'#10 +                                                 // 12 E2008
+    '  D := Copy(S, 0, 2);'#10 +                                         // 13 E2008
+    '  SetLength(S, 2);'#10 +                                            // 14 E2008
+    '  Delete(S, 0, 1);'#10 +                                            // 15 E2008
+    '  Insert(1, S, 0);'#10 +                                            // 16 E2008
+    '  D := Concat(D, S);'#10 +                                          // 17 E2008
+    '  P(Slice(D, 2));'#10 +                                             // 18 E2016
+    '  D := D + D2 + [3]; D := D + IA2; D := Copy(D, 0, 1); D := Copy(D);'#10 + // 19
+    '  SetLength(D, 2); Insert(1, D, 0); Delete(D, 0, 1);'#10 +          // 20
+    '  D := Concat(D, D2, [1]); P(Slice(S, 2)); St := Copy(Ch, 0, 2);'#10 + // 21
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'ArrT.dpr'));
+    LM := ModelByName('arrt');
+    Ok('arrt: E2008 lines [' + DiagLinesOf(LM, 'E2008') + ']',
+      DiagLinesOf(LM, 'E2008') = '8 9 12 13 14 15 16 17');
+    Ok('arrt: E2010 lines [' + DiagLinesOf(LM, 'E2010') + ']',
+      DiagLinesOf(LM, 'E2010') = '10 11');
+    Ok('arrt: E2010 names both',
+      DiagHasText(LM, 'E2010', '''TArray<Integer>'' and ''TArray<string>''') and
+      DiagHasText(LM, 'E2010', '''TArray<Integer>'' and ''TIA'''));
+    Ok('arrt: E2016 lines [' + DiagLinesOf(LM, 'E2016') + ']',
+      DiagLinesOf(LM, 'E2016') = '18');
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
+// `is` / `as` (spec 4.9, 12.4.1, 14.5.1, 14.1.1): two unrelated classes are
+// E2010; an interface on the right of `is` E2015; `as` an interface from a
+// class listing none in its chain E2015, else `as` a GUID-less interface
+// no static conversion reaches E2232, as is such an interface's name as a
+// routine's argument; a class `as` a GUID-less interface it lists, an
+// interface on the left with a class target, a hard cast and `is` a class
+// reference compile (dcc64 37.0; spec audit g4 IIsAs, g5 I01, I01b, I01c,
+// I05, v V2; the RTL's `Self as IAsyncResult`).
+procedure TestIsAsChecks;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_isas');
+  WriteTypesSystem(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'IsAsT.dpr'),
+    'program IsAsT;'#10 +                                                // 1
+    'type'#10 +                                                          // 2
+    '  IG = interface [''{11111111-2222-3333-4444-555555555555}''] procedure A; end;'#10 + // 3
+    '  INoGuid = interface procedure A; end;'#10 +                       // 4
+    '  TAnimal = class end; TDog = class(TAnimal) end;'#10 +             // 5
+    '  TCat = class(TAnimal) end; TAC = class of TAnimal;'#10 +          // 6
+    '  TImpl = class(TInterfacedObject, IG, INoGuid) procedure A; end;'#10 + // 7
+    '  TPlain = class end;'#10 +                                         // 8
+    'procedure TImpl.A; begin end;'#10 +                                 // 9
+    'procedure Q(const A, B); begin end;'#10 +                           // 10
+    'var D: TDog; C: TCat; A: TAnimal; O: TObject; I: IInterface;'#10 +  // 11
+    '  G: IG; N: INoGuid; X: TImpl; IO: TInterfacedObject; P: TPlain; CR: TAC;'#10 + // 12
+    'begin'#10 +                                                         // 13
+    '  if D is TCat then ;'#10 +                                         // 14 E2010
+    '  C := D as TCat;'#10 +                                             // 15 E2010
+    '  if O is IInterface then ;'#10 +                                   // 16 E2015
+    '  if X is IG then ;'#10 +                                           // 17 E2015
+    '  G := O as IG;'#10 +                                               // 18 E2015
+    '  G := P as IG;'#10 +                                               // 19 E2015
+    '  N := I as INoGuid;'#10 +                                          // 20 E2232
+    '  Q(O, INoGuid);'#10 +                                              // 21 E2232
+    '  if D is TAnimal then ; if A is TDog then ; C := TCat(D);'#10 +    // 22
+    '  if I is TDog then ; O := I as TObject; G := I as IG;'#10 +        // 23
+    '  G := X as IG; G := IO as IG; N := INoGuid(I); Q(O, IG);'#10 +     // 24
+    '  if A is CR then ; A := A as TDog; if O is TAnimal then ;'#10 +    // 25
+    '  N := X as INoGuid;'#10 +                                          // 26
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'IsAsT.dpr'));
+    LM := ModelByName('isast');
+    Ok('isast: E2010 lines [' + DiagLinesOf(LM, 'E2010') + ']',
+      DiagLinesOf(LM, 'E2010') = '14 15');
+    Ok('isast: E2010 names both',
+      DiagHasText(LM, 'E2010', '''TDog'' and ''TCat'''));
+    Ok('isast: E2015 lines [' + DiagLinesOf(LM, 'E2015') + ']',
+      DiagLinesOf(LM, 'E2015') = '16 17 18 19');
+    Ok('isast: E2232 lines [' + DiagLinesOf(LM, 'E2232') + ']',
+      DiagLinesOf(LM, 'E2232') = '20 21');
+    Ok('isast: E2232 names the interface',
+      DiagHasText(LM, 'E2232', 'Interface ''INoGuid'' has no interface'));
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
+// A property's `index` parameter (spec 13.1.3): Integer or an enumeration,
+// whatever the constant; Byte, Word and the rest are E2008 at the accessor;
+// a field-backed property ignores the index (dcc64 37.0; spec audit g4
+// QIdx, QIdx2, QIdx3; local/probe-park/sa4-types QX1, QX2).
+procedure TestPropertyIndexParam;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_pidx');
+  WriteTypesSystem(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'PIdx.dpr'),
+    'program PIdx;'#10 +                                                 // 1
+    'type'#10 +                                                          // 2
+    '  TE = (e0, e1);'#10 +                                              // 3
+    '  TC = class'#10 +                                                  // 4
+    '    FI: Integer;'#10 +                                              // 5
+    '    function G1(Idx: Byte): Integer;'#10 +                          // 6
+    '    function G2(Idx: Integer): Integer;'#10 +                       // 7
+    '    function G3(Idx: TE): Integer;'#10 +                            // 8
+    '    function G4(Idx: Word): Integer;'#10 +                          // 9
+    '    function G5(I: Integer; Idx: LongInt): Integer;'#10 +           // 10
+    '    property P1: Integer index 3 read G1;'#10 +                     // 11 E2008
+    '    property P2: Integer index e1 read G2;'#10 +                    // 12
+    '    property P3: Integer index 1 read G3;'#10 +                     // 13
+    '    property P4: Integer index 300 read G4;'#10 +                   // 14 E2008
+    '    property P5[I: Integer]: Integer index 7 read G5;'#10 +         // 15
+    '    property P6: Integer index 3 read FI;'#10 +                     // 16
+    '  end;'#10 +                                                        // 17
+    'function TC.G1(Idx: Byte): Integer; begin Result := 0; end;'#10 +   // 18
+    'function TC.G2(Idx: Integer): Integer; begin Result := 0; end;'#10 + // 19
+    'function TC.G3(Idx: TE): Integer; begin Result := 0; end;'#10 +     // 20
+    'function TC.G4(Idx: Word): Integer; begin Result := 0; end;'#10 +   // 21
+    'function TC.G5(I: Integer; Idx: LongInt): Integer; begin Result := 0; end;'#10 + // 22
+    'begin'#10 +                                                         // 23
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'PIdx.dpr'));
+    LM := ModelByName('pidx');
+    Ok('pidx: E2008 lines [' + DiagLinesOf(LM, 'E2008') + ']',
+      DiagLinesOf(LM, 'E2008') = '11 14');
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // A write to a `const` parameter (spec 6.2.3): E2064 for the parameter
 // itself, a field of a record one at any depth (through `with` too), an
 // element of a static array one or of a `const` open array; a dynamic
@@ -24344,6 +24653,11 @@ begin
   TestOpenArrayValue;
   TestPropertyAccessChecks;
   TestGenericInferErrors;
+  TestPointerArithmetic;
+  TestFileTypeChecks;
+  TestArrayOperands;
+  TestIsAsChecks;
+  TestPropertyIndexParam;
 
   if GCounter.Finish('SemaProjectSmoke') then
     ExitCode := 1;
