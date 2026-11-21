@@ -499,6 +499,21 @@ of less work, not a gap in following the language; its consequences are in
 
 ## 12-inheritance-polymorphism.md
 
+### 12.2.1 `virtual` / `override`, 12.2.4 `abstract`
+- the class-body checks (TPasSemaProject.CheckClassDecls) judge classes
+  only, not `object` types, records or helpers. An `override` whose
+  signature cannot be compared with a candidate - a type written in place
+  (`array of const`), an open type parameter, an unresolved type, a generic
+  method - is not judged at all.
+- E2065 is reported only for a method whose `abstract` is no directive;
+  a method with no implementation in general is not judged. E2136 is not
+  judged for an overloaded name.
+- `static` on an instance method makes dcc read it as a class method (its
+  implementation `procedure TA.St` is E2037); PasTree reports the E2376
+  alone.
+- a `stored` specifier naming a member declared below is not judged (dcc's
+  report varies), nor E2356 (an instance property reading a class var).
+
 ### 12.1.2 `inherited`
 - intra-unit, the name after `inherited` binds to the ancestor's member when
   the unit's own ancestry declares it; a member only an ancestor in another

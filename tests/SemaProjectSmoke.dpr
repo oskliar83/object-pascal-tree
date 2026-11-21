@@ -11412,6 +11412,215 @@ begin
   end;
 end;
 
+{ Spec 11.1.2, 11.2.1, 12.2.1, 12.2.4, 12.2.5, 12.3.1, 13.1.1, 13.2.1,
+  15.1.3, 15.1.4 (dcc64 37.0, spec audit g4 IOvr, IMsg, QFwd, CPub, CPub2,
+  CDefVis, g5 C02*; local/probe-park/sa4-classes tests CD, CD2 - each
+  wanted row is what dcc64 reports on the fixture): the declaration checks
+  of a class body (TPasSemaProject.CheckClassDecls) - abstract / final /
+  static / message on a method, `override` against the ancestry, published
+  fields and properties, property accessors - and the legal shapes beside
+  each: an override of a message method, of one overload past an
+  intermediate override of the other, of TObject's Destroy beside a class
+  destructor, a class property over a class var and a static class method,
+  a published object or interface field, an RTTI class's descendant, a
+  plain class's default section. }
+procedure TestClassDeclChecks;
+const
+  SYS = 'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class constructor Create; destructor Destroy; virtual;'#10 +
+    '  end;'#10'  IInterface = interface end;'#10 +
+    'implementation'#10'constructor TObject.Create; begin end;'#10 +
+    'destructor TObject.Destroy; begin end;'#10'end.'#10;
+  CD =
+    'program CD;'#10 +
+    'type'#10 +
+    '  TA = class'#10 +
+    '    procedure V(X: Integer); virtual;'#10 +
+    '    procedure S;'#10 +
+    '    procedure Fin; virtual;'#10 +
+    '    procedure Ab; abstract;'#10 +
+    '    procedure NF; final;'#10 +
+    '    procedure St; static;'#10 +
+    '    procedure M1(Msg: Integer); message 1;'#10 +
+    '    procedure M2(var Msg); message 2;'#10 +
+    '    procedure Ov(A: Integer); overload; virtual;'#10 +
+    '    procedure Ov(A: string); overload; virtual;'#10 +
+    '    procedure CS(M: Integer); overload; dynamic;'#10 +
+    '    procedure CS(M: Integer; B: Boolean); overload; dynamic;'#10 +
+    '    class constructor Create;'#10 +
+    '    class destructor Destroy;'#10 +
+    '    procedure VA; virtual; abstract;'#10 +
+    '    class procedure SV; virtual; static;'#10 +
+    '  end;'#10 +
+    '  TB = class(TA)'#10 +
+    '    procedure Nope; override;'#10 +
+    '    procedure V(X: string); override;'#10 +
+    '    procedure S; override;'#10 +
+    '    procedure Fin; override; final;'#10 +
+    '    procedure Ov(A: Byte); override;'#10 +
+    '    procedure CS(M: Integer; B: Boolean); override;'#10 +
+    '    procedure M2(var Msg); override;'#10 +
+    '    destructor Destroy; override;'#10 +
+    '    procedure VA; override;'#10 +
+    '  end;'#10 +
+    '  TC = class(TB)'#10 +
+    '    procedure Fin; override;'#10 +
+    '    procedure CS(M: Integer); override;'#10 +
+    '  end;'#10 +
+    '  TD = class'#10 +
+    '    FI: Integer;'#10 +
+    '    class var FV: Integer;'#10 +
+    '    class function GetV: Integer;'#10 +
+    '    class function GetS: Integer; static;'#10 +
+    '    class property V: Integer read GetV;'#10 +
+    '    class property S: Integer read GetS write FV;'#10 +
+    '    class property I: Integer read FI;'#10 +
+    '    property P: Integer read GetP;'#10 +
+    '    function GetP: Integer;'#10 +
+    '    property Q: Integer read FI;'#10 +
+    '  end;'#10 +
+    '  {$M+}'#10 +
+    '  TP = class'#10 +
+    '    O: TObject;'#10 +
+    '    F: Integer;'#10 +
+    '  private'#10 +
+    '    FPtr: Pointer;'#10 +
+    '    FJ: Integer;'#10 +
+    '    function GetI(I: Integer): Integer;'#10 +
+    '  published'#10 +
+    '    G, G2: Integer;'#10 +
+    '    O2: TObject;'#10 +
+    '    property PP: Pointer read FPtr;'#10 +
+    '    property PJ: Integer read FJ;'#10 +
+    '    property Items[I: Integer]: Integer read GetI;'#10 +
+    '  end;'#10 +
+    '  {$M-}'#10 +
+    '  TQ = class(TP)'#10 +
+    '    H: Integer;'#10 +
+    '  end;'#10 +
+    '  TPlain = class'#10 +
+    '    J: Integer;'#10 +
+    '  end;'#10 +
+    'procedure TA.V(X: Integer); begin end;'#10 +
+    'procedure TA.S; begin end;'#10 +
+    'procedure TA.Fin; begin end;'#10 +
+    'procedure TA.NF; begin end;'#10 +
+    'class procedure TA.St; begin end;'#10 +
+    'procedure TA.M1(Msg: Integer); begin end;'#10 +
+    'procedure TA.M2(var Msg); begin end;'#10 +
+    'procedure TA.Ov(A: Integer); begin end;'#10 +
+    'procedure TA.Ov(A: string); begin end;'#10 +
+    'procedure TA.CS(M: Integer); begin end;'#10 +
+    'procedure TA.CS(M: Integer; B: Boolean); begin end;'#10 +
+    'class constructor TA.Create; begin end;'#10 +
+    'class destructor TA.Destroy; begin end;'#10 +
+    'class procedure TA.SV; begin end;'#10 +
+    'procedure TB.Nope; begin end;'#10 +
+    'procedure TB.V(X: string); begin end;'#10 +
+    'procedure TB.S; begin end;'#10 +
+    'procedure TB.Fin; begin end;'#10 +
+    'procedure TB.Ov(A: Byte); begin end;'#10 +
+    'procedure TB.CS(M: Integer; B: Boolean); begin end;'#10 +
+    'procedure TB.M2(var Msg); begin end;'#10 +
+    'destructor TB.Destroy; begin end;'#10 +
+    'procedure TB.VA; begin end;'#10 +
+    'procedure TC.Fin; begin end;'#10 +
+    'procedure TC.CS(M: Integer); begin end;'#10 +
+    'class function TD.GetV: Integer; begin Result := 0; end;'#10 +
+    'class function TD.GetS: Integer; begin Result := 0; end;'#10 +
+    'function TD.GetP: Integer; begin Result := 0; end;'#10 +
+    'function TP.GetI(I: Integer): Integer; begin Result := 0; end;'#10 +
+    'begin'#10 +
+    'end.'#10;
+  CD3 = 'program CD3;'#10'type'#10 +
+    '  TA = class'#10'    procedure Ab2; abstract;'#10 +
+    '  end;'#10'procedure TA.Ab2; begin end;'#10 +
+    'begin'#10'end.'#10;
+  CD2 =
+    'program CD2;'#10 +
+    'type'#10 +
+    '  TA = class'#10 +
+    '    procedure Ab; abstract;'#10 +
+    '    procedure VA; virtual; abstract;'#10 +
+    '    procedure DA; dynamic; abstract;'#10 +
+    '  end;'#10 +
+    'procedure TA.VA; begin end;'#10 +
+    'begin'#10 +
+    'end.'#10;
+
+  // Each diagnostic as line:code, by line, then code.
+  function LineCodes(AModel: TPasSemaModel): string;
+  var
+    LList: TStringList;
+  begin
+    LList := TStringList.Create;
+    try
+      for var LIdx := 0 to High(AModel.Diags) do
+        LList.Add(Format('%.5d:%s', [AModel.Diags[LIdx].Line,
+          AModel.Diags[LIdx].Code]));
+      LList.Sort;
+      Result := '';
+      for var LIdx := 0 to LList.Count - 1 do
+      begin
+        if Result <> '' then
+          Result := Result + ' ';
+        Result := Result + IntToStr(StrToInt(Copy(LList[LIdx], 1, 5))) +
+          Copy(LList[LIdx], 6, MaxInt);
+      end;
+    finally
+      LList.Free;
+    end;
+  end;
+
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_classdecl');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'), SYS);
+  TFile.WriteAllText(TPath.Combine(LDir, 'CD.dpr'), CD);
+  TFile.WriteAllText(TPath.Combine(LDir, 'CD2.dpr'), CD2);
+  TFile.WriteAllText(TPath.Combine(LDir, 'CD3.dpr'), CD3);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'CD.dpr'));
+    LM := ModelByName('cd');
+    Ok('classdecl: the rows dcc reports [' + LineCodes(LM) + ']',
+      LineCodes(LM) = '7:E2167 8:E2351 9:E2376 10:E2138 19:E2376 ' +
+      '22:E2137 23:E2037 24:E2170 26:E2137 33:E2352 41:E2355 43:E2355 ' +
+      '44:E2168 51:E2217 57:E2217 59:E2188 61:E2188 65:E2217');
+    Ok('classdecl: the messages',
+      DiagHasText(LM, 'E2137', 'Method ''Nope'' not found in base class') and
+      DiagHasText(LM, 'E2217', 'Published field ''G'' not a class or interface type') and
+      DiagHasText(LM, 'E2188', 'Published property ''PP'' cannot be of type POINTER') and
+      DiagHasText(LM, 'E2188', 'Published property ''Items'' cannot be of type ARRAY'));
+  finally
+    GProj.Free;
+  end;
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'CD2.dpr'));
+    LM := ModelByName('cd2');
+    Ok('classdecl: abstract with a body, beside a virtual abstract no E2065 [' +
+      LineCodes(LM) + ']', LineCodes(LM) = '4:E2167 8:E2136');
+  finally
+    GProj.Free;
+  end;
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'CD3.dpr'));
+    LM := ModelByName('cd3');
+    Ok('classdecl: no virtual abstract beside it - E2065 too [' +
+      LineCodes(LM) + ']', LineCodes(LM) = '4:E2065 4:E2167 6:E2136');
+    Ok('classdecl: ...qualified', DiagHasText(LM, 'E2065',
+      'Unsatisfied forward or external declaration: ''TA.Ab2'''));
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 { Spec 11.1.1 (dcc64 37.0, spec audit g4 CFwd, local/probe-park/sa4-classes
   fwd W1-W6): a forward class or interface open at the end of its `type`
   section is E2086 at the forward - a nested one named with its outer type;
@@ -24324,6 +24533,7 @@ begin
   TestNestedToReference;
   TestAttributeE2289;
   TestForwardSection;
+  TestClassDeclChecks;
   TestAttributeE2289Lists;
   TestAttributeE2289Hidden;
   TestForCounterChecks;
