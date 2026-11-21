@@ -24437,6 +24437,77 @@ var
         [XTypeText(LX)]));
     end;
 
+    { 18.3.1: the raised expression is a class INSTANCE - a value of another
+      category (5, an interface, a record, a class reference), a type name
+      (`raise Exception`) or nil is E2021; the `at` address is a pointer
+      (`at 5` is E2017). An untyped operand says nothing (dcc64 37.0, spec
+      audit g6 X02). }
+    procedure CheckRaise(N: Integer);
+    var
+      LExpr, LAddr, LCore, LMid, LSym: Integer;
+      LX: TSemaXType;
+    begin
+      LExpr := LM.Tree.Nodes[N].FirstChild;
+      if (LExpr = NIL_NODE) or InUntypedWith(N) then
+        Exit;
+      LCore := PeelParens(LM.Tree, LExpr);
+      if LCore = NIL_NODE then
+        Exit;
+      if LM.Tree.Nodes[LCore].Kind = nkNilLit then
+        EmitAt(LM, LExpr, 'E2021', SE2021_ClassTypeRequired)
+      else if (LM.Tree.Nodes[LCore].Kind in [nkIdent, nkMember]) and
+         TargetSym(LCore, LMid, LSym) and
+         (FModels[LMid].Symbols[LSym].Kind in [skType, skBuiltinType]) then
+        EmitAt(LM, LExpr, 'E2021', SE2021_ClassTypeRequired)
+      else
+      begin
+        LX := GetX(LExpr);
+        if XValid(LX) and not Unreliable(N, LExpr, LX) and
+           (XCatOf(CanonTypeX(LX)) in [tcInteger, tcFloat, tcBoolean, tcChar,
+            tcString, tcPointer, tcEnum, tcSet, tcArray, tcRecord,
+            tcInterface, tcProc, tcClassOf, tcVariant]) then
+          EmitAt(LM, LExpr, 'E2021', SE2021_ClassTypeRequired);
+      end;
+      LAddr := LM.Tree.Nodes[LExpr].NextSibling;
+      if LAddr = NIL_NODE then
+        Exit;
+      LX := GetX(LAddr);
+      if XValid(LX) and not Unreliable(N, LAddr, LX) and
+         (XCatOf(CanonTypeX(LX)) in [tcInteger, tcFloat, tcBoolean, tcChar,
+          tcString, tcEnum, tcSet, tcArray, tcRecord, tcClass, tcInterface,
+          tcClassOf, tcVariant]) then
+        EmitAt(LM, LAddr, 'E2017', SE2017_PointerTypeRequired);
+    end;
+
+    { 18.1.2: an `on` handler's type is a class - an Integer, an interface, a
+      record, a class reference (`on E: TClass`) is E2021 (dcc64 37.0, spec
+      audit g6 X01). An undeclared or generic type says nothing here. }
+    procedure CheckHandler(N: Integer);
+    var
+      LType, LMid, LSym: Integer;
+      LX: TSemaXType;
+    begin
+      LType := LM.Tree.Nodes[N].FirstChild;
+      if LType = NIL_NODE then
+        Exit;
+      // `on E: T do S` - three children; `on T do S` - two.
+      if (LM.Tree.Nodes[LType].NextSibling <> NIL_NODE) and
+         (LM.Tree.Nodes[LM.Tree.Nodes[LType].NextSibling].NextSibling <>
+          NIL_NODE) then
+        LType := LM.Tree.Nodes[LType].NextSibling;
+      if not (LM.Tree.Nodes[LType].Kind in [nkIdent, nkMember]) or
+         InUntypedWith(N) or not TargetSym(LType, LMid, LSym) or
+         not (FModels[LMid].Symbols[LSym].Kind in [skType, skBuiltinType]) then
+        Exit;
+      LX := XPlain(LMid, LSym);
+      if OpenX(LX) then
+        Exit;
+      if XCatOf(CanonTypeX(LX)) in [tcInteger, tcFloat, tcBoolean, tcChar,
+         tcString, tcPointer, tcEnum, tcSet, tcArray, tcRecord, tcInterface,
+         tcProc, tcClassOf, tcVariant, tcFile] then
+        EmitAt(LM, LType, 'E2021', SE2021_ClassTypeRequired);
+    end;
+
     procedure CheckForIn(N: Integer);
     var
       LVar, LColl, LCore, LHead, LMid, LSym: Integer;
@@ -25264,6 +25335,10 @@ var
           CheckFor(N);
         nkForInStmt:
           CheckForIn(N);
+        nkRaiseStmt:
+          CheckRaise(N);
+        nkExceptOn:
+          CheckHandler(N);
         nkExprStmt:
           if Length(LM.Tree.Source.SwitchEvents) > 0 then
             CheckCallStmt(N);

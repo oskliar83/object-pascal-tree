@@ -51,6 +51,10 @@ const
     'E2037 Declaration of ''%s'' differs from previous declaration';
   // An anonymous method naming what it cannot capture (17 sec. 17.3.1).
   SE2555_CannotCapture = 'E2555 Cannot capture symbol ''%s''';
+  // A raise operand or a handler type that is no class (instance), a raise
+  // address that is no pointer (18.1.2, 18.3.1). Neither names anything.
+  SE2021_ClassTypeRequired = 'E2021 Class type required';
+  SE2017_PointerTypeRequired = 'E2017 Pointer type required';
   // A nested routine as a plain procedural value (6.9).
   SE2094_LocalRoutineToProcVar =
     'E2094 Local procedure/function ''%s'' assigned to procedure variable';

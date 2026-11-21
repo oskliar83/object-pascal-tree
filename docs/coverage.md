@@ -618,6 +618,12 @@ of less work, not a gap in following the language; its consequences are in
   E2250), but beside an Integer overload dcc takes `F9(X: Integer)` for a
   literal where PasTree takes the `reference to` one - not modelled.
 
+## 18-exceptions.md
+
+### 18.1.2 / 18.3.1 Handler types and raise operands
+- E2021 / E2017 are judged over a typed operand only: an untyped one, one
+  an overload choice typed, an open generic type say nothing.
+
 ## 19-rtti-attributes.md
 
 ### 19.3.2 Applying attributes

@@ -15496,6 +15496,63 @@ begin
   end;
 end;
 
+// A raise operand and a handler type are classes (spec 18.1.2, 18.3.1): 5,
+// an interface, a record, a class reference, a type name, nil are E2021; an
+// `at` address that is no pointer E2017 (dcc64 37.0; spec audit g6 X01,
+// X02; local/probe-park/sa4-flow R1).
+procedure TestRaiseOperands;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_raise');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class constructor Create; end;'#10 +
+    '  TClass = class of TObject;'#10 +
+    '  IInterface = interface end;'#10 +
+    'implementation'#10 +
+    'constructor TObject.Create; begin end;'#10 +
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'RaiseX.dpr'),
+    'program RaiseX;'#10 +                                               // 1
+    'type IFoo = interface end; TRec = record end; EMy = class end;'#10 + // 2
+    'var I: IFoo; R: TRec; O: TObject; C: TClass; P: Pointer; E: EMy;'#10 + // 3
+    'function Make: EMy; begin Result := nil; end;'#10 +                 // 4
+    'procedure Q;'#10 +                                                  // 5
+    'begin'#10 +                                                         // 6
+    '  raise 5;'#10 +                                                    // 7 E2021
+    '  raise I;'#10 +                                                    // 8 E2021
+    '  raise R;'#10 +                                                    // 9 E2021
+    '  raise C;'#10 +                                                    // 10 E2021
+    '  raise EMy;'#10 +                                                  // 11 E2021
+    '  raise nil;'#10 +                                                  // 12 E2021
+    '  raise O; raise E; raise EMy.Create; raise (E); raise Make;'#10 +  // 13
+    '  raise E at 5;'#10 +                                               // 14 E2017
+    '  raise E at P; raise E at @Q; raise E at nil;'#10 +                // 15
+    '  try except on X: Integer do ; end;'#10 +                          // 16 E2021
+    '  try except on X: IFoo do ; end;'#10 +                             // 17 E2021
+    '  try except on TRec do ; end;'#10 +                                // 18 E2021
+    '  try except on X: TClass do ; end;'#10 +                           // 19 E2021
+    '  try except on X: TObject do ; on EMy do raise; end;'#10 +         // 20
+    'end;'#10 +                                                          // 21
+    'begin'#10 +                                                         // 22
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'RaiseX.dpr'));
+    LM := ModelByName('raisex');
+    Ok('raise: E2021 lines [' + DiagLinesOf(LM, 'E2021') + ']',
+      DiagLinesOf(LM, 'E2021') = '7 8 9 10 11 12 16 17 18 19');
+    Ok('raise: E2017 lines [' + DiagLinesOf(LM, 'E2017') + ']',
+      DiagLinesOf(LM, 'E2017') = '14');
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // A write to a `const` parameter (spec 6.2.3): E2064 for the parameter
 // itself, a field of a record one at any depth (through `with` too), an
 // element of a static array one or of a `const` open array; a dynamic
@@ -24472,6 +24529,7 @@ begin
   TestParamLegalShapes;
   TestFlowExits;
   TestNestedProcValue;
+  TestRaiseOperands;
   TestOpenArrayValue;
   TestPropertyAccessChecks;
   TestGenericInferErrors;
