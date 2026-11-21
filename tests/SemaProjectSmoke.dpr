@@ -11412,6 +11412,101 @@ begin
   end;
 end;
 
+{ Spec 11.1.2 (dcc64 37.0, local/probe-park/sa4-classes inh H1-H7, HT; the
+  wide gate's JVCL TJvCustomListBox.DragImages): a property specifier above
+  the class's own member of the name binds an INHERITED member of the name
+  visible there - an ancestor's virtual method overridden or reintroduced
+  below, an ancestor's protected field, a private one of the same unit - and
+  is E2168 only with none: an ancestor's `private` member of another unit,
+  a `strict private` one. }
+procedure TestPropSpecInherited;
+const
+  SYS = 'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class constructor Create; end;'#10 +
+    '  IInterface = interface end;'#10 +
+    'implementation'#10'constructor TObject.Create; begin end;'#10 +
+    'end.'#10;
+  UB =
+    'unit UBase;'#10 +
+    'interface'#10 +
+    'type'#10 +
+    '  TB = class'#10 +
+    '  private'#10 +
+    '    FPriv: Integer;'#10 +
+    '    function GetPriv: Integer;'#10 +
+    '  strict private'#10 +
+    '    FSP: Integer;'#10 +
+    '  protected'#10 +
+    '    FProt: Integer;'#10 +
+    '    function GetV: Integer; virtual;'#10 +
+    '    function GetR: Integer; virtual;'#10 +
+    '    function GetS: Integer;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TB.GetPriv: Integer; begin Result := 0; end;'#10 +
+    'function TB.GetV: Integer; begin Result := 0; end;'#10 +
+    'function TB.GetR: Integer; begin Result := 0; end;'#10 +
+    'function TB.GetS: Integer; begin Result := 0; end;'#10 +
+    'end.'#10;
+  HT =
+    'program HT;'#10 +
+    'uses UBase;'#10 +
+    'type'#10 +
+    '  TL = class'#10 +
+    '  strict private'#10 +
+    '    FSP: Integer;'#10 +
+    '  private'#10 +
+    '    FP: Integer;'#10 +
+    '  end;'#10 +
+    '  TD = class(TB)'#10 +
+    '  public'#10 +
+    '    property P1: Integer read GetV;'#10 +
+    '    property P2: Integer read GetR;'#10 +
+    '    property P3: Integer read FProt;'#10 +
+    '    property P4: Integer read GetPriv;'#10 +
+    '  protected'#10 +
+    '    FProt: Integer;'#10 +
+    '    function GetV: Integer; override;'#10 +
+    '    function GetR: Integer; reintroduce;'#10 +
+    '  private'#10 +
+    '    function GetPriv: Integer;'#10 +
+    '  end;'#10 +
+    '  TE = class(TL)'#10 +
+    '  public'#10 +
+    '    property P5: Integer read FSP;'#10 +
+    '    property P6: Integer read FP;'#10 +
+    '  private'#10 +
+    '    FSP: Integer;'#10 +
+    '    FP: Integer;'#10 +
+    '  end;'#10 +
+    'function TD.GetV: Integer; begin Result := 0; end;'#10 +
+    'function TD.GetR: Integer; begin Result := 0; end;'#10 +
+    'function TD.GetPriv: Integer; begin Result := 0; end;'#10 +
+    'begin'#10 +
+    'end.'#10;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_propinh');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'), SYS);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UBase.pas'), UB);
+  TFile.WriteAllText(TPath.Combine(LDir, 'HT.dpr'), HT);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'HT.dpr'));
+    LM := ModelByName('ht');
+    Ok('propinh: E2168 only with no visible inherited member [' +
+      DiagSites(LM, 'E2168') + ']', DiagSites(LM, 'E2168') = '15:31 25:31');
+    Ok('propinh: nothing else [' + IntToStr(Length(LM.Diags)) + ']',
+      Length(LM.Diags) = 2);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 { Spec 11.1.2, 11.2.1, 12.2.1, 12.2.4, 12.2.5, 12.3.1, 13.1.1, 13.2.1,
   15.1.3, 15.1.4 (dcc64 37.0, spec audit g4 IOvr, IMsg, QFwd, CPub, CPub2,
   CDefVis, g5 C02*; local/probe-park/sa4-classes tests CD, CD2 - each
@@ -25969,6 +26064,7 @@ begin
   TestAttributeE2289;
   TestForwardSection;
   TestClassDeclChecks;
+  TestPropSpecInherited;
   TestProcKindValue;
   TestAttributeE2289Lists;
   TestAttributeE2289Hidden;

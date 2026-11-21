@@ -15527,6 +15527,44 @@ var
       'class or interface type', [LM.Tree.NodeText(LName)]));
   end;
 
+  // Does an ancestor of AClassSym declare a member ANameLower visible from
+  // the class (13.1.1: a property specifier above the class's own
+  // redeclaration names it)? Not visible: a `strict private` one, a
+  // `private` one of another unit. True too where the ancestry is not
+  // known (an ancestor that does not resolve, a model with no text).
+  function InheritedVisible(AClassSym: Integer;
+    const ANameLower: string): Boolean;
+  var
+    LCur, LNext: TSemaXType;
+    LDef, LFound: Integer;
+    LCm: TPasSemaModel;
+  begin
+    Result := True;
+    if AClassSym = NIL_SYM then
+      Exit;
+    LCur := XPlain(AId, AClassSym);
+    for var LDepth := 1 to 40 do
+    begin
+      LDef := TypeDefNodeOf(LCur.UnitId, LCur.Sym);
+      if LDef = NIL_NODE then
+        Exit;
+      case HeritageHopX(LCur.UnitId, LCur.Sym, LDef, LNext) of
+        hhNone: Exit(False);
+        hhBroken: Exit;
+      end;
+      LCur := XPlain(LNext.UnitId, LNext.Sym);
+      LCm := FModels[LCur.UnitId];
+      if LCm.Demoted or (LCm.Symbols[LCur.Sym].MemberScope = NIL_SCOPE) then
+        Exit;
+      LFound := LCm.FindLocal(LCm.Symbols[LCur.Sym].MemberScope, ANameLower);
+      if (LFound <> NIL_SYM) and
+         not ((LCm.Symbols[LFound].Visibility = svStrictPrivate) or
+              ((LCm.Symbols[LFound].Visibility = svPrivate) and
+               (LCur.UnitId <> AId))) then
+        Exit(True);
+    end;
+  end;
+
   procedure CheckProperty(ADecl: Integer; APublished: Boolean);
   var
     LName, LProp, LChild, LAcc, LMid, LAs, LDef, LAbs, LFinal, LStat: Integer;
@@ -15608,8 +15646,16 @@ var
                (LM.Symbols[LAs].DeclNode <> NIL_NODE) and
                (LM.Tree.Nodes[LM.Symbols[LAs].DeclNode].FirstToken >
                 LM.Tree.Nodes[ADecl].FirstToken) then
-              EmitAt(LM, LAcc, 'E2168', 'E2168 Field or method identifier ' +
-                'expected')
+            begin
+              // An inherited member of the name visible here is what the
+              // specifier names (13.1.1): JVCL's TJvCustomListBox reads
+              // GetDragImages above its own override of TControl's.
+              if not InheritedVisible(
+                   LM.Scopes[LM.Symbols[LProp].Scope].StructSym,
+                   LM.Symbols[LAs].NameLower) then
+                EmitAt(LM, LAcc, 'E2168', 'E2168 Field or method ' +
+                  'identifier expected');
+            end
             else if (LM.Tree.Nodes[ADecl].Aux = 1) and
                     not LAm.Demoted then
             begin
