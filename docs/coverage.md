@@ -504,6 +504,25 @@ of less work, not a gap in following the language; its consequences are in
   instead; it gets the E2003 here. A list of labels on that line (`A, B:
   Integer;`) is read as labels: each undeclared one is reported, where dcc
   shows the first alone.
+- a branch field of a generic record typed by an unconstrained type
+  parameter (`0: (V: T)`) is not reported; dcc says `E2569 Type parameter
+  'T' may need finalization` at the declaration.
+
+### 9.2.1 Methods, properties, class members
+- a destructor in a record helper (`E2295 A class helper cannot introduce
+  a destructor`) is not reported; `automated` in a record (an E2169 cascade
+  for dcc) is not judged.
+
+### 9.3.1 `class operator` declarations
+- after an operator whose name is no operator name (E2393) dcc's reading of
+  the rest of the record goes off - E2029 / E2058 / E2086 on that line and
+  the next ones, and E2393 at the record's later operator headings; PasTree
+  reports the E2393 and checks nothing more of that record.
+- an operand of a record type with no usable operator (`R + R` for a record
+  without `Add`, or whose `Add` has the wrong arity) is not reported; dcc
+  says `E2015 Operator not applicable to this operand type`.
+- a record helper's `class operator` (dcc accepts the declaration) is not
+  checked for its name or arity.
 
 ## 11-classes.md
 

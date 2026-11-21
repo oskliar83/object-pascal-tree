@@ -15678,6 +15678,230 @@ begin
   end;
 end;
 
+// A record's own declaration (spec 9.2.1, 9.2.2, 9.3.1, 9.4.1; dcc64 37.0,
+// spec audit g4 RVis, RCtor, ROpCls, ROpAr, RNot, RMgd, RMgd2;
+// local/probe-park/sa4-records A1-E1): protected / published sections,
+// parameterless and all-defaulted constructors, non-static class methods,
+// destructors, operator names, arities and the lifecycle operators' modes;
+// `class operator` in a class. Beside each, the legal shapes that must stay
+// silent - the RTL is full of record constructors and operators.
+procedure TestRecordDecls;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_recdecl');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'RecDecl.dpr'),
+    'program RecDecl;'#10 +                                              // 1
+    'type'#10 +                                                          // 2
+    '  TR1 = record'#10 +                                                // 3
+    '  protected'#10 +                                                   // 4 E2184
+    '    A: Integer;'#10 +                                               // 5
+    '  strict protected'#10 +                                            // 6 E2184
+    '    B: Integer;'#10 +                                               // 7
+    '  published'#10 +                                                   // 8 E2184
+    '    C: Integer;'#10 +                                               // 9
+    '  strict private D: Integer;'#10 +                                  // 10
+    '  private E: Integer;'#10 +                                         // 11
+    '  public F: Integer;'#10 +                                          // 12
+    '  end;'#10 +                                                        // 13
+    '  TR2 = record'#10 +                                                // 14
+    '    X: Integer;'#10 +                                               // 15
+    '    constructor Create;'#10 +                                       // 16 E2394
+    '    constructor Make(A: Integer = 0; B: Integer = 1);'#10 +         // 17 E2471
+    '    constructor Ok1(A: Integer; B: Integer = 0);'#10 +              // 18
+    '    constructor Ok2(const A: array of Integer);'#10 +               // 19
+    '    constructor Ok3(var A: Integer); overload;'#10 +                // 20
+    '    constructor Ok3(out A: string); overload;'#10 +                 // 21
+    '    class function F1: Integer;'#10 +                               // 22 E2398
+    '    class function F2: Integer; static;'#10 +                       // 23
+    '    class procedure P1; static; inline;'#10 +                       // 24
+    '    class constructor CC;'#10 +                                     // 25
+    '    class destructor CD;'#10 +                                      // 26
+    '    destructor Destroy;'#10 +                                       // 27 E2465
+    '    procedure M;'#10 +                                              // 28
+    '  end;'#10 +                                                        // 29
+    '  TR3 = record'#10 +                                                // 30
+    '    class operator Add(A: TR3): TR3;'#10 +                          // 31 E2517
+    '    class operator Negative(A, B: TR3): TR3;'#10 +                  // 32 E2517
+    '    class operator In(A: Integer; B: TR3): Boolean;'#10 +           // 33
+    '    class operator Include(A: TR3; B: Integer): TR3;'#10 +          // 34
+    '    class operator Implicit(A: Integer): TR3;'#10 +                 // 35
+    '    class operator Implicit(A: TR3): string;'#10 +                  // 36
+    '    class operator Initialize(out D: TR3);'#10 +                    // 37
+    '    class operator Finalize(var D: TR3);'#10 +                      // 38
+    '    class operator Assign(var D: TR3; const [ref] S: TR3);'#10 +    // 39
+    '    class operator LogicalNot(const A: TR3): TR3;'#10 +             // 40
+    '  end;'#10 +                                                        // 41
+    '  TR4 = record'#10 +                                                // 42
+    '    class operator Initialize(var D: TR4);'#10 +                    // 43 E2644
+    '    class operator Finalize(out D: TR4);'#10 +                      // 44 E2645
+    '    class operator Assign(out D: TR4; var S: TR4);'#10 +            // 45 E2617
+    '  end;'#10 +                                                        // 46
+    '  TR5 = record'#10 +                                                // 47
+    '    class operator Initialize;'#10 +                                // 48
+    '    class operator Finalize;'#10 +                                  // 49
+    '    class operator Assign(var D: TR5; S: TR5);'#10 +                // 50 E2618
+    '  end;'#10 +                                                        // 51
+    '  TR6 = record'#10 +                                                // 52
+    '    class operator Initialize(out A, B: TR6);'#10 +                 // 53 E2640
+    '    class operator Assign(var D: TR6);'#10 +                        // 54 E2616
+    '    class operator Finalize(var D: Integer);'#10 +                  // 55 E2645
+    '  end;'#10 +                                                        // 56
+    '  TG<T> = record'#10 +                                              // 57
+    '    class operator Initialize(out D: TG<T>);'#10 +                  // 58
+    '    class operator Assign(var D: TG<T>; const [Ref] S: TG<T>);'#10 + // 59
+    '    class operator Add(const A, B: TG<T>): TG<T>;'#10 +             // 60
+    '    constructor Create(const A: T);'#10 +                           // 61
+    '  end;'#10 +                                                        // 62
+    '  TC = class'#10 +                                                  // 63
+    '    class operator Add(A, B: TC): TC;'#10 +                         // 64 E2123
+    '  end;'#10 +                                                        // 65
+    '  TH = record helper for TR2'#10 +                                  // 66
+    '  protected'#10 +                                                   // 67
+    '    procedure HM;'#10 +                                             // 68
+    '    class function G: Integer;'#10 +                                // 69 E2398
+    '    constructor HC;'#10 +                                           // 70 E2394
+    '    class function G2: Integer; static;'#10 +                       // 71
+    '  end;'#10 +                                                        // 72
+    '  TBad = record'#10 +                                               // 73
+    '    class operator BitwiseNot(const A: TBad): TBad;'#10 +           // 74 E2393
+    '    class operator Add(A: TBad): TBad;'#10 +                        // 75 lost
+    '  end;'#10 +                                                        // 76
+    '  TRx = record X: Integer; class operator Add(const A, B: TRx): TRx; end;'#10 + // 77
+    'class operator TRx.Add(const A, B: TRx): TRx; begin Result := A; end;'#10 + // 78
+    'class operator TRx.Foo(const A, B: TRx): TRx; begin Result := A; end;'#10 + // 79 E2393
+    'class operator TBad.Mul(const A, B: TBad): TBad; begin Result := A; end;'#10 + // 80 lost
+    'begin'#10 +                                                         // 81
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'RecDecl.dpr'));
+    LM := ModelByName('recdecl');
+    Ok('recdecl: E2184 lines [' + DiagLinesOf(LM, 'E2184') + ']',
+      DiagLinesOf(LM, 'E2184') = '4 6 8');
+    Ok('recdecl: E2394 lines [' + DiagLinesOf(LM, 'E2394') + ']',
+      DiagLinesOf(LM, 'E2394') = '16 70');
+    Ok('recdecl: E2471 lines [' + DiagLinesOf(LM, 'E2471') + ']',
+      DiagLinesOf(LM, 'E2471') = '17');
+    Ok('recdecl: E2398 lines [' + DiagLinesOf(LM, 'E2398') + ']',
+      DiagLinesOf(LM, 'E2398') = '22 69');
+    Ok('recdecl: E2465 lines [' + DiagLinesOf(LM, 'E2465') + ']',
+      DiagLinesOf(LM, 'E2465') = '27');
+    Ok('recdecl: E2517 lines [' + DiagLinesOf(LM, 'E2517') + ']',
+      DiagLinesOf(LM, 'E2517') = '31 32');
+    Ok('recdecl: E2517 text',
+      DiagHasText(LM, 'E2517', 'Operator ''Add'' must take 2 parameter(s)') and
+      DiagHasText(LM, 'E2517', 'Operator ''Negative'' must take 1 parameter(s)'));
+    Ok('recdecl: E2644 lines [' + DiagLinesOf(LM, 'E2644') + ']',
+      DiagLinesOf(LM, 'E2644') = '43');
+    Ok('recdecl: E2645 lines [' + DiagLinesOf(LM, 'E2645') + ']',
+      DiagLinesOf(LM, 'E2645') = '44 55');
+    Ok('recdecl: E2617 lines [' + DiagLinesOf(LM, 'E2617') + ']',
+      DiagLinesOf(LM, 'E2617') = '45');
+    Ok('recdecl: E2618 lines [' + DiagLinesOf(LM, 'E2618') + ']',
+      DiagLinesOf(LM, 'E2618') = '50');
+    Ok('recdecl: E2640 lines [' + DiagLinesOf(LM, 'E2640') + ']',
+      DiagLinesOf(LM, 'E2640') = '53');
+    Ok('recdecl: E2616 lines [' + DiagLinesOf(LM, 'E2616') + ']',
+      DiagLinesOf(LM, 'E2616') = '54');
+    Ok('recdecl: E2123 lines [' + DiagLinesOf(LM, 'E2123') + ']',
+      DiagLinesOf(LM, 'E2123') = '64');
+    Ok('recdecl: E2393 lines [' + DiagLinesOf(LM, 'E2393') + ']',
+      DiagLinesOf(LM, 'E2393') = '74 79');
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
+// Variant-part fields (spec 9.1.3; dcc64 37.0, spec audit g4 RVar, RVar3;
+// local/probe-park/sa4-records C1, C2): a field needing finalization is
+// E2154, one reaching a custom managed record E2651, named as dcc names the
+// type; an `[unsafe]` interface, a method pointer, ShortString, string[N], a
+// pointer, a class, a generic parameter and a managed field OUTSIDE the
+// variant part stay silent.
+procedure TestRecordVariantFields;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_recvar');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    '  IInterface = interface end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'RecVar.dpr'),
+    'program RecVar;'#10 +                                               // 1
+    'type'#10 +                                                          // 2
+    '  TM = record X: Integer; class operator Initialize(out D: TM); end;'#10 + // 3
+    '  TH = record S: string; end;'#10 +                                 // 4
+    '  THM = record M: TM; S: string; end;'#10 +                         // 5
+    '  TStrs = array[0..1] of string;'#10 +                              // 6
+    '  TRef = reference to procedure;'#10 +                              // 7
+    '  TP = procedure of object;'#10 +                                   // 8
+    '  TV = record'#10 +                                                 // 9
+    '    case Integer of'#10 +                                           // 10
+    '      0: (A, B: string);'#10 +                                      // 11 E2154
+    '      1: (M: TM);'#10 +                                             // 12 E2651
+    '      2: (H: TH);'#10 +                                             // 13 E2154
+    '      3: (HM: THM);'#10 +                                           // 14 E2651
+    '      4: (SA: TStrs);'#10 +                                         // 15 E2154
+    '      5: (D: array of Integer);'#10 +                               // 16 E2154
+    '      6: (Q: Integer;'#10 +                                         // 17
+    '          case Byte of'#10 +                                        // 18
+    '            0: (NS: string);'#10 +                                  // 19 E2154
+    '            1: (NI: Integer));'#10 +                                // 20
+    '      7: ([unsafe] U: IInterface);'#10 +                            // 21
+    '      8: (MP: TP; SS: ShortString; P: Pointer; O: TObject);'#10 +   // 22
+    '      9: (RF: TRef);'#10 +                                          // 23 E2154
+    '      10: (AM: array[0..1] of TM);'#10 +                            // 24 E2651
+    '      11: (I: IInterface);'#10 +                                    // 25 E2154
+    '      12: (S10: string[10]);'#10 +                                  // 26
+    '  end;'#10 +                                                        // 27
+    '  TG<T> = record'#10 +                                              // 28
+    '    case Integer of'#10 +                                           // 29
+    '      0: (V: T);'#10 +                                              // 30
+    '      1: (I: Integer);'#10 +                                        // 31
+    '  end;'#10 +                                                        // 32
+    '  TPlain = record'#10 +                                             // 33
+    '    S: string;'#10 +                                                // 34
+    '    case Integer of'#10 +                                           // 35
+    '      0: (X: Integer);'#10 +                                        // 36
+    '      1: (Y: Double);'#10 +                                         // 37
+    '  end;'#10 +                                                        // 38
+    'class operator TM.Initialize(out D: TM); begin end;'#10 +           // 39
+    'begin'#10 +                                                         // 40
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'RecVar.dpr'));
+    LM := ModelByName('recvar');
+    Ok('recvar: E2154 lines [' + DiagLinesOf(LM, 'E2154') + ']',
+      DiagLinesOf(LM, 'E2154') = '11 13 15 16 19 23 25');
+    Ok('recvar: E2651 lines [' + DiagLinesOf(LM, 'E2651') + ']',
+      DiagLinesOf(LM, 'E2651') = '12 14 24');
+    Ok('recvar: E2154 names',
+      DiagHasText(LM, 'E2154', 'Type ''TH'' needs finalization') and
+      DiagHasText(LM, 'E2154', 'Type ''array of Integer'' needs') and
+      DiagHasText(LM, 'E2154', 'Type ''TRef'' needs') and
+      not DiagHasText(LM, 'E2154', 'TStrs'));
+    Ok('recvar: E2651 names',
+      DiagHasText(LM, 'E2651', 'Type ''THM'' is managed record') and
+      DiagHasText(LM, 'E2651', 'Type ''TM'' is managed record'));
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // A write to a `const` parameter (spec 6.2.3): E2064 for the parameter
 // itself, a field of a record one at any depth (through `with` too), an
 // element of a static array one or of a `const` open array; a dynamic
@@ -24844,6 +25068,8 @@ begin
   TestRaiseOperands;
   TestForInMembers;
   TestRefTypeInPlace;
+  TestRecordDecls;
+  TestRecordVariantFields;
   TestOpenArrayValue;
   TestPropertyAccessChecks;
   TestGenericInferErrors;

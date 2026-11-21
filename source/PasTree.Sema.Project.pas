@@ -1515,6 +1515,7 @@ type
     function ResolveCustomAttributeX(AId: Integer): TSemaXType;
     procedure CheckAttributes(AId: Integer);
     procedure CheckHeadingPairs(AId: Integer);
+    procedure CheckRecordDecls(AId: Integer);
     function InterfaceGuidBracket(AModel: TPasSemaModel;
       AAttr: Integer): Boolean;
     function RecordHasLifecycleOp(AMid, ADefNode: Integer): Boolean;
@@ -2722,6 +2723,10 @@ type
     // definition or a field's type slot, inline anonymous types included -
     // closed over instance AInst.
     function IsManagedTypeNode(AMid, ANode, AInst, ADepth: Integer): Boolean;
+    // A record field declaration that is no part of an instance's storage
+    // for managedness: a `class var`, an `[unsafe]` field.
+    class function FieldStorageUncounted(AModel: TPasSemaModel;
+      ADecl: Integer): Boolean; static;
     { Source position of ANY node in AId, as a clickable site: the file the
       node's FIRST token really came from (NOT ModelFile - an $I-included file
       is a different path), 1-based line/col. False if AId/ANode is out of
@@ -11601,6 +11606,7 @@ begin
             CheckConstraints(AIds[0]);
             CheckAttributes(AIds[0]);
             CheckHeadingPairs(AIds[0]);
+            CheckRecordDecls(AIds[0]);
             CheckLateUnitMembers(AIds[0]);
           end;
         except
@@ -11616,6 +11622,7 @@ begin
         CheckConstraints(AIds[ASlot]);
         CheckAttributes(AIds[ASlot]);
         CheckHeadingPairs(AIds[ASlot]);
+        CheckRecordDecls(AIds[ASlot]);
         CheckLateUnitMembers(AIds[ASlot]);
       end,
       function(ASlot: Integer): Integer
@@ -13431,6 +13438,640 @@ begin
       EmitAt(LM, LName, 'E2037', Format(SE2037_DeclarationDiffers,
         [LM.Tree.NodeText(LName)]));
   end;
+end;
+
+{ The rules of a record's own declaration, which dcc checks there whatever
+  uses the record (dcc64 37.0; spec audit g4 RVis, RCtor, ROpCls, ROpAr, RNot,
+  RVar, RVar3, RMgd2; local/probe-park/sa4-records):
+  - 9.2.1: a `protected` or `published` section in a record is E2184 (a
+    record helper takes both); a `class` method of a record or a record
+    helper that is not `static` is E2398 (class constructors and destructors
+    are none); a record's destructor is E2465;
+  - 9.2.2: an instance constructor of a record or a record helper that takes
+    no parameter is E2394, one whose parameters all have defaults E2471;
+  - 9.3.1: a record's `class operator` whose name is no operator is E2393,
+    one with the wrong count of parameters E2517 (Initialize E2640, Finalize
+    E2641, Assign E2616); an implementation heading of a record's operator
+    with no operator name is E2393 too; `class operator` in a class, a class
+    helper or an `object` is E2123 (a record helper's is not checked);
+  - 9.4.1: the lifecycle operators' parameter modes and types, E2644 /
+    E2645 / E2617 / E2618 - "the container type" is the record named as
+    written, or a type that resolves to it; an unresolved one says nothing;
+  - 9.1.3: a variant-part field whose type needs finalization is E2154, one
+    that reaches a custom managed record E2651, the type named as dcc names
+    it (VariantCulprit). A generic parameter's field (E2569) is left alone.
+  One report per declaration, at its name (a section: its level word; a
+  variant field: its type). dcc's recovery after an invalid operator name -
+  the E2029 / E2058 / E2086 that follow it - is not imitated. }
+procedure TPasSemaProject.CheckRecordDecls(AId: Integer);
+const
+  SE2184 = 'E2184 %s section valid only in class types';
+  SE2394 = 'E2394 Parameterless constructors not allowed on record types';
+  SE2471 =
+    'E2471 Possibly parameterless constructors not allowed on record types';
+  SE2398 = 'E2398 Class methods in record types must be static';
+  SE2465 = 'E2465 A record cannot introduce a destructor';
+  SE2123 = 'E2123 PROCEDURE, FUNCTION, PROPERTY, or VAR expected';
+  SE2393 = 'E2393 Invalid operator declaration';
+  SE2517 = 'E2517 Operator ''%s'' must take %d parameter(s)';
+  SE2640 = 'E2640 Initialize operator only allowed in record type and ' +
+    'takes one out parameter';
+  SE2641 = 'E2641 Finalize operator only allowed in record type and ' +
+    'takes one var parameter';
+  SE2616 = 'E2616 Assign operator only allowed in record type and takes ' +
+    'two parameters';
+  SE2644 = 'E2644 The parameter of Initialize operator must be a out ' +
+    'parameter of the container type';
+  SE2645 = 'E2645 The parameter of Finalize operator must be a var ' +
+    'parameter of the container type';
+  SE2617 = 'E2617 First parameter of Assign operator must be a var ' +
+    'parameter of the container type';
+  SE2618 = 'E2618 Second parameter of Assign operator must be a const[Ref] ' +
+    'or var parameter of the container type';
+  SE2154 = 'E2154 Type ''%s'' needs finalization - not allowed in variant ' +
+    'record';
+  SE2651 = 'E2651 Type ''%s'' is managed record - not allowed in variant ' +
+    'record';
+  // OperatorArity's answers for the three lifecycle operators.
+  OP_INITIALIZE = -1;
+  OP_FINALIZE = -2;
+  OP_ASSIGN = -3;
+var
+  LM: TPasSemaModel;
+  LT: TPasTree;
+  LNode: Integer;
+  // The record being read has an operator with no operator name (E2393).
+  LLost: Boolean;
+  // The records whose declaration was lost so: their headings are dcc's
+  // recovery too.
+  LLostRecords: TArray<Integer>;
+
+  // 9.3.1: the parameter count of operator AName (lower case); 0 when it is
+  // no operator name.
+  function OperatorArity(const AName: string): Integer;
+  begin
+    if (AName = 'implicit') or (AName = 'explicit') or
+       (AName = 'negative') or (AName = 'positive') or (AName = 'inc') or
+       (AName = 'dec') or (AName = 'logicalnot') or (AName = 'trunc') or
+       (AName = 'round') then
+      Result := 1
+    else if (AName = 'add') or (AName = 'subtract') or
+       (AName = 'multiply') or (AName = 'divide') or
+       (AName = 'intdivide') or (AName = 'modulus') or
+       (AName = 'leftshift') or (AName = 'rightshift') or
+       (AName = 'logicaland') or (AName = 'logicalor') or
+       (AName = 'logicalxor') or (AName = 'bitwiseand') or
+       (AName = 'bitwiseor') or (AName = 'bitwisexor') or
+       (AName = 'equal') or (AName = 'notequal') or
+       (AName = 'greaterthan') or (AName = 'greaterthanorequal') or
+       (AName = 'lessthan') or (AName = 'lessthanorequal') or
+       (AName = 'in') or (AName = 'include') or (AName = 'exclude') then
+      Result := 2
+    else if AName = 'initialize' then
+      Result := OP_INITIALIZE
+    else if AName = 'finalize' then
+      Result := OP_FINALIZE
+    else if AName = 'assign' then
+      Result := OP_ASSIGN
+    else
+      Result := 0;
+  end;
+
+  function IsOperator(ARoutine: Integer): Boolean;
+  begin
+    Result := LT.Source.VisibleTextEquals(LT.Nodes[ARoutine].FirstToken,
+      'operator');
+  end;
+
+  // The routine's last name segment; NIL_NODE when it has none.
+  function NameOf(ARoutine: Integer): Integer;
+  var
+    LKid: Integer;
+  begin
+    Result := NIL_NODE;
+    LKid := LT.Nodes[ARoutine].FirstChild;
+    while LKid <> NIL_NODE do
+    begin
+      if nfName in LT.Nodes[LKid].Flags then
+        Result := LKid;
+      LKid := LT.Nodes[LKid].NextSibling;
+    end;
+  end;
+
+  function HasDirective(ARoutine: Integer; const AWord: string): Boolean;
+  var
+    LKid: Integer;
+  begin
+    LKid := LT.Nodes[ARoutine].FirstChild;
+    while LKid <> NIL_NODE do
+    begin
+      if (LT.Nodes[LKid].Kind = nkDirective) and
+         LT.Source.VisibleTextEquals(LT.Nodes[LKid].FirstToken, AWord) then
+        Exit(True);
+      LKid := LT.Nodes[LKid].NextSibling;
+    end;
+    Result := False;
+  end;
+
+  // The nkParam of each parameter NAME of ARoutine, in order. ABroken: the
+  // parser reported an error inside the list (`constref X: T` is E2067 and
+  // two names), whose count and modes then say nothing.
+  function ParamsOf(ARoutine: Integer; out ABroken: Boolean): TArray<Integer>;
+  var
+    LList, LParam, LName: Integer;
+  begin
+    Result := nil;
+    ABroken := False;
+    LList := LT.Nodes[ARoutine].FirstChild;
+    while (LList <> NIL_NODE) and (LT.Nodes[LList].Kind <> nkParams) do
+      LList := LT.Nodes[LList].NextSibling;
+    if LList = NIL_NODE then
+      Exit;
+    for var LDiag in LM.ParseDiags do
+      if (LDiag.VisIndex >= LT.Nodes[LList].FirstToken) and
+         (LDiag.VisIndex <= LT.Nodes[LList].LastToken) then
+        ABroken := True;
+    LParam := LT.Nodes[LList].FirstChild;
+    while LParam <> NIL_NODE do
+    begin
+      if LT.Nodes[LParam].Kind = nkParam then
+      begin
+        LName := PasSkipAttrGroups(LT, LT.Nodes[LParam].FirstChild);
+        while (LName <> NIL_NODE) and (nfName in LT.Nodes[LName].Flags) do
+        begin
+          Result := Result + [LParam];
+          LName := PasSkipAttrGroups(LT, LT.Nodes[LName].NextSibling);
+        end;
+      end;
+      LParam := LT.Nodes[LParam].NextSibling;
+    end;
+  end;
+
+  // A parameter's or a field's type: its first child that is neither a name
+  // nor an attribute group; NIL_NODE when none is written.
+  function TypeOf(ADecl: Integer): Integer;
+  begin
+    Result := LT.Nodes[ADecl].FirstChild;
+    while (Result <> NIL_NODE) and ((nfName in LT.Nodes[Result].Flags) or
+          (LT.Nodes[Result].Kind = nkAttrGroup)) do
+      Result := LT.Nodes[Result].NextSibling;
+  end;
+
+  // A default value follows the parameter's type (6.2.5).
+  function HasDefault(AParam: Integer): Boolean;
+  var
+    LType: Integer;
+  begin
+    LType := TypeOf(AParam);
+    Result := (LType <> NIL_NODE) and (LT.Nodes[LType].NextSibling <> NIL_NODE);
+  end;
+
+  // `const [Ref] X` (19.3.3): the attribute stands among the parameter's
+  // children, before its names.
+  function HasRefAttr(AParam: Integer): Boolean;
+  var
+    LKid, LAttr: Integer;
+  begin
+    LKid := LT.Nodes[AParam].FirstChild;
+    while LKid <> NIL_NODE do
+    begin
+      if LT.Nodes[LKid].Kind = nkAttrGroup then
+      begin
+        LAttr := LT.Nodes[LKid].FirstChild;
+        while LAttr <> NIL_NODE do
+        begin
+          if (LT.Nodes[LAttr].Kind = nkAttribute) and
+             (LT.Nodes[LAttr].Aux = amaRef) then
+            Exit(True);
+          LAttr := LT.Nodes[LAttr].NextSibling;
+        end;
+      end;
+      LKid := LT.Nodes[LKid].NextSibling;
+    end;
+    Result := False;
+  end;
+
+  // Is AParam's type the record ARecord (its nkRecordType), as far as can
+  // be told? Its name as written - `TG<T>` for a generic one - or a type
+  // that resolves to it; a type that does not resolve says nothing (True).
+  function OfContainer(AParam, ARecord: Integer): Boolean;
+  var
+    LType, LHead, LDecl, LRecName, LRecSym: Integer;
+    LX, LR: TSemaXType;
+  begin
+    LType := TypeOf(AParam);
+    if LType = NIL_NODE then
+      Exit(False);  // untyped
+    LHead := LType;
+    if LT.Nodes[LHead].Kind = nkTypeArgs then
+      LHead := LT.Nodes[LHead].FirstChild;
+    LDecl := LT.Nodes[ARecord].Parent;
+    if (LDecl = NIL_NODE) or (LT.Nodes[LDecl].Kind <> nkTypeDecl) then
+      Exit(True);
+    LRecName := PasSkipAttrGroups(LT, LT.Nodes[LDecl].FirstChild);
+    if (LHead <> NIL_NODE) and (LRecName <> NIL_NODE) and
+       (LT.Nodes[LHead].Kind = nkIdent) and
+       (LT.NodeNameLower(LHead) = LT.NodeNameLower(LRecName)) then
+      Exit(True);
+    LRecSym := LM.StructSymAtNode(ARecord);
+    LX := ResolveTypeExpr(AId, LType);
+    if (LRecSym = NIL_SYM) or not XValid(LX) then
+      Exit(True);
+    LX := CanonTypeX(LX);
+    LR := CanonTypeX(XPlain(AId, LRecSym));
+    Result := (LX.UnitId = LR.UnitId) and (LX.Sym = LR.Sym);
+  end;
+
+  // 9.3.1 / 9.4.1: a record's `class operator` declaration.
+  procedure CheckOperator(ARoutine, AName, ARecord: Integer);
+  var
+    LArity: Integer;
+    LParams: TArray<Integer>;
+    LBroken: Boolean;
+  begin
+    LArity := OperatorArity(LT.NodeNameLower(AName));
+    LParams := ParamsOf(ARoutine, LBroken);
+    if LBroken and (LArity <> 0) then
+      Exit;
+    case LArity of
+      0:
+        begin
+          EmitAt(LM, AName, 'E2393', SE2393);
+          LLost := True;
+          LLostRecords := LLostRecords + [ARecord];
+        end;
+      OP_INITIALIZE:
+        if Length(LParams) > 1 then
+          EmitAt(LM, AName, 'E2640', SE2640)
+        else if (Length(LParams) = 1) and
+           not ((nfOut in LT.Nodes[LParams[0]].Flags) and
+                OfContainer(LParams[0], ARecord)) then
+          EmitAt(LM, AName, 'E2644', SE2644);
+      OP_FINALIZE:
+        if Length(LParams) > 1 then
+          EmitAt(LM, AName, 'E2641', SE2641)
+        else if (Length(LParams) = 1) and
+           not ((nfVar in LT.Nodes[LParams[0]].Flags) and
+                OfContainer(LParams[0], ARecord)) then
+          EmitAt(LM, AName, 'E2645', SE2645);
+      OP_ASSIGN:
+        if Length(LParams) <> 2 then
+          EmitAt(LM, AName, 'E2616', SE2616)
+        else if not ((nfVar in LT.Nodes[LParams[0]].Flags) and
+                OfContainer(LParams[0], ARecord)) then
+          EmitAt(LM, AName, 'E2617', SE2617)
+        else if not (((nfVar in LT.Nodes[LParams[1]].Flags) or
+                ((nfConst in LT.Nodes[LParams[1]].Flags) and
+                 HasRefAttr(LParams[1]))) and
+                OfContainer(LParams[1], ARecord)) then
+          EmitAt(LM, AName, 'E2618', SE2618);
+    else
+      if Length(LParams) <> LArity then
+        EmitAt(LM, AName, 'E2517', Format(SE2517,
+          [LT.NodeText(AName), LArity]));
+    end;
+  end;
+
+  // 9.2.1 / 9.2.2 / 9.3.1: a method of a record (ARecord) or of a record
+  // helper (ARecord = NIL_NODE).
+  procedure CheckMethod(ARoutine, ARecord: Integer);
+  var
+    LName: Integer;
+    LParams: TArray<Integer>;
+    LAllDefault, LBroken: Boolean;
+  begin
+    LName := NameOf(ARoutine);
+    if (LName = NIL_NODE) or (LT.Nodes[LName].Kind <> nkIdent) then
+      Exit;
+    if IsOperator(ARoutine) then
+    begin
+      if ARecord <> NIL_NODE then
+        CheckOperator(ARoutine, LName, ARecord);
+      Exit;
+    end;
+    case LT.Source.VisibleKind(LT.Nodes[ARoutine].FirstToken) of
+      tkConstructor:
+        if LT.Nodes[ARoutine].Aux <> 1 then
+        begin
+          LParams := ParamsOf(ARoutine, LBroken);
+          if LBroken then
+            Exit;
+          if Length(LParams) = 0 then
+            EmitAt(LM, LName, 'E2394', SE2394)
+          else
+          begin
+            LAllDefault := True;
+            for var LP in LParams do
+              LAllDefault := LAllDefault and HasDefault(LP);
+            if LAllDefault then
+              EmitAt(LM, LName, 'E2471', SE2471);
+          end;
+        end;
+      tkDestructor:
+        if (LT.Nodes[ARoutine].Aux <> 1) and (ARecord <> NIL_NODE) then
+          EmitAt(LM, LName, 'E2465', SE2465);
+      tkProcedure, tkFunction:
+        if (LT.Nodes[ARoutine].Aux = 1) and
+           not HasDirective(ARoutine, 'static') then
+          EmitAt(LM, LName, 'E2398', SE2398);
+    end;
+  end;
+
+  { 9.1.3: what dcc names in E2154 / E2651 for a variant field of type node
+    ANode (model AMid, instance AInst): 2 when the type reaches a custom
+    managed record (a record with a lifecycle operator, a record holding
+    one, an array of either), 1 when it only needs finalization, 0 when it
+    does not or cannot be told. AName: a static array, inline or named, is
+    named by its innermost element, an inline record by its first field that
+    counts; any other type as written. }
+  function VariantCulprit(AMid, ANode, AInst, ADepth: Integer;
+    out AName: string): Integer; forward;
+
+  // An array type node with an index: static (a dynamic one and `array of
+  // const` write none - IsManagedTypeNode's test).
+  function IsStaticArray(const ATree: TPasTree; ADef: Integer): Boolean;
+  begin
+    Result := (ATree.Nodes[ADef].Aux <> 1) and
+      (ATree.Nodes[ADef].FirstChild <> NIL_NODE) and
+      (ATree.Nodes[ATree.Nodes[ADef].FirstChild].NextSibling <> NIL_NODE);
+  end;
+
+  // A record or object definition ADef that reaches a custom managed record
+  // (VariantCulprit 2) - its own lifecycle operator, or an instance field.
+  function CustomManaged(AMid, ADef, AInst, ADepth: Integer): Boolean;
+  var
+    LDm: TPasSemaModel;
+    LStruct, LScope, LSym: Integer;
+    LList: TSemaSymList;
+    LDummy: string;
+  begin
+    Result := False;
+    if ADepth > 8 then
+      Exit;
+    if RecordHasLifecycleOp(AMid, ADef) then
+      Exit(True);
+    LDm := FModels[AMid];
+    LStruct := LDm.StructSymAtNode(ADef);
+    if LStruct = NIL_SYM then
+      Exit;
+    LScope := LDm.Symbols[LStruct].MemberScope;
+    if LScope = NIL_SCOPE then
+      Exit;
+    LList := LDm.Scopes[LScope].Symbols;
+    for var LIdx := 0 to LList.Count - 1 do
+    begin
+      LSym := LList[LIdx];
+      if (LDm.Symbols[LSym].Kind <> skField) or
+         (LDm.Symbols[LSym].DeclNode = NIL_NODE) or
+         FieldStorageUncounted(LDm,
+           LDm.Tree.Nodes[LDm.Symbols[LSym].DeclNode].Parent) then
+        Continue;
+      if VariantCulprit(AMid, LDm.Symbols[LSym].TypeNode, AInst, ADepth + 1,
+         LDummy) = 2 then
+        Exit(True);
+    end;
+  end;
+
+  function VariantCulprit(AMid, ANode, AInst, ADepth: Integer;
+    out AName: string): Integer;
+  var
+    LDm: TPasSemaModel;
+    LX, LCur, LNext: TSemaXType;
+    LDef, LStruct, LScope, LSym, LBest, LSubVerdict: Integer;
+    LList: TSemaSymList;
+    LSub: string;
+  begin
+    Result := 0;
+    AName := '';
+    if (ANode = NIL_NODE) or (ADepth > 8) or
+       not IsManagedTypeNode(AMid, ANode, AInst, ADepth) then
+      Exit;
+    LDm := FModels[AMid];
+    AName := LDm.Tree.NodeSpanText(ANode);
+    Result := 1;
+    case LDm.Tree.Nodes[ANode].Kind of
+      nkIdent, nkMember, nkTypeArgs:
+        begin
+          LX := SubstX(ResolveTypeExprNested(AMid, ANode), AInst, 0);
+          if not XValid(LX) then
+            Exit;
+          // To the definition, every alias step (IsManagedTypeX's walk).
+          LCur := LX;
+          for var LStep := 1 to 16 do
+          begin
+            LDef := TypeDefNodeOf(LCur.UnitId, LCur.Sym);
+            if (LDef = NIL_NODE) or not (FModels[LCur.UnitId].Tree.Nodes[
+               LDef].Kind in [nkIdent, nkMember, nkTypeArgs]) then
+              Break;
+            LNext := AliasStepX(LCur, LDef);
+            if not XValid(LNext) then
+              Break;
+            LCur := LNext;
+          end;
+          LDef := TypeDefNodeOf(LCur.UnitId, LCur.Sym);
+          if LDef = NIL_NODE then
+            Exit;
+          case FModels[LCur.UnitId].Tree.Nodes[LDef].Kind of
+            nkArrayType:
+              if IsStaticArray(FModels[LCur.UnitId].Tree, LDef) then
+              begin
+                LSubVerdict := VariantCulprit(LCur.UnitId,
+                  FModels[LCur.UnitId].Tree.LastChild(LDef), LCur.Inst,
+                  ADepth + 1, LSub);
+                if LSubVerdict > 0 then
+                begin
+                  AName := LSub;
+                  Result := LSubVerdict;
+                end;
+              end;
+            nkRecordType, nkObjectType:
+              if CustomManaged(LCur.UnitId, LDef, LCur.Inst, ADepth + 1) then
+                Result := 2;
+          end;
+        end;
+      nkCall:
+        begin
+          Result := VariantCulprit(AMid, LDm.Tree.Nodes[ANode].FirstChild,
+            AInst, ADepth + 1, LSub);
+          if Result > 0 then
+            AName := LSub;
+        end;
+      nkArrayType:
+        if IsStaticArray(LDm.Tree, ANode) then
+        begin
+          Result := VariantCulprit(AMid, LDm.Tree.LastChild(ANode), AInst,
+            ADepth + 1, LSub);
+          if Result > 0 then
+            AName := LSub
+          else
+            Result := 1;
+        end;
+      nkRecordType, nkObjectType:
+        begin
+          if CustomManaged(AMid, ANode, AInst, ADepth + 1) then
+            Result := 2;
+          // Named by its first field that counts for the verdict.
+          LStruct := LDm.StructSymAtNode(ANode);
+          if LStruct = NIL_SYM then
+            Exit;
+          LScope := LDm.Symbols[LStruct].MemberScope;
+          if LScope = NIL_SCOPE then
+            Exit;
+          LList := LDm.Scopes[LScope].Symbols;
+          LBest := NIL_SYM;
+          for var LIdx := 0 to LList.Count - 1 do
+          begin
+            LSym := LList[LIdx];
+            if (LDm.Symbols[LSym].Kind <> skField) or
+               (LDm.Symbols[LSym].DeclNode = NIL_NODE) or
+               FieldStorageUncounted(LDm,
+                 LDm.Tree.Nodes[LDm.Symbols[LSym].DeclNode].Parent) then
+              Continue;
+            if VariantCulprit(AMid, LDm.Symbols[LSym].TypeNode, AInst,
+               ADepth + 1, LSub) >= Result then
+            begin
+              LBest := LSym;
+              Break;
+            end;
+          end;
+          if LBest <> NIL_SYM then
+            AName := LSub;
+        end;
+    end;
+  end;
+
+  // 9.1.3: the fields of variant part APart, its nested parts too.
+  procedure CheckVariantPart(APart: Integer);
+  var
+    LBranch, LKid, LType: Integer;
+    LName: string;
+  begin
+    LBranch := LT.Nodes[APart].FirstChild;
+    while LBranch <> NIL_NODE do
+    begin
+      if LT.Nodes[LBranch].Kind = nkVariantBranch then
+      begin
+        LKid := LT.Nodes[LBranch].FirstChild;
+        while LKid <> NIL_NODE do
+        begin
+          case LT.Nodes[LKid].Kind of
+            nkVariantPart:
+              CheckVariantPart(LKid);
+            nkVarDecl:
+              if not FieldStorageUncounted(LM, LKid) then
+              begin
+                LType := TypeOf(LKid);
+                case VariantCulprit(AId, LType, NIL_INST, 0, LName) of
+                  1: EmitAt(LM, LType, 'E2154', Format(SE2154, [LName]));
+                  2: EmitAt(LM, LType, 'E2651', Format(SE2651, [LName]));
+                end;
+              end;
+          end;
+          LKid := LT.Nodes[LKid].NextSibling;
+        end;
+      end;
+      LBranch := LT.Nodes[LBranch].NextSibling;
+    end;
+  end;
+
+  // A record's members, up to an operator with no operator name: dcc's
+  // reading of the rest of the record is then its recovery (9.3.1, D3).
+  procedure CheckRecord(ARecord: Integer);
+  var
+    LKid: Integer;
+  begin
+    LLost := False;
+    LKid := LT.Nodes[ARecord].FirstChild;
+    while (LKid <> NIL_NODE) and not LLost do
+    begin
+      case LT.Nodes[LKid].Kind of
+        nkVisibility:
+          case LT.Nodes[LKid].Aux of
+            2: EmitAtToken(LM, LKid, LT.Nodes[LKid].LastToken, 'E2184',
+                 Format(SE2184, ['PROTECTED']));
+            4: EmitAtToken(LM, LKid, LT.Nodes[LKid].LastToken, 'E2184',
+                 Format(SE2184, ['PUBLISHED']));
+          end;
+        nkRoutine:
+          CheckMethod(LKid, ARecord);
+        nkVariantPart:
+          CheckVariantPart(LKid);
+      end;
+      LKid := LT.Nodes[LKid].NextSibling;
+    end;
+  end;
+
+  // A class, a class helper or an `object`: `class operator` is E2123.
+  procedure CheckNoOperators(AStruct: Integer);
+  var
+    LKid: Integer;
+  begin
+    LKid := LT.Nodes[AStruct].FirstChild;
+    while LKid <> NIL_NODE do
+    begin
+      if (LT.Nodes[LKid].Kind = nkRoutine) and IsOperator(LKid) then
+        EmitAtToken(LM, LKid, LT.Nodes[LKid].FirstToken, 'E2123', SE2123);
+      LKid := LT.Nodes[LKid].NextSibling;
+    end;
+  end;
+
+  // An operator's implementation heading `class operator TR.Foo` - a
+  // routine scope of struct AStruct outside the struct's body - TR a record
+  // of this unit, Foo no operator name: E2393.
+  procedure CheckOperatorHeading(ARoutine, AStruct: Integer);
+  var
+    LParent, LName, LDef: Integer;
+  begin
+    LParent := LT.Nodes[ARoutine].Parent;
+    if (LParent <> NIL_NODE) and (LT.Nodes[LParent].Kind in [nkRecordType,
+       nkClassType, nkObjectType, nkHelperType, nkInterfaceType]) then
+      Exit;
+    LName := NameOf(ARoutine);
+    if (LName = NIL_NODE) or (LT.Nodes[LName].Kind <> nkIdent) or
+       (OperatorArity(LT.NodeNameLower(LName)) <> 0) then
+      Exit;
+    LDef := TypeDefNodeOf(AId, AStruct);
+    for var LLostRec in LLostRecords do
+      if LLostRec = LDef then
+        Exit;
+    if (LDef <> NIL_NODE) and (LT.Nodes[LDef].Kind = nkRecordType) then
+      EmitAt(LM, LName, 'E2393', SE2393);
+  end;
+
+begin
+  LM := FModels[AId];
+  LT := LM.Tree;
+  for LNode := 0 to High(LT.Nodes) do
+    case LT.Nodes[LNode].Kind of
+      nkRecordType:
+        CheckRecord(LNode);
+      nkHelperType:
+        if LT.Nodes[LNode].Aux = 1 then
+        begin
+          // A record helper: its constructors and class methods follow the
+          // record's rules, its sections and operators are not checked.
+          var LKid := LT.Nodes[LNode].FirstChild;
+          while LKid <> NIL_NODE do
+          begin
+            if LT.Nodes[LKid].Kind = nkRoutine then
+              CheckMethod(LKid, NIL_NODE);
+            LKid := LT.Nodes[LKid].NextSibling;
+          end;
+        end
+        else
+          CheckNoOperators(LNode);
+      nkClassType, nkObjectType:
+        CheckNoOperators(LNode);
+    end;
+  // The implementation headings, by the struct each one's scope belongs to.
+  for LNode := 0 to LM.Scopes.Count - 1 do
+    if (LM.Scopes[LNode].Kind = sckRoutine) and
+       (LM.Scopes[LNode].StructSym <> NIL_SYM) and
+       (LM.Scopes[LNode].OwnerNode <> NIL_NODE) and
+       (LT.Nodes[LM.Scopes[LNode].OwnerNode].Kind = nkRoutine) and
+       IsOperator(LM.Scopes[LNode].OwnerNode) then
+      CheckOperatorHeading(LM.Scopes[LNode].OwnerNode,
+        LM.Scopes[LNode].StructSym);
 end;
 
 { 14.1.1 (dcc64 37.0, 2026-11-13): AAttr stands in an interface's first
@@ -16116,14 +16757,56 @@ begin
   end;
 end;
 
+{ A record field declaration ADecl (an nkVarDecl) whose storage is no part of
+  an instance's: a `class var`, which lives in global storage, and an
+  `[unsafe]` field, which is not reference-counted (dcc64 37.0,
+  local/probe-park/e345 MG.dpr; spec 9.1.3, 20.3.1). The attribute groups are
+  the declaration's preceding SIBLINGS (`[unsafe] I: IInterface` - nkAttrGroup,
+  then nkVarDecl), in a member list and in a variant branch alike. }
+class function TPasSemaProject.FieldStorageUncounted(AModel: TPasSemaModel;
+  ADecl: Integer): Boolean;
+var
+  LSub, LKid, LAttr: Integer;
+  LUnsafe: Boolean;
+begin
+  Result := False;
+  if (ADecl = NIL_NODE) or (AModel.Tree.Nodes[ADecl].Kind <> nkVarDecl) then
+    Exit;
+  LSub := AModel.Tree.Nodes[ADecl].Parent;
+  if LSub = NIL_NODE then
+    Exit;
+  if (AModel.Tree.Nodes[LSub].Kind = nkVarSec) and
+     (AModel.Tree.Nodes[LSub].Aux = 1) then
+    Exit(True);   // `class var`
+  LUnsafe := False;
+  LKid := AModel.Tree.Nodes[LSub].FirstChild;
+  while (LKid <> NIL_NODE) and (LKid <> ADecl) do
+  begin
+    if AModel.Tree.Nodes[LKid].Kind = nkAttrGroup then
+    begin
+      LAttr := AModel.Tree.Nodes[LKid].FirstChild;
+      while LAttr <> NIL_NODE do
+      begin
+        if (AModel.Tree.Nodes[LAttr].Kind = nkAttribute) and
+           (AModel.Tree.Nodes[LAttr].Aux = amaUnsafe) then
+          LUnsafe := True;
+        LAttr := AModel.Tree.Nodes[LAttr].NextSibling;
+      end;
+    end
+    else
+      LUnsafe := False;
+    LKid := AModel.Tree.Nodes[LKid].NextSibling;
+  end;
+  Result := (LKid = ADecl) and LUnsafe;
+end;
+
 function TPasSemaProject.IsManagedTypeNode(AMid, ANode, AInst,
   ADepth: Integer): Boolean;
 var
   LM: TPasSemaModel;
-  LStruct, LScope, LSym, LDecl, LSub, LAttr: Integer;
+  LStruct, LScope, LSym, LDecl: Integer;
   LX: TSemaXType;
   LList: TSemaSymList;
-  LSkip: Boolean;
 begin
   Result := False;
   if (ANode = NIL_NODE) or (ADepth > 8) then
@@ -16190,40 +16873,7 @@ begin
              (LM.Symbols[LSym].DeclNode = NIL_NODE) then
             Continue;
           LDecl := LM.Tree.Nodes[LM.Symbols[LSym].DeclNode].Parent;
-          LSkip := False;
-          if (LDecl <> NIL_NODE) and (LM.Tree.Nodes[LDecl].Kind = nkVarDecl) then
-          begin
-            LSub := LM.Tree.Nodes[LDecl].Parent;
-            if (LSub <> NIL_NODE) and (LM.Tree.Nodes[LSub].Kind = nkVarSec) and
-               (LM.Tree.Nodes[LSub].Aux = 1) then
-              LSkip := True;   // `class var`
-            // The attribute groups are the declaration's preceding SIBLINGS
-            // (`[unsafe] I: IInterface` - nkAttrGroup, then nkVarDecl).
-            if not LSkip and (LSub <> NIL_NODE) then
-            begin
-              var LUnsafe := False;
-              var LKid := LM.Tree.Nodes[LSub].FirstChild;
-              while (LKid <> NIL_NODE) and (LKid <> LDecl) do
-              begin
-                if LM.Tree.Nodes[LKid].Kind = nkAttrGroup then
-                begin
-                  LAttr := LM.Tree.Nodes[LKid].FirstChild;
-                  while LAttr <> NIL_NODE do
-                  begin
-                    if (LM.Tree.Nodes[LAttr].Kind = nkAttribute) and
-                       (LM.Tree.Nodes[LAttr].Aux = amaUnsafe) then
-                      LUnsafe := True;
-                    LAttr := LM.Tree.Nodes[LAttr].NextSibling;
-                  end;
-                end
-                else
-                  LUnsafe := False;
-                LKid := LM.Tree.Nodes[LKid].NextSibling;
-              end;
-              LSkip := (LKid = LDecl) and LUnsafe;
-            end;
-          end;
-          if LSkip then
+          if FieldStorageUncounted(LM, LDecl) then
             Continue;
           if IsManagedTypeNode(AMid, LM.Symbols[LSym].TypeNode, AInst,
              ADepth + 1) then
@@ -33564,6 +34214,7 @@ begin
     CheckConstraints(Result);
     CheckAttributes(Result);
     CheckHeadingPairs(Result);
+    CheckRecordDecls(Result);
     CheckLateUnitMembers(Result);
     // Expressions for the requested unit only.
     CrossType(Result);
