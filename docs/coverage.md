@@ -294,6 +294,14 @@ of less work, not a gap in following the language; its consequences are in
   class/record/interface's `GetEnumerator` result's `Current` property); the
   intra-unit typer still has no ExprType for it.
 
+### 5.6 Flow-control statements
+- every E2126 is reported; dcc stops the compilation at the first.
+- E2127 is checked for a `try` statement only: dcc's other two cases - a
+  for-in whose enumerator has a destructor, a block declaring an inline
+  variable - are not.
+- Break / Continue / Exit in an unopened `with` body (the binding a guess)
+  are not judged.
+
 ### 5.7 The `with` statement
 - the write rule behind `with (R) do X := 1` (E2064, a write into a part of
   a value) is judged at an assignment's target only: a value passed to a

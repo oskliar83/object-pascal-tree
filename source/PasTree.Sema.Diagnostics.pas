@@ -54,6 +54,15 @@ const
   // Takes no argument: a bare `raise` has nothing to name (18 sec. 18.3.1).
   SE2145_ReRaiseOutsideHandler =
     'E2145 Re-raising an exception only allowed in exception handler';
+  // The flow-control statements' limits (5.6, 5.6.4, 18.2.1). E2127 names
+  // the goto's label.
+  SE2097_BreakOutsideLoop = 'E2097 BREAK or CONTINUE outside of loop';
+  SE2025_ProcedureResultType = 'E2025 Procedure cannot have a result type';
+  SE2126_ExitFromFinally =
+    'E2126 Cannot BREAK, CONTINUE or EXIT out of a FINALLY clause';
+  SE2127_GotoIntoTry = 'E2127 ''GOTO %s'' leads into or out of TRY ' +
+    'statement, FOR-IN statement whose enumerator has destructor, or a ' +
+    'block containing local variable';
   // Likewise argument-free; dcc's wording says "standard function" (4 sec. 4.11).
   SE2193_SliceOutsideOpenArray =
     'E2193 Slice standard function only allowed as open array argument';

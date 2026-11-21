@@ -15367,6 +15367,85 @@ begin
   end;
 end;
 
+// The flow-control limits (spec 5.6, 5.6.3, 5.6.4, 18.2.1): Break / Continue
+// outside a loop - an anonymous method's body included, a `finally` with no
+// loop too - E2097; Exit(X) without a result (a procedure, an anonymous
+// procedure, the main block) E2025; any of the three leaving a `finally`
+// part E2126 unless that try guards nothing; a goto into or out of a try
+// part E2127 at the label. A unit's own `Break` is a call (dcc64 37.0; spec
+// audit g3 Flow / FinBrk, g6 F1-FI, X05; local/probe-park/sa4-flow P1-P8).
+procedure TestFlowExits;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_flow');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'FlowX.dpr'),
+    'program FlowX;'#10 +                                                // 1
+    'type TP = reference to procedure;'#10 +                             // 2
+    'var G: Integer;'#10 +                                               // 3
+    'procedure BrOut; begin Break; end;'#10 +                            // 4 E2097
+    'procedure CoOut; begin Continue; end;'#10 +                         // 5 E2097
+    'procedure ExVal; begin Exit(1); end;'#10 +                          // 6 E2025
+    'function ExFn: Integer; begin Exit(1); end;'#10 +                   // 7
+    'procedure ExEmpty; begin Exit(); Exit; end;'#10 +                   // 8
+    'procedure BrAnon; var I: Integer; P: TP;'#10 +                      // 9
+    '  begin for I := 0 to 1 do P := procedure begin Break; end; end;'#10 + // 10 E2097
+    'procedure Loops; var I: Integer; begin while G = 0 do Break;'#10 + // 11
+    '  repeat Continue; until G = 0;'#10 +                               // 12
+    '  for I := 0 to 1 do case I of 0: Break; else Continue end; end;'#10 + // 13
+    'procedure F1; begin try G := 1; finally Exit; end; end;'#10 +       // 14 E2126
+    'procedure F2; var I: Integer; begin for I := 0 to 1 do'#10 +        // 15
+    '  try G := 1; finally if G = 1 then Break; end; end;'#10 +          // 16 E2126
+    'procedure F3; begin try G := 1; finally try Exit; except end; end; end;'#10 + // 17 E2126
+    'procedure F4; begin try finally Exit; end;'#10 +                    // 18
+    '  try begin end; finally Exit; end; end;'#10 +                      // 19
+    'procedure F5; var I: Integer; P: TP; begin try G := 1; finally'#10 + // 20
+    '  for I := 0 to 1 do Break; P := procedure begin Exit; end; end; end;'#10 + // 21
+    'procedure F6; var I: Integer; begin for I := 0 to 1 do'#10 +        // 22
+    '  try G := 1; except Break; end; try G := 1; except Exit; end; end;'#10 + // 23
+    'procedure F7; begin try G := 1; finally Break; end; end;'#10 +      // 24 E2097
+    'procedure AnonEx; var P: TP; begin'#10 +                            // 25
+    '  P := procedure begin Exit(1); end; end;'#10 +                     // 26 E2025
+    'procedure Shadow; procedure Break; begin end; begin Break; end;'#10 + // 27
+    'procedure Gt;'#10 +                                                 // 28
+    'label L1, L2, L3;'#10 +                                             // 29
+    'begin'#10 +                                                         // 30
+    '  goto L1;'#10 +                                                    // 31
+    '  try L1: ; finally end;'#10 +                                      // 32 E2127
+    '  try goto L2; finally end;'#10 +                                   // 33
+    '  L2: ;'#10 +                                                       // 34 E2127
+    '  try goto L3; L3: ; finally end;'#10 +                             // 35
+    'end;'#10 +                                                          // 36
+    'begin'#10 +                                                         // 37
+    '  Exit(1);'#10 +                                                    // 38 E2025
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'FlowX.dpr'));
+    LM := ModelByName('flowx');
+    Ok('flow: E2097 lines [' + DiagLinesOf(LM, 'E2097') + ']',
+      DiagLinesOf(LM, 'E2097') = '4 5 10 24');
+    Ok('flow: E2025 lines [' + DiagLinesOf(LM, 'E2025') + ']',
+      DiagLinesOf(LM, 'E2025') = '6 26 38');
+    Ok('flow: E2126 lines [' + DiagLinesOf(LM, 'E2126') + ']',
+      DiagLinesOf(LM, 'E2126') = '14 16 17');
+    Ok('flow: E2127 lines [' + DiagLinesOf(LM, 'E2127') + ']',
+      DiagLinesOf(LM, 'E2127') = '32 34');
+    Ok('flow: E2127 names the goto [' + DiagText(LM, 'E2127') + ']',
+      Pos('''GOTO L1'' leads into or out of TRY statement',
+        DiagText(LM, 'E2127')) > 0);
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // A write to a `const` parameter (spec 6.2.3): E2064 for the parameter
 // itself, a field of a record one at any depth (through `with` too), an
 // element of a static array one or of a `const` open array; a dynamic
@@ -24341,6 +24420,7 @@ begin
   TestArgShapes;
   TestConstParamWrites;
   TestParamLegalShapes;
+  TestFlowExits;
   TestOpenArrayValue;
   TestPropertyAccessChecks;
   TestGenericInferErrors;
