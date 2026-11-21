@@ -425,6 +425,12 @@ of less work, not a gap in following the language; its consequences are in
   plain `F(D: Double)` of a used unit and the unit's own `F(X: Integer);
   overload;` is not reported.
 
+### 6.9 Nested routines
+- E2094 is judged where E2555 is: a nested routine as an assignment's whole
+  source or as a bare argument whose parameter is read. Against an `of
+  object` type (dcc: E2009) and for a nested function whose result is the
+  procedure type (dcc: E2010) nothing is reported.
+
 ## 6.10 Inline assembly (`asm … end`)
 - where an asm body ends is decided by the preprocessor, which knows the
   live branches (F26): only live text switches the mode, dead text is

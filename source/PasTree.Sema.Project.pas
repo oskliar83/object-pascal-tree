@@ -25034,6 +25034,30 @@ var
           (FModels[LCx.UnitId].Tree.Nodes[LDef].Aux = 2);
       end;
 
+      // A plain `procedure` / `function` type - neither `of object` nor
+      // `reference to`.
+      function IsPlainProcType(const AX: TSemaXType;
+        out AFunc: Boolean): Boolean;
+      var
+        LCx: TSemaXType;
+        LDef: Integer;
+      begin
+        Result := False;
+        AFunc := False;
+        if not XValid(AX) then
+          Exit;
+        LCx := CanonTypeX(AX);
+        if not XValid(LCx) then
+          Exit;
+        LDef := TypeDefNodeOf(LCx.UnitId, LCx.Sym);
+        Result := (LDef <> NIL_NODE) and
+          (FModels[LCx.UnitId].Tree.Nodes[LDef].Kind = nkProcType) and
+          (FModels[LCx.UnitId].Tree.Nodes[LDef].Aux <= 0);   // 1 of object, 2 reference to
+        if Result then
+          AFunc := FModels[LCx.UnitId].Tree.Source.VisibleKind(
+            FModels[LCx.UnitId].Tree.Nodes[LDef].FirstToken) = tkFunction;
+      end;
+
       // The declared type of the AIndex-th parameter of the routine the call
       // ACall binds; XNil when not read.
       function ArgParamX(ACall, AIndex: Integer): TSemaXType;
@@ -25066,6 +25090,7 @@ var
     var
       LSym, LDecl, LOwner, LUp, LAt, LTop, LIdx, LTok: Integer;
       LTargetX: TSemaXType;
+      LFunc: Boolean;
     begin
       if N > High(LM.RefMap) then
         Exit;
@@ -25119,6 +25144,16 @@ var
             end;
             LTargetX := ArgParamX(LUp, LIdx);
           end;
+      end;
+      // A plain procedural type takes no nested routine (6.9): E2094 at the
+      // name. A nested FUNCTION against a procedure type is no candidate:
+      // dcc says E2010 there (`G := Inner` with `function Inner: TP`).
+      if IsPlainProcType(LTargetX, LFunc) then
+      begin
+        if LFunc or (LM.RoutineHead(LSym) <> rhFunction) then
+          EmitAt(LM, N, 'E2094', Format(SE2094_LocalRoutineToProcVar,
+            [LM.Tree.NodeText(N)]));
+        Exit;
       end;
       if not IsRefType(LTargetX) then
         Exit;

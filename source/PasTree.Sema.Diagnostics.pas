@@ -51,6 +51,9 @@ const
     'E2037 Declaration of ''%s'' differs from previous declaration';
   // An anonymous method naming what it cannot capture (17 sec. 17.3.1).
   SE2555_CannotCapture = 'E2555 Cannot capture symbol ''%s''';
+  // A nested routine as a plain procedural value (6.9).
+  SE2094_LocalRoutineToProcVar =
+    'E2094 Local procedure/function ''%s'' assigned to procedure variable';
   // Takes no argument: a bare `raise` has nothing to name (18 sec. 18.3.1).
   SE2145_ReRaiseOutsideHandler =
     'E2145 Re-raising an exception only allowed in exception handler';

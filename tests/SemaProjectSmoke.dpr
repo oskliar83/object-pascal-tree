@@ -15446,6 +15446,56 @@ begin
   end;
 end;
 
+// A nested routine as a plain procedural value is E2094 (spec 6.9), a
+// function against a function type too; `@Inner`, a global routine and a
+// `reference to` target (E2555 instead) are not (dcc64 37.0; spec audit g3
+// NestP, NestP2; local/probe-park/sa4-flow N1, N2, P10).
+procedure TestNestedProcValue;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_nestp');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NestX.dpr'),
+    'program NestX;'#10 +                                                // 1
+    'type TP = procedure; TF = function: Integer;'#10 +                  // 2
+    'var G: TP; F: TF; Ptr: Pointer;'#10 +                               // 3
+    'procedure Take(P: TP); begin end;'#10 +                             // 4
+    'procedure Glob; begin end;'#10 +                                    // 5
+    'procedure O1;'#10 +                                                 // 6
+    '  procedure Inner; begin end;'#10 +                                 // 7
+    '  function NF: Integer; begin Result := 0; end;'#10 +               // 8
+    '  function InnerF: TP; begin Result := Glob; end;'#10 +             // 9
+    'begin'#10 +                                                         // 10
+    '  G := Inner;'#10 +                                                 // 11 E2094
+    '  Take(Inner);'#10 +                                                // 12 E2094
+    '  F := NF;'#10 +                                                    // 13 E2094
+    '  G := @Inner; Take(@Inner); Ptr := @Inner;'#10 +                   // 14
+    '  G := Glob; Take(Glob);'#10 +                                      // 15
+    '  G := InnerF;'#10 +                                                // 16 (E2010)
+    'end;'#10 +                                                          // 17
+    'begin'#10 +                                                         // 18
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'NestX.dpr'));
+    LM := ModelByName('nestx');
+    Ok('nestp: E2094 lines [' + DiagLinesOf(LM, 'E2094') + ']',
+      DiagLinesOf(LM, 'E2094') = '11 12 13');
+    Ok('nestp: E2094 names the routine [' + DiagText(LM, 'E2094') + ']',
+      Pos('Local procedure/function ''Inner'' assigned to procedure variable',
+        DiagText(LM, 'E2094')) > 0);
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // A write to a `const` parameter (spec 6.2.3): E2064 for the parameter
 // itself, a field of a record one at any depth (through `with` too), an
 // element of a static array one or of a `const` open array; a dynamic
@@ -24421,6 +24471,7 @@ begin
   TestConstParamWrites;
   TestParamLegalShapes;
   TestFlowExits;
+  TestNestedProcValue;
   TestOpenArrayValue;
   TestPropertyAccessChecks;
   TestGenericInferErrors;
