@@ -254,6 +254,7 @@ type
     procedure CheckBareRaises;
     procedure CheckCaptures;
     procedure CheckSlicePositions;
+    procedure CheckFlowExits;
     function ReachesRoot(ANode: Integer): Boolean;
     procedure AppendHit(var AHits: TArray<Integer>; var ACount: Integer;
       ANode: Integer);
@@ -5854,6 +5855,243 @@ begin
     end;
 end;
 
+{ The flow-control statements' limits (5.6, 5.6.4, 18.2.1; dcc64 37.0, spec
+  audit g3 Flow / FinBrk, g6 F1-FI, X05, X06, local/probe-park/sa4-flow):
+    - `Break` / `Continue` outside a loop is E2097. A routine and an
+      anonymous method end the search: a literal's body is outside the loop
+      it is written in. Without a loop it is E2097 even inside a `finally`;
+    - `Exit(X)` with a value where there is no result - a procedure, a
+      constructor, a destructor, an anonymous procedure, a program's main
+      block, a unit's initialization or finalization - is E2025. An empty
+      `Exit()` is a plain Exit;
+    - leaving a `finally` part with any of the three is E2126 - the part met
+      on the way up to the loop (Break, Continue) or the routine (Exit),
+      nested tries included - unless that try's guarded part is EMPTY (only
+      empty statements and empty compounds): dcc does not check that one;
+    - a `goto` whose label lies in another part of a `try` statement - the
+      guarded part, the finally or the except part, at any depth - jumps
+      into or out of it: E2127 at the LABEL, naming the goto, once per
+      label. (dcc's other two E2127 cases - a for-in whose enumerator has a
+      destructor, a block declaring an inline variable - are not checked.)
+  The three intrinsics are told by their binding (sfBuiltin), not their
+  text: a unit's own `procedure Break` is an ordinary call (5.6). In an
+  unopened with body the binding is a guess, and nothing is said there.
+  dcc stops at the first E2126 of a compilation; every one is reported here,
+  each a real error. A flat scan over the statements; the climbs are short. }
+procedure TPasSemaResolver.CheckFlowExits;
+type
+  TFlowKind = (fkBreak, fkExit);
+
+  // Only empty statements and empty compounds (`try ; finally`, `try begin
+  // end; finally`).
+  function EmptyStmts(ANode: Integer): Boolean;
+  var
+    LKid: Integer;
+  begin
+    LKid := FirstChild(ANode);
+    while LKid <> NIL_NODE do
+    begin
+      case KindOf(LKid) of
+        nkEmptyStmt: ;
+        nkBlock:
+          if not EmptyStmts(LKid) then
+            Exit(False);
+      else
+        Exit(False);
+      end;
+      LKid := NextSib(LKid);
+    end;
+    Result := True;
+  end;
+
+  // A routine (or literal, or main block) with no result: its head word.
+  function HasNoResult(AOwner: Integer): Boolean;
+  var
+    LTok: Integer;
+  begin
+    if (AOwner = NIL_NODE) or (KindOf(AOwner) in [nkInitSec, nkFinalSec]) then
+      Exit(True);   // a main block, an initialization / finalization
+    LTok := FTree.Nodes[AOwner].FirstToken;
+    if (LTok >= 0) and (LTok < High(FTree.Source.Visible)) and
+       (FTree.Source.VisibleKind(LTok) = tkClass) then
+      Inc(LTok);
+    Result := (LTok >= 0) and (LTok <= High(FTree.Source.Visible)) and
+      (FTree.Source.VisibleKind(LTok) in [tkProcedure, tkConstructor,
+       tkDestructor]);
+  end;
+
+  procedure Report(ANode: Integer; const ACode, AMsg: string);
+  var
+    LFileId, LLine, LCol: Integer;
+  begin
+    NodePos(ANode, LFileId, LLine, LCol);
+    FModel.AddDiag(MakeDiag(ACode, AMsg, ANode, LFileId, LLine, LCol));
+  end;
+
+  // The statement AStmt (an nkExprStmt) when it is Break, Continue or Exit:
+  // the head ident, its call (when written with parentheses) in ACall.
+  function FlowHead(AStmt: Integer; out AKind: TFlowKind;
+    out ACall: Integer): Integer;
+  var
+    LHead, LSym: Integer;
+  begin
+    Result := NIL_NODE;
+    ACall := NIL_NODE;
+    LHead := FirstChild(AStmt);
+    if LHead = NIL_NODE then
+      Exit;
+    if KindOf(LHead) = nkCall then
+    begin
+      ACall := LHead;
+      LHead := FirstChild(LHead);
+      if LHead = NIL_NODE then
+        Exit;
+    end;
+    // `System.Break`: the name is the member's last child.
+    if KindOf(LHead) = nkMember then
+    begin
+      LHead := FirstChild(LHead);
+      while NextSib(LHead) <> NIL_NODE do
+        LHead := NextSib(LHead);
+    end;
+    if (LHead = NIL_NODE) or (KindOf(LHead) <> nkIdent) or
+       (LHead > High(FModel.RefMap)) then
+      Exit;
+    LSym := FModel.RefMap[LHead];
+    if (LSym = NIL_SYM) or not (sfBuiltin in FModel.Symbols[LSym].Flags) then
+      Exit;
+    if (FModel.Symbols[LSym].NameLower = 'break') or
+       (FModel.Symbols[LSym].NameLower = 'continue') then
+      AKind := fkBreak
+    else if FModel.Symbols[LSym].NameLower = 'exit' then
+      AKind := fkExit
+    else
+      Exit;
+    Result := LHead;
+  end;
+
+  procedure CheckStmt(AStmt: Integer);
+  var
+    LHead, LCall, LCur, LUp, LFinally: Integer;
+    LKind: TFlowKind;
+    LLoop: Boolean;
+  begin
+    LHead := FlowHead(AStmt, LKind, LCall);
+    if (LHead = NIL_NODE) or FModel.InUnopenedWithBody(LHead) then
+      Exit;
+    LFinally := NIL_NODE;
+    LLoop := False;
+    LCur := AStmt;
+    LUp := FTree.Nodes[LCur].Parent;
+    while LUp <> NIL_NODE do
+    begin
+      case KindOf(LUp) of
+        nkForStmt, nkForInStmt, nkWhileStmt, nkRepeatStmt:
+          if LKind = fkBreak then
+          begin
+            LLoop := True;
+            Break;
+          end;
+        nkFinallyPart:
+          if (LFinally = NIL_NODE) and
+             (FTree.Nodes[LUp].Parent <> NIL_NODE) and
+             not EmptyStmts(FirstChild(FTree.Nodes[LUp].Parent)) then
+            LFinally := LUp;
+        nkRoutine, nkAnonMethod, nkInitSec, nkFinalSec:
+          Break;
+      end;
+      LCur := LUp;
+      LUp := FTree.Nodes[LCur].Parent;
+    end;
+    if (LKind = fkBreak) and not LLoop then
+      Report(AStmt, 'E2097', SE2097_BreakOutsideLoop)
+    else if LFinally <> NIL_NODE then
+      Report(AStmt, 'E2126', SE2126_ExitFromFinally)
+    else if (LKind = fkExit) and (LCall <> NIL_NODE) and
+            (NextSib(FirstChild(LCall)) <> NIL_NODE) and
+            HasNoResult(LUp) then
+      Report(AStmt, 'E2025', SE2025_ProcedureResultType);
+  end;
+
+  // The routine, literal or main block AStmt belongs to, and the try parts
+  // around it inside that one, innermost first.
+  function TryPath(ANode: Integer; out AOwner: Integer): TArray<Integer>;
+  var
+    LCur, LUp: Integer;
+  begin
+    Result := nil;
+    AOwner := NIL_NODE;
+    LCur := ANode;
+    LUp := FTree.Nodes[LCur].Parent;
+    while LUp <> NIL_NODE do
+    begin
+      case KindOf(LUp) of
+        nkTryStmt:
+          Result := Result + [LCur];   // the guarded block or a part
+        nkRoutine, nkAnonMethod:
+          begin
+            AOwner := LUp;
+            Exit;
+          end;
+      end;
+      LCur := LUp;
+      LUp := FTree.Nodes[LCur].Parent;
+    end;
+  end;
+
+var
+  LIdx, LCount, LGoto, LLabel, LGotoOwner, LLabelOwner, I: Integer;
+  LGotos, LLabels: TArray<Integer>;
+  LGotoPath, LLabelPath: TArray<Integer>;
+  LSame: Boolean;
+  LReported: TArray<Boolean>;
+begin
+  LGotos := nil;
+  LLabels := nil;
+  for LIdx := 0 to High(FTree.Nodes) do
+    case FTree.Nodes[LIdx].Kind of
+      nkExprStmt:
+        CheckStmt(LIdx);
+      nkGotoStmt:
+        if FirstChild(LIdx) <> NIL_NODE then
+          LGotos := LGotos + [LIdx];
+      nkLabeledStmt:
+        if FirstChild(LIdx) <> NIL_NODE then
+          LLabels := LLabels + [LIdx];
+    end;
+  if (LGotos = nil) or (LLabels = nil) then
+    Exit;
+  SetLength(LReported, Length(LLabels));
+  for LGoto in LGotos do
+  begin
+    LGotoPath := TryPath(LGoto, LGotoOwner);
+    for LIdx := 0 to High(LLabels) do
+    begin
+      LLabel := LLabels[LIdx];
+      if LReported[LIdx] or not SameText(NodeText(FirstChild(LGoto)),
+         NodeText(FirstChild(LLabel))) then
+        Continue;
+      LLabelPath := TryPath(LLabel, LLabelOwner);
+      if LLabelOwner <> LGotoOwner then
+        Continue;
+      LCount := Length(LGotoPath);
+      LSame := LCount = Length(LLabelPath);
+      if LSame then
+        for I := 0 to LCount - 1 do
+          if LGotoPath[I] <> LLabelPath[I] then
+          begin
+            LSame := False;
+            Break;
+          end;
+      if LSame then
+        Continue;
+      LReported[LIdx] := True;
+      Report(LLabel, 'E2127', Format(SE2127_GotoIntoTry,
+        [NodeText(FirstChild(LGoto))]));
+    end;
+  end;
+end;
+
 procedure TPasSemaResolver.Run;
 begin
   FSys := SeedSystemScope(FModel, FPlatform);
@@ -5877,6 +6115,7 @@ begin
   CheckBareRaises;    // structural only - see its own header
   CheckCaptures;      // needs RefMap - see its own header
   CheckSlicePositions; // needs RefMap - see its own header
+  CheckFlowExits;     // needs RefMap - see its own header
   FModel.TyperDiagFrom := FModel.DiagCount;
   if not FSkipTyper then
     // The platform reaches the typer for one rule only: a 64-bit ordinal

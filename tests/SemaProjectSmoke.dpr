@@ -15367,6 +15367,317 @@ begin
   end;
 end;
 
+// The flow-control limits (spec 5.6, 5.6.3, 5.6.4, 18.2.1): Break / Continue
+// outside a loop - an anonymous method's body included, a `finally` with no
+// loop too - E2097; Exit(X) without a result (a procedure, an anonymous
+// procedure, the main block) E2025; any of the three leaving a `finally`
+// part E2126 unless that try guards nothing; a goto into or out of a try
+// part E2127 at the label. A unit's own `Break` is a call (dcc64 37.0; spec
+// audit g3 Flow / FinBrk, g6 F1-FI, X05; local/probe-park/sa4-flow P1-P8).
+procedure TestFlowExits;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_flow');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'FlowX.dpr'),
+    'program FlowX;'#10 +                                                // 1
+    'type TP = reference to procedure;'#10 +                             // 2
+    'var G: Integer;'#10 +                                               // 3
+    'procedure BrOut; begin Break; end;'#10 +                            // 4 E2097
+    'procedure CoOut; begin Continue; end;'#10 +                         // 5 E2097
+    'procedure ExVal; begin Exit(1); end;'#10 +                          // 6 E2025
+    'function ExFn: Integer; begin Exit(1); end;'#10 +                   // 7
+    'procedure ExEmpty; begin Exit(); Exit; end;'#10 +                   // 8
+    'procedure BrAnon; var I: Integer; P: TP;'#10 +                      // 9
+    '  begin for I := 0 to 1 do P := procedure begin Break; end; end;'#10 + // 10 E2097
+    'procedure Loops; var I: Integer; begin while G = 0 do Break;'#10 + // 11
+    '  repeat Continue; until G = 0;'#10 +                               // 12
+    '  for I := 0 to 1 do case I of 0: Break; else Continue end; end;'#10 + // 13
+    'procedure F1; begin try G := 1; finally Exit; end; end;'#10 +       // 14 E2126
+    'procedure F2; var I: Integer; begin for I := 0 to 1 do'#10 +        // 15
+    '  try G := 1; finally if G = 1 then Break; end; end;'#10 +          // 16 E2126
+    'procedure F3; begin try G := 1; finally try Exit; except end; end; end;'#10 + // 17 E2126
+    'procedure F4; begin try finally Exit; end;'#10 +                    // 18
+    '  try begin end; finally Exit; end; end;'#10 +                      // 19
+    'procedure F5; var I: Integer; P: TP; begin try G := 1; finally'#10 + // 20
+    '  for I := 0 to 1 do Break; P := procedure begin Exit; end; end; end;'#10 + // 21
+    'procedure F6; var I: Integer; begin for I := 0 to 1 do'#10 +        // 22
+    '  try G := 1; except Break; end; try G := 1; except Exit; end; end;'#10 + // 23
+    'procedure F7; begin try G := 1; finally Break; end; end;'#10 +      // 24 E2097
+    'procedure AnonEx; var P: TP; begin'#10 +                            // 25
+    '  P := procedure begin Exit(1); end; end;'#10 +                     // 26 E2025
+    'procedure Shadow; procedure Break; begin end; begin Break; end;'#10 + // 27
+    'procedure Gt;'#10 +                                                 // 28
+    'label L1, L2, L3;'#10 +                                             // 29
+    'begin'#10 +                                                         // 30
+    '  goto L1;'#10 +                                                    // 31
+    '  try L1: ; finally end;'#10 +                                      // 32 E2127
+    '  try goto L2; finally end;'#10 +                                   // 33
+    '  L2: ;'#10 +                                                       // 34 E2127
+    '  try goto L3; L3: ; finally end;'#10 +                             // 35
+    'end;'#10 +                                                          // 36
+    'begin'#10 +                                                         // 37
+    '  Exit(1);'#10 +                                                    // 38 E2025
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'FlowX.dpr'));
+    LM := ModelByName('flowx');
+    Ok('flow: E2097 lines [' + DiagLinesOf(LM, 'E2097') + ']',
+      DiagLinesOf(LM, 'E2097') = '4 5 10 24');
+    Ok('flow: E2025 lines [' + DiagLinesOf(LM, 'E2025') + ']',
+      DiagLinesOf(LM, 'E2025') = '6 26 38');
+    Ok('flow: E2126 lines [' + DiagLinesOf(LM, 'E2126') + ']',
+      DiagLinesOf(LM, 'E2126') = '14 16 17');
+    Ok('flow: E2127 lines [' + DiagLinesOf(LM, 'E2127') + ']',
+      DiagLinesOf(LM, 'E2127') = '32 34');
+    Ok('flow: E2127 names the goto [' + DiagText(LM, 'E2127') + ']',
+      Pos('''GOTO L1'' leads into or out of TRY statement',
+        DiagText(LM, 'E2127')) > 0);
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
+// A nested routine as a plain procedural value is E2094 (spec 6.9), a
+// function against a function type too; `@Inner`, a global routine and a
+// `reference to` target (E2555 instead) are not (dcc64 37.0; spec audit g3
+// NestP, NestP2; local/probe-park/sa4-flow N1, N2, P10).
+procedure TestNestedProcValue;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_nestp');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NestX.dpr'),
+    'program NestX;'#10 +                                                // 1
+    'type TP = procedure; TF = function: Integer;'#10 +                  // 2
+    'var G: TP; F: TF; Ptr: Pointer;'#10 +                               // 3
+    'procedure Take(P: TP); begin end;'#10 +                             // 4
+    'procedure Glob; begin end;'#10 +                                    // 5
+    'procedure O1;'#10 +                                                 // 6
+    '  procedure Inner; begin end;'#10 +                                 // 7
+    '  function NF: Integer; begin Result := 0; end;'#10 +               // 8
+    '  function InnerF: TP; begin Result := Glob; end;'#10 +             // 9
+    'begin'#10 +                                                         // 10
+    '  G := Inner;'#10 +                                                 // 11 E2094
+    '  Take(Inner);'#10 +                                                // 12 E2094
+    '  F := NF;'#10 +                                                    // 13 E2094
+    '  G := @Inner; Take(@Inner); Ptr := @Inner;'#10 +                   // 14
+    '  G := Glob; Take(Glob);'#10 +                                      // 15
+    '  G := InnerF;'#10 +                                                // 16 (E2010)
+    'end;'#10 +                                                          // 17
+    'begin'#10 +                                                         // 18
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'NestX.dpr'));
+    LM := ModelByName('nestx');
+    Ok('nestp: E2094 lines [' + DiagLinesOf(LM, 'E2094') + ']',
+      DiagLinesOf(LM, 'E2094') = '11 12 13');
+    Ok('nestp: E2094 names the routine [' + DiagText(LM, 'E2094') + ']',
+      Pos('Local procedure/function ''Inner'' assigned to procedure variable',
+        DiagText(LM, 'E2094')) > 0);
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
+// A raise operand and a handler type are classes (spec 18.1.2, 18.3.1): 5,
+// an interface, a record, a class reference, a type name, nil are E2021; an
+// `at` address that is no pointer E2017 (dcc64 37.0; spec audit g6 X01,
+// X02; local/probe-park/sa4-flow R1).
+procedure TestRaiseOperands;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_raise');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class constructor Create; end;'#10 +
+    '  TClass = class of TObject;'#10 +
+    '  IInterface = interface end;'#10 +
+    'implementation'#10 +
+    'constructor TObject.Create; begin end;'#10 +
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'RaiseX.dpr'),
+    'program RaiseX;'#10 +                                               // 1
+    'type IFoo = interface end; TRec = record end; EMy = class end;'#10 + // 2
+    'var I: IFoo; R: TRec; O: TObject; C: TClass; P: Pointer; E: EMy;'#10 + // 3
+    'function Make: EMy; begin Result := nil; end;'#10 +                 // 4
+    'procedure Q;'#10 +                                                  // 5
+    'begin'#10 +                                                         // 6
+    '  raise 5;'#10 +                                                    // 7 E2021
+    '  raise I;'#10 +                                                    // 8 E2021
+    '  raise R;'#10 +                                                    // 9 E2021
+    '  raise C;'#10 +                                                    // 10 E2021
+    '  raise EMy;'#10 +                                                  // 11 E2021
+    '  raise nil;'#10 +                                                  // 12 E2021
+    '  raise O; raise E; raise EMy.Create; raise (E); raise Make;'#10 +  // 13
+    '  raise E at 5;'#10 +                                               // 14 E2017
+    '  raise E at P; raise E at @Q; raise E at nil;'#10 +                // 15
+    '  try except on X: Integer do ; end;'#10 +                          // 16 E2021
+    '  try except on X: IFoo do ; end;'#10 +                             // 17 E2021
+    '  try except on TRec do ; end;'#10 +                                // 18 E2021
+    '  try except on X: TClass do ; end;'#10 +                           // 19 E2021
+    '  try except on X: TObject do ; on EMy do raise; end;'#10 +         // 20
+    'end;'#10 +                                                          // 21
+    'begin'#10 +                                                         // 22
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'RaiseX.dpr'));
+    LM := ModelByName('raisex');
+    Ok('raise: E2021 lines [' + DiagLinesOf(LM, 'E2021') + ']',
+      DiagLinesOf(LM, 'E2021') = '7 8 9 10 11 12 16 17 18 19');
+    Ok('raise: E2017 lines [' + DiagLinesOf(LM, 'E2017') + ']',
+      DiagLinesOf(LM, 'E2017') = '14');
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
+// The for-in enumerator pattern member by member (spec 5.5.2): a public
+// function GetEnumerator - not a private or protected one, even in the
+// class's own method -, a public function MoveNext of a Boolean type, a
+// public PROPERTY Current; each failure is E2431 naming the type that lacks
+// it. An inherited GetEnumerator, a LongBool MoveNext and an interface pass
+// (dcc64 37.0; spec audit g3 ForInEn, ForInPriv*; local/probe-park/sa4-flow
+// L1, P5).
+procedure TestForInMembers;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_forin');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    '  IInterface = interface end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'ForInX.dpr'),
+    'program ForInX;'#10 +                                               // 1
+    'type'#10 +                                                          // 2
+    '  TEnOk = record I: Integer; function MoveNext: Boolean;'#10 +      // 3
+    '    function GetC: Integer; property Current: Integer read GetC; end;'#10 + // 4
+    '  TEnFn = class function MoveNext: Boolean; function Current: Integer; end;'#10 + // 5
+    '  THasFn = class function GetEnumerator: TEnFn; end;'#10 +          // 6
+    '  TEnFld = record Current: Integer; function MoveNext: Boolean; end;'#10 + // 7
+    '  THasFld = record function GetEnumerator: TEnFld; end;'#10 +       // 8
+    '  TEnInt = class function MoveNext: Integer; function GetC: Integer;'#10 + // 9
+    '    property Current: Integer read GetC; end;'#10 +                 // 10
+    '  THasInt = class function GetEnumerator: TEnInt; end;'#10 +        // 11
+    '  TNoMove = record function GetC: Integer; property Current: Integer read GetC; end;'#10 + // 12
+    '  THasNoMove = record function GetEnumerator: TNoMove; end;'#10 +   // 13
+    '  THasPriv = class private function GetEnumerator: TEnOk; procedure M; end;'#10 + // 14
+    '  THasProt = class protected function GetEnumerator: TEnOk; end;'#10 + // 15
+    '  TEnPriv = record private function MoveNext: Boolean; function GetC: Integer;'#10 + // 16
+    '    public property Current: Integer read GetC; end;'#10 +          // 17
+    '  THasEP = class function GetEnumerator: TEnPriv; end;'#10 +        // 18
+    '  THasPub = class public function GetEnumerator: TEnOk; end;'#10 +  // 19
+    '  TDer = class(THasPub) end;'#10 +                                  // 20
+    '  TBool = class function MoveNext: LongBool; function GetC: Integer;'#10 + // 21
+    '    property Current: Integer read GetC; end;'#10 +                 // 22
+    '  THasBool = class function GetEnumerator: TBool; end;'#10 +        // 23
+    '  IEn = interface function MoveNext: Boolean; function GetC: Integer;'#10 + // 24
+    '    property Current: Integer read GetC; end;'#10 +                 // 25
+    '  IColl = interface function GetEnumerator: IEn; end;'#10 +         // 26
+    'procedure THasPriv.M; var X: Integer; begin for X in Self do ; end;'#10 + // 27 E2431
+    'procedure P;'#10 +                                                  // 28
+    'var X: Integer; H1: THasFn; H2: THasFld; H3: THasInt; H4: THasNoMove;'#10 + // 29
+    '  H5: TObject; H6: THasPriv; H7: THasProt; H8: THasEP; H9: THasPub;'#10 + // 30
+    '  H10: TDer; H11: THasBool; H12: IColl;'#10 +                       // 31
+    'begin'#10 +                                                         // 32
+    '  for X in H1 do ;'#10 +                                            // 33 E2431
+    '  for X in H2 do ;'#10 +                                            // 34 E2431
+    '  for X in H3 do ;'#10 +                                            // 35 E2431
+    '  for X in H4 do ;'#10 +                                            // 36 E2431
+    '  for X in H5 do ;'#10 +                                            // 37 E2431
+    '  for X in H6 do ;'#10 +                                            // 38 E2431
+    '  for X in H7 do ;'#10 +                                            // 39 E2431
+    '  for X in H8 do ;'#10 +                                            // 40 E2431
+    '  for X in H9 do ; for X in H10 do ; for X in H11 do ; for X in H12 do ;'#10 + // 41
+    'end;'#10 +                                                          // 42
+    'begin'#10 +                                                         // 43
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'ForInX.dpr'));
+    LM := ModelByName('forinx');
+    Ok('forin: E2431 lines [' + DiagLinesOf(LM, 'E2431') + ']',
+      DiagLinesOf(LM, 'E2431') = '27 33 34 35 36 37 38 39 40');
+    Ok('forin: E2431 names the lacking type [' + DiagText(LM, 'E2431') + ']',
+      (Pos('''THasEP'' because ''TEnPriv'' does not contain a member for ' +
+         '''MoveNext''', DiagText(LM, 'E2431')) > 0) and
+      (Pos('''TObject'' because ''TObject'' does not contain a member for ' +
+         '''GetEnumerator''', DiagText(LM, 'E2431')) > 0) and
+      (Pos('''THasFld'' because ''TEnFld'' does not contain a member for ' +
+         '''Current''', DiagText(LM, 'E2431')) > 0));
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
+// `reference to` is a type only as a type declaration's right side (spec
+// 17.1.1): written as a variable's, a parameter's or a field's type, or as
+// another reference type's result, `reference` is E2003 and the heading
+// dcc reads after it E2029 (dcc64 37.0; spec audit g3 NestP;
+// local/probe-park/sa4-flow RT1-RT14).
+procedure TestRefTypeInPlace;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_refpl');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    '  IInterface = interface end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'RefX.dpr'),
+    'program RefX;'#10 +                                                 // 1
+    'type TP = reference to procedure; TQ = reference to function: Integer;'#10 + // 2
+    '  TG<T> = reference to function(A: T): T; TS = type TP;'#10 +       // 3
+    'var R: reference to procedure;'#10 +                                // 4 E2003 E2029
+    'procedure Q(X: reference to procedure); begin end;'#10 +            // 5 E2003 E2029
+    'type TR = record F: reference to procedure; end;'#10 +              // 6 E2003 E2029
+    '  TZ = reference to function: reference to procedure;'#10 +         // 7 E2003 E2029
+    'var reference: Integer; P: TP;'#10 +                                // 8
+    'begin'#10 +                                                         // 9
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'RefX.dpr'));
+    LM := ModelByName('refx');
+    Ok('refpl: E2003 lines [' + DiagLinesOf(LM, 'E2003') + ']',
+      DiagLinesOf(LM, 'E2003') = '4 5 6 7');
+    Ok('refpl: E2029 lines [' + DiagLinesOf(LM, 'E2029') + ']',
+      DiagLinesOf(LM, 'E2029') = '4 5 6 7');
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // A write to a `const` parameter (spec 6.2.3): E2064 for the parameter
 // itself, a field of a record one at any depth (through `with` too), an
 // element of a static array one or of a `const` open array; a dynamic
@@ -24528,6 +24839,11 @@ begin
   TestConstParamWrites;
   TestParamLegalShapes;
   TestSpecAuditConsts;
+  TestFlowExits;
+  TestNestedProcValue;
+  TestRaiseOperands;
+  TestForInMembers;
+  TestRefTypeInPlace;
   TestOpenArrayValue;
   TestPropertyAccessChecks;
   TestGenericInferErrors;

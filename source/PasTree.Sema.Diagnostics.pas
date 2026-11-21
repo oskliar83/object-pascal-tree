@@ -51,9 +51,25 @@ const
     'E2037 Declaration of ''%s'' differs from previous declaration';
   // An anonymous method naming what it cannot capture (17 sec. 17.3.1).
   SE2555_CannotCapture = 'E2555 Cannot capture symbol ''%s''';
+  // A raise operand or a handler type that is no class (instance), a raise
+  // address that is no pointer (18.1.2, 18.3.1). Neither names anything.
+  SE2021_ClassTypeRequired = 'E2021 Class type required';
+  SE2017_PointerTypeRequired = 'E2017 Pointer type required';
+  // A nested routine as a plain procedural value (6.9).
+  SE2094_LocalRoutineToProcVar =
+    'E2094 Local procedure/function ''%s'' assigned to procedure variable';
   // Takes no argument: a bare `raise` has nothing to name (18 sec. 18.3.1).
   SE2145_ReRaiseOutsideHandler =
     'E2145 Re-raising an exception only allowed in exception handler';
+  // The flow-control statements' limits (5.6, 5.6.4, 18.2.1). E2127 names
+  // the goto's label.
+  SE2097_BreakOutsideLoop = 'E2097 BREAK or CONTINUE outside of loop';
+  SE2025_ProcedureResultType = 'E2025 Procedure cannot have a result type';
+  SE2126_ExitFromFinally =
+    'E2126 Cannot BREAK, CONTINUE or EXIT out of a FINALLY clause';
+  SE2127_GotoIntoTry = 'E2127 ''GOTO %s'' leads into or out of TRY ' +
+    'statement, FOR-IN statement whose enumerator has destructor, or a ' +
+    'block containing local variable';
   // Likewise argument-free; dcc's wording says "standard function" (4 sec. 4.11).
   SE2193_SliceOutsideOpenArray =
     'E2193 Slice standard function only allowed as open array argument';
@@ -88,6 +104,10 @@ const
     'E1012 Constant expression violates subrange bounds';
   SE2430_ForInCollection =
     'E2430 for-in statement cannot operate on collection type ''%s''';
+  // The collection, the type lacking the member, the member (5.5.2).
+  SE2431_ForInMember = 'E2431 for-in statement cannot operate on collection ' +
+    'type ''%s'' because ''%s'' does not contain a member for ''%s'', or it ' +
+    'is inaccessible';
   SE2029_ForInTypeCollection = 'E2029 ''('' expected but ''DO'' found';
   SE2005_NotATypeIdentifier   = 'E2005 ''%s'' is not a type identifier';
   // E2010 takes two type names (dst, src). E2015 takes NOTHING - dcc's own

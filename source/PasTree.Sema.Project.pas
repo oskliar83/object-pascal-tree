@@ -24510,10 +24510,143 @@ var
         [XTypeText(LX)]));
     end;
 
+    { 18.3.1: the raised expression is a class INSTANCE - a value of another
+      category (5, an interface, a record, a class reference), a type name
+      (`raise Exception`) or nil is E2021; the `at` address is a pointer
+      (`at 5` is E2017). An untyped operand says nothing (dcc64 37.0, spec
+      audit g6 X02). }
+    procedure CheckRaise(N: Integer);
+    var
+      LExpr, LAddr, LCore, LMid, LSym: Integer;
+      LX: TSemaXType;
+    begin
+      LExpr := LM.Tree.Nodes[N].FirstChild;
+      if (LExpr = NIL_NODE) or InUntypedWith(N) then
+        Exit;
+      LCore := PeelParens(LM.Tree, LExpr);
+      if LCore = NIL_NODE then
+        Exit;
+      if LM.Tree.Nodes[LCore].Kind = nkNilLit then
+        EmitAt(LM, LExpr, 'E2021', SE2021_ClassTypeRequired)
+      else if (LM.Tree.Nodes[LCore].Kind in [nkIdent, nkMember]) and
+         TargetSym(LCore, LMid, LSym) and
+         (FModels[LMid].Symbols[LSym].Kind in [skType, skBuiltinType]) then
+        EmitAt(LM, LExpr, 'E2021', SE2021_ClassTypeRequired)
+      else
+      begin
+        LX := GetX(LExpr);
+        if XValid(LX) and not Unreliable(N, LExpr, LX) and
+           (XCatOf(CanonTypeX(LX)) in [tcInteger, tcFloat, tcBoolean, tcChar,
+            tcString, tcPointer, tcEnum, tcSet, tcArray, tcRecord,
+            tcInterface, tcProc, tcClassOf, tcVariant]) then
+          EmitAt(LM, LExpr, 'E2021', SE2021_ClassTypeRequired);
+      end;
+      LAddr := LM.Tree.Nodes[LExpr].NextSibling;
+      if LAddr = NIL_NODE then
+        Exit;
+      LX := GetX(LAddr);
+      if XValid(LX) and not Unreliable(N, LAddr, LX) and
+         (XCatOf(CanonTypeX(LX)) in [tcInteger, tcFloat, tcBoolean, tcChar,
+          tcString, tcEnum, tcSet, tcArray, tcRecord, tcClass, tcInterface,
+          tcClassOf, tcVariant]) then
+        EmitAt(LM, LAddr, 'E2017', SE2017_PointerTypeRequired);
+    end;
+
+    { 18.1.2: an `on` handler's type is a class - an Integer, an interface, a
+      record, a class reference (`on E: TClass`) is E2021 (dcc64 37.0, spec
+      audit g6 X01). An undeclared or generic type says nothing here. }
+    procedure CheckHandler(N: Integer);
+    var
+      LType, LMid, LSym: Integer;
+      LX: TSemaXType;
+    begin
+      LType := LM.Tree.Nodes[N].FirstChild;
+      if LType = NIL_NODE then
+        Exit;
+      // `on E: T do S` - three children; `on T do S` - two.
+      if (LM.Tree.Nodes[LType].NextSibling <> NIL_NODE) and
+         (LM.Tree.Nodes[LM.Tree.Nodes[LType].NextSibling].NextSibling <>
+          NIL_NODE) then
+        LType := LM.Tree.Nodes[LType].NextSibling;
+      if not (LM.Tree.Nodes[LType].Kind in [nkIdent, nkMember]) or
+         InUntypedWith(N) or not TargetSym(LType, LMid, LSym) or
+         not (FModels[LMid].Symbols[LSym].Kind in [skType, skBuiltinType]) then
+        Exit;
+      LX := XPlain(LMid, LSym);
+      if OpenX(LX) then
+        Exit;
+      if XCatOf(CanonTypeX(LX)) in [tcInteger, tcFloat, tcBoolean, tcChar,
+         tcString, tcPointer, tcEnum, tcSet, tcArray, tcRecord, tcInterface,
+         tcProc, tcClassOf, tcVariant, tcFile] then
+        EmitAt(LM, LType, 'E2021', SE2021_ClassTypeRequired);
+    end;
+
     procedure CheckForIn(N: Integer);
     var
       LVar, LColl, LCore, LHead, LMid, LSym: Integer;
       LVarX, LCollX, LElemX: TSemaXType;
+
+      { 5.5.2: the enumerator pattern member by member - a PUBLIC function
+        GetEnumerator (wherever the loop is: dcc does not grant a private one
+        to its own class), whose result has a public function MoveNext
+        returning Boolean and a public PROPERTY Current. The first member
+        that fails is E2431, naming the type that lacks it; False then. A
+        type whose ancestry is not all known says nothing for a missing
+        GetEnumerator, nor does a GetEnumerator that is a procedure (dcc
+        crashes on it) or an enumerator not typed here. }
+      function EnumeratorFits(const ACollX: TSemaXType): Boolean;
+      const
+        PUBLIC_VIS = [svDefault, svPublic, svPublished, svAutomated];
+      var
+        LMemMid, LMemSym, LCtx: Integer;
+        LEnumX, LResX: TSemaXType;
+
+        function Fail(const AOwnerX: TSemaXType; const AMember: string):
+          Boolean;
+        begin
+          EmitAt(LM, LColl, 'E2431', Format(SE2431_ForInMember,
+            [XTypeText(ACollX), XTypeText(AOwnerX), AMember]));
+          Result := False;
+        end;
+
+      begin
+        Result := True;
+        if not FindMemberX(AId, ACollX, 'getenumerator', LMemMid, LMemSym,
+             LCtx) then
+        begin
+          if not UnknownAncestryX(CanonTypeX(ACollX)) then
+            Result := Fail(ACollX, 'GetEnumerator');
+          Exit;
+        end;
+        if (FModels[LMemMid].Symbols[LMemSym].Kind <> skRoutine) or
+           not (FModels[LMemMid].Symbols[LMemSym].Visibility in PUBLIC_VIS)
+        then
+          Exit(Fail(ACollX, 'GetEnumerator'));
+        if FModels[LMemMid].RoutineHead(LMemSym) <> rhFunction then
+          Exit;
+        LEnumX := SubstX(SymDeclTypeX(LMemMid, LMemSym), LCtx, 0);
+        if not XValid(LEnumX) or OpenX(LEnumX) or
+           not (XCatOf(CanonTypeX(LEnumX)) in [tcClass, tcRecord,
+            tcInterface]) or UnknownAncestryX(CanonTypeX(LEnumX)) then
+          Exit;
+        if not FindMemberX(AId, LEnumX, 'movenext', LMemMid, LMemSym, LCtx) or
+           (FModels[LMemMid].Symbols[LMemSym].Kind <> skRoutine) or
+           not (FModels[LMemMid].Symbols[LMemSym].Visibility in PUBLIC_VIS)
+        then
+          Exit(Fail(LEnumX, 'MoveNext'));
+        if FModels[LMemMid].RoutineHead(LMemSym) <> rhFunction then
+          Exit(Fail(LEnumX, 'MoveNext'));
+        LResX := SymDeclTypeX(LMemMid, LMemSym);
+        if XValid(LResX) and not OpenX(LResX) and
+           (XCatOf(CanonTypeX(LResX)) <> tcBoolean) then
+          Exit(Fail(LEnumX, 'MoveNext'));
+        if not FindMemberX(AId, LEnumX, 'current', LMemMid, LMemSym, LCtx) or
+           (FModels[LMemMid].Symbols[LMemSym].Kind <> skProperty) or
+           not (FModels[LMemMid].Symbols[LMemSym].Visibility in PUBLIC_VIS)
+        then
+          Exit(Fail(LEnumX, 'Current'));
+      end;
+
     begin
       LVar := LM.Tree.Nodes[N].FirstChild;
       if LVar = NIL_NODE then
@@ -24562,6 +24695,11 @@ var
           [XTypeText(LCollX)]));
         Exit;
       end;
+      if XValid(LCollX) and not InUntypedWith(N) and
+         not Unreliable(N, LColl, LCollX) and
+         (XCatOf(CanonTypeX(LCollX)) in [tcClass, tcRecord, tcInterface]) and
+         not EnumeratorFits(LCollX) then
+        Exit;
       if not XValid(LVarX) or not XValid(LCollX) then
         Exit;
       LElemX := ForInElementX(AId, LColl, LCollX);
@@ -25107,6 +25245,30 @@ var
           (FModels[LCx.UnitId].Tree.Nodes[LDef].Aux = 2);
       end;
 
+      // A plain `procedure` / `function` type - neither `of object` nor
+      // `reference to`.
+      function IsPlainProcType(const AX: TSemaXType;
+        out AFunc: Boolean): Boolean;
+      var
+        LCx: TSemaXType;
+        LDef: Integer;
+      begin
+        Result := False;
+        AFunc := False;
+        if not XValid(AX) then
+          Exit;
+        LCx := CanonTypeX(AX);
+        if not XValid(LCx) then
+          Exit;
+        LDef := TypeDefNodeOf(LCx.UnitId, LCx.Sym);
+        Result := (LDef <> NIL_NODE) and
+          (FModels[LCx.UnitId].Tree.Nodes[LDef].Kind = nkProcType) and
+          (FModels[LCx.UnitId].Tree.Nodes[LDef].Aux <= 0);   // 1 of object, 2 reference to
+        if Result then
+          AFunc := FModels[LCx.UnitId].Tree.Source.VisibleKind(
+            FModels[LCx.UnitId].Tree.Nodes[LDef].FirstToken) = tkFunction;
+      end;
+
       // The declared type of the AIndex-th parameter of the routine the call
       // ACall binds; XNil when not read.
       function ArgParamX(ACall, AIndex: Integer): TSemaXType;
@@ -25139,6 +25301,7 @@ var
     var
       LSym, LDecl, LOwner, LUp, LAt, LTop, LIdx, LTok: Integer;
       LTargetX: TSemaXType;
+      LFunc: Boolean;
     begin
       if N > High(LM.RefMap) then
         Exit;
@@ -25192,6 +25355,16 @@ var
             end;
             LTargetX := ArgParamX(LUp, LIdx);
           end;
+      end;
+      // A plain procedural type takes no nested routine (6.9): E2094 at the
+      // name. A nested FUNCTION against a procedure type is no candidate:
+      // dcc says E2010 there (`G := Inner` with `function Inner: TP`).
+      if IsPlainProcType(LTargetX, LFunc) then
+      begin
+        if LFunc or (LM.RoutineHead(LSym) <> rhFunction) then
+          EmitAt(LM, N, 'E2094', Format(SE2094_LocalRoutineToProcVar,
+            [LM.Tree.NodeText(N)]));
+        Exit;
       end;
       if not IsRefType(LTargetX) then
         Exit;
@@ -26154,6 +26327,10 @@ var
           CheckFor(N);
         nkForInStmt:
           CheckForIn(N);
+        nkRaiseStmt:
+          CheckRaise(N);
+        nkExceptOn:
+          CheckHandler(N);
         nkExprStmt:
           if Length(LM.Tree.Source.SwitchEvents) > 0 then
             CheckCallStmt(N);

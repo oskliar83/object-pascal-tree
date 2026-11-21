@@ -87,6 +87,10 @@ type
     // `;` (see ParseProcTypeExpr). Read and cleared by ParseTypeExpr on entry,
     // like FEqEndsBound.
     FProcTail: Boolean;
+    // Set for the right side of a type declaration only, the one place a
+    // `reference to` type may be written (17.1.1). Read and cleared by
+    // ParseTypeExpr on entry.
+    FTypeDeclRhs: Boolean;
     // Set while parsing a variant branch's labels: a member name starting its
     // line before `: (` is the label's (`TKind.` NEWLINE `A: (...)`), not the
     // next field's head (see ParseSelectors).
@@ -2590,7 +2594,7 @@ end;
 function TPasParser.ParseTypeExpr: Integer;
 var
   LNode, LExpr, LStart: Integer;
-  LEqEnds, LProcTail, LDouble: Boolean;
+  LEqEnds, LProcTail, LDouble, LRefOk: Boolean;
 begin
   if not EnterGuard then
   begin
@@ -2606,6 +2610,8 @@ begin
   FEqEndsBound := False;
   LProcTail := FProcTail;
   FProcTail := False;
+  LRefOk := FTypeDeclRhs;
+  FTypeDeclRhs := False;
   try
   // The head of the NEXT declaration, on its own line, where a type was due:
   // the author has not typed the type yet (`E` above `Reserve: ...`, `TArr =
@@ -2722,6 +2728,21 @@ begin
           (PeekKind(2) in [tkProcedure, tkFunction]) then
         begin
           MarkContextKeyword; // color 'reference' (lexed as an identifier)
+          // 17.1.1: only a type declaration's right side reads `reference
+          // to`; anywhere else - a variable's, a field's, a parameter's, a
+          // result's, a constant's type, an array's element, another
+          // reference type's result - `reference` is an identifier: E2003
+          // there, and E2029 where the routine heading dcc then reads wants
+          // its name (dcc64 37.0, spec audit g3 NestP, local/probe-park/
+          // sa4-flow RT1-RT14). The type stays in the tree as written.
+          if not LRefOk then
+          begin
+            ErrorAt(FPos, 'Undeclared identifier: ''reference''');
+            FDiags[FDiagCount - 1].Code := 'E2003';
+            ErrorAt(FPos + 3, Format('Identifier expected but ''%s'' found',
+              [FSrc.VisibleText(FPos + 3)]));
+            FDiags[FDiagCount - 1].Code := 'E2029';
+          end;
           Next; // reference
           Next; // to
           // No directive run after a `;` (`reference to procedure; stdcall;`
@@ -4804,10 +4825,12 @@ begin
       // `TFn = function: T; stdcall;` - the run after the `;` is the
       // procedural type's (see ParseProcTypeExpr).
       FProcTail := True;
+      FTypeDeclRhs := True;
       try
         FB.Adopt(LDecl, ParseTypeExpr);
       finally
         FProcTail := False;
+        FTypeDeclRhs := False;
       end;
     end;
     ParseHintsOpt(LDecl);

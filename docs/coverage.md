@@ -299,6 +299,20 @@ of less work, not a gap in following the language; its consequences are in
   project level only (arrays incl. `TArray<T>`, strings, sets, and a
   class/record/interface's `GetEnumerator` result's `Current` property); the
   intra-unit typer still has no ExprType for it.
+- the enumerator pattern's E2431 (a public GetEnumerator, MoveNext of a
+  Boolean type, a Current property) is not judged over a collection typed
+  loosely (an open generic type, an overload choice), a missing
+  GetEnumerator not where the type's ancestry is not all known, and nothing
+  after a GetEnumerator that is a procedure (dcc crashes on it) or whose
+  enumerator is not typed.
+
+### 5.6 Flow-control statements
+- every E2126 is reported; dcc stops the compilation at the first.
+- E2127 is checked for a `try` statement only: dcc's other two cases - a
+  for-in whose enumerator has a destructor, a block declaring an inline
+  variable - are not.
+- Break / Continue / Exit in an unopened `with` body (the binding a guess)
+  are not judged.
 
 ### 5.7 The `with` statement
 - the write rule behind `with (R) do X := 1` (E2064, a write into a part of
@@ -428,6 +442,12 @@ of less work, not a gap in following the language; its consequences are in
   the rule; for a used unit the check stays lenient, so `F(1.5)` beside a
   plain `F(D: Double)` of a used unit and the unit's own `F(X: Integer);
   overload;` is not reported.
+
+### 6.9 Nested routines
+- E2094 is judged where E2555 is: a nested routine as an assignment's whole
+  source or as a bare argument whose parameter is read. Against an `of
+  object` type (dcc: E2009) and for a nested function whose result is the
+  procedure type (dcc: E2010) nothing is reported.
 
 ## 6.10 Inline assembly (`asm … end`)
 - where an asm body ends is decided by the preprocessor, which knows the
@@ -608,6 +628,14 @@ of less work, not a gap in following the language; its consequences are in
 
 ## 17-anonymous-methods.md
 
+### 17.1.1 Anonymous-method reference types
+- a `reference to` type written in place (not a type declaration's right
+  side) is E2003 on `reference` and E2029 at the token after `procedure` /
+  `function`, worded as dcc words a variable's; a parameter's, an inline
+  variable's and a typed constant's E2029 read differently in dcc, and its
+  recovery errors after them are not reproduced. The type stays in the
+  tree.
+
 ### 17.2.1 Inline `procedure`/`function` literals
 - a literal fits a `reference to` parameter by its parameter count,
   procedure / function kind and parameter types (overload scoring,
@@ -615,6 +643,12 @@ of less work, not a gap in following the language; its consequences are in
   type either (spec 17.2.1: two reference types differing only in it are
   E2250), but beside an Integer overload dcc takes `F9(X: Integer)` for a
   literal where PasTree takes the `reference to` one - not modelled.
+
+## 18-exceptions.md
+
+### 18.1.2 / 18.3.1 Handler types and raise operands
+- E2021 / E2017 are judged over a typed operand only: an untyped one, one
+  an overload choice typed, an open generic type say nothing.
 
 ## 19-rtti-attributes.md
 
