@@ -24829,6 +24829,55 @@ var
         [XTypeText(LDstX), 'Set']));
     end;
 
+    // 15.1.4, 6.6.1 (dcc64 37.0, spec audit g5 C03): a routine named alone
+    // as the value of a plain procedural variable must be no method - a
+    // class method has the class for its Self, a `static` one none - and
+    // of a method pointer, a method: `P := TA.C` is E2009 'regular
+    // procedure and method pointer', `M := TA.S` the reverse (the target's
+    // kind first). Judged for a lone routine of unit or class level, not
+    // overloaded, nested or a function returning a procedural value.
+    procedure CheckProcKindValue(AAssign, ADst, ASrc: Integer);
+    var
+      LSrc, LMid, LSym, LDef, LConv: Integer;
+      LDstX: TSemaXType;
+      LDstKind, LSrcKind: TSemaProcKind;
+      LOm: TPasSemaModel;
+    begin
+      LSrc := PeelParens(LM.Tree, ASrc);
+      if (LSrc = NIL_NODE) or
+         not (LM.Tree.Nodes[LSrc].Kind in [nkIdent, nkMember]) or
+         not TargetSym(LSrc, LMid, LSym) then
+        Exit;
+      LOm := FModels[LMid];
+      if (LOm.Symbols[LSym].Kind <> skRoutine) or LOm.Demoted or
+         (LOm.Symbols[LSym].NextOverload <> NIL_SYM) or
+         (sfOverload in LOm.Symbols[LSym].Flags) or
+         (LOm.Symbols[LSym].Scope = NIL_SCOPE) or
+         (LOm.Scopes[LOm.Symbols[LSym].Scope].Kind = sckRoutine) then
+        Exit;
+      if (LOm.RoutineHead(LSym) = rhFunction) and
+         (XCatOf(CanonTypeX(SymDeclTypeX(LMid, LSym))) in [tcProc,
+           tcUnknown]) then
+        Exit;
+      LDstX := CanonTypeX(GetX(ADst));
+      if not XValid(LDstX) or OpenX(LDstX) or (XCatOf(LDstX) <> tcProc) then
+        Exit;
+      LDef := TypeDefNodeOf(LDstX.UnitId, LDstX.Sym);
+      if (LDef = NIL_NODE) or
+         (FModels[LDstX.UnitId].Tree.Nodes[LDef].Kind <> nkProcType) then
+        Exit;
+      LDstKind := ProcTypeKind(FModels[LDstX.UnitId], LDef);
+      LSrcKind := RoutineProcKind(LOm, LSym, LConv);
+      if InUntypedWith(AAssign) or LM.HasDiagAt(ASrc) then
+        Exit;
+      if (LDstKind = pkPlain) and (LSrcKind = pkMethod) then
+        EmitAt(LM, ASrc, 'E2009', 'E2009 Incompatible types: ''regular ' +
+          'procedure and method pointer''')
+      else if (LDstKind = pkMethod) and (LSrcKind = pkPlain) then
+        EmitAt(LM, ASrc, 'E2009', 'E2009 Incompatible types: ''method ' +
+          'pointer and regular procedure''');
+    end;
+
     // The declared type of the variable a name node (or an nkInlineVar's
     // first name) declares; XNil for one with no written type - inferred
     // from its value, which then cannot disagree with it.
@@ -25858,6 +25907,7 @@ var
               Continue;
             CheckConv(N, LDst, LSrc, LSrc, GetX(LDst), GetX(LSrc));
             CheckStaticCtor(N, LDst, LSrc);
+            CheckProcKindValue(N, LDst, LSrc);
             CheckWriteTarget(N, LDst);
             CheckReadOnlyTarget(N, LDst);
             CheckOpenArrayValue(N, LDst, LSrc);

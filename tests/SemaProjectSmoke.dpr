@@ -11621,6 +11621,86 @@ begin
   end;
 end;
 
+{ Spec 15.1.4, 6.6.1 (dcc64 37.0, spec audit g5 C03,
+  local/probe-park/sa4-classes sem E1): a routine named alone as the value
+  of a procedural variable - E2009 when a method (a plain class method, a
+  record's or an object's instance method) goes to a plain procedural type
+  or a static class method or a unit-level routine to a method pointer; a
+  static class method to a plain type, a class method to a method pointer
+  and anything to a `reference to` type stay silent. }
+procedure TestProcKindValue;
+const
+  SYS = 'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class constructor Create; end;'#10 +
+    '  IInterface = interface end;'#10 +
+    'implementation'#10'constructor TObject.Create; begin end;'#10 +
+    'end.'#10;
+  E1 =
+    'program E1;'#10 +
+    'type'#10 +
+    '  TPr = procedure;'#10 +
+    '  TMe = procedure of object;'#10 +
+    '  TRf = reference to procedure;'#10 +
+    '  TFn = function: Integer;'#10 +
+    '  TA = class'#10 +
+    '    class procedure S; static;'#10 +
+    '    class procedure C;'#10 +
+    '    procedure I;'#10 +
+    '  end;'#10 +
+    '  TR = record'#10 +
+    '    procedure RM;'#10 +
+    '    class procedure RS; static;'#10 +
+    '  end;'#10 +
+    'procedure G; begin end;'#10 +
+    'function F: Integer; begin Result := 0; end;'#10 +
+    'class procedure TA.S; begin end;'#10 +
+    'class procedure TA.C; begin end;'#10 +
+    'procedure TA.I; begin end;'#10 +
+    'procedure TR.RM; begin end;'#10 +
+    'class procedure TR.RS; begin end;'#10 +
+    'var P: TPr; M: TMe; Rf: TRf; Fn: TFn; A: TA; R: TR;'#10 +
+    'begin'#10 +
+    '  P := TA.S;'#10 +
+    '  P := G;'#10 +
+    '  P := TR.RS;'#10 +
+    '  M := TA.C;'#10 +
+    '  M := A.I;'#10 +
+    '  M := A.C;'#10 +
+    '  M := R.RM;'#10 +
+    '  Rf := TA.S;'#10 +
+    '  Rf := TA.C;'#10 +
+    '  Rf := G;'#10 +
+    '  Fn := F;'#10 +
+    '  P := A.I;'#10 +
+    '  M := G;'#10 +
+    '  P := TR.RS;'#10 +
+    '  M := TR.RS;'#10 +
+    'end.'#10;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_prockind');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'), SYS);
+  TFile.WriteAllText(TPath.Combine(LDir, 'E1.dpr'), E1);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'E1.dpr'));
+    LM := ModelByName('e1');
+    Ok('prockind: E2009 where dcc reports it [' + DiagSites(LM, 'E2009') +
+      ']', DiagSites(LM, 'E2009') = '36:9 37:8 39:10');
+    Ok('prockind: ...the target''s kind first',
+      DiagHasText(LM, 'E2009', 'regular procedure and method pointer') and
+      DiagHasText(LM, 'E2009', 'method pointer and regular procedure'));
+    Ok('prockind: nothing else [' + IntToStr(Length(LM.Diags)) + ']',
+      Length(LM.Diags) = 3);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 { Spec 11.1.1 (dcc64 37.0, spec audit g4 CFwd, local/probe-park/sa4-classes
   fwd W1-W6): a forward class or interface open at the end of its `type`
   section is E2086 at the forward - a nested one named with its outer type;
@@ -24534,6 +24614,7 @@ begin
   TestAttributeE2289;
   TestForwardSection;
   TestClassDeclChecks;
+  TestProcKindValue;
   TestAttributeE2289Lists;
   TestAttributeE2289Hidden;
   TestForCounterChecks;
