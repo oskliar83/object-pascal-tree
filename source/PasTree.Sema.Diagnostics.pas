@@ -37,6 +37,10 @@ const
   SE2003_UndeclaredIdentifier = 'E2003 Undeclared identifier: ''%s''';
   SE2004_IdentifierRedeclared = 'E2004 Identifier redeclared: ''%s''';
   SE2081_AssignToForLoopVar = 'E2081 Assignment to FOR-Loop variable ''%s''';
+  // A forward class or interface left open at the end of its `type` section
+  // (11 sec. 11.1.1): the name, qualified by the types around a nested one.
+  SE2086_NotCompletelyDefined =
+    'E2086 Type ''%s'' is not yet completely defined';
   // A record aggregate's label naming a member that is no field - a method,
   // a property, a constant (3 sec. 3.2.2).
   SE2461_NotAnInstanceField =

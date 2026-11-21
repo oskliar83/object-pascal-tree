@@ -526,6 +526,17 @@ of less work, not a gap in following the language; its consequences are in
 
 ## 11-classes.md
 
+### 11.1.3 Methods
+- a method directive out of dcc's order is E2169 (E2599 in a helper) at the
+  word, and the field's missing type only at an `end` right after it; when
+  a member follows, dcc reads it as that field's type and reports on into
+  its line (E2070, E2058, E2003 on the implementation) - not reproduced.
+  The tail group's own rules after `final` and `abstract` (only `inline`,
+  and `final` after `abstract`) are not judged: dcc's reports there vary
+  with what follows.
+- `F, G: Integer` in a helper is dcc's E2599 plus an E2029 "'END' expected
+  but ';' found" at the `;`; PasTree reports the E2599 alone.
+
 ### 11.2.1 `private` / `protected` / `public` / `published` (+ `strict`)
 - E2361 / E2362 (ReportVisibility, opt-in by design) are judged at a
   qualified access in a method body or in unit-level code; a protected
@@ -538,6 +549,21 @@ of less work, not a gap in following the language; its consequences are in
   inherited passes filter all four kinds.
 
 ## 12-inheritance-polymorphism.md
+
+### 12.2.1 `virtual` / `override`, 12.2.4 `abstract`
+- the class-body checks (TPasSemaProject.CheckClassDecls) judge classes
+  only, not `object` types, records or helpers. An `override` whose
+  signature cannot be compared with a candidate - a type written in place
+  (`array of const`), an open type parameter, an unresolved type, a generic
+  method - is not judged at all.
+- E2065 is reported only for a method whose `abstract` is no directive;
+  a method with no implementation in general is not judged. E2136 is not
+  judged for an overloaded name.
+- `static` on an instance method makes dcc read it as a class method (its
+  implementation `procedure TA.St` is E2037); PasTree reports the E2376
+  alone.
+- a `stored` specifier naming a member declared below is not judged (dcc's
+  report varies), nor E2356 (an instance property reading a class var).
 
 ### 12.1.2 `inherited`
 - intra-unit, the name after `inherited` binds to the ancestor's member when

@@ -408,6 +408,15 @@ type
              the ancestry is UNKNOWN past this point, not absent. }
   TPasHeritageHop = (hhNext, hhNone, hhBroken);
 
+  { TPasSemaProject.MethodDirs: the method directives the class checks read
+    (spec 11.1.3); mdOther for any other word, never in the set. }
+  TPasMethodDir = (mdVirtual, mdDynamic, mdOverride, mdMessage, mdStatic,
+    mdFinal, mdAbstract, mdOverload, mdReintroduce, mdOther);
+  TPasMethodDirs = set of TPasMethodDir;
+
+  { TPasSemaProject.SameMethodSig: one signature, another, or not known. }
+  TPasSigMatch = (msYes, msNo, msUnknown);
+
   { TPasSemaProject.MessageIdOf / MessageHandlerX: a message id read (mirId),
     none there (mirNone), or one that cannot be read (mirUnknown). }
   TPasMsgIdRead = (mirId, mirNone, mirUnknown);
@@ -1516,6 +1525,12 @@ type
     procedure CheckAttributes(AId: Integer);
     procedure CheckHeadingPairs(AId: Integer);
     procedure CheckRecordDecls(AId: Integer);
+    function MethodDirs(AModel: TPasSemaModel; ARoutine: Integer;
+      out ADirs: TPasMethodDirs; out AAbstract, AFinal,
+      AStatic: Integer): Boolean;
+    function SameMethodSig(AMid, ASym, BMid, BSym: Integer): TPasSigMatch;
+    function ClassTypeInfoX(const AX: TSemaXType; ADepth: Integer): Integer;
+    procedure CheckClassDecls(AId: Integer);
     function InterfaceGuidBracket(AModel: TPasSemaModel;
       AAttr: Integer): Boolean;
     function RecordHasLifecycleOp(AMid, ADefNode: Integer): Boolean;
@@ -11607,6 +11622,7 @@ begin
             CheckAttributes(AIds[0]);
             CheckHeadingPairs(AIds[0]);
             CheckRecordDecls(AIds[0]);
+            CheckClassDecls(AIds[0]);
             CheckLateUnitMembers(AIds[0]);
           end;
         except
@@ -11623,6 +11639,7 @@ begin
         CheckAttributes(AIds[ASlot]);
         CheckHeadingPairs(AIds[ASlot]);
         CheckRecordDecls(AIds[ASlot]);
+        CheckClassDecls(AIds[ASlot]);
         CheckLateUnitMembers(AIds[ASlot]);
       end,
       function(ASlot: Integer): Integer
@@ -14072,6 +14089,677 @@ begin
        IsOperator(LM.Scopes[LNode].OwnerNode) then
       CheckOperatorHeading(LM.Scopes[LNode].OwnerNode,
         LM.Scopes[LNode].StructSym);
+end;
+
+{ The directives a method declaration ARoutine of AModel says, as dcc reads
+  them (11.1.3): in a class, record, object or helper body the first word of
+  an earlier group after a later one (reintroduce, overload, a binding word,
+  the rest) is no directive, and neither is what follows it. AAbstract,
+  AFinal, AStatic: the nodes of those words, NIL_NODE when not read. False
+  for a model with no directive text (demoted). }
+function TPasSemaProject.MethodDirs(AModel: TPasSemaModel; ARoutine: Integer;
+  out ADirs: TPasMethodDirs; out AAbstract, AFinal, AStatic: Integer): Boolean;
+var
+  LDir, LStage, LRank, LBody: Integer;
+  LOrdered: Boolean;
+  LD: TPasMethodDir;
+begin
+  ADirs := [];
+  AAbstract := NIL_NODE;
+  AFinal := NIL_NODE;
+  AStatic := NIL_NODE;
+  Result := not AModel.Demoted;
+  if not Result then
+    Exit;
+  LBody := AModel.Tree.Nodes[ARoutine].Parent;
+  LOrdered := (LBody <> NIL_NODE) and (AModel.Tree.Nodes[LBody].Kind in
+    [nkClassType, nkRecordType, nkObjectType, nkHelperType]);
+  LStage := 0;
+  LDir := AModel.Tree.Nodes[ARoutine].FirstChild;
+  while LDir <> NIL_NODE do
+  begin
+    if AModel.Tree.Nodes[LDir].Kind = nkDirective then
+    begin
+      LRank := 4;
+      if AModel.Tree.NodeTextEquals(LDir, 'virtual') then
+        LD := mdVirtual
+      else if AModel.Tree.NodeTextEquals(LDir, 'dynamic') then
+        LD := mdDynamic
+      else if AModel.Tree.NodeTextEquals(LDir, 'override') then
+        LD := mdOverride
+      else if AModel.Tree.NodeTextEquals(LDir, 'message') then
+        LD := mdMessage
+      else if AModel.Tree.NodeTextEquals(LDir, 'static') then
+        LD := mdStatic
+      else if AModel.Tree.NodeTextEquals(LDir, 'final') then
+        LD := mdFinal
+      else if AModel.Tree.NodeTextEquals(LDir, 'abstract') then
+        LD := mdAbstract
+      else if AModel.Tree.NodeTextEquals(LDir, 'overload') then
+        LD := mdOverload
+      else if AModel.Tree.NodeTextEquals(LDir, 'reintroduce') then
+        LD := mdReintroduce
+      else
+        LD := mdOther;
+      case LD of
+        mdReintroduce: LRank := 1;
+        mdOverload: LRank := 2;
+        mdVirtual, mdDynamic, mdOverride, mdMessage: LRank := 3;
+      end;
+      if LOrdered and (LRank < 4) and (LRank <= LStage) then
+        Exit;   // a field to dcc, and the rest with it (11.1.3)
+      if LRank > LStage then
+        LStage := LRank;
+      if LD <> mdOther then
+        Include(ADirs, LD);
+      case LD of
+        mdAbstract: AAbstract := LDir;
+        mdFinal: AFinal := LDir;
+        mdStatic: AStatic := LDir;
+      end;
+    end;
+    LDir := AModel.Tree.Nodes[LDir].NextSibling;
+  end;
+end;
+
+{ Are the routines ASym of model AMid and BSym of model BMid one signature,
+  as an `override` must repeat its ancestor's (12.2.1): the head (procedure
+  or function), class or instance, the parameter count, each mode (value,
+  const, var, out) and type, the result. Names and default values do not
+  count. msUnknown where a type cannot be compared - unresolved, an open
+  type parameter, a type written in place (`array of T`), a generic method,
+  a model with no text. }
+function TPasSemaProject.SameMethodSig(AMid, ASym, BMid,
+  BSym: Integer): TPasSigMatch;
+
+  function Params(AM: TPasSemaModel; ARoutine: Integer): TArray<Integer>;
+  var
+    LScope: Integer;
+  begin
+    Result := nil;
+    LScope := AM.Symbols[ARoutine].MemberScope;
+    if LScope = NIL_SCOPE then
+      Exit;
+    for var LI := 0 to AM.Scopes[LScope].Symbols.Count - 1 do
+      if AM.Symbols[AM.Scopes[LScope].Symbols[LI]].Kind = skParam then
+        Result := Result + [AM.Scopes[LScope].Symbols[LI]];
+  end;
+
+  // Two declared types: written as names on both sides, the same type.
+  function SameType(AM, BM, AS1, BS1: Integer): TPasSigMatch;
+  var
+    LA, LB: Integer;
+    LXa, LXb: TSemaXType;
+  begin
+    LA := FModels[AM].Symbols[AS1].TypeNode;
+    LB := FModels[BM].Symbols[BS1].TypeNode;
+    if (LA = NIL_NODE) and (LB = NIL_NODE) then
+      Exit(msYes);   // untyped `var X` / `const X` on both sides
+    if (LA = NIL_NODE) or (LB = NIL_NODE) then
+      Exit(msNo);
+    if not (FModels[AM].Tree.Nodes[LA].Kind in [nkIdent, nkMember]) or
+       not (FModels[BM].Tree.Nodes[LB].Kind in [nkIdent, nkMember]) then
+      Exit(msUnknown);
+    LXa := CanonTypeX(SymDeclTypeX(AM, AS1));
+    LXb := CanonTypeX(SymDeclTypeX(BM, BS1));
+    if not XValid(LXa) or not XValid(LXb) or OpenX(LXa) or OpenX(LXb) or
+       NestedInGenericX(LXa) or NestedInGenericX(LXb) then
+      Exit(msUnknown);
+    if XSameType(LXa, LXb) then
+      Result := msYes
+    else
+      Result := msNo;
+  end;
+
+var
+  LAm, LBm: TPasSemaModel;
+  LAr, LBr, LAh, LBh: Integer;
+  LAp, LBp: TArray<Integer>;
+  LMa, LMb: Integer;
+  LUnknown: Boolean;
+begin
+  Result := msUnknown;
+  LAm := FModels[AMid];
+  LBm := FModels[BMid];
+  if LAm.Demoted or LBm.Demoted or (sfGeneric in LAm.Symbols[ASym].Flags) or
+     (sfGeneric in LBm.Symbols[BSym].Flags) then
+    Exit;
+  LAr := RoutineNodeOf(LAm, ASym);
+  LBr := RoutineNodeOf(LBm, BSym);
+  if (LAr = NIL_NODE) or (LBr = NIL_NODE) then
+    Exit;
+  LAh := Ord(LAm.RoutineHead(ASym));
+  LBh := Ord(LBm.RoutineHead(BSym));
+  if (LAh <> LBh) or
+     ((LAm.Tree.Nodes[LAr].Aux = 1) <> (LBm.Tree.Nodes[LBr].Aux = 1)) then
+    Exit(msNo);
+  LAp := Params(LAm, ASym);
+  LBp := Params(LBm, BSym);
+  if Length(LAp) <> Length(LBp) then
+    Exit(msNo);
+  LUnknown := False;
+  for var LI := 0 to High(LAp) do
+  begin
+    LMa := ParamModeOf(LAm, LAp[LI]);
+    LMb := ParamModeOf(LBm, LBp[LI]);
+    if (LMa < 0) or (LMb < 0) then
+      LUnknown := True
+    else if LMa <> LMb then
+      Exit(msNo);
+    case SameType(AMid, BMid, LAp[LI], LBp[LI]) of
+      msNo: Exit(msNo);
+      msUnknown: LUnknown := True;
+    end;
+  end;
+  if LAm.RoutineHead(ASym) = rhFunction then
+    case SameType(AMid, BMid, ASym, BSym) of
+      msNo: Exit(msNo);
+      msUnknown: LUnknown := True;
+    end;
+  if LUnknown then
+    Result := msUnknown
+  else
+    Result := msYes;
+end;
+
+{ Is the class AX compiled with RTTI - under $M+, or descended from a class
+  that is (11.2.1: its members before the first section word are then
+  published)? 1 yes, 0 no, -1 not known (an ancestor that does not resolve,
+  a model with no text). }
+function TPasSemaProject.ClassTypeInfoX(const AX: TSemaXType;
+  ADepth: Integer): Integer;
+var
+  LM: TPasSemaModel;
+  LDef: Integer;
+  LNext: TSemaXType;
+begin
+  Result := -1;
+  if not XValid(AX) or (ADepth > 40) then
+    Exit;
+  LM := FModels[AX.UnitId];
+  if LM.Demoted then
+    Exit;
+  LDef := TypeDefNodeOf(AX.UnitId, AX.Sym);
+  if (LDef = NIL_NODE) or (LM.Tree.Nodes[LDef].Kind <> nkClassType) then
+    Exit;
+  if LM.Tree.Source.SwitchAt(LM.Tree.Nodes[LDef].FirstToken, optM) then
+    Exit(1);
+  case HeritageHopX(AX.UnitId, AX.Sym, LDef, LNext) of
+    hhNone: Result := 0;
+    hhNext: Result := ClassTypeInfoX(LNext, ADepth + 1);
+  end;
+end;
+
+{ Spec 11.1.2, 11.2.1, 12.2.1, 12.2.4, 12.2.5, 12.3.1, 13.1.1, 13.2.1,
+  15.1.3, 15.1.4 (dcc64 37.0, spec audit g4 IOvr, IMsg, QFwd, CFieldOrd,
+  CPub, CPub2, CDefVis, g5 C02*; local/probe-park/sa4-classes sem S1-S14) -
+  the declaration checks of a class body, each on the directives dcc reads
+  (MethodDirs):
+  - `abstract` without virtual, dynamic or override is E2167 at the word
+    (`message N` is no binding for it), and the method then wants a body:
+    E2065 at the declaration, unless the class has a virtual or dynamic
+    abstract method (dcc's report, probed); `final` so is E2351;
+  - `static` on an instance method, and `static` beside virtual, dynamic
+    or override, are E2376 each;
+  - a `message` method other than an instance procedure of ONE `var`
+    parameter is E2138;
+  - an implementation of an abstract method is E2136 at its heading;
+  - `override` (CheckOverride): the nearest ancestor method of the same
+    signature - head, class-ness, count, each mode and type, the result -
+    is the one overridden: E2352 when it is final, E2170 when it has no
+    virtual, dynamic, override or message; with none, E2037 when the
+    ancestry declares the name once, not overloaded, else E2137;
+  - a published field (in a `published` section, or before the first
+    section word of a class with RTTI, ClassTypeInfoX) of a type other than
+    a class or an interface is E2217, once per declaration at its first
+    name; a published property of a pointer type, a plain procedural type,
+    a static array, or an array property, E2188;
+  - a `read` or `write` naming a member of the same class declared below
+    the property is E2168 (a `stored` is not judged); a class property's
+    accessor other than a class var or a static class method E2355. }
+procedure TPasSemaProject.CheckClassDecls(AId: Integer);
+var
+  LM: TPasSemaModel;
+  // The class body being checked: its methods whose `abstract` is no
+  // directive (E2065 wanting a body), and whether one is a virtual or
+  // dynamic abstract method (then dcc reports none of those E2065).
+  LInvalidAbstract: TList<Integer>;
+  LValidAbstract: Boolean;
+
+  function NameOf(ARoutine: Integer): Integer;
+  var
+    LChild: Integer;
+  begin
+    Result := NIL_NODE;
+    LChild := PasSkipAttrGroups(LM.Tree, LM.Tree.Nodes[ARoutine].FirstChild);
+    while (LChild <> NIL_NODE) and
+          ((nfName in LM.Tree.Nodes[LChild].Flags) or
+           (LM.Tree.Nodes[LChild].Kind = nkGenericParams)) do
+    begin
+      if LM.Tree.Nodes[LChild].Kind = nkIdent then
+        Result := LChild;
+      LChild := LM.Tree.Nodes[LChild].NextSibling;
+    end;
+  end;
+
+  // `TOuter.TA.M` - the method's name after the types around it.
+  function QualifiedName(ASym: Integer): string;
+  var
+    LScope: Integer;
+  begin
+    Result := LM.Symbols[ASym].Name;
+    LScope := LM.Symbols[ASym].Scope;
+    while (LScope <> NIL_SCOPE) and (LM.Scopes[LScope].Kind = sckStruct) and
+          (LM.Scopes[LScope].StructSym <> NIL_SYM) do
+    begin
+      Result := LM.Symbols[LM.Scopes[LScope].StructSym].Name + '.' + Result;
+      LScope := LM.Scopes[LScope].Parent;
+    end;
+  end;
+
+  // dcc looks for the overridden method by its signature up the whole
+  // ancestry, nearest first (an override of one overload in between hides
+  // none of the others: TWinControl's ChangeScale(M, D, isDpiChange)
+  // override leaves TControl's ChangeScale(M, D) for TCalendar's); a class
+  // constructor or destructor of the name takes no part. The first of the
+  // signature decides E2352 / E2170; none of it is E2037 when the ancestry
+  // holds exactly one declaration of the name, not overloaded, else E2137.
+  // A signature that cannot be compared ends the check silently.
+  procedure CheckOverride(AClassSym, ARoutine, AName, ASym: Integer);
+  var
+    LCur, LNext: TSemaXType;
+    LDef, LFound, LCand, LDepth, LFinal, LAbs, LStat, LSeen, LCr: Integer;
+    LCm: TPasSemaModel;
+    LDirs: TPasMethodDirs;
+    LOverloaded: Boolean;
+  begin
+    LCur := XPlain(AId, AClassSym);
+    LSeen := 0;
+    LOverloaded := False;
+    for LDepth := 1 to 40 do
+    begin
+      LDef := TypeDefNodeOf(LCur.UnitId, LCur.Sym);
+      if LDef = NIL_NODE then
+        Exit;
+      case HeritageHopX(LCur.UnitId, LCur.Sym, LDef, LNext) of
+        hhNone:
+          begin
+            if (LSeen = 1) and not LOverloaded then
+              EmitAt(LM, AName, 'E2037', Format(SE2037_DeclarationDiffers,
+                [LM.Tree.NodeText(AName)]))
+            else
+              EmitAt(LM, AName, 'E2137', Format('E2137 Method ''%s'' not ' +
+                'found in base class', [LM.Tree.NodeText(AName)]));
+            Exit;
+          end;
+        hhBroken:
+          Exit;
+      end;
+      LCur := XPlain(LNext.UnitId, LNext.Sym);
+      LCm := FModels[LCur.UnitId];
+      if LCm.Demoted or (LCm.Symbols[LCur.Sym].MemberScope = NIL_SCOPE) then
+        Exit;
+      LFound := LCm.FindLocal(LCm.Symbols[LCur.Sym].MemberScope,
+        LM.Symbols[ASym].NameLower);
+      if LFound = NIL_SYM then
+        Continue;
+      if LCm.Symbols[LFound].Kind <> skRoutine then
+        Exit;   // a field or a property of the name: not judged
+      LCand := LFound;
+      while LCand <> NIL_SYM do
+      begin
+        LCr := RoutineNodeOf(LCm, LCand);
+        if LCr = NIL_NODE then
+          Exit;
+        if not ((LCm.Tree.Nodes[LCr].Aux = 1) and
+                (LCm.RoutineHead(LCand) in [rhConstructor, rhDestructor])) then
+        begin
+          Inc(LSeen);
+          if (LCm.Symbols[LCand].NextOverload <> NIL_SYM) or
+             (sfOverload in LCm.Symbols[LCand].Flags) or
+             (sfOverloadDirective in LCm.Symbols[LCand].Flags) then
+            LOverloaded := True;
+          case SameMethodSig(AId, ASym, LCur.UnitId, LCand) of
+            msUnknown:
+              Exit;
+            msYes:
+              begin
+                if not MethodDirs(LCm, LCr, LDirs, LAbs, LFinal, LStat) then
+                  Exit;
+                if mdFinal in LDirs then
+                  EmitAt(LM, AName, 'E2352', 'E2352 Cannot override a final ' +
+                    'method')
+                else if LDirs * [mdVirtual, mdDynamic, mdOverride,
+                        mdMessage] = [] then
+                  EmitAt(LM, AName, 'E2170', 'E2170 Cannot override a ' +
+                    'non-virtual method');
+                Exit;
+              end;
+          end;
+        end;
+        LCand := LCm.Symbols[LCand].NextOverload;
+      end;
+    end;
+  end;
+
+  procedure CheckMethod(AClassSym, ARoutine: Integer);
+  var
+    LName, LSym, LAbs, LFinal, LStat, LCount, LMode, LScope: Integer;
+    LDirs: TPasMethodDirs;
+    LIsClass: Boolean;
+    LHead: TPasRoutineHead;
+  begin
+    LName := NameOf(ARoutine);
+    if LName = NIL_NODE then
+      Exit;
+    LSym := LM.RefMap[LName];
+    if (LSym = NIL_SYM) or (LM.Symbols[LSym].Kind <> skRoutine) or
+       not MethodDirs(LM, ARoutine, LDirs, LAbs, LFinal, LStat) then
+      Exit;
+    LHead := LM.RoutineHead(LSym);
+    LIsClass := LM.Tree.Nodes[ARoutine].Aux = 1;
+    if (LAbs <> NIL_NODE) and
+       (LDirs * [mdVirtual, mdDynamic, mdOverride] = []) then
+    begin
+      EmitAt(LM, LAbs, 'E2167', 'E2167 Abstract methods must be virtual or ' +
+        'dynamic');
+      LInvalidAbstract.Add(LSym);
+    end
+    else if LAbs <> NIL_NODE then
+      LValidAbstract := True;
+    if (LFinal <> NIL_NODE) and
+       (LDirs * [mdVirtual, mdDynamic, mdOverride] = []) then
+      EmitAt(LM, LFinal, 'E2351', 'E2351 Final methods must be virtual or ' +
+        'dynamic');
+    if (LStat <> NIL_NODE) and (LHead in [rhProcedure, rhFunction]) then
+    begin
+      if not LIsClass then
+        EmitAt(LM, LStat, 'E2376', 'E2376 STATIC can only be used on ' +
+          'non-virtual class methods');
+      if LDirs * [mdVirtual, mdDynamic, mdOverride] <> [] then
+        EmitAt(LM, LStat, 'E2376', 'E2376 STATIC can only be used on ' +
+          'non-virtual class methods');
+    end;
+    if mdMessage in LDirs then
+    begin
+      LCount := 0;
+      LMode := -1;
+      LScope := LM.Symbols[LSym].MemberScope;
+      if LScope <> NIL_SCOPE then
+        for var LI := 0 to LM.Scopes[LScope].Symbols.Count - 1 do
+          if LM.Symbols[LM.Scopes[LScope].Symbols[LI]].Kind = skParam then
+          begin
+            Inc(LCount);
+            LMode := ParamModeOf(LM, LM.Scopes[LScope].Symbols[LI]);
+          end;
+      if LIsClass or (LHead <> rhProcedure) or (LCount <> 1) or
+         (LMode = 0) or (LMode = 1) or (LMode = 3) then
+        EmitAt(LM, LName, 'E2138', 'E2138 Invalid message parameter list');
+    end;
+    if mdOverride in LDirs then
+      CheckOverride(AClassSym, ARoutine, LName, LSym);
+  end;
+
+  // E2217 for the field declaration AVarDecl of a published section.
+  procedure CheckPublishedField(AVarDecl: Integer);
+  var
+    LName, LSym: Integer;
+    LX: TSemaXType;
+  begin
+    LName := LM.Tree.Nodes[AVarDecl].FirstChild;
+    while (LName <> NIL_NODE) and not ((LM.Tree.Nodes[LName].Kind = nkIdent)
+          and (nfName in LM.Tree.Nodes[LName].Flags)) do
+      LName := LM.Tree.Nodes[LName].NextSibling;
+    if LName = NIL_NODE then
+      Exit;
+    LSym := LM.RefMap[LName];
+    if (LSym = NIL_SYM) or not (LM.Symbols[LSym].Kind in [skField, skVar]) then
+      Exit;
+    LX := CanonTypeX(SymDeclTypeX(AId, LSym));
+    if not XValid(LX) or OpenX(LX) or NestedInGenericX(LX) or
+       (XCatOf(LX) in [tcUnknown, tcClass, tcInterface]) then
+      Exit;
+    EmitAt(LM, LName, 'E2217', Format('E2217 Published field ''%s'' not a ' +
+      'class or interface type', [LM.Tree.NodeText(LName)]));
+  end;
+
+  procedure CheckProperty(ADecl: Integer; APublished: Boolean);
+  var
+    LName, LProp, LChild, LAcc, LMid, LAs, LDef, LAbs, LFinal, LStat: Integer;
+    LX: TSemaXType;
+    LKind: string;
+    LExt: TPasExtRef;
+    LAm: TPasSemaModel;
+    LDirs: TPasMethodDirs;
+    LBad: Boolean;
+  begin
+    LName := LM.Tree.Nodes[ADecl].FirstChild;
+    while (LName <> NIL_NODE) and (LM.Tree.Nodes[LName].Kind <> nkIdent) do
+      LName := LM.Tree.Nodes[LName].NextSibling;
+    if LName = NIL_NODE then
+      Exit;
+    LProp := LM.RefMap[LName];
+    if (LProp = NIL_SYM) or (LM.Symbols[LProp].Kind <> skProperty) then
+      Exit;
+    // 13.2.1: what a published property cannot be.
+    if APublished and (LM.Symbols[LProp].TypeNode <> NIL_NODE) then
+    begin
+      LKind := '';
+      LChild := LM.Tree.Nodes[ADecl].FirstChild;
+      while LChild <> NIL_NODE do
+      begin
+        if LM.Tree.Nodes[LChild].Kind = nkParams then
+          LKind := 'ARRAY';
+        LChild := LM.Tree.Nodes[LChild].NextSibling;
+      end;
+      if LKind = '' then
+      begin
+        LX := CanonTypeX(SymDeclTypeX(AId, LProp));
+        if XValid(LX) and not OpenX(LX) and not NestedInGenericX(LX) then
+          case XCatOf(LX) of
+            tcPointer:
+              LKind := 'POINTER';
+            tcProc:
+              begin
+                LDef := TypeDefNodeOf(LX.UnitId, LX.Sym);
+                if (LDef <> NIL_NODE) and
+                   (FModels[LX.UnitId].Tree.Nodes[LDef].Kind = nkProcType) and
+                   (ProcTypeKind(FModels[LX.UnitId], LDef) = pkPlain) then
+                  LKind := 'PROCEDURE';
+              end;
+            tcArray:
+              if IsStaticArrayX(LX) then
+                LKind := 'ARRAY';
+          end;
+      end;
+      if LKind <> '' then
+        EmitAt(LM, LName, 'E2188', Format('E2188 Published property ''%s'' ' +
+          'cannot be of type %s', [LM.Tree.NodeText(LName), LKind]));
+    end;
+    // 11.1.2, 15.1.3: the accessors.
+    LChild := LM.Tree.Nodes[ADecl].FirstChild;
+    while LChild <> NIL_NODE do
+    begin
+      // Not `stored`: dcc is silent on some names declared below there and
+      // says E2003 for others (sem S4, S8, S9) - not judged.
+      if (LM.Tree.Nodes[LChild].Kind = nkPropSpec) and
+         (LM.Tree.NodeTextEquals(LChild, 'read') or
+          LM.Tree.NodeTextEquals(LChild, 'write')) then
+      begin
+        LAcc := LM.Tree.Nodes[LChild].FirstChild;
+        if (LAcc <> NIL_NODE) and (LM.Tree.Nodes[LAcc].Kind = nkIdent) then
+        begin
+          LMid := AId;
+          LAs := LM.RefMap[LAcc];
+          if (LAs = NIL_SYM) and LM.ExtRefMap.TryGetValue(LAcc, LExt) then
+          begin
+            LMid := LExt.UnitId;
+            LAs := LExt.Sym;
+          end;
+          if LAs <> NIL_SYM then
+          begin
+            LAm := FModels[LMid];
+            if (LMid = AId) and
+               (LM.Symbols[LAs].Scope = LM.Symbols[LProp].Scope) and
+               (LM.Symbols[LAs].DeclNode <> NIL_NODE) and
+               (LM.Tree.Nodes[LM.Symbols[LAs].DeclNode].FirstToken >
+                LM.Tree.Nodes[ADecl].FirstToken) then
+              EmitAt(LM, LAcc, 'E2168', 'E2168 Field or method identifier ' +
+                'expected')
+            else if (LM.Tree.Nodes[ADecl].Aux = 1) and
+                    not LAm.Demoted then
+            begin
+              LBad := False;
+              case LAm.Symbols[LAs].Kind of
+                skField, skVar:
+                  LBad := not LAm.IsClassVar(LAs);
+                skRoutine:
+                  begin
+                    LDef := RoutineNodeOf(LAm, LAs);
+                    if (LDef <> NIL_NODE) and
+                       MethodDirs(LAm, LDef, LDirs, LAbs, LFinal, LStat) then
+                      LBad := (LAm.Tree.Nodes[LDef].Aux <> 1) or
+                        (LStat = NIL_NODE);
+                  end;
+              end;
+              if LBad then
+                EmitAt(LM, LAcc, 'E2355', 'E2355 Class property accessor ' +
+                  'must be a class field or class static method');
+            end;
+          end;
+        end;
+      end;
+      LChild := LM.Tree.Nodes[LChild].NextSibling;
+    end;
+  end;
+
+  procedure CheckBody(AClass, AClassSym: Integer);
+  var
+    LChild, LField, LTypeInfo: Integer;
+    LPublished: Boolean;
+  begin
+    LTypeInfo := -2;   // not asked yet
+    LPublished := False;
+    LChild := LM.Tree.Nodes[AClass].FirstChild;
+    // Before the first section word: published under RTTI (11.2.1).
+    if LChild <> NIL_NODE then
+    begin
+      LTypeInfo := ClassTypeInfoX(XPlain(AId, AClassSym), 0);
+      LPublished := LTypeInfo = 1;
+    end;
+    while LChild <> NIL_NODE do
+    begin
+      case LM.Tree.Nodes[LChild].Kind of
+        nkVisibility:
+          LPublished := LM.Tree.Nodes[LChild].Aux = 4;
+        nkRoutine:
+          CheckMethod(AClassSym, LChild);
+        nkPropertyDecl:
+          CheckProperty(LChild, LPublished);
+        nkVarDecl:
+          if LPublished then
+            CheckPublishedField(LChild);
+        nkVarSec:
+          if LPublished then
+          begin
+            LField := LM.Tree.Nodes[LChild].FirstChild;
+            while LField <> NIL_NODE do
+            begin
+              if LM.Tree.Nodes[LField].Kind = nkVarDecl then
+                CheckPublishedField(LField);
+              LField := LM.Tree.Nodes[LField].NextSibling;
+            end;
+          end;
+      end;
+      LChild := LM.Tree.Nodes[LChild].NextSibling;
+    end;
+    // The bodies an `abstract` that is no directive cannot spare (12.2.4) -
+    // none reported beside a virtual or dynamic abstract method of the
+    // class (dcc's report, sem S12, S19-S22).
+    if not LValidAbstract then
+      for var LSym in LInvalidAbstract do
+      begin
+        var LName := NameOf(RoutineNodeOf(LM, LSym));
+        if LName <> NIL_NODE then
+          EmitAt(LM, LName, 'E2065', Format('E2065 Unsatisfied forward or ' +
+            'external declaration: ''%s''', [QualifiedName(LSym)]));
+      end;
+    LInvalidAbstract.Clear;
+    LValidAbstract := False;
+  end;
+
+  // E2136: the routine scope AScope, a method's implementation (its
+  // heading names nothing the resolver binds - the scope's StructSym is the
+  // class), of an abstract declaration; an overloaded name is not judged.
+  procedure CheckImpl(AScope: Integer);
+  var
+    LImpl, LName, LSym, LDecl, LAbs, LFinal, LStat, LStruct: Integer;
+    LDirs: TPasMethodDirs;
+  begin
+    LImpl := LM.Scopes[AScope].OwnerNode;
+    LStruct := LM.Scopes[AScope].StructSym;
+    if (LImpl = NIL_NODE) or (LStruct = NIL_SYM) or
+       (LM.Tree.Nodes[LImpl].Kind <> nkRoutine) or
+       (LM.Tree.Nodes[LImpl].Parent = NIL_NODE) or
+       (LM.Tree.Nodes[LM.Tree.Nodes[LImpl].Parent].Kind in [nkClassType,
+         nkRecordType, nkObjectType, nkHelperType, nkInterfaceType]) or
+       (LM.Symbols[LStruct].MemberScope = NIL_SCOPE) then
+      Exit;
+    LName := NameOf(LImpl);
+    if LName = NIL_NODE then
+      Exit;
+    LSym := LM.FindLocal(LM.Symbols[LStruct].MemberScope,
+      PasNodeKey(LM.Tree, LName));
+    if (LSym = NIL_SYM) or (LM.Symbols[LSym].Kind <> skRoutine) or
+       (LM.Symbols[LSym].NextOverload <> NIL_SYM) or
+       (sfOverload in LM.Symbols[LSym].Flags) then
+      Exit;
+    LDecl := RoutineNodeOf(LM, LSym);
+    if (LDecl = NIL_NODE) or (LDecl = LImpl) or
+       (LM.Tree.Nodes[LDecl].Parent = NIL_NODE) or
+       (LM.Tree.Nodes[LM.Tree.Nodes[LDecl].Parent].Kind <> nkClassType) or
+       not MethodDirs(LM, LDecl, LDirs, LAbs, LFinal, LStat) or
+       (LAbs = NIL_NODE) then
+      Exit;
+    EmitAt(LM, LName, 'E2136', Format('E2136 No definition for abstract ' +
+      'method ''%s'' allowed', [LM.Tree.NodeText(LName)]));
+  end;
+
+var
+  LNode, LDecl, LName, LSym: Integer;
+begin
+  LM := FModels[AId];
+  if LM.Demoted or not LM.AllUsesResolved then
+    Exit;
+  LInvalidAbstract := TList<Integer>.Create;
+  LValidAbstract := False;
+  try
+    for LNode := 0 to High(LM.Tree.Nodes) do
+      case LM.Tree.Nodes[LNode].Kind of
+        nkClassType:
+          begin
+            if PasIsForwardStruct(LM.Tree, LNode) then
+              Continue;
+            LDecl := LM.Tree.Nodes[LNode].Parent;
+            if (LDecl = NIL_NODE) or
+               (LM.Tree.Nodes[LDecl].Kind <> nkTypeDecl) then
+              Continue;
+            LName := PasSkipAttrGroups(LM.Tree, LM.Tree.Nodes[LDecl].FirstChild);
+            if (LName = NIL_NODE) or (LM.Tree.Nodes[LName].Kind <> nkIdent) then
+              Continue;
+            LSym := LM.RefMap[LName];
+            if (LSym = NIL_SYM) or (LM.Symbols[LSym].Kind <> skType) then
+              Continue;
+            CheckBody(LNode, LSym);
+          end;
+      end;
+    for LNode := 0 to LM.Scopes.Count - 1 do
+      if (LM.Scopes[LNode].Kind = sckRoutine) and
+         (LM.Scopes[LNode].StructSym <> NIL_SYM) then
+        CheckImpl(LNode);
+  finally
+    LInvalidAbstract.Free;
+  end;
 end;
 
 { 14.1.1 (dcc64 37.0, 2026-11-13): AAttr stands in an interface's first
@@ -24879,6 +25567,55 @@ var
         [XTypeText(LDstX), 'Set']));
     end;
 
+    // 15.1.4, 6.6.1 (dcc64 37.0, spec audit g5 C03): a routine named alone
+    // as the value of a plain procedural variable must be no method - a
+    // class method has the class for its Self, a `static` one none - and
+    // of a method pointer, a method: `P := TA.C` is E2009 'regular
+    // procedure and method pointer', `M := TA.S` the reverse (the target's
+    // kind first). Judged for a lone routine of unit or class level, not
+    // overloaded, nested or a function returning a procedural value.
+    procedure CheckProcKindValue(AAssign, ADst, ASrc: Integer);
+    var
+      LSrc, LMid, LSym, LDef, LConv: Integer;
+      LDstX: TSemaXType;
+      LDstKind, LSrcKind: TSemaProcKind;
+      LOm: TPasSemaModel;
+    begin
+      LSrc := PeelParens(LM.Tree, ASrc);
+      if (LSrc = NIL_NODE) or
+         not (LM.Tree.Nodes[LSrc].Kind in [nkIdent, nkMember]) or
+         not TargetSym(LSrc, LMid, LSym) then
+        Exit;
+      LOm := FModels[LMid];
+      if (LOm.Symbols[LSym].Kind <> skRoutine) or LOm.Demoted or
+         (LOm.Symbols[LSym].NextOverload <> NIL_SYM) or
+         (sfOverload in LOm.Symbols[LSym].Flags) or
+         (LOm.Symbols[LSym].Scope = NIL_SCOPE) or
+         (LOm.Scopes[LOm.Symbols[LSym].Scope].Kind = sckRoutine) then
+        Exit;
+      if (LOm.RoutineHead(LSym) = rhFunction) and
+         (XCatOf(CanonTypeX(SymDeclTypeX(LMid, LSym))) in [tcProc,
+           tcUnknown]) then
+        Exit;
+      LDstX := CanonTypeX(GetX(ADst));
+      if not XValid(LDstX) or OpenX(LDstX) or (XCatOf(LDstX) <> tcProc) then
+        Exit;
+      LDef := TypeDefNodeOf(LDstX.UnitId, LDstX.Sym);
+      if (LDef = NIL_NODE) or
+         (FModels[LDstX.UnitId].Tree.Nodes[LDef].Kind <> nkProcType) then
+        Exit;
+      LDstKind := ProcTypeKind(FModels[LDstX.UnitId], LDef);
+      LSrcKind := RoutineProcKind(LOm, LSym, LConv);
+      if InUntypedWith(AAssign) or LM.HasDiagAt(ASrc) then
+        Exit;
+      if (LDstKind = pkPlain) and (LSrcKind = pkMethod) then
+        EmitAt(LM, ASrc, 'E2009', 'E2009 Incompatible types: ''regular ' +
+          'procedure and method pointer''')
+      else if (LDstKind = pkMethod) and (LSrcKind = pkPlain) then
+        EmitAt(LM, ASrc, 'E2009', 'E2009 Incompatible types: ''method ' +
+          'pointer and regular procedure''');
+    end;
+
     // The declared type of the variable a name node (or an nkInlineVar's
     // first name) declares; XNil for one with no written type - inferred
     // from its value, which then cannot disagree with it.
@@ -26918,6 +27655,7 @@ var
                ConstOutside(N, LDst, LSrc, GetX(LDst)) then
               EmitAt(LM, LSrc, 'E1012', SE1012_ConstViolatesBounds);
             CheckStaticCtor(N, LDst, LSrc);
+            CheckProcKindValue(N, LDst, LSrc);
             CheckWriteTarget(N, LDst);
             CheckReadOnlyTarget(N, LDst);
             CheckOpenArrayValue(N, LDst, LSrc);
@@ -34215,6 +34953,7 @@ begin
     CheckAttributes(Result);
     CheckHeadingPairs(Result);
     CheckRecordDecls(Result);
+    CheckClassDecls(Result);
     CheckLateUnitMembers(Result);
     // Expressions for the requested unit only.
     CrossType(Result);

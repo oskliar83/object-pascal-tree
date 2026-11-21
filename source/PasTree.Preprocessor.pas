@@ -305,11 +305,14 @@ const
   { The single-letter switches the analysis reads by position (spec 1.3.1's
     table): $J (a typed constant declared under it is a variable), $P (a
     `var` ShortString parameter declared under it is an open string), $T
-    (`@X` is a typed pointer) and $X (a function's implicit Result). Their
-    state is journaled as one mask (TPasPreprocessed.SwitchEvents); every
-    other letter changes no name or type and is read by $IFOPT alone. }
-  PAS_SEMA_SWITCHES = [optJ, optP, optT, optX];
-  // dcc's no-config state of them as a SwitchEvents mask: $J-, $P+, $T-, $X+.
+    (`@X` is a typed pointer), $X (a function's implicit Result) and $M (a
+    class declared under it publishes the members before its first section
+    word, 11.2.1). Their state is journaled as one mask
+    (TPasPreprocessed.SwitchEvents); every other letter changes no name or
+    type and is read by $IFOPT alone. }
+  PAS_SEMA_SWITCHES = [optJ, optM, optP, optT, optX];
+  // dcc's no-config state of them as a SwitchEvents mask: $J-, $M-, $P+,
+  // $T-, $X+.
   PAS_SEMA_SWITCH_DEFAULT = (1 shl Ord(optP)) or (1 shl Ord(optX));
 
 type

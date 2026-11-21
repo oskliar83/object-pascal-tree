@@ -84,6 +84,11 @@ type
     // The declaration nodes reported E2004 - one report per declaration,
     // whichever check finds it first (ReportRedeclared). Sized on the first.
     FReported: TArray<Boolean>;
+    // The forward declarations (`TA = class;`, `I = interface;`) collected
+    // and not yet checked, as (symbol, name node, scope) triples: the end of
+    // their `type` section reports each still open (ReportOpenForwards).
+    FForwards: TArray<Integer>;
+    FForwardCount: Integer;
     FNodeScope: TArray<Integer>;
     FIsDeclName: TArray<Boolean>;
     FPendingAggr: TArray<TPasPendingAggr>;
@@ -143,6 +148,7 @@ type
     // collect
     procedure MarkDeclName(ANode, ASym: Integer);
     procedure ReportRedeclared(ADeclNode: Integer);
+    procedure ReportOpenForwards(ASection: Integer);
     { A parameter list's names, each nkParam declared into AScope, which is
       the list's own scope too (a climb from inside it lands there). }
     procedure DeclareParamList(AParams, AScope: Integer);
@@ -1306,9 +1312,58 @@ begin
     Report(LFirst);
 end;
 
+{ 11.1.1 (dcc64 37.0, spec audit g4 CFwd, local/probe-park/sa4-classes fwd
+  W1-W3): a forward class or interface still open at the end of its `type`
+  section - never completed, or completed in a later section (an E2004 of
+  its own, CollectTypeDecl) - is `E2086 Type 'TA' is not yet completely
+  defined` at the forward, a nested type named with the types around it
+  (`TOuter.TIn`). }
+procedure TPasSemaResolver.ReportOpenForwards(ASection: Integer);
+var
+  LIdx, LKeep, LSym, LName, LScope, LFileId, LLine, LCol: Integer;
+  LText: string;
+begin
+  LKeep := 0;
+  LIdx := 0;
+  while LIdx < FForwardCount do
+  begin
+    LSym := FForwards[LIdx];
+    LName := FForwards[LIdx + 1];
+    LScope := FForwards[LIdx + 2];
+    if FTree.Nodes[FTree.Nodes[LName].Parent].Parent <> ASection then
+    begin
+      FForwards[LKeep] := LSym;
+      FForwards[LKeep + 1] := LName;
+      FForwards[LKeep + 2] := LScope;
+      Inc(LKeep, 3);
+    end
+    else if (FModel.Symbols[LSym].DeclNode = LName) and
+            IsForwardTypeSym(LSym) then
+    begin
+      LText := NodeText(LName);
+      while (LScope <> NIL_SCOPE) and
+            (FModel.Scopes[LScope].Kind = sckStruct) and
+            (FModel.Scopes[LScope].StructSym <> NIL_SYM) and
+            (FModel.Symbols[FModel.Scopes[LScope].StructSym].DeclNode <>
+             NIL_NODE) do
+      begin
+        LText := NodeText(FModel.Symbols[FModel.Scopes[LScope].StructSym].
+          DeclNode) + '.' + LText;
+        LScope := FModel.Scopes[LScope].Parent;
+      end;
+      NodePos(LName, LFileId, LLine, LCol);
+      FModel.AddDiag(MakeDiag('E2086', Format(SE2086_NotCompletelyDefined,
+        [LText]), LName, LFileId, LLine, LCol));
+    end;
+    Inc(LIdx, 3);
+  end;
+  FForwardCount := LKeep;
+end;
+
 procedure TPasSemaResolver.ReportRedeclared(ADeclNode: Integer);
 var
-  LFileId, LLine, LCol: Integer;
+  LFileId, LLine, LCol, LDecl, LType, LTok: Integer;
+  LVis: TPasVisibleToken;
 begin
   // dcc reports a declaration once however many names it clashes with, and
   // the checks overlap: a duplicate enum value is both a same-scope clash
@@ -1319,6 +1374,33 @@ begin
     Exit;
   FReported[ADeclNode] := True;
   NodePos(ADeclNode, LFileId, LLine, LCol);
+  // A type is reported where dcc knows the declaration for a second one: at
+  // the token after its `=` - after a class's, object's or interface's head
+  // word, which dcc reads past to tell a forward from a body (11.1.1; dcc64
+  // 37.0, local/probe-park/sa4-classes fwd W6, spec audit g4 CFwd).
+  LDecl := FTree.Nodes[ADeclNode].Parent;
+  if (LDecl <> NIL_NODE) and (KindOf(LDecl) = nkTypeDecl) then
+  begin
+    LType := NextSib(ADeclNode);
+    while (LType <> NIL_NODE) and
+          (KindOf(LType) in [nkGenericParams, nkAttrGroup]) do
+      LType := NextSib(LType);
+    if LType <> NIL_NODE then
+    begin
+      LTok := FTree.Nodes[LType].FirstToken;
+      if KindOf(LType) in [nkClassType, nkObjectType, nkInterfaceType,
+         nkHelperType] then
+        Inc(LTok);
+      if (LTok >= 0) and (LTok <= High(FTree.Source.Visible)) then
+      begin
+        LVis := FTree.Source.Visible[LTok];
+        LFileId := LVis.FileId;
+        FTree.Source.Files[LVis.FileId].OffsetToLineCol(
+          FTree.Source.Files[LVis.FileId].Tokens[LVis.TokenIndex].Start,
+          LLine, LCol);
+      end;
+    end;
+  end;
   FModel.AddDiag(MakeDiag('E2004',
     Format(SE2004_IdentifierRedeclared, [NodeText(ADeclNode)]), ADeclNode,
     LFileId, LLine, LCol));
@@ -1989,7 +2071,13 @@ begin
   // forward completed twice - each is E2004 (dcc64 37.0; audit B4-19).
   // DeclareSym reports it and gives the second its own symbol, so the
   // first's declaration and member scope stand.
-  if (LMatch <> NIL_SYM) and not IsForwardTypeSym(LMatch) then
+  // The completion must stand in the forward's own `type` section (11.1.1):
+  // one in a later section is a second declaration, E2004, and the forward
+  // stays open (E2086 at its section's end, ReportOpenForwards).
+  if (LMatch <> NIL_SYM) and
+     (not IsForwardTypeSym(LMatch) or
+      (FTree.Nodes[FTree.Nodes[FModel.Symbols[LMatch].DeclNode].Parent].Parent
+       <> FTree.Nodes[ANode].Parent)) then
     LSym := DeclareSym(AScope, skType, LName)
   else if LMatch <> NIL_SYM then
   begin
@@ -2024,6 +2112,16 @@ begin
       {AOverloadOnClash} True)
   else
     LSym := DeclareSym(AScope, skType, LName);
+  if (LSym <> NIL_SYM) and (FModel.Symbols[LSym].DeclNode = LName) and
+     IsForwardTypeSym(LSym) then
+  begin
+    if FForwardCount + 3 > Length(FForwards) then
+      SetLength(FForwards, FForwardCount * 2 + 24);
+    FForwards[FForwardCount] := LSym;
+    FForwards[FForwardCount + 1] := LName;
+    FForwards[FForwardCount + 2] := AScope;
+    Inc(FForwardCount, 3);
+  end;
 
   // Generic type params live in a per-type scope so identical names (T, TKey...)
   // across different generic types don't collide in the unit scope.
@@ -2930,6 +3028,17 @@ begin
 
     nkTypeDecl:
       CollectTypeDecl(ANode, AScope);
+
+    nkTypeSec:
+      begin
+        LChild := FirstChild(ANode);
+        while LChild <> NIL_NODE do
+        begin
+          Collect(LChild, AScope);
+          LChild := NextSib(LChild);
+        end;
+        ReportOpenForwards(ANode);
+      end;
 
     nkVarDecl:
       if FModel.Scopes[AScope].Kind = sckStruct then
