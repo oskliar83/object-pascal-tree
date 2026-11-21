@@ -39,6 +39,13 @@ of less work, not a gap in following the language; its consequences are in
 
 ## 01-program-structure.md
 
+### 1.2.1 The `uses` clause
+- an interface-only `uses` cycle (F2047) is reported once, at the entry
+  that closes it from a unit to one loaded before it; dcc reports it at the
+  entry that closes it in its compile order. Load order follows the `uses`
+  lists from the root as dcc's does, but a cycle reached from two roots of a
+  directory analysis may be reported at another entry of it.
+
 ### 1.3.1 Switch & parameter directives
 - `{$X-}`'s E2014 (a function called as a statement) is withheld for an
   overloaded function and inside a `with` whose target was not typed, as
@@ -634,8 +641,16 @@ of less work, not a gap in following the language; its consequences are in
 - the list after a class's ancestor is read where dcc reads it - a
   conversion to an interface (XImplementsX, 6.3.1) and an interface
   constraint (16.4.1) reach what the class's or an ancestor class's list
-  names, member lookup none of it - but the methods are not matched:
-  `E2291 Missing implementation of interface method` is never reported.
+  names, member lookup none of it. `E2291 Missing implementation of
+  interface method` matches a method by NAME, not by parameter list: a
+  `procedure B(S: string)` for an interface's `B(const S: string)` is dcc's
+  E2291 and silent here (an overload set would need 6.3's identity
+  comparison per candidate, across generic frames). Not judged at all: a
+  class whose ancestry or listed interface does not resolve, a class an
+  ancestor class of which delegates any interface (`implements`), an
+  `implements` naming no interface type. The reader-type E2010 of an
+  `implements` property (`property P: IFoo read FB implements IFoo` with
+  `FB: IBar`) is the one accessor-type check made, and only there.
 
 ## 15-class-mechanics-helpers.md
 
@@ -689,11 +704,10 @@ of less work, not a gap in following the language; its consequences are in
   a .dcu - leaves the argument unchecked. dcc, which has that unit, knows;
   without its declaration there is nothing to follow, and a verdict would
   be a guess.
-- the declaration's own constraint list is not judged: the combinations
-  and kinds dcc refuses there (E2507 `class, record`, E2516 `record,
-  constructor`, E2510 `TObject` / `Integer`, E2552 `class, TBase`, E2553
-  and the other repeats) are not reported. Its syntax is: `<T: string>`
-  and a constraint repeated in an implementation header are E2029.
+- the declaration's own constraint list is judged up to the first
+  constraint that does not resolve (a type of a unit not on the path): the
+  rest of that list is not read. A plain procedural type as a constraint
+  (not `reference to`) is not judged.
 
 ## 17-anonymous-methods.md
 
@@ -720,6 +734,15 @@ of less work, not a gap in following the language; its consequences are in
   an overload choice typed, an open generic type say nothing.
 
 ## 19-rtti-attributes.md
+
+### 19.2.1 Extended RTTI & the `{$RTTI}` directive
+- the clause list's shape (E1030), a literal argument (E2572) and the
+  directive before the module header (E2609) are dcc's; the expression is
+  not resolved: an undeclared name is E2003 only when it looks like a
+  misspelt visibility name (`vc`-prefixed, not one of the four) or stands
+  before the header, so `FIELDS([NoSuch])` and `FIELDS(NoSuchConst)` are
+  silent, and dcc's E2572 after a second element beside an undeclared one is
+  not reported.
 
 ### 19.3.2 Applying attributes
 - an attribute is a name with its arguments or ONE expression (the

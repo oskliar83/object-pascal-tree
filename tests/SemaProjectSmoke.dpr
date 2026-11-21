@@ -16569,6 +16569,326 @@ begin
   end;
 end;
 
+// The minimal System the sa4 fixtures share: TObject, IInterface with its
+// three methods and TInterfacedObject implementing them.
+procedure WriteSa4System(const ADir: string);
+begin
+  TFile.WriteAllText(TPath.Combine(ADir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    '  TClass = class of TObject;'#10 +
+    '  IInterface = interface'#10 +
+    '    function QueryInterface(const IID: TGUID; out Obj): HResult; stdcall;'#10 +
+    '    function _AddRef: Integer; stdcall;'#10 +
+    '    function _Release: Integer; stdcall;'#10 +
+    '  end;'#10 +
+    '  TInterfacedObject = class(TObject, IInterface)'#10 +
+    '    function QueryInterface(const IID: TGUID; out Obj): HResult; stdcall;'#10 +
+    '    function _AddRef: Integer; stdcall;'#10 +
+    '    function _Release: Integer; stdcall;'#10 +
+    '  end;'#10 +
+    '  TArray<T> = array of T;'#10 +
+    'implementation'#10 +
+    'function TInterfacedObject.QueryInterface(const IID: TGUID; out Obj): HResult; begin Result := 0; end;'#10 +
+    'function TInterfacedObject._AddRef: Integer; begin Result := 0; end;'#10 +
+    'function TInterfacedObject._Release: Integer; begin Result := 0; end;'#10 +
+    'end.'#10);
+end;
+
+// A class's interface list (spec 14.1.1, 14.2.1, 14.2.2, 14.4.1; dcc64 37.0,
+// spec audit g5 I01, I03, I03b, I04, I06, I06b-I09, local/sa4-intf I1-I3,
+// X1): E2291 per method no member implements, E2003 in a resolution clause,
+// E2210 / E2209 in an interface, E2265 / E2261 / E2010 / E2257 around
+// `implements` - and the legal shapes beside them stay silent: a method of an
+// ancestor class, a helper's, an abstract one, an overload, a resolution
+// clause, a generic interface, a delegate of either kind, an ancestor's
+// delegation, an escaped name.
+procedure TestSa4Interfaces;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_sa4intf');
+  WriteSa4System(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'Intf.dpr'),
+    'program Intf;'#10 +                                                 // 1
+    'type'#10 +                                                          // 2
+    '  IBase = interface procedure A; end;'#10 +                         // 3
+    '  IDer = interface(IBase) procedure B; end;'#10 +                   // 4
+    '  IGen<T> = interface function G(X: T): T; end;'#10 +               // 5
+    '  TMiss = class(TInterfacedObject, IDer) procedure B; end;'#10 +    // 6 E2291 IBase.A
+    '  TBare = class(TObject, IBase) procedure A; end;'#10 +             // 7 E2291 x3
+    '  TCls = class(TInterfacedObject, IBase) class procedure A; end;'#10 + // 8 E2291
+    '  TFld = class(TInterfacedObject, IBase) A: Integer; end;'#10 +     // 9 E2291
+    '  TRes = class(TInterfacedObject, IBase)'#10 +                      // 10
+    '    procedure X;'#10 +                                              // 11
+    '    procedure IDer.B = X;'#10 +                                     // 12 E2003 IDer
+    '    procedure IBase.Zzz = X;'#10 +                                  // 13 E2003 Zzz
+    '  end;'#10 +                                                        // 14 (E2291 at 10)
+    '  IBad = interface'#10 +                                            // 15
+    '  private'#10 +                                                     // 16 E2210
+    '    procedure A;'#10 +                                              // 17
+    '    F: Integer;'#10 +                                               // 18 E2209
+    '  end;'#10 +                                                        // 19
+    '  TImp = class(TInterfacedObject, IBase)'#10 +                      // 20 E2291
+    '    FB: IDer; FI: IGen<Integer>; FW: IBase;'#10 +                   // 21
+    '    property P1: IGen<Integer> read FI implements IGen<Integer>;'#10 + // 22 E2265
+    '    property P2: IGen<Integer> read FI implements IBase;'#10 +      // 23 E2010
+    '    property P3: IBase write FW implements IBase;'#10 +             // 24 E2261
+    '  end;'#10 +                                                        // 25
+    '  TDup = class(TInterfacedObject, IBase)'#10 +                      // 26
+    '    FW: IBase; FD: IGen<Integer>;'#10 +                             // 27
+    '    property P1: IBase read FD implements IBase;'#10 +              // 28 E2010 (reader)
+    '    property P2: IBase read FW implements IBase;'#10 +              // 29 E2257
+    '  end;'#10 +                                                        // 30
+    // the legal ones
+    '  TAncA = class(TInterfacedObject) public procedure A; end;'#10 +   // 31
+    '  TOk1 = class(TAncA, IDer) procedure B; end;'#10 +                 // 32
+    '  TOk2<T> = class(TInterfacedObject, IGen<T>) function G(X: T): T; end;'#10 + // 33
+    '  TOk3 = class(TInterfacedObject, IGen<Integer>) function G(X: Integer): Integer; end;'#10 + // 34
+    '  TOk4 = class(TInterfacedObject, IBase) procedure A; virtual; abstract; end;'#10 + // 35
+    '  TOk5 = class(TOk4, IDer) procedure B; end;'#10 +                  // 36
+    '  TOk6 = class(TInterfacedObject, IBase) end;'#10 +                 // 37
+    '  TOk6H = class helper for TOk6 procedure A; end;'#10 +             // 38
+    '  TOk7 = class(TInterfacedObject, IBase, IDer)'#10 +                // 39
+    '    procedure DoA; procedure B; procedure IBase.A = DoA; procedure IDer.A = DoA;'#10 + // 40
+    '  end;'#10 +                                                        // 41
+    '  TOk8 = class(TInterfacedObject, IBase) procedure A(X: Integer); overload; procedure A; overload; end;'#10 + // 42
+    '  TPlain = class procedure A; end;'#10 +                            // 43
+    '  TOk9 = class(TInterfacedObject, IBase) FP: TPlain; property P: TPlain read FP implements IBase; end;'#10 + // 44
+    '  TOkA = class(TInterfacedObject, IDer) FD: IDer; property P: IDer read FD implements IDer; end;'#10 + // 45
+    '  TOkB = class(TOkA, IDer) end;'#10 +                               // 46
+    '  IEsc = interface procedure &Begin; end;'#10 +                     // 47
+    '  TOkC = class(TInterfacedObject, IEsc) procedure &Begin; end;'#10 + // 48
+    '  TOkD = class(TInterfacedObject, IBase) FB: IDer; property P: IDer read FB implements IBase; end;'#10 + // 49
+    '  IOk = interface'#10 +                                             // 50
+    '    function GetX: Integer;'#10 +                                   // 51
+    '    property X: Integer read GetX;'#10 +                            // 52
+    '  end;'#10 +                                                        // 53
+    'procedure TMiss.B; begin end;'#10 +                                 // 54
+    'procedure TBare.A; begin end;'#10 +                                 // 55
+    'class procedure TCls.A; begin end;'#10 +                            // 56
+    'procedure TRes.X; begin end;'#10 +                                  // 57
+    'procedure TAncA.A; begin end;'#10 +                                 // 58
+    'procedure TOk1.B; begin end;'#10 +                                  // 59
+    'function TOk2<T>.G(X: T): T; begin Result := X; end;'#10 +          // 60
+    'function TOk3.G(X: Integer): Integer; begin Result := X; end;'#10 + // 61
+    'procedure TOk5.B; begin end;'#10 +                                  // 62
+    'procedure TOk6H.A; begin end;'#10 +                                 // 63
+    'procedure TOk7.DoA; begin end;'#10 +                                // 64
+    'procedure TOk7.B; begin end;'#10 +                                  // 65
+    'procedure TOk8.A(X: Integer); begin end;'#10 +                      // 66
+    'procedure TOk8.A; begin end;'#10 +                                  // 67
+    'procedure TPlain.A; begin end;'#10 +                                // 68
+    'procedure TOkC.&Begin; begin end;'#10 +                             // 69
+    'begin'#10 +                                                         // 70
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'Intf.dpr'));
+    LM := ModelByName('intf');
+    Ok('sa4 intf: E2291 lines [' + DiagLinesOf(LM, 'E2291') + ']',
+      DiagLinesOf(LM, 'E2291') = '6 7 7 7 8 9 10 20');
+    Ok('sa4 intf: E2291 text [' + DiagText(LM, 'E2291') + ']',
+      Pos('interface method IBase.A', DiagText(LM, 'E2291')) > 0);
+    Ok('sa4 intf: E2003 lines [' + DiagLinesOf(LM, 'E2003') + ']',
+      DiagLinesOf(LM, 'E2003') = '12 13');
+    Ok('sa4 intf: E2210 E2209 [' + DiagLinesOf(LM, 'E2210') + '/' +
+      DiagLinesOf(LM, 'E2209') + ']',
+      (DiagLinesOf(LM, 'E2210') = '16') and (DiagLinesOf(LM, 'E2209') = '18'));
+    Ok('sa4 intf: E2265 E2261 [' + DiagLinesOf(LM, 'E2265') + '/' +
+      DiagLinesOf(LM, 'E2261') + ']',
+      (DiagLinesOf(LM, 'E2265') = '22') and (DiagLinesOf(LM, 'E2261') = '24'));
+    Ok('sa4 intf: E2010 lines [' + DiagLinesOf(LM, 'E2010') + ']',
+      DiagLinesOf(LM, 'E2010') = '23 28');
+    Ok('sa4 intf: E2257 lines [' + DiagLinesOf(LM, 'E2257') + ']',
+      DiagLinesOf(LM, 'E2257') = '29');
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
+// Generic declarations (spec 16.2, 16.3, 16.4.1; dcc64 37.0, spec audit g5
+// G02, G02b, G05, G09, G09b, local/sa4-intf G1): the constraint list's
+// conflicts, one per type parameter; a virtual / dynamic / message generic
+// method; a generic method in an interface; a variant field typed by a type
+// parameter with no `record` constraint - and the legal combinations.
+procedure TestSa4Generics;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_sa4gen');
+  WriteSa4System(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'Gen.dpr'),
+    'program Gen;'#10 +                                                  // 1
+    'type'#10 +                                                          // 2
+    '  IFoo = interface end;'#10 +                                       // 3
+    '  TBase = class end;'#10 +                                          // 4
+    '  TRecX = record end;'#10 +                                         // 5
+    '  TA<T: class, record> = class end;'#10 +                           // 6 E2507
+    '  TB<T: record, constructor> = class end;'#10 +                     // 7 E2516
+    '  TC<T: TObject> = class end;'#10 +                                 // 8 E2510
+    '  TD<T: class, TBase> = class end;'#10 +                            // 9 E2552
+    '  TE<T: Integer> = class end;'#10 +                                 // 10 E2510
+    '  TH<T: record, IFoo> = class end;'#10 +                            // 11 E2666
+    '  TI<T: IFoo, IFoo> = class end;'#10 +                              // 12 E2670
+    '  TJ<T: TBase, TBase> = class end;'#10 +                            // 13 E2553
+    '  TK<T: constructor, constructor> = class end;'#10 +                // 14 E2603
+    '  TL<T: TRecX> = class end;'#10 +                                   // 15 E2510
+    '  TM<T: constructor, record> = class end;'#10 +                     // 16 E2516
+    '  TN<T: IFoo, record> = class end;'#10 +                            // 17 E2666
+    '  TO2<T: TBase, record> = class end;'#10 +                          // 18 E2552
+    '  TP<T: TBase, class> = class end;'#10 +                            // 19 E2552
+    // legal
+    '  TQ<T: class, constructor> = class end;'#10 +                      // 20
+    '  TR<T: constructor, class> = class end;'#10 +                      // 21
+    '  TS<T: TBase, IFoo, constructor> = class end;'#10 +                // 22
+    '  TU<T: class, IFoo> = class end;'#10 +                             // 23
+    '  TV<T: record; U: class> = class end;'#10 +                        // 24
+    '  TW<T: TBase; U: T> = class end;'#10 +                             // 25
+    '  TX<T: IInterface> = class end;'#10 +                              // 26
+    '  IG = interface procedure M<T>; end;'#10 +                         // 27 E2535
+    '  TG = class'#10 +                                                  // 28
+    '    procedure V<T>; virtual;'#10 +                                  // 29 E2533
+    '    procedure D<T>; dynamic;'#10 +                                  // 30 E2533
+    '    procedure S<T>; static;'#10 +                                   // 31
+    '    procedure P<T>;'#10 +                                           // 32
+    '    procedure Q; virtual;'#10 +                                     // 33
+    '  end;'#10 +                                                        // 34
+    '  TVR<T> = record case Integer of 0: (A: T); 1: (B: Integer); end;'#10 + // 35 E2569
+    '  TVR2<T: class> = record case Integer of 0: (A: T); end;'#10 +     // 36 E2569
+    '  TVR3<T: record> = record case Integer of 0: (A: T); end;'#10 +    // 37
+    '  TVR4<T> = record A: T; case Integer of 0: (B: Byte); end;'#10 +   // 38
+    'procedure TG.V<T>; begin end;'#10 +                                 // 39
+    'procedure TG.D<T>; begin end;'#10 +                                 // 40
+    'procedure TG.S<T>; begin end;'#10 +                                 // 41
+    'procedure TG.P<T>; begin end;'#10 +                                 // 42
+    'procedure TG.Q; begin end;'#10 +                                    // 43
+    'begin'#10 +                                                         // 44
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'Gen.dpr'));
+    LM := ModelByName('gen');
+    Ok('sa4 gen: E2507 [' + DiagLinesOf(LM, 'E2507') + ']',
+      DiagLinesOf(LM, 'E2507') = '6');
+    Ok('sa4 gen: E2516 [' + DiagLinesOf(LM, 'E2516') + ']',
+      DiagLinesOf(LM, 'E2516') = '7 16');
+    Ok('sa4 gen: E2510 [' + DiagLinesOf(LM, 'E2510') + ']',
+      DiagLinesOf(LM, 'E2510') = '8 10 15');
+    Ok('sa4 gen: E2552 [' + DiagLinesOf(LM, 'E2552') + ']',
+      DiagLinesOf(LM, 'E2552') = '9 18 19');
+    Ok('sa4 gen: E2666 [' + DiagLinesOf(LM, 'E2666') + ']',
+      DiagLinesOf(LM, 'E2666') = '11 17');
+    Ok('sa4 gen: E2670 E2553 E2603 [' + DiagLinesOf(LM, 'E2670') + '/' +
+      DiagLinesOf(LM, 'E2553') + '/' + DiagLinesOf(LM, 'E2603') + ']',
+      (DiagLinesOf(LM, 'E2670') = '12') and (DiagLinesOf(LM, 'E2553') = '13') and
+      (DiagLinesOf(LM, 'E2603') = '14'));
+    Ok('sa4 gen: E2535 E2533 [' + DiagLinesOf(LM, 'E2535') + '/' +
+      DiagLinesOf(LM, 'E2533') + ']',
+      (DiagLinesOf(LM, 'E2535') = '27') and (DiagLinesOf(LM, 'E2533') = '29 30'));
+    Ok('sa4 gen: E2569 [' + DiagLinesOf(LM, 'E2569') + ']',
+      DiagLinesOf(LM, 'E2569') = '35 36');
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
+// Program-level and directive rows (spec 1.1.3, 1.2.x, 19.2.1, 20.x; dcc64
+// 37.0, spec audit g1 Circ, Circ2, ExpMeth, g6 R01-R05, M4, MA,
+// local/sa4-intf R1): an interface-only `uses` cycle (F2047, once, at the
+// entry that closes it), an exported static class method (E2276), the RTTI
+// directive's E1030 / E2003 / E2572 / E2609, `[weak]` on a non-class
+// non-interface (E2584) - and the legal shapes beside them.
+procedure TestSa4ProgramRules;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_sa4prog');
+  WriteSa4System(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UC1.pas'),
+    'unit UC1;'#10'interface'#10'uses UC2;'#10'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UC2.pas'),
+    'unit UC2;'#10'interface'#10'uses UC1;'#10'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UC3.pas'),
+    'unit UC3;'#10'interface'#10'uses UC4;'#10'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UC4.pas'),
+    'unit UC4;'#10'interface'#10'implementation'#10'uses UC3;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UExp.pas'),
+    'unit UExp;'#10'interface'#10'procedure Q;'#10 +
+    'type TK = class class procedure S; static; end;'#10 +
+    'implementation'#10'procedure Q; begin end;'#10 +
+    'class procedure TK.S; begin end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'URtti.pas'),
+    '{$RTTI EXPLICIT METHODS([vcPublic]) FIELDS([]) PROPERTIES([])}'#10 + // 1 E2609 E2003
+    'unit URtti;'#10'interface'#10'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'Prog.dpr'),
+    'library Prog;'#10 +                                                 // 1
+    'uses UC1, UC3, UExp, URtti;'#10 +                                   // 2
+    '{$RTTI EXPLICIT}'#10 +                                              // 3
+    '{$RTTI INHERIT}'#10 +                                               // 4
+    '{$RTTI EXPLICIT FIELDS([vcPublic]) FIELDS([vcPrivate])}'#10 +       // 5 E1030
+    '{$RTTI EXPLICIT BOGUS([])}'#10 +                                    // 6 E1030
+    '{$RTTI}'#10 +                                                       // 7 E1030
+    '{$RTTI EXPLICIT FIELDS([vcBogus])}'#10 +                            // 8 E2003
+    '{$RTTI EXPLICIT FIELDS(5)}'#10 +                                    // 9 E2572
+    '{$RTTI METHODS([vcPublic, vcPublished])}'#10 +                      // 10
+    '{$RTTI EXPLICIT METHODS([vcPrivate..vcPublished]) FIELDS(DefaultFieldRttiVisibility)}'#10 + // 11
+    '{$RTTI FIELDS([]) EXPLICIT}'#10 +                                   // 12 E1030
+    'type'#10 +                                                          // 13
+    '  IFoo = interface end;'#10 +                                       // 14
+    '  TC = class'#10 +                                                  // 15
+    '    [weak] FI: Integer;'#10 +                                       // 16 E2584
+    '    [weak] FA: TArray<TObject>;'#10 +                               // 17 E2584
+    '    [weak] FO: TObject;'#10 +                                       // 18
+    '    [weak] FF: IFoo;'#10 +                                          // 19
+    '    [unsafe] FU: Integer;'#10 +                                     // 20
+    '  end;'#10 +                                                        // 21
+    'var [weak] GW: IFoo;'#10 +                                          // 22
+    'exports TK.S name ''s1'';'#10 +                                     // 23 E2276
+    'exports Q name ''q1'', UExp.Q name ''q2'';'#10 +                    // 24
+    'begin'#10 +                                                         // 25
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'Prog.dpr'));
+    LM := ModelByName('prog');
+    Ok('sa4 prog: E1030 [' + DiagLinesOf(LM, 'E1030') + ']',
+      DiagLinesOf(LM, 'E1030') = '5 6 7 12');
+    Ok('sa4 prog: E2003 [' + DiagLinesOf(LM, 'E2003') + ']',
+      DiagLinesOf(LM, 'E2003') = '8');
+    Ok('sa4 prog: E2572 [' + DiagLinesOf(LM, 'E2572') + ']',
+      DiagLinesOf(LM, 'E2572') = '9');
+    Ok('sa4 prog: E2584 [' + DiagLinesOf(LM, 'E2584') + ']',
+      DiagLinesOf(LM, 'E2584') = '16 17');
+    Ok('sa4 prog: E2276 [' + DiagLinesOf(LM, 'E2276') + ']',
+      DiagLinesOf(LM, 'E2276') = '23');
+    LM := ModelByName('urtti');
+    Ok('sa4 prog: URtti E2609 E2003 [' + DiagLinesOf(LM, 'E2609') + '/' +
+      DiagLinesOf(LM, 'E2003') + ']',
+      (DiagLinesOf(LM, 'E2609') = '1') and (DiagLinesOf(LM, 'E2003') = '1'));
+    Ok('sa4 prog: F2047 once, in UC2 [' +
+      DiagLinesOf(ModelByName('uc1'), 'F2047') + '/' +
+      DiagLinesOf(ModelByName('uc2'), 'F2047') + '/' +
+      DiagLinesOf(ModelByName('uc3'), 'F2047') + '/' +
+      DiagLinesOf(ModelByName('uc4'), 'F2047') + ']',
+      (DiagLinesOf(ModelByName('uc1'), 'F2047') = '') and
+      (DiagLinesOf(ModelByName('uc2'), 'F2047') = '3') and
+      (DiagLinesOf(ModelByName('uc3'), 'F2047') = '') and
+      (DiagLinesOf(ModelByName('uc4'), 'F2047') = ''));
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // A write to a `const` parameter (spec 6.2.3): E2064 for the parameter
 // itself, a field of a record one at any depth (through `with` too), an
 // element of a static array one or of a `const` open array; a dynamic
@@ -19881,7 +20201,10 @@ begin
     // violation of itself, and the open parameter T inside the generic's own
     // body constrains nothing.
     var LCD := ModelByName('unitcon');
-    Ok('constraints: the declaring unit has no diags', Length(LCD.Diags) = 0);
+    // E2291 aside: its classes list IBase over TBase, which implements no
+    // IInterface method - dcc's E2291 (spec 14.2.1), not this test's point.
+    Ok('constraints: the declaring unit has no diags',
+      Length(LCD.Diags) - DiagCount(LCD, 'E2291') = 0);
 
     // Every with-target shape the RTL uses (see UNIT_WSHAPES). One assertion
     // per shape would be eight lookups into the same body, so the no-diags
@@ -19910,7 +20233,9 @@ begin
     // `=` must still resolve there.
     var LMR := ModelByName('unitmruse');
     Ok('method resolution: UnitMRUse loaded', Assigned(LMR));
-    Ok('method resolution: no diags at all', Length(LMR.Diags) = 0);
+    // E2291 aside: the classes descend from TObject, not TInterfacedObject.
+    Ok('method resolution: no diags at all',
+      Length(LMR.Diags) - DiagCount(LMR, 'E2291') = 0);
     Ok('method resolution: the interface method is not reported undeclared',
       DiagCount(LMR, 'E2003') = 0);
     Ok('method resolution: the impl methods still resolve',
@@ -25748,6 +26073,9 @@ begin
   TestArrayOperands;
   TestIsAsChecks;
   TestPropertyIndexParam;
+  TestSa4Interfaces;
+  TestSa4Generics;
+  TestSa4ProgramRules;
 
   if GCounter.Finish('SemaProjectSmoke') then
     ExitCode := 1;

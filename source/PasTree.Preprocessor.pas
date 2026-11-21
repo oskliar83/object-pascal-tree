@@ -58,10 +58,18 @@ type
     ppPopWithoutPush,
     ppCrossIncludeConditional, // an include's $ELSE/$ELSEIF/$ENDIF/$IFEND
                               // on a conditional its includer opened
-    ppWrongConditionalEnd     // under {$LEGACYIFEND ON}: an $IF closed by
+    ppWrongConditionalEnd,    // under {$LEGACYIFEND ON}: an $IF closed by
                               // $ENDIF or an $IFDEF by $IFEND - dcc's E2029;
                               // Detail is the closer expected ('$IFEND' or
                               // '$ENDIF'). It closes all the same (1.3.2)
+    // {$RTTI} (19.2.1), dcc's words: a clause list dcc cannot read (E1030
+    // 'RTTI'); a misspelt visibility name, or any name before the module
+    // header, Detail the name (E2003); a literal where the visibility set
+    // stands (E2572); the directive before the module header (E2609).
+    ppRttiInvalid,
+    ppRttiUndeclared,
+    ppRttiSetExpected,
+    ppRttiBeforeHeader
   );
 
   TPasSymbolQuery = (sqConstValue, sqSizeOfType, sqLengthOf, sqDeclared,
@@ -631,6 +639,8 @@ type
     procedure SetMinEnumSize(AValue: Integer);
     procedure SetAlign(AValue: Integer);
     procedure ApplyRtti(const AArg: string);
+    procedure CheckRtti(AFileId: Integer; const AToken: TPasToken;
+      const AArg: string);
     // AExprStart: file offset of AExpr's first character, so the
     // `Defined(X)` spans CondEval reports relative to the text can be recorded
     // as DefineRefs in file coordinates. AActive: the enclosing state, the
@@ -765,7 +775,11 @@ const
     '$POPOPT without $PUSHOPT',
     'Conditional directive acts on a conditional opened outside this ' +
       'include file',
-    '$IF closed by $ENDIF, or $IFDEF by $IFEND, under {$LEGACYIFEND ON}'
+    '$IF closed by $ENDIF, or $IFDEF by $IFEND, under {$LEGACYIFEND ON}',
+    'Invalid RTTI directive',
+    'Undeclared identifier in an RTTI directive',
+    'RTTI visibility set expected',
+    'RTTI directive before the module header'
   );
 
 implementation
@@ -2095,6 +2109,8 @@ begin
     if LLong = lsNone then
       Exit;
     FTouched := [];
+    if LLong = lsRtti then
+      CheckRtti(AFileId, AToken, Arg);
     ApplyLongSwitch(LLong, Arg);
     if FTouched <> [] then
       AddOptionRef(AFileId, AToken, orSet);
@@ -2412,6 +2428,186 @@ end;
 // misparsed RTTI directive must never cascade into an unrelated E-code the
 // way the brace-comment/`{$SCOPEDENUMS}` lesson (test-coverage-plan batch 5)
 // warns about for directive text in general.
+{ dcc's verdicts on an RTTI directive's clause list (spec 19.2.1; dcc64 37.0, spec
+  audit g6 R01-R05, local/sa4-intf/rtti): an optional INHERIT / EXPLICIT
+  first, then METHODS / FIELDS / PROPERTIES clauses, each once, separated by
+  blanks only, each with one parenthesised constant expression. Anything
+  else - no word at all, a mode word after a clause or twice, an unknown
+  word, a comma between clauses, a repeat, a clause with no parentheses or
+  unbalanced ones - is E1030 'RTTI', one per directive. The expression is a
+  TVisibilityClasses constant: a string or a number there (`FIELDS(5)`,
+  `FIELDS([1])`) is E2572; a misspelt visibility name in the brackets
+  (vc-prefixed, not one of the four) is E2003 for the first one. Before the
+  module header the directive is E2609, and every name in it is E2003 there
+  (System is not in scope yet). A name that is not vc-prefixed (a declared
+  constant, `DefaultFieldRttiVisibility`) is the semantic side's, not read. }
+procedure TPasPreprocessor.CheckRtti(AFileId: Integer; const AToken: TPasToken;
+  const AArg: string);
+const
+  CVis: array[0..3] of string = ('VCPRIVATE', 'VCPROTECTED', 'VCPUBLIC',
+    'VCPUBLISHED');
+var
+  LPos, LLen, LDepth, LStart, LIdx: Integer;
+  LWord, LSeen: string;
+  LBefore, LClause, LReported: Boolean;
+
+  procedure SkipWs;
+  begin
+    while (LPos <= LLen) and CharInSet(AArg[LPos], [' ', #9, #13, #10]) do
+      Inc(LPos);
+  end;
+
+  function ReadWord: string;
+  begin
+    LStart := LPos;
+    while (LPos <= LLen) and
+          CharInSet(AArg[LPos], ['A'..'Z', 'a'..'z', '0'..'9', '_']) do
+      Inc(LPos);
+    Result := UpperCase(Copy(AArg, LStart, LPos - LStart));
+  end;
+
+  procedure Report(ACode: TPasPPDiagCode; const ADetail: string = '');
+  begin
+    Diag(ACode, AFileId, AToken.Start, AToken.Len, ADetail);
+  end;
+
+  function IsVis(const AUpper: string): Boolean;
+  begin
+    for var LV in CVis do
+      if LV = AUpper then
+        Exit(True);
+    Result := False;
+  end;
+
+  // The expression between the clause's parentheses, AArg[AFrom..ATo].
+  procedure CheckExpr(AFrom, ATo: Integer);
+  var
+    LP, LS: Integer;
+    LName: string;
+    LInSet, LLiteral: Boolean;
+  begin
+    LP := AFrom;
+    LInSet := False;
+    LLiteral := False;
+    while LP <= ATo do
+    begin
+      case AArg[LP] of
+        '[':
+          begin
+            LInSet := True;
+            Inc(LP);
+          end;
+        '''', '0'..'9', '#', '$':
+          begin
+            LLiteral := True;
+            Inc(LP);
+          end;
+        'A'..'Z', 'a'..'z', '_':
+          begin
+            LS := LP;
+            while (LP <= ATo) and
+                  CharInSet(AArg[LP], ['A'..'Z', 'a'..'z', '0'..'9', '_']) do
+              Inc(LP);
+            LName := Copy(AArg, LS, LP - LS);
+            if not LReported and (LBefore or (LInSet and
+               SameText(Copy(LName, 1, 2), 'vc') and
+               not IsVis(UpperCase(LName)))) then
+            begin
+              Report(ppRttiUndeclared, LName);
+              LReported := True;
+            end;
+          end;
+      else
+        Inc(LP);
+      end;
+    end;
+    if LLiteral and not LReported then
+    begin
+      Report(ppRttiSetExpected);
+      LReported := True;
+    end;
+  end;
+
+begin
+  LLen := Length(AArg);
+  LPos := 1;
+  LReported := False;
+  LBefore := (AFileId = 0) and (FVisible.Count = 0);
+  if LBefore then
+    Report(ppRttiBeforeHeader);
+  SkipWs;
+  LWord := ReadWord;
+  LClause := (LWord = 'EXPLICIT') or (LWord = 'INHERIT');   // a mode word
+  if LClause then
+  begin
+    SkipWs;
+    LWord := ReadWord;
+  end;
+  if LWord = '' then
+  begin
+    // `{$RTTI}` or `{$RTTI ,}`; `{$RTTI EXPLICIT}` alone is dcc's.
+    if (LPos <= LLen) or not LClause then
+      Report(ppRttiInvalid, 'RTTI');
+    Exit;
+  end;
+  LSeen := '|';
+  repeat
+    if ((LWord <> 'METHODS') and (LWord <> 'FIELDS') and
+        (LWord <> 'PROPERTIES')) or (Pos('|' + LWord + '|', LSeen) > 0) then
+    begin
+      Report(ppRttiInvalid, 'RTTI');
+      Exit;
+    end;
+    LSeen := LSeen + LWord + '|';
+    SkipWs;
+    if (LPos > LLen) or (AArg[LPos] <> '(') then
+    begin
+      Report(ppRttiInvalid, 'RTTI');
+      Exit;
+    end;
+    LIdx := LPos;
+    LDepth := 0;
+    LClause := False;
+    while LPos <= LLen do
+    begin
+      if AArg[LPos] = '(' then
+        Inc(LDepth)
+      else if AArg[LPos] = ')' then
+      begin
+        Dec(LDepth);
+        if LDepth = 0 then
+        begin
+          LClause := True;
+          Break;
+        end;
+      end
+      else if AArg[LPos] = '''' then
+      begin
+        Inc(LPos);
+        while (LPos <= LLen) and (AArg[LPos] <> '''') do
+          Inc(LPos);
+      end;
+      Inc(LPos);
+    end;
+    if not LClause then
+    begin
+      Report(ppRttiInvalid, 'RTTI');
+      Exit;
+    end;
+    CheckExpr(LIdx + 1, LPos - 1);
+    Inc(LPos);   // ')'
+    SkipWs;
+    if LPos > LLen then
+      Break;
+    LWord := ReadWord;
+    if LWord = '' then
+    begin
+      Report(ppRttiInvalid, 'RTTI');   // a `,` or another stray token
+      Exit;
+    end;
+  until False;
+end;
+
 procedure TPasPreprocessor.ApplyRtti(const AArg: string);
 var
   LPos: Integer;

@@ -713,6 +713,10 @@ type
       parallel 'calls' pass - see RunCallChecksPass. Nil outside it,
       and then the write goes straight to the model. }
     FCallNewExt: TArray<TDictionary<Integer, TPasExtRef>>;
+    // The strongly connected component of each model in the graph of
+    // INTERFACE `uses` (BuildIntfUsesScc): two units in one are a cycle,
+    // F2047 (CheckDeclRules). Built before the call checks, read by them.
+    FIntfScc: TArray<Integer>;
     FSingleThreaded: Boolean;
     // Pass failures that had no model to hang off - see NoteInternalError.
     // The lock also guards AddDiag on a shared model from a parallel body.
@@ -1523,6 +1527,8 @@ type
     procedure CheckConstraints(AId: Integer);
     function ResolveCustomAttributeX(AId: Integer): TSemaXType;
     procedure CheckAttributes(AId: Integer);
+    procedure CheckDeclRules(AId: Integer);
+    procedure BuildIntfUsesScc;
     procedure CheckHeadingPairs(AId: Integer);
     procedure CheckRecordDecls(AId: Integer);
     function MethodDirs(AModel: TPasSemaModel; ARoutine: Integer;
@@ -11603,6 +11609,7 @@ procedure TPasSemaProject.RunCallChecksOver(const AIds: TArray<Integer>);
 var
   LId: Integer;
 begin
+  BuildIntfUsesScc;
   SetLength(FCallNewExt, FModels.Count);
   for LId in AIds do
     FCallNewExt[LId] := TDictionary<Integer, TPasExtRef>.Create;
@@ -11620,6 +11627,7 @@ begin
           begin
             CheckConstraints(AIds[0]);
             CheckAttributes(AIds[0]);
+            CheckDeclRules(AIds[0]);
             CheckHeadingPairs(AIds[0]);
             CheckRecordDecls(AIds[0]);
             CheckClassDecls(AIds[0]);
@@ -11637,6 +11645,7 @@ begin
         CheckCalls(AIds[ASlot]);
         CheckConstraints(AIds[ASlot]);
         CheckAttributes(AIds[ASlot]);
+        CheckDeclRules(AIds[ASlot]);
         CheckHeadingPairs(AIds[ASlot]);
         CheckRecordDecls(AIds[ASlot]);
         CheckClassDecls(AIds[ASlot]);
@@ -13258,6 +13267,1001 @@ begin
               Format(SE2289_UnresolvedCustomAttribute,
               [FModels[LAttrX.UnitId].Symbols[LAttrX.Sym].Name]));
         end;
+    end;
+  end;
+end;
+
+{ Declaration rules dcc checks where a declaration stands, each read where it
+  is certain and silent otherwise (spec audit section 4, dcc64 37.0):
+  - 16.4.1 a type parameter's constraint list: E2507, E2516, E2510, E2552,
+    E2553, E2603, E2666, E2670, one per type parameter, at the constraint;
+  - 16.3 a generic method that is virtual / dynamic / message (E2533) or
+    declared in an interface (E2535); 16.2 a type parameter without a
+    `record` constraint typing a field of a generic record's variant part
+    (E2569);
+  - 14.1.1 a visibility word (E2210) or a field (E2209) in an interface;
+  - 14.2.1 / 14.2.2 / 14.4.1 a class's interface list: a method no member
+    implements (E2291, at the class), a resolution clause naming an
+    interface the class does not list or a method the interface lacks
+    (E2003), an `implements` clause of an unlisted interface (E2265), of a
+    property with no reader (E2261), of an interface property of another
+    interface (E2010), or a second one for the same interface (E2257);
+  - 20.x `[weak]` on a variable or field of neither a class nor an
+    interface type (E2584);
+  - 1.1.3 an exported name qualified by a type (E2276);
+  - 1.2.x a cycle of interface `uses` (F2047), at the one entry that closes
+    it from the lower model id - dcc's compile order. }
+procedure TPasSemaProject.CheckDeclRules(AId: Integer);
+var
+  LM: TPasSemaModel;
+  LResolved: Boolean;   // every `uses` found and no leaf guessed
+
+  function KindOf(N: Integer): TPasNodeKind;
+  begin
+    Result := LM.Tree.Nodes[N].Kind;
+  end;
+
+  function HeadTok(N: Integer): TPasTokenKind;
+  begin
+    Result := LM.Tree.Source.VisibleKind(LM.Tree.Nodes[N].FirstToken);
+  end;
+
+  function SymOf(N: Integer; out AMid, ASym: Integer): Boolean;
+  var
+    LExt: TPasExtRef;
+  begin
+    AMid := AId;
+    ASym := LM.RefMap[N];
+    if (ASym = NIL_SYM) and LM.ExtRefMap.TryGetValue(N, LExt) then
+    begin
+      AMid := LExt.UnitId;
+      ASym := LExt.Sym;
+    end;
+    Result := ASym <> NIL_SYM;
+  end;
+
+  // A type written at N, canonical; XNil when it does not resolve or names
+  // a type parameter.
+  function TypeAt(N: Integer): TSemaXType;
+  begin
+    Result := ResolveTypeExpr(AId, N);
+    if XValid(Result) then
+      Result := CanonTypeX(Result);
+    if XValid(Result) and
+       (FModels[Result.UnitId].Symbols[Result.Sym].Kind = skGenericParam) then
+      Result := XNil;
+  end;
+
+  function SameSym(const A, B: TSemaXType): Boolean;
+  begin
+    Result := XValid(A) and XValid(B) and (A.UnitId = B.UnitId) and
+      (A.Sym = B.Sym);
+  end;
+
+  // The declared name of the struct definition ADef: the nkTypeDecl's.
+  function DeclNameNode(ADef: Integer): Integer;
+  begin
+    Result := LM.Tree.Nodes[ADef].Parent;
+    if (Result = NIL_NODE) or (KindOf(Result) <> nkTypeDecl) then
+      Exit(ADef);
+    Result := LM.Tree.Nodes[Result].FirstChild;
+    while (Result <> NIL_NODE) and (KindOf(Result) <> nkIdent) do
+      Result := LM.Tree.Nodes[Result].NextSibling;
+    if Result = NIL_NODE then
+      Result := ADef;
+  end;
+
+  // A routine's own name: its last name segment.
+  function RoutineName(ARoutine: Integer): Integer;
+  var
+    LC: Integer;
+  begin
+    Result := NIL_NODE;
+    LC := LM.Tree.Nodes[ARoutine].FirstChild;
+    while LC <> NIL_NODE do
+    begin
+      if (KindOf(LC) = nkIdent) and (nfName in LM.Tree.Nodes[LC].Flags) then
+        Result := LC;
+      LC := LM.Tree.Nodes[LC].NextSibling;
+    end;
+  end;
+
+  function ChildOfKind(N: Integer; AKind: TPasNodeKind): Integer;
+  begin
+    Result := LM.Tree.Nodes[N].FirstChild;
+    while (Result <> NIL_NODE) and (KindOf(Result) <> AKind) do
+      Result := LM.Tree.Nodes[Result].NextSibling;
+  end;
+
+  function HasDirective(ARoutine: Integer; const AWords: array of string):
+    Boolean;
+  var
+    LC: Integer;
+    LText: string;
+  begin
+    LC := LM.Tree.Nodes[ARoutine].FirstChild;
+    while LC <> NIL_NODE do
+    begin
+      if KindOf(LC) = nkDirective then
+      begin
+        LText := LowerCase(LM.Tree.NodeText(LC));
+        for var LW in AWords do
+          if LText = LW then
+            Exit(True);
+      end;
+      LC := LM.Tree.Nodes[LC].NextSibling;
+    end;
+    Result := False;
+  end;
+
+  { 16.4.1 (dcc64 37.0, spec audit g5 G02, G02b, local/sa4-intf G1): the
+    words and types of one type parameter's constraint list, left to right,
+    the first conflict reported at the constraint that makes it. }
+  procedure CheckConstraintList(AParam: Integer);
+  var
+    LC: Integer;
+    LClass, LRecord, LCtor: Boolean;
+    LClassTypes: Integer;
+    LIntfs: TArray<TSemaXType>;
+    LX, LRoot: TSemaXType;
+    LRMid, LRSym: Integer;
+    LErrCode, LErrMsg: string;
+
+    // The first conflict: the walk stops at it.
+    procedure Stop(const ACode, AMsg: string);
+    begin
+      if LErrCode = '' then
+      begin
+        LErrCode := ACode;
+        LErrMsg := ACode + ' ' + AMsg;
+      end;
+    end;
+
+  begin
+    LErrCode := '';
+    LClass := False;
+    LRecord := False;
+    LCtor := False;
+    LClassTypes := 0;
+    LIntfs := nil;
+    LRoot := XNil;
+    if ImplicitRootX(AId, 'tobject', LRMid, LRSym) then
+      LRoot := XPlain(LRMid, LRSym);
+    LC := LM.Tree.Nodes[AParam].FirstChild;
+    while LC <> NIL_NODE do
+    begin
+      if KindOf(LC) = nkConstraint then
+      begin
+        if LM.Tree.Nodes[LC].FirstChild = NIL_NODE then
+          case HeadTok(LC) of
+            tkClass:
+              if LClass then
+                Stop('E2603', 'Constraint ''class'' cannot be specified ' +
+                  'more than once')
+              else if LRecord then
+                Stop('E2507', 'CLASS constraint and RECORD constraint ' +
+                  'cannot be specified together')
+              else if LClassTypes > 0 then
+                Stop('E2552', 'CLASS or RECORD constraint and class ' +
+                  'type constraint cannot be specified together')
+              else
+                LClass := True;
+            tkRecord:
+              if LRecord then
+                Stop('E2603', 'Constraint ''record'' cannot be ' +
+                  'specified more than once')
+              else if LClass then
+                Stop('E2507', 'CLASS constraint and RECORD constraint ' +
+                  'cannot be specified together')
+              else if LCtor then
+                Stop('E2516', 'Constraint ''record'' is conflicting ' +
+                  'with previous constraints')
+              else if LClassTypes > 0 then
+                Stop('E2552', 'CLASS or RECORD constraint and class ' +
+                  'type constraint cannot be specified together')
+              else if Length(LIntfs) > 0 then
+                Stop('E2666', 'Constraint ''record'' and interface ' +
+                  'type constraint cannot be specified together')
+              else
+                LRecord := True;
+            tkConstructor:
+              if LCtor then
+                Stop('E2603', 'Constraint ''constructor'' cannot be ' +
+                  'specified more than once')
+              else if LRecord then
+                Stop('E2516', 'Constraint ''constructor'' is ' +
+                  'conflicting with previous constraints')
+              else
+                LCtor := True;
+          else
+            Exit;
+          end
+        else
+        begin
+          // `<T: string>` is the parser's E2029 already.
+          if not (KindOf(LM.Tree.Nodes[LC].FirstChild) in [nkIdent, nkMember,
+             nkTypeArgs]) or (HeadTok(LC) = tkString) or
+             LM.HasDiagAt(LM.Tree.Nodes[LC].FirstChild) then
+            Exit;
+          LX := TypeAt(LM.Tree.Nodes[LC].FirstChild);
+          if not XValid(LX) then
+            Exit;   // unknown: nothing after it is judged either
+          case XCatOf(LX) of
+            tcClass:
+              if SameSym(LX, LRoot) then
+                Stop('E2510', Format('Type ''%s'' is not a valid ' +
+                  'constraint', [LM.Tree.NodeSpanText(
+                  LM.Tree.Nodes[LC].FirstChild)]))
+              else if LClassTypes > 0 then
+                Stop('E2553', 'Class type constraint cannot be ' +
+                  'specified more than once')
+              else if LClass or LRecord then
+                Stop('E2552', 'CLASS or RECORD constraint and class ' +
+                  'type constraint cannot be specified together')
+              else
+                Inc(LClassTypes);
+            tcInterface:
+              begin
+                if LRecord then
+                  Stop('E2666', 'Constraint ''record'' and interface ' +
+                    'type constraint cannot be specified together');
+                for var LI in LIntfs do
+                  if XSameType(LI, LX) then
+                    Stop('E2670', 'Identical interface type ' +
+                      'constraint cannot be specified more than once');
+                LIntfs := LIntfs + [LX];
+              end;
+            // A `reference to` type is an interface; a plain procedural
+            // type is not read.
+            tcProc, tcUnknown:
+              ;
+          else
+            Stop('E2510', Format('Type ''%s'' is not a valid constraint',
+              [LM.Tree.NodeSpanText(LM.Tree.Nodes[LC].FirstChild)]));
+          end;
+        end;
+        if LErrCode <> '' then
+        begin
+          if not LM.HasDiagAt(LC) then
+            EmitAt(LM, LC, LErrCode, LErrMsg);
+          Exit;
+        end;
+      end;
+      LC := LM.Tree.Nodes[LC].NextSibling;
+    end;
+  end;
+
+  { 14.1.1 / 16.3: what an interface body may not hold. }
+  procedure CheckInterfaceBody(ADef: Integer);
+  var
+    LC: Integer;
+  begin
+    LC := LM.Tree.Nodes[ADef].FirstChild;
+    while LC <> NIL_NODE do
+    begin
+      case KindOf(LC) of
+        nkVisibility:
+          EmitAt(LM, LC, 'E2210', Format('E2210 ''%s'' directive not ' +
+            'allowed in in interface type', [LowerCase(LM.Tree.Source.
+            VisibleText(LM.Tree.Nodes[LC].FirstToken))]));
+        nkVarDecl:
+          EmitAt(LM, LC, 'E2209', 'E2209 Field declarations not allowed ' +
+            'in interface type');
+        nkRoutine:
+          if ChildOfKind(LC, nkGenericParams) <> NIL_NODE then
+            EmitAt(LM, LC, 'E2535', 'E2535 Interface methods must not have ' +
+              'parameterized methods');
+      end;
+      LC := LM.Tree.Nodes[LC].NextSibling;
+    end;
+  end;
+
+  { 16.2 (dcc64 37.0, spec audit g5 G09, G09b): a field of a generic
+    record's variant part typed by a type parameter of the record that has
+    no `record` constraint. }
+  procedure CheckVariantFields(ADef: Integer);
+  var
+    LDecl, LGen, LP, LC, LVar, LCount, LType: Integer;
+    LNames: TArray<string>;
+    LStack: TArray<Integer>;
+    LRec: Boolean;
+  begin
+    LDecl := LM.Tree.Nodes[ADef].Parent;
+    if (LDecl = NIL_NODE) or (KindOf(LDecl) <> nkTypeDecl) then
+      Exit;
+    LGen := ChildOfKind(LDecl, nkGenericParams);
+    if LGen = NIL_NODE then
+      Exit;
+    LNames := nil;
+    LP := LM.Tree.Nodes[LGen].FirstChild;
+    while LP <> NIL_NODE do
+    begin
+      if KindOf(LP) = nkGenericParam then
+      begin
+        LRec := False;
+        LC := LM.Tree.Nodes[LP].FirstChild;
+        while LC <> NIL_NODE do
+        begin
+          if (KindOf(LC) = nkConstraint) and
+             (LM.Tree.Nodes[LC].FirstChild = NIL_NODE) and
+             (HeadTok(LC) = tkRecord) then
+            LRec := True;
+          LC := LM.Tree.Nodes[LC].NextSibling;
+        end;
+        if not LRec then
+        begin
+          LC := LM.Tree.Nodes[LP].FirstChild;
+          while LC <> NIL_NODE do
+          begin
+            if KindOf(LC) = nkIdent then
+              LNames := LNames + [LM.Tree.NodeNameLower(LC)];
+            LC := LM.Tree.Nodes[LC].NextSibling;
+          end;
+        end;
+      end;
+      LP := LM.Tree.Nodes[LP].NextSibling;
+    end;
+    if LNames = nil then
+      Exit;
+    LVar := ChildOfKind(ADef, nkVariantPart);
+    if LVar = NIL_NODE then
+      Exit;
+    LStack := [LVar];
+    while Length(LStack) > 0 do
+    begin
+      LC := LStack[High(LStack)];
+      SetLength(LStack, Length(LStack) - 1);
+      LP := LM.Tree.Nodes[LC].FirstChild;
+      while LP <> NIL_NODE do
+      begin
+        if KindOf(LP) = nkVarDecl then
+        begin
+          if FieldDeclShape(LM.Tree, LP, LCount, LType) and
+             (KindOf(LType) = nkIdent) then
+            for var LN in LNames do
+              if LN = LM.Tree.NodeNameLower(LType) then
+              begin
+                EmitAt(LM, LType, 'E2569', Format('E2569 Type parameter ' +
+                  '''%s'' may need finalization - not allowed in variant ' +
+                  'record.  Consider using RECORD constraint',
+                  [LM.Tree.NodeText(LType)]));
+                Break;
+              end;
+        end
+        else if not (KindOf(LP) in [nkRecordType, nkClassType]) then
+          LStack := LStack + [LP];
+        LP := LM.Tree.Nodes[LP].NextSibling;
+      end;
+    end;
+  end;
+
+  { 20.2.x (dcc64 37.0, spec audit g6 M4, MA): `[weak]` on a variable or
+    field whose type is neither a class nor an interface. }
+  procedure CheckWeak(ADecl: Integer; AWeak: Boolean);
+  var
+    LC, LA, LCount, LType: Integer;
+    LWeak: Boolean;
+    LX: TSemaXType;
+  begin
+    LWeak := AWeak;
+    LC := LM.Tree.Nodes[ADecl].FirstChild;
+    while LC <> NIL_NODE do
+    begin
+      if KindOf(LC) = nkAttrGroup then
+      begin
+        LA := LM.Tree.Nodes[LC].FirstChild;
+        while LA <> NIL_NODE do
+        begin
+          if (KindOf(LA) = nkAttribute) and
+             (LM.Tree.Nodes[LA].Aux = amaWeak) then
+            LWeak := True;
+          LA := LM.Tree.Nodes[LA].NextSibling;
+        end;
+      end;
+      LC := LM.Tree.Nodes[LC].NextSibling;
+    end;
+    if not LWeak or not FieldDeclShape(LM.Tree, ADecl, LCount, LType) or
+       (LType = NIL_NODE) then
+      Exit;
+    LX := TypeAt(LType);
+    if not XValid(LX) or
+       (XCatOf(LX) in [tcClass, tcInterface, tcProc, tcUnknown]) then
+      Exit;
+    LC := LM.Tree.Nodes[ADecl].FirstChild;
+    while LC <> NIL_NODE do
+    begin
+      if (KindOf(LC) = nkIdent) and (nfName in LM.Tree.Nodes[LC].Flags) then
+        EmitAt(LM, LC, 'E2584', Format('E2584 Weak attribute only allowed ' +
+          'on fields and variables of type class or interface: %s',
+          [LM.Tree.NodeText(LC)]));
+      LC := LM.Tree.Nodes[LC].NextSibling;
+    end;
+  end;
+
+  { 1.1.3 (dcc64 37.0, spec audit g1 ExpMeth): an exported name qualified
+    by a type - a class's static method - is no routine dcc exports. }
+  procedure CheckExportsItem(AItem: Integer);
+
+    function LastSeg(N: Integer): Integer;
+    begin
+      Result := N;
+      if KindOf(N) = nkMember then
+        Result := LM.Tree.LastChild(N);
+    end;
+
+  var
+    LName, LLeft: Integer;
+    LX: TSemaXType;
+  begin
+    LName := LM.Tree.Nodes[AItem].FirstChild;
+    if (LName = NIL_NODE) or (KindOf(LName) <> nkMember) then
+      Exit;
+    LLeft := LM.Tree.Nodes[LName].FirstChild;
+    if (LLeft = NIL_NODE) or not (KindOf(LLeft) in [nkIdent, nkMember]) then
+      Exit;
+    LX := TypeAt(LLeft);
+    if XValid(LX) and (XCatOf(LX) in [tcClass, tcRecord, tcInterface]) then
+      EmitAt(LM, LName, 'E2276', Format('E2276 Identifier ''%s'' cannot be ' +
+        'exported', [LM.Tree.NodeText(LastSeg(LLeft))]));
+  end;
+
+  { 14.2.1, 14.2.2, 14.4.1 (dcc64 37.0, spec audit g5 I01, I03, I03b, I06,
+    I06b-I09, local/sa4-intf I1). Silent wherever the class's ancestry, a
+    listed interface or an interface's ancestry does not resolve, and for an
+    interface an ancestor class delegates (`implements`). }
+  procedure CheckClassInterfaces(ADef: Integer);
+  var
+    LSym, LC, LS, LE, LTypeNode, LIdx, LMMid, LMSym, LCtx, LAnc, LIfc,
+      LMeth, LOwner, LDepth, LReadExpr: Integer;
+    LClassX, LX, LPT, LJ, LCur: TSemaXType;
+    LListed, LSeen, LDelegated, LCancel: TArray<TSemaXType>;
+    LListedNode: TArray<Integer>;
+    LResNames, LDone: TStringList;
+    LRead, LWrite, LAncImpl, LListedHit, LUnknown, LMissing: Boolean;
+    LName, LIName, LKey: string;
+
+    function IndexIn(const AList: TArray<TSemaXType>;
+      const AX: TSemaXType): Integer;
+    begin
+      for var I := 0 to High(AList) do
+        if SameSym(AList[I], AX) then
+          Exit(I);
+      Result := -1;
+    end;
+
+    // A class definition's resolution clauses, their method names.
+    procedure CollectResNames(AMid, ADefNode: Integer);
+    var
+      LK, LN: Integer;
+    begin
+      LK := FModels[AMid].Tree.Nodes[ADefNode].FirstChild;
+      while LK <> NIL_NODE do
+      begin
+        if FModels[AMid].Tree.Nodes[LK].Kind = nkMethodResolution then
+        begin
+          LN := NIL_NODE;
+          var LSeg := FModels[AMid].Tree.Nodes[LK].FirstChild;
+          while LSeg <> NIL_NODE do
+          begin
+            if (FModels[AMid].Tree.Nodes[LSeg].Kind = nkIdent) and
+               (nfName in FModels[AMid].Tree.Nodes[LSeg].Flags) then
+              LN := LSeg;
+            LSeg := FModels[AMid].Tree.Nodes[LSeg].NextSibling;
+          end;
+          if LN <> NIL_NODE then
+            LResNames.Add(FModels[AMid].Tree.NodeNameLower(LN));
+        end
+        else if (FModels[AMid].Tree.Nodes[LK].Kind = nkPropertyDecl) and
+          ((AMid <> AId) or (ADefNode <> ADef)) then
+        begin
+          var LSp := FModels[AMid].Tree.Nodes[LK].FirstChild;
+          while LSp <> NIL_NODE do
+          begin
+            if (FModels[AMid].Tree.Nodes[LSp].Kind = nkPropSpec) and
+               SameText(FModels[AMid].Tree.Source.VisibleText(
+                 FModels[AMid].Tree.Nodes[LSp].FirstToken), 'implements') then
+              LAncImpl := True;
+            LSp := FModels[AMid].Tree.Nodes[LSp].NextSibling;
+          end;
+        end;
+        LK := FModels[AMid].Tree.Nodes[LK].NextSibling;
+      end;
+    end;
+
+  begin
+    LSym := LM.StructSymAtNode(ADef);
+    if LSym = NIL_SYM then
+      Exit;
+    LClassX := XPlain(AId, LSym);
+    // The interface list: the heritage items after the class ancestor. A
+    // list starting with an interface is E2021's, not read.
+    LC := PasHeritageRef(LM.Tree, ADef);
+    if LC = NIL_NODE then
+      Exit;
+    LX := TypeAt(LC);
+    if not XValid(LX) or (XCatOf(LX) <> tcClass) then
+      Exit;
+    LListed := nil;
+    LListedNode := nil;
+    LC := LM.Tree.Nodes[LC].NextSibling;
+    while (LC <> NIL_NODE) and (KindOf(LC) in [nkIdent, nkMember, nkTypeArgs]) do
+    begin
+      LX := TypeAt(LC);
+      if XValid(LX) and (XCatOf(LX) = tcInterface) then
+      begin
+        LListed := LListed + [LX];
+        LListedNode := LListedNode + [LC];
+      end;
+      LC := LM.Tree.Nodes[LC].NextSibling;
+    end;
+    LResNames := TStringList.Create;
+    LDone := TStringList.Create;
+    try
+      LResNames.Sorted := True;
+      LResNames.Duplicates := dupIgnore;
+      LDone.Sorted := True;
+      LDone.Duplicates := dupIgnore;
+      LSeen := nil;
+      LDelegated := nil;
+      LCancel := nil;
+      LAncImpl := False;
+      // The class's own members: resolution clauses and `implements`.
+      LC := LM.Tree.Nodes[ADef].FirstChild;
+      while LC <> NIL_NODE do
+      begin
+        if KindOf(LC) = nkMethodResolution then
+        begin
+          LIfc := LM.Tree.Nodes[LC].FirstChild;
+          LMeth := NIL_NODE;
+          if (LIfc <> NIL_NODE) and (KindOf(LIfc) = nkIdent) and
+             (LM.Tree.Nodes[LIfc].NextSibling <> NIL_NODE) and
+             (KindOf(LM.Tree.Nodes[LIfc].NextSibling) = nkIdent) and
+             (nfName in LM.Tree.Nodes[LM.Tree.Nodes[LIfc].NextSibling].Flags) then
+            LMeth := LM.Tree.Nodes[LIfc].NextSibling;
+          if LMeth <> NIL_NODE then
+          begin
+            // A clause in error implements nothing (local/sa4-intf X1 T7:
+            // E2291 beside the clause's E2003).
+            LX := TypeAt(LIfc);
+            if XValid(LX) and (XCatOf(LX) = tcInterface) and
+               not LM.HasDiagAt(LIfc) then
+            begin
+              if IndexIn(LListed, LX) < 0 then
+                EmitE2003(LM, LIfc, AId)
+              else if not FindMemberX(AId, LX,
+                LM.Tree.NodeNameLower(LMeth), LMMid, LMSym, LCtx, 0,
+                True) then
+              begin
+                if not LM.HasDiagAt(LMeth) then
+                  EmitE2003(LM, LMeth, AId);
+              end
+              else
+                LResNames.Add(LM.Tree.NodeNameLower(LMeth));
+            end
+            else
+              LResNames.Add(LM.Tree.NodeNameLower(LMeth));
+          end;
+        end
+        else if KindOf(LC) = nkPropertyDecl then
+        begin
+          LRead := False;
+          LWrite := False;
+          LReadExpr := NIL_NODE;
+          LTypeNode := NIL_NODE;
+          LS := LM.Tree.Nodes[LC].FirstChild;
+          while (LS <> NIL_NODE) and (KindOf(LS) = nkAttrGroup) do
+            LS := LM.Tree.Nodes[LS].NextSibling;
+          if LS <> NIL_NODE then
+            LS := LM.Tree.Nodes[LS].NextSibling;   // past the name
+          while LS <> NIL_NODE do
+          begin
+            if KindOf(LS) = nkPropSpec then
+            begin
+              LName := LowerCase(LM.Tree.Source.VisibleText(
+                LM.Tree.Nodes[LS].FirstToken));
+              if LName = 'read' then
+              begin
+                LRead := True;
+                LReadExpr := LM.Tree.Nodes[LS].FirstChild;
+              end
+              else if LName = 'write' then
+                LWrite := True;
+            end
+            else if (LTypeNode = NIL_NODE) and (KindOf(LS) <> nkParams) then
+              LTypeNode := LS;
+            LS := LM.Tree.Nodes[LS].NextSibling;
+          end;
+          LS := LM.Tree.Nodes[LC].FirstChild;
+          while LS <> NIL_NODE do
+          begin
+            if (KindOf(LS) = nkPropSpec) and SameText(LM.Tree.Source.
+               VisibleText(LM.Tree.Nodes[LS].FirstToken), 'implements') then
+            begin
+              LE := LM.Tree.Nodes[LS].FirstChild;
+              while LE <> NIL_NODE do
+              begin
+                LX := TypeAt(LE);
+                if XValid(LX) and (XCatOf(LX) = tcInterface) then
+                begin
+                  LListedHit := False;
+                  LUnknown := False;
+                  for LJ in LListed do
+                    if SameSym(LJ, LX) then
+                      LListedHit := True
+                    else
+                      case XDescent(LJ, LX) of
+                        xdYes:
+                          LListedHit := True;
+                        xdUnknown:
+                          LUnknown := True;
+                      end;
+                  if not LListedHit then
+                  begin
+                    if not LUnknown then
+                      EmitAt(LM, LE, 'E2265', Format('E2265 Interface ' +
+                        '''%s'' not mentioned in interface list',
+                        [LM.Tree.NodeSpanText(LE)]));
+                  end
+                  else if LWrite and not LRead then
+                  begin
+                    // It undoes the interface's delegation, whatever else
+                    // delegates it (local/sa4-intf I3: TC, TE).
+                    EmitAt(LM, LC, 'E2261', 'E2261 Implements clause only ' +
+                      'allowed for readable property');
+                    LCancel := LCancel + [LX];
+                  end
+                  else
+                  begin
+                    LPT := XNil;
+                    if LTypeNode <> NIL_NODE then
+                      LPT := TypeAt(LTypeNode);
+                    if XValid(LPT) and (XCatOf(LPT) = tcInterface) and
+                       not SameSym(LPT, LX) and
+                       (XDescent(LPT, LX) = xdNo) then
+                    begin
+                      EmitAt(LM, LTypeNode, 'E2010', Format(
+                        SE2010_IncompatibleTypes, [XTypeText(LPT),
+                        XTypeText(LX)]));
+                      if IndexIn(LSeen, LX) < 0 then
+                        LSeen := LSeen + [LX];
+                    end
+                    else if IndexIn(LSeen, LX) >= 0 then
+                      EmitAt(LM, LE, 'E2257', Format('E2257 Duplicate ' +
+                        'implements clause for interface ''%s''',
+                        [FModels[LX.UnitId].Symbols[LX.Sym].Name]))
+                    else
+                    begin
+                      LSeen := LSeen + [LX];
+                      LDelegated := LDelegated + [LX];
+                      // The reader's type against the property's - a
+                      // field of another interface: E2010, the
+                      // delegation kept (local/sa4-intf I3: TA).
+                      if XValid(LPT) and (XCatOf(LPT) = tcInterface) and
+                         (LReadExpr <> NIL_NODE) and
+                         (KindOf(LReadExpr) = nkIdent) and
+                         SymOf(LReadExpr, LMMid, LMSym) and
+                         (FModels[LMMid].Symbols[LMSym].Kind = skField) and
+                         (FModels[LMMid].Symbols[LMSym].TypeNode <> NIL_NODE) then
+                      begin
+                        var LFT := ResolveTypeExpr(LMMid,
+                          FModels[LMMid].Symbols[LMSym].TypeNode);
+                        if XValid(LFT) then
+                          LFT := CanonTypeX(LFT);
+                        if XValid(LFT) and (XCatOf(LFT) = tcInterface) and
+                           not SameSym(LFT, LPT) and
+                           (XDescent(LFT, LPT) = xdNo) then
+                          EmitAt(LM, LReadExpr, 'E2010', Format(
+                            SE2010_IncompatibleTypes, [XTypeText(LPT),
+                            XTypeText(LFT)]));
+                      end;
+                    end;
+                  end;
+                end
+                else
+                  LAncImpl := True;   // not read: no E2291 judged
+                LE := LM.Tree.Nodes[LE].NextSibling;
+              end;
+            end;
+            LS := LM.Tree.Nodes[LS].NextSibling;
+          end;
+        end;
+        LC := LM.Tree.Nodes[LC].NextSibling;
+      end;
+      for LX in LCancel do
+        for var I := High(LDelegated) downto 0 do
+          if SameSym(LDelegated[I], LX) then
+            Delete(LDelegated, I, 1);
+      if (Length(LListed) = 0) or UnknownAncestryX(LClassX) then
+        Exit;
+      // The ancestors' resolution clauses count; an ancestor's delegation
+      // is not read.
+      LCur := AncestorOfX(LClassX);
+      for LDepth := 1 to 64 do
+      begin
+        if not XValid(LCur) then
+          Break;
+        LAnc := TypeDefNodeOf(LCur.UnitId, LCur.Sym);
+        if (LAnc = NIL_NODE) or
+           (FModels[LCur.UnitId].Tree.Nodes[LAnc].Kind <> nkClassType) then
+          Break;
+        CollectResNames(LCur.UnitId, LAnc);
+        LCur := AncestorOfX(LCur);
+      end;
+      if LAncImpl then
+        Exit;
+      // E2291: every method of every listed interface and its ancestors.
+      for LIdx := 0 to High(LListed) do
+      begin
+        LJ := LListed[LIdx];
+        for LDepth := 1 to 32 do
+        begin
+          if not XValid(LJ) or (XCatOf(LJ) <> tcInterface) then
+            Break;
+          LAnc := TypeDefNodeOf(LJ.UnitId, LJ.Sym);
+          if (LAnc = NIL_NODE) or
+             (FModels[LJ.UnitId].Tree.Nodes[LAnc].Kind <> nkInterfaceType) then
+            Break;
+          LMissing := False;
+          for LX in LDelegated do
+            if SameSym(LX, LJ) or (XDescent(LX, LJ) <> xdNo) then
+              LMissing := True;   // delegated: nothing to report
+          if not LMissing then
+          begin
+            if LDepth = 1 then
+              LIName := LM.Tree.NodeSpanText(LListedNode[LIdx])
+            else
+              LIName := FModels[LJ.UnitId].Symbols[LJ.Sym].Name;
+            LC := FModels[LJ.UnitId].Tree.Nodes[LAnc].FirstChild;
+            while LC <> NIL_NODE do
+            begin
+              if FModels[LJ.UnitId].Tree.Nodes[LC].Kind = nkRoutine then
+              begin
+                LS := NIL_NODE;
+                LE := FModels[LJ.UnitId].Tree.Nodes[LC].FirstChild;
+                while LE <> NIL_NODE do
+                begin
+                  if (FModels[LJ.UnitId].Tree.Nodes[LE].Kind = nkIdent) and
+                     (nfName in FModels[LJ.UnitId].Tree.Nodes[LE].Flags) then
+                    LS := LE;
+                  LE := FModels[LJ.UnitId].Tree.Nodes[LE].NextSibling;
+                end;
+                if LS <> NIL_NODE then
+                begin
+                  LName := FModels[LJ.UnitId].Tree.NodeText(LS);
+                  LKey := FModels[LJ.UnitId].Tree.NodeNameLower(LS);
+                  if LName.StartsWith('&') then
+                    Delete(LName, 1, 1);
+                  if (LResNames.IndexOf(LKey) < 0) and
+                     (LDone.IndexOf(Format('%d.%d.%s', [LJ.UnitId, LJ.Sym,
+                       LKey])) < 0) then
+                  begin
+                    LDone.Add(Format('%d.%d.%s', [LJ.UnitId, LJ.Sym,
+                      LKey]));
+                    LMissing := True;
+                    if FindMemberX(AId, LClassX, LKey, LMMid,
+                       LMSym, LCtx) then
+                    begin
+                      LOwner := FModels[LMMid].Symbols[LMSym].Scope;
+                      if (LOwner >= 0) and
+                         (LOwner < FModels[LMMid].Scopes.Count) then
+                        LOwner := FModels[LMMid].Scopes[LOwner].OwnerNode
+                      else
+                        LOwner := NIL_NODE;
+                      if (LOwner = NIL_NODE) or
+                         (FModels[LMMid].Tree.Nodes[LOwner].Kind <>
+                           nkInterfaceType) then
+                        case FModels[LMMid].Symbols[LMSym].Kind of
+                          skField, skVar, skConst, skType, skProperty:
+                            ;   // a field named so implements nothing
+                          skRoutine:
+                            // A `class` method alone implements nothing.
+                            LMissing := FModels[LMMid].IsClassRoutine(LMSym) and
+                              (FModels[LMMid].Symbols[LMSym].NextOverload =
+                                NIL_SYM);
+                        else
+                          LMissing := False;
+                        end;
+                    end;
+                    if LMissing then
+                      EmitAt(LM, DeclNameNode(ADef), 'E2291', Format(
+                        'E2291 Missing implementation of interface method ' +
+                        '%s.%s', [LIName, LName]));
+                  end;
+                end;
+              end;
+              LC := FModels[LJ.UnitId].Tree.Nodes[LC].NextSibling;
+            end;
+          end;
+          LJ := AncestorOfX(LJ);
+          if XValid(LJ) then
+            LJ := CanonTypeX(LJ);
+        end;
+      end;
+    finally
+      LResNames.Free;
+      LDone.Free;
+    end;
+  end;
+
+  { 1.2.x (dcc64 37.0, spec audit g1 Circ, Circ2): a unit whose interface
+    `uses` reaches back to it through interface `uses` only. dcc stops at the
+    entry that closes the cycle in its compile order; the entry here is the
+    one to a unit with a lower model id - the order models are loaded in. }
+  procedure CheckUsesCycle;
+  var
+    LIdx, LU: Integer;
+  begin
+    if AId > High(FIntfScc) then
+      Exit;
+    for LIdx := 0 to High(LM.UsesList) do
+    begin
+      LU := LM.UsesList[LIdx].UnitId;
+      if (LU >= 0) and (LU < AId) and (FIntfScc[LU] = FIntfScc[AId]) and
+         UsesIsInterface(AId, LIdx) then
+        EmitAt(LM, LM.UsesList[LIdx].NameNode, 'F2047', Format(
+          'F2047 Circular unit reference to ''%s''',
+          [LM.UsesList[LIdx].NameFull]));
+    end;
+  end;
+
+var
+  LNode: Integer;
+begin
+  LM := FModels[AId];
+  LResolved := LM.AllUsesResolved and not UsesLeafGuessed(LM);
+  for LNode := 0 to High(LM.Tree.Nodes) do
+    case LM.Tree.Nodes[LNode].Kind of
+      nkGenericParam:
+        if LResolved then
+          CheckConstraintList(LNode);
+      nkInterfaceType:
+        if not PasIsForwardStruct(LM.Tree, LNode) then
+          CheckInterfaceBody(LNode);
+      nkClassType:
+        if not PasIsForwardStruct(LM.Tree, LNode) then
+        begin
+          var LC := LM.Tree.Nodes[LNode].FirstChild;
+          while LC <> NIL_NODE do
+          begin
+            if (KindOf(LC) = nkRoutine) and
+               (ChildOfKind(LC, nkGenericParams) <> NIL_NODE) and
+               HasDirective(LC, ['virtual', 'dynamic', 'message']) then
+              EmitAt(LM, LC, 'E2533', 'E2533 Virtual, dynamic and message ' +
+                'methods cannot have type parameters');
+            LC := LM.Tree.Nodes[LC].NextSibling;
+          end;
+          if LResolved then
+            CheckClassInterfaces(LNode);
+        end;
+      nkRecordType:
+        CheckVariantFields(LNode);
+      nkVarDecl:
+        if LResolved then
+          CheckWeak(LNode, False);
+      // In a struct body a field's group stands before it, a sibling.
+      nkAttrGroup:
+        if LResolved and (LM.Tree.Nodes[LNode].Parent <> NIL_NODE) and
+           (KindOf(LM.Tree.Nodes[LNode].Parent) in [nkClassType,
+             nkRecordType, nkObjectType, nkVarSec]) then
+        begin
+          var LNext := LM.Tree.Nodes[LNode].NextSibling;
+          while (LNext <> NIL_NODE) and (KindOf(LNext) = nkAttrGroup) do
+            LNext := LM.Tree.Nodes[LNext].NextSibling;
+          var LA := LM.Tree.Nodes[LNode].FirstChild;
+          while LA <> NIL_NODE do
+          begin
+            if (KindOf(LA) = nkAttribute) and
+               (LM.Tree.Nodes[LA].Aux = amaWeak) and (LNext <> NIL_NODE) and
+               (KindOf(LNext) = nkVarDecl) then
+            begin
+              CheckWeak(LNext, True);
+              Break;
+            end;
+            LA := LM.Tree.Nodes[LA].NextSibling;
+          end;
+        end;
+      nkExportsItem:
+        if LResolved then
+          CheckExportsItem(LNode);
+    end;
+  CheckUsesCycle;
+end;
+
+{ FIntfScc: Tarjan's components over the INTERFACE `uses` edges of every
+  model (spec 1.2.x, F2047), iterative - a closure is thousands of units
+  deep. A unit that uses no unit of its own component is a component of its
+  own; only a component of two or more is a cycle. }
+procedure TPasSemaProject.BuildIntfUsesScc;
+var
+  LN, LNext, LCounter, LComp, LTop: Integer;
+  LIndex, LLow: TArray<Integer>;
+  LOnStack: TArray<Boolean>;
+  LStack: TArray<Integer>;
+  LCallV, LCallE: TArray<Integer>;   // the explicit DFS: node and edge index
+  LDepth, LV, LE: Integer;
+  LEdges: TArray<TArray<Integer>>;
+begin
+  LN := FModels.Count;
+  SetLength(LEdges, LN);
+  for LV := 0 to LN - 1 do
+  begin
+    LEdges[LV] := nil;
+    if FModels[LV] = nil then
+      Continue;
+    for LE := 0 to High(FModels[LV].UsesList) do
+    begin
+      LNext := FModels[LV].UsesList[LE].UnitId;
+      if (LNext >= 0) and (LNext < LN) and (LNext <> LV) and
+         (FModels[LNext] <> nil) and UsesIsInterface(LV, LE) then
+        LEdges[LV] := LEdges[LV] + [LNext];
+    end;
+  end;
+  SetLength(FIntfScc, LN);
+  SetLength(LIndex, LN);
+  SetLength(LLow, LN);
+  SetLength(LOnStack, LN);
+  SetLength(LStack, LN);
+  SetLength(LCallV, LN);
+  SetLength(LCallE, LN);
+  for LV := 0 to LN - 1 do
+  begin
+    LIndex[LV] := -1;
+    LOnStack[LV] := False;
+    FIntfScc[LV] := LV;
+  end;
+  LCounter := 0;
+  LTop := 0;
+  for var LRoot := 0 to LN - 1 do
+  begin
+    if LIndex[LRoot] >= 0 then
+      Continue;
+    LDepth := 0;
+    LCallV[0] := LRoot;
+    LCallE[0] := 0;
+    LIndex[LRoot] := LCounter;
+    LLow[LRoot] := LCounter;
+    Inc(LCounter);
+    LStack[LTop] := LRoot;
+    Inc(LTop);
+    LOnStack[LRoot] := True;
+    while LDepth >= 0 do
+    begin
+      LV := LCallV[LDepth];
+      if LCallE[LDepth] <= High(LEdges[LV]) then
+      begin
+        LNext := LEdges[LV][LCallE[LDepth]];
+        Inc(LCallE[LDepth]);
+        if LIndex[LNext] < 0 then
+        begin
+          LIndex[LNext] := LCounter;
+          LLow[LNext] := LCounter;
+          Inc(LCounter);
+          LStack[LTop] := LNext;
+          Inc(LTop);
+          LOnStack[LNext] := True;
+          Inc(LDepth);
+          LCallV[LDepth] := LNext;
+          LCallE[LDepth] := 0;
+        end
+        else if LOnStack[LNext] and (LIndex[LNext] < LLow[LV]) then
+          LLow[LV] := LIndex[LNext];
+      end
+      else
+      begin
+        if LLow[LV] = LIndex[LV] then
+        begin
+          LComp := LV;
+          repeat
+            Dec(LTop);
+            LNext := LStack[LTop];
+            LOnStack[LNext] := False;
+            FIntfScc[LNext] := LComp;
+          until LNext = LV;
+        end;
+        Dec(LDepth);
+        if (LDepth >= 0) and (LLow[LV] < LLow[LCallV[LDepth]]) then
+          LLow[LCallV[LDepth]] := LLow[LV];
+      end;
     end;
   end;
 end;
@@ -35613,6 +36617,8 @@ begin
     CheckCalls(Result);
     CheckConstraints(Result);
     CheckAttributes(Result);
+    BuildIntfUsesScc;
+    CheckDeclRules(Result);
     CheckHeadingPairs(Result);
     CheckRecordDecls(Result);
     CheckClassDecls(Result);

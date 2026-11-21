@@ -4807,6 +4807,27 @@ begin
       'procedure P; deprecated; overload;'#13#10'begin end;'#13#10 +
       'begin'#13#10'end.'#13#10,
       ''),
+    // g1 Local, LocalExp (3.1.5, 1.1.3): `threadvar` and `exports` inside
+    // a routine are E2189 / E2191 at the word; a local resourcestring, a
+    // global threadvar and a global exports (program too) stay clean.
+    DiagListCase('3.1.5', 'SA Local: local threadvar',
+      'program Local;'#13#10'procedure P1;'#13#10 +
+      'resourcestring RS = ''a'';'#13#10'begin'#13#10'end;'#13#10 +
+      'procedure P2;'#13#10'threadvar TV: Integer;'#13#10'begin'#13#10 +
+      '  TV := 1;'#13#10'end;'#13#10'begin'#13#10'end.'#13#10,
+      '7:1 E2189 Thread local variables cannot be local to a function; '),
+    DiagListCase('1.1.3', 'SA LocalExp: local exports',
+      'library LocalExp;'#13#10'procedure Q; begin end;'#13#10 +
+      'procedure P3;'#13#10'exports Q;'#13#10'begin'#13#10'end;'#13#10 +
+      'begin'#13#10'end.'#13#10,
+      '4:1 E2191 EXPORTS allowed only at global scope; '),
+    DiagListCase('1.1.3', 'SA Local: global threadvar and exports stay clean',
+      'program G;'#13#10'threadvar TV: Integer;'#13#10 +
+      'procedure Q; begin end;'#13#10'exports Q;'#13#10 +
+      'procedure R;'#13#10'  procedure N; begin end;'#13#10 +
+      'var V: Integer;'#13#10'begin'#13#10'end;'#13#10 +
+      'begin'#13#10'end.'#13#10,
+      ''),
     // g1 EmptyVar, EmptyRs (B, DeclSection): a section word with no
     // declaration after it is E2029 at the next token - in a program, a
     // routine, a unit; in a struct only `const` / `type` before no
