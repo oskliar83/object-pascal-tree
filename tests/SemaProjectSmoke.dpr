@@ -15308,6 +15308,65 @@ begin
   end;
 end;
 
+// Legal shapes the wide gate found reported (spec 6.2.2, 6.2.5): an empty
+// `[]` is a dynamic array parameter's default as nil is (a `[...]` with
+// elements is E2026); `@P` of a procedural variable is the variable - one
+// whose type is written inline (`procedure(); cdecl`) and a typed constant
+// under {$J+} too - which a `var Pointer` and an untyped `var` parameter
+// take under {$T-}; under {$J-} such a constant is E2197, and so is `@V` of
+// any other variable (dcc64 37.0; local/p Q1-Q3; the client's
+// TStringDynArray = [] defaults, ImageEn's CheckCallWand(@exec, ...)).
+procedure TestParamLegalShapes;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_plegal');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    '  TArray<T> = array of T;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'PLegal.dpr'),
+    'program PLegal;'#10 +                                               // 1
+    '{$J+}'#10 +                                                         // 2
+    'type'#10 +                                                          // 3
+    '  TR = record F: Integer; end;'#10 +                                // 4
+    '  TSDA = array of string; TSDA2 = TSDA; TP = procedure;'#10 +       // 5
+    '  TC = class'#10 +                                                  // 6
+    '    class procedure CW(var Exec: Pointer; const N: string);'#10 +   // 7
+    '  end;'#10 +                                                        // 8
+    'class procedure TC.CW(var Exec: Pointer; const N: string); begin end;'#10 + // 9
+    'procedure D1(const A: TSDA = []; B: TSDA2 = []); begin end;'#10 +   // 10
+    'procedure D2(const A: TArray<TR> = []; B: TArray<Integer> = nil);'#10 + // 11
+    '  begin end;'#10 +                                                  // 12
+    'procedure D3(A: TArray<Integer> = [1]); begin end;'#10 +            // 13 E2026
+    'procedure U(var X); begin end;'#10 +                                // 14
+    'var PV: procedure(); cdecl; P2: TP; V: Integer;'#10 +               // 15
+    'procedure L;'#10 +                                                  // 16
+    'const Exec: procedure(); cdecl = nil; C2: TP = nil;'#10 +           // 17
+    'begin'#10 +                                                         // 18
+    '  TC.CW(@Exec, ''x''); TC.CW(@C2, ''x''); TC.CW(@PV, ''x'');'#10 +  // 19
+    '  TC.CW(@P2, ''x''); U(@Exec);'#10 +                                // 20
+    '  TC.CW(@V, ''x'');'#10 +                                           // 21 E2197
+    'end;'#10 +                                                          // 22
+    'begin'#10 +                                                         // 23
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'PLegal.dpr'));
+    LM := ModelByName('plegal');
+    Ok('plegal: E2026 lines [' + DiagLinesOf(LM, 'E2026') + ']',
+      DiagLinesOf(LM, 'E2026') = '13');
+    Ok('plegal: E2197 lines [' + DiagLinesOf(LM, 'E2197') + ']',
+      DiagLinesOf(LM, 'E2197') = '21');
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // A write to a `const` parameter (spec 6.2.3): E2064 for the parameter
 // itself, a field of a record one at any depth (through `with` too), an
 // element of a static array one or of a `const` open array; a dynamic
@@ -24281,6 +24340,7 @@ begin
   TestParamDefaults;
   TestArgShapes;
   TestConstParamWrites;
+  TestParamLegalShapes;
   TestOpenArrayValue;
   TestPropertyAccessChecks;
   TestGenericInferErrors;

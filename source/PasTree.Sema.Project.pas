@@ -19112,10 +19112,13 @@ var
 
     // Is ANode `@P` of a procedural variable P (IsAddrOfExpr) - the variable
     // itself, which an untyped or a `var` parameter takes, and the single
-    // element of `array of Pointer`?
+    // element of `array of Pointer`? A typed constant under {$J+} is a
+    // variable (ArgHeadKind): `CheckCallWand(@exec, ...)` for a local
+    // `const exec: procedure(); cdecl = nil` and `var exec: Pointer`
+    // compiles; under {$J-} it is E2197 (spec 6.2.2; local/p Q2).
     function ProcVarAddr(ANode: Integer): Boolean;
     var
-      LOpd, LVMid, LVSym: Integer;
+      LOpd, LVMid, LVSym, LTyNode: Integer;
       LOpdX: TSemaXType;
     begin
       Result := False;
@@ -19123,9 +19126,19 @@ var
          not (LM.Tree.Nodes[LOpd].Kind in [nkIdent, nkMember]) then
         Exit;
       LOpdX := GetX(LOpd);
-      Result := XValid(LOpdX) and (XCatOf(CanonTypeX(LOpdX)) = tcProc) and
-        TargetSym(LOpd, LVMid, LVSym) and
-        (FModels[LVMid].Symbols[LVSym].Kind in [skVar, skParam, skField]);
+      Result := TargetSym(LOpd, LVMid, LVSym) and
+        (ArgHeadKind(FModels[LVMid].Symbols[LVSym]) in
+         [skVar, skParam, skField]);
+      if not Result then
+        Exit;
+      // Its type: procedural, or - a type written inline (`var PV:
+      // procedure(); cdecl`), which types as nothing - a plain or `of
+      // object` procedural type at its declaration.
+      LTyNode := FModels[LVMid].Symbols[LVSym].TypeNode;
+      Result := XValid(LOpdX) and (XCatOf(CanonTypeX(LOpdX)) = tcProc) or
+        (LTyNode <> NIL_NODE) and
+        (FModels[LVMid].Tree.Nodes[LTyNode].Kind = nkProcType) and
+        (FModels[LVMid].Tree.Nodes[LTyNode].Aux <> 2);
     end;
 
     // What the argument ACore brings an ARRAY parameter besides its type
@@ -24221,7 +24234,7 @@ var
       too. dcc64 37.0, 2026-11-20 (local/p P3-P5). }
     procedure CheckParamDefaults(N: Integer);
     var
-      LParam, LChild, LName, LType, LDflt, LAttr: Integer;
+      LParam, LChild, LName, LType, LDflt, LAttr, LCore: Integer;
       LSeen, LByRef: Boolean;
       LX: TSemaXType;
     begin
@@ -24298,9 +24311,14 @@ var
                 [LM.Tree.NodeText(LName)]))
             else
             begin
+              // nil and an empty `[]` are a dynamic array's defaults; a
+              // `[...]` with elements is E2026 (`([])` is dcc's E2010 'Set' -
+              // not reported).
+              LCore := PeelParens(LM.Tree, LDflt);
               if XValid(LX) and not OpenX(LX) and IsDynArrayTypeX(LX) and
-                 (LM.Tree.Nodes[PeelParens(LM.Tree, LDflt)].Kind <>
-                  nkNilLit) then
+                 (LM.Tree.Nodes[LCore].Kind <> nkNilLit) and
+                 not ((LM.Tree.Nodes[LCore].Kind = nkSetCtor) and
+                      (LM.Tree.Nodes[LCore].FirstChild = NIL_NODE)) then
                 EmitAt(LM, LDflt, 'E2026', SE2026_ConstantExpected);
               LSeen := True;
             end;
