@@ -3929,6 +3929,29 @@ begin
           LMsg := Format('W1078 {$POPOPT} with no matching {$PUSHOPT} in %s',
             [Tree.Source.FileNames[LDiag.FileId]]);
         end;
+      // {$RTTI} (19.2.1; TPasPreprocessor.CheckRtti).
+      ppRttiInvalid:
+        begin
+          LCode := 'E1030';
+          LMsg := 'E1030 Invalid compiler directive: ''RTTI''';
+        end;
+      ppRttiUndeclared:
+        begin
+          LCode := 'E2003';
+          LMsg := Format('E2003 Undeclared identifier: ''%s''', [LDiag.Detail]);
+        end;
+      ppRttiSetExpected:
+        begin
+          LCode := 'E2572';
+          LMsg := 'E2572 RTTI visibility set constant expression of type ' +
+            'System.TVisibilityClasses expected';
+        end;
+      ppRttiBeforeHeader:
+        begin
+          LCode := 'E2609';
+          LMsg := 'E2609 RTTI directive must be used after PROGRAM, UNIT or ' +
+            'LIBRARY header';
+        end;
     else
       Continue;
     end;

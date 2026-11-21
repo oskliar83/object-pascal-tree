@@ -334,7 +334,8 @@ function BuildPreprocessorCases(APP: TPasPreprocessor): TPasCustomCases;
           'include-not-found', 'include-cycle', 'include-too-deep',
           'if-unreadable', 'if-guessed', 'unsupported-insertion',
           'popopt-without-pushopt', 'cross-include-conditional',
-          'wrong-conditional-end');
+          'wrong-conditional-end', 'rtti-invalid', 'rtti-undeclared',
+          'rtti-set-expected', 'rtti-before-header');
       var
         LDir: string;
         LSM: TPasSourceManager;
@@ -394,6 +395,21 @@ function BuildPreprocessorCases(APP: TPasPreprocessor): TPasCustomCases;
 
 begin
   Result := [
+    // ---- 19.2.1: the RTTI directive's clause list (dcc64 37.0, spec audit
+    // g6 R01-R05, local/sa4-intf R1): before the header E2609 and its names
+    // E2003; a bare one, a mode after a clause E1030; a misspelt visibility
+    // name E2003; a literal E2572; the mode word optional ----
+    CrossIncludeCase('RTTI directive clause lists',
+      '{$RTTI EXPLICIT METHODS([vcPublic])} program P; {$RTTI} ' +
+      '{$RTTI EXPLICIT} {$RTTI INHERIT} {$RTTI METHODS([vcPublic, vcPublished])} ' +
+      '{$RTTI FIELDS([]) EXPLICIT} {$RTTI EXPLICIT FIELDS([vcBogus])} ' +
+      '{$RTTI EXPLICIT FIELDS(5)} {$RTTI EXPLICIT FIELDS([vcPrivate..vcPublished]) ' +
+      'METHODS(DefaultMethodRttiVisibility)} {$RTTI EXPLICIT FIELDS([vcPublic]), ' +
+      'METHODS([])} X', '', '',
+      'rtti-before-header@U.pas,rtti-undeclared@U.pas,rtti-invalid@U.pas,' +
+      'rtti-invalid@U.pas,rtti-undeclared@U.pas,rtti-set-expected@U.pas,' +
+      'rtti-invalid@U.pas',
+      'program P ; X'),
     // ---- 1.3.3 / F22: a conditional across an include boundary ----
     CrossIncludeCase('an include opening a conditional its includer closes',
       'A {$I a.inc} B {$ENDIF} C', '{$IFDEF ON} X', '',
