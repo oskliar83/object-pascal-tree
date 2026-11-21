@@ -1845,6 +1845,14 @@ function FoldedIntValue(const ATree: TPasTree; ANode, ADepth: Integer;
 function FoldedIntOverflow(const ATree: TPasTree; ANode: Integer;
   const AFacts: TSemaConstFactsFunc; const AName: TSemaOrdNameValue): Boolean;
 
+{ FoldedIntValue at depth 0 and FoldedIntOverflow's flag in one fold:
+  AOverflow is set when ANode's own operator (parentheses peeled) folded
+  its operands but left its type - with the result False. A caller that
+  asks both of one node (CrossType's constant checks) folds it once. }
+function FoldedIntValueOver(const ATree: TPasTree; ANode: Integer;
+  const AFacts: TSemaConstFactsFunc; const AName: TSemaOrdNameValue;
+  out AValue: Int64; out AOverflow: Boolean): Boolean;
+
 { The ordinal value of a compiler-provided constant, which has no
   declaration to fold: True / False, MaxInt / MaxLongint (High(Integer) -
   so `MaxInt + 1` is E2099, 4.2.1). }
@@ -6228,10 +6236,25 @@ begin
   end;
   if ATree.Nodes[ANode].Kind <> nkIntLit then
     Exit;
-  LTxt := StringReplace(ATree.NodeText(ANode), '_', '', [rfReplaceAll]);
+  LTxt := ATree.NodeText(ANode);
+  if Pos('_', LTxt) > 0 then
+    LTxt := StringReplace(LTxt, '_', '', [rfReplaceAll]);
   if LTxt = '' then
     Exit;
-  if LTxt[1] = '%' then
+  if CharInSet(LTxt[1], ['0'..'9']) then
+  begin
+    // Decimal, the usual literal, read here: TryStrToUInt64's answer
+    // without its conversion setup (a digit past High(UInt64) is none).
+    LU := 0;
+    for LIdx := 1 to Length(LTxt) do
+    begin
+      if not CharInSet(LTxt[LIdx], ['0'..'9']) or
+         (LU > (High(UInt64) - UInt64(Ord(LTxt[LIdx]) - Ord('0'))) div 10) then
+        Exit;
+      LU := LU * 10 + UInt64(Ord(LTxt[LIdx]) - Ord('0'));
+    end;
+  end
+  else if LTxt[1] = '%' then
   begin
     LU := 0;
     for LIdx := 2 to Length(LTxt) do
@@ -7067,7 +7090,10 @@ begin
     nkBinaryOp:
       begin
         LOp := OpTok(ANode);
-        Result := Binary(ANode);
+        // Binary's operators: a comparison, `in`, `/`, `as`, `is` fold to
+        // no integer - known before their operands are folded.
+        Result := (LOp in [tkPlus, tkMinus, tkStar, tkDiv, tkMod, tkAnd, tkOr,
+          tkXor, tkShl, tkShr]) and Binary(ANode);
       end;
     nkCall:
       Result := Call(ANode);
@@ -7140,6 +7166,18 @@ begin
     (ATree.Nodes[ANode].Kind in [nkBinaryOp, nkUnaryOp]) and
     not FoldIntNode(ATree, ANode, 0, 0, False, AFacts, AName, LF, @LOver) and
     LOver;
+end;
+
+function FoldedIntValueOver(const ATree: TPasTree; ANode: Integer;
+  const AFacts: TSemaConstFactsFunc; const AName: TSemaOrdNameValue;
+  out AValue: Int64; out AOverflow: Boolean): Boolean;
+var
+  LF: TSemaOpFacts;
+begin
+  AOverflow := False;
+  Result := FoldIntNode(ATree, ANode, 0, 0, False, AFacts, AName, LF,
+    @AOverflow);
+  AValue := LF.IntValue;
 end;
 
 function OrdAnswerShape(AAns: TSemaOpAnswer; out ARank: Byte;
