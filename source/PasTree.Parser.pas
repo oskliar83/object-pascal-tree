@@ -5100,6 +5100,12 @@ begin
         end;
       tkVar, tkThreadvar:
         begin
+          // Spec 3.1.5: a `threadvar` section in a routine is E2189; the
+          // section is read as a `var` one all the same.
+          if (CurKind = tkThreadvar) and (FB.Kind(AParent) = nkRoutineBody) then
+            ErrorCode('E2189',
+              'Thread local variables cannot be local to a function',
+              NIL_NODE);
           LResume := tkVar;
           FB.Adopt(AParent, ParseVarSection(False));
         end;
@@ -5155,7 +5161,14 @@ begin
           FB.Adopt(AParent, LNode);
         end;
       tkExports:
-        FB.Adopt(AParent, ParseExportsClause);
+        begin
+          // Spec 1.1.3: `exports` stands at the global level only - in a
+          // routine it is E2191, the clause kept in the tree.
+          if FB.Kind(AParent) = nkRoutineBody then
+            ErrorCode('E2191', 'EXPORTS allowed only at global scope',
+              NIL_NODE);
+          FB.Adopt(AParent, ParseExportsClause);
+        end;
       tkProcedure, tkFunction, tkConstructor, tkDestructor:
         FB.Adopt(AParent, ParseRoutine(False, AAllowBodies));
       tkClass:
