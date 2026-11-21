@@ -24512,6 +24512,68 @@ var
     var
       LVar, LColl, LCore, LHead, LMid, LSym: Integer;
       LVarX, LCollX, LElemX: TSemaXType;
+
+      { 5.5.2: the enumerator pattern member by member - a PUBLIC function
+        GetEnumerator (wherever the loop is: dcc does not grant a private one
+        to its own class), whose result has a public function MoveNext
+        returning Boolean and a public PROPERTY Current. The first member
+        that fails is E2431, naming the type that lacks it; False then. A
+        type whose ancestry is not all known says nothing for a missing
+        GetEnumerator, nor does a GetEnumerator that is a procedure (dcc
+        crashes on it) or an enumerator not typed here. }
+      function EnumeratorFits(const ACollX: TSemaXType): Boolean;
+      const
+        PUBLIC_VIS = [svDefault, svPublic, svPublished, svAutomated];
+      var
+        LMemMid, LMemSym, LCtx: Integer;
+        LEnumX, LResX: TSemaXType;
+
+        function Fail(const AOwnerX: TSemaXType; const AMember: string):
+          Boolean;
+        begin
+          EmitAt(LM, LColl, 'E2431', Format(SE2431_ForInMember,
+            [XTypeText(ACollX), XTypeText(AOwnerX), AMember]));
+          Result := False;
+        end;
+
+      begin
+        Result := True;
+        if not FindMemberX(AId, ACollX, 'getenumerator', LMemMid, LMemSym,
+             LCtx) then
+        begin
+          if not UnknownAncestryX(CanonTypeX(ACollX)) then
+            Result := Fail(ACollX, 'GetEnumerator');
+          Exit;
+        end;
+        if (FModels[LMemMid].Symbols[LMemSym].Kind <> skRoutine) or
+           not (FModels[LMemMid].Symbols[LMemSym].Visibility in PUBLIC_VIS)
+        then
+          Exit(Fail(ACollX, 'GetEnumerator'));
+        if FModels[LMemMid].RoutineHead(LMemSym) <> rhFunction then
+          Exit;
+        LEnumX := SubstX(SymDeclTypeX(LMemMid, LMemSym), LCtx, 0);
+        if not XValid(LEnumX) or OpenX(LEnumX) or
+           not (XCatOf(CanonTypeX(LEnumX)) in [tcClass, tcRecord,
+            tcInterface]) or UnknownAncestryX(CanonTypeX(LEnumX)) then
+          Exit;
+        if not FindMemberX(AId, LEnumX, 'movenext', LMemMid, LMemSym, LCtx) or
+           (FModels[LMemMid].Symbols[LMemSym].Kind <> skRoutine) or
+           not (FModels[LMemMid].Symbols[LMemSym].Visibility in PUBLIC_VIS)
+        then
+          Exit(Fail(LEnumX, 'MoveNext'));
+        if FModels[LMemMid].RoutineHead(LMemSym) <> rhFunction then
+          Exit(Fail(LEnumX, 'MoveNext'));
+        LResX := SymDeclTypeX(LMemMid, LMemSym);
+        if XValid(LResX) and not OpenX(LResX) and
+           (XCatOf(CanonTypeX(LResX)) <> tcBoolean) then
+          Exit(Fail(LEnumX, 'MoveNext'));
+        if not FindMemberX(AId, LEnumX, 'current', LMemMid, LMemSym, LCtx) or
+           (FModels[LMemMid].Symbols[LMemSym].Kind <> skProperty) or
+           not (FModels[LMemMid].Symbols[LMemSym].Visibility in PUBLIC_VIS)
+        then
+          Exit(Fail(LEnumX, 'Current'));
+      end;
+
     begin
       LVar := LM.Tree.Nodes[N].FirstChild;
       if LVar = NIL_NODE then
@@ -24560,6 +24622,11 @@ var
           [XTypeText(LCollX)]));
         Exit;
       end;
+      if XValid(LCollX) and not InUntypedWith(N) and
+         not Unreliable(N, LColl, LCollX) and
+         (XCatOf(CanonTypeX(LCollX)) in [tcClass, tcRecord, tcInterface]) and
+         not EnumeratorFits(LCollX) then
+        Exit;
       if not XValid(LVarX) or not XValid(LCollX) then
         Exit;
       LElemX := ForInElementX(AId, LColl, LCollX);

@@ -104,6 +104,10 @@ const
     'E1012 Constant expression violates subrange bounds';
   SE2430_ForInCollection =
     'E2430 for-in statement cannot operate on collection type ''%s''';
+  // The collection, the type lacking the member, the member (5.5.2).
+  SE2431_ForInMember = 'E2431 for-in statement cannot operate on collection ' +
+    'type ''%s'' because ''%s'' does not contain a member for ''%s'', or it ' +
+    'is inaccessible';
   SE2029_ForInTypeCollection = 'E2029 ''('' expected but ''DO'' found';
   SE2005_NotATypeIdentifier   = 'E2005 ''%s'' is not a type identifier';
   // E2010 takes two type names (dst, src). E2015 takes NOTHING - dcc's own

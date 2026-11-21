@@ -15553,6 +15553,89 @@ begin
   end;
 end;
 
+// The for-in enumerator pattern member by member (spec 5.5.2): a public
+// function GetEnumerator - not a private or protected one, even in the
+// class's own method -, a public function MoveNext of a Boolean type, a
+// public PROPERTY Current; each failure is E2431 naming the type that lacks
+// it. An inherited GetEnumerator, a LongBool MoveNext and an interface pass
+// (dcc64 37.0; spec audit g3 ForInEn, ForInPriv*; local/probe-park/sa4-flow
+// L1, P5).
+procedure TestForInMembers;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_forin');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    '  IInterface = interface end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'ForInX.dpr'),
+    'program ForInX;'#10 +                                               // 1
+    'type'#10 +                                                          // 2
+    '  TEnOk = record I: Integer; function MoveNext: Boolean;'#10 +      // 3
+    '    function GetC: Integer; property Current: Integer read GetC; end;'#10 + // 4
+    '  TEnFn = class function MoveNext: Boolean; function Current: Integer; end;'#10 + // 5
+    '  THasFn = class function GetEnumerator: TEnFn; end;'#10 +          // 6
+    '  TEnFld = record Current: Integer; function MoveNext: Boolean; end;'#10 + // 7
+    '  THasFld = record function GetEnumerator: TEnFld; end;'#10 +       // 8
+    '  TEnInt = class function MoveNext: Integer; function GetC: Integer;'#10 + // 9
+    '    property Current: Integer read GetC; end;'#10 +                 // 10
+    '  THasInt = class function GetEnumerator: TEnInt; end;'#10 +        // 11
+    '  TNoMove = record function GetC: Integer; property Current: Integer read GetC; end;'#10 + // 12
+    '  THasNoMove = record function GetEnumerator: TNoMove; end;'#10 +   // 13
+    '  THasPriv = class private function GetEnumerator: TEnOk; procedure M; end;'#10 + // 14
+    '  THasProt = class protected function GetEnumerator: TEnOk; end;'#10 + // 15
+    '  TEnPriv = record private function MoveNext: Boolean; function GetC: Integer;'#10 + // 16
+    '    public property Current: Integer read GetC; end;'#10 +          // 17
+    '  THasEP = class function GetEnumerator: TEnPriv; end;'#10 +        // 18
+    '  THasPub = class public function GetEnumerator: TEnOk; end;'#10 +  // 19
+    '  TDer = class(THasPub) end;'#10 +                                  // 20
+    '  TBool = class function MoveNext: LongBool; function GetC: Integer;'#10 + // 21
+    '    property Current: Integer read GetC; end;'#10 +                 // 22
+    '  THasBool = class function GetEnumerator: TBool; end;'#10 +        // 23
+    '  IEn = interface function MoveNext: Boolean; function GetC: Integer;'#10 + // 24
+    '    property Current: Integer read GetC; end;'#10 +                 // 25
+    '  IColl = interface function GetEnumerator: IEn; end;'#10 +         // 26
+    'procedure THasPriv.M; var X: Integer; begin for X in Self do ; end;'#10 + // 27 E2431
+    'procedure P;'#10 +                                                  // 28
+    'var X: Integer; H1: THasFn; H2: THasFld; H3: THasInt; H4: THasNoMove;'#10 + // 29
+    '  H5: TObject; H6: THasPriv; H7: THasProt; H8: THasEP; H9: THasPub;'#10 + // 30
+    '  H10: TDer; H11: THasBool; H12: IColl;'#10 +                       // 31
+    'begin'#10 +                                                         // 32
+    '  for X in H1 do ;'#10 +                                            // 33 E2431
+    '  for X in H2 do ;'#10 +                                            // 34 E2431
+    '  for X in H3 do ;'#10 +                                            // 35 E2431
+    '  for X in H4 do ;'#10 +                                            // 36 E2431
+    '  for X in H5 do ;'#10 +                                            // 37 E2431
+    '  for X in H6 do ;'#10 +                                            // 38 E2431
+    '  for X in H7 do ;'#10 +                                            // 39 E2431
+    '  for X in H8 do ;'#10 +                                            // 40 E2431
+    '  for X in H9 do ; for X in H10 do ; for X in H11 do ; for X in H12 do ;'#10 + // 41
+    'end;'#10 +                                                          // 42
+    'begin'#10 +                                                         // 43
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'ForInX.dpr'));
+    LM := ModelByName('forinx');
+    Ok('forin: E2431 lines [' + DiagLinesOf(LM, 'E2431') + ']',
+      DiagLinesOf(LM, 'E2431') = '27 33 34 35 36 37 38 39 40');
+    Ok('forin: E2431 names the lacking type [' + DiagText(LM, 'E2431') + ']',
+      (Pos('''THasEP'' because ''TEnPriv'' does not contain a member for ' +
+         '''MoveNext''', DiagText(LM, 'E2431')) > 0) and
+      (Pos('''TObject'' because ''TObject'' does not contain a member for ' +
+         '''GetEnumerator''', DiagText(LM, 'E2431')) > 0) and
+      (Pos('''THasFld'' because ''TEnFld'' does not contain a member for ' +
+         '''Current''', DiagText(LM, 'E2431')) > 0));
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // A write to a `const` parameter (spec 6.2.3): E2064 for the parameter
 // itself, a field of a record one at any depth (through `with` too), an
 // element of a static array one or of a `const` open array; a dynamic
@@ -24530,6 +24613,7 @@ begin
   TestFlowExits;
   TestNestedProcValue;
   TestRaiseOperands;
+  TestForInMembers;
   TestOpenArrayValue;
   TestPropertyAccessChecks;
   TestGenericInferErrors;

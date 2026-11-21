@@ -293,6 +293,12 @@ of less work, not a gap in following the language; its consequences are in
   project level only (arrays incl. `TArray<T>`, strings, sets, and a
   class/record/interface's `GetEnumerator` result's `Current` property); the
   intra-unit typer still has no ExprType for it.
+- the enumerator pattern's E2431 (a public GetEnumerator, MoveNext of a
+  Boolean type, a Current property) is not judged over a collection typed
+  loosely (an open generic type, an overload choice), a missing
+  GetEnumerator not where the type's ancestry is not all known, and nothing
+  after a GetEnumerator that is a procedure (dcc crashes on it) or whose
+  enumerator is not typed.
 
 ### 5.6 Flow-control statements
 - every E2126 is reported; dcc stops the compilation at the first.
