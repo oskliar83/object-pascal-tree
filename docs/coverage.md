@@ -475,6 +475,17 @@ of less work, not a gap in following the language; its consequences are in
 
 ## 11-classes.md
 
+### 11.1.3 Methods
+- a method directive out of dcc's order is E2169 (E2599 in a helper) at the
+  word, and the field's missing type only at an `end` right after it; when
+  a member follows, dcc reads it as that field's type and reports on into
+  its line (E2070, E2058, E2003 on the implementation) - not reproduced.
+  The tail group's own rules after `final` and `abstract` (only `inline`,
+  and `final` after `abstract`) are not judged: dcc's reports there vary
+  with what follows.
+- `F, G: Integer` in a helper is dcc's E2599 plus an E2029 "'END' expected
+  but ';' found" at the `;`; PasTree reports the E2599 alone.
+
 ### 11.2.1 `private` / `protected` / `public` / `published` (+ `strict`)
 - E2361 / E2362 (ReportVisibility, opt-in by design) are judged at a
   qualified access in a method body or in unit-level code; a protected

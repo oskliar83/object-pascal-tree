@@ -11412,6 +11412,74 @@ begin
   end;
 end;
 
+{ Spec 11.1.1 (dcc64 37.0, spec audit g4 CFwd, local/probe-park/sa4-classes
+  fwd W1-W6): a forward class or interface open at the end of its `type`
+  section is E2086 at the forward - a nested one named with its outer type;
+  a completion in a later section is E2004, at the token after a class's
+  head word (after the `=` of any other type). Completed in its own section
+  - across a visibility word of a struct's nested types too - it is silent. }
+procedure TestForwardSection;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_fwdsec');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10'  IInterface = interface end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'FW.dpr'),
+    'program FW;'#10 +                          // 1
+    'type'#10 +                                 // 2
+    '  TA = class;'#10 +                        // 3 E2086
+    '  TB = class'#10 +                         // 4
+    '    A: TA;'#10 +                           // 5
+    '  end;'#10 +                               // 6
+    '  TOk = class;'#10 +                       // 7
+    '  IOk = interface;'#10 +                   // 8
+    '  TOk = class F: IOk; end;'#10 +           // 9
+    '  IOk = interface end;'#10 +               // 10
+    '  TOuter = class'#10 +                     // 11
+    '  public type'#10 +                        // 12
+    '    TIn = class;'#10 +                     // 13 E2086 TOuter.TIn
+    '    TIn2 = class;'#10 +                    // 14
+    '    TIn2 = class end;'#10 +                // 15
+    '  private type'#10 +                       // 16
+    '    TIn = class end;'#10 +                 // 17 E2004
+    '  end;'#10 +                               // 18
+    'type'#10 +                                 // 19
+    '  TA = class'#10 +                         // 20
+    '  end;'#10 +                               // 21 E2004
+    '  TC = class;'#10 +                        // 22 E2086
+    '  TI = interface;'#10 +                    // 23 E2086
+    '  TX = Integer;'#10 +                      // 24
+    '  TX ='#10 +                               // 25
+    '    Byte;'#10 +                            // 26 E2004
+    '  TAbs = class abstract;'#10 +             // 27 complete, no forward
+    '  TSea = class sealed;'#10 +               // 28 likewise
+    '  TSub = class(TAbs) end;'#10 +            // 29
+    'begin'#10 +
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'FW.dpr'));
+    LM := ModelByName('fw');
+    Ok('fwdsec: E2086 at each forward left open [' + DiagSites(LM, 'E2086') +
+      ']', DiagSites(LM, 'E2086') = '3:3 13:5 22:3 23:3');
+    Ok('fwdsec: ...a nested one qualified',
+      DiagHasText(LM, 'E2086', 'Type ''TOuter.TIn'' is not yet completely defined'));
+    Ok('fwdsec: E2004 where dcc reads the second declaration [' +
+      DiagSites(LM, 'E2004') + ']',
+      DiagSites(LM, 'E2004') = '17:17 21:3 26:5');
+    Ok('fwdsec: nothing else [' + IntToStr(Length(LM.Diags)) + ']',
+      Length(LM.Diags) = 7);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 { Spec 19.3.2 (dcc64 37.0, 2026-11-14, local/fu-attrs R1-R10, Pa*, Pb*, Pd,
   Q1-Q6): a group dcc cannot place is E2289 where its walk ends. A
   `Result:` attribute lands on the next function of a class's or an
@@ -11442,7 +11510,7 @@ begin
     '  OtherAttribute = class(TCustomAttribute) end;'#10 + // 4
     '  T1 = class'#10 +                                  // 5
     '    [Result: Tag] procedure P1;'#10 +               // 6
-    '    [Result: Tag] FX: Integer;'#10 +                // 7
+    '    [Result: Tag] FX: Integer;'#10 +                // 7 E2169 (11.1.2)
     '  private'#10 +                                     // 8
     '    const K = 1;'#10 +                              // 9
     '  public'#10 +                                      // 10
@@ -11517,7 +11585,8 @@ begin
     Ok('attre2289: an unresolved one is its own error alone [' +
       DiagSites(LM, 'E2010') + '/' + DiagSites(LM, 'W1074') + ']',
       (DiagSites(LM, 'E2010') = '61:10') and
-      (DiagSites(LM, 'W1074') = '63:2') and (Length(LM.Diags) = 10));
+      (DiagSites(LM, 'W1074') = '63:2') and (DiagSites(LM, 'E2169') = '7:19')
+      and (Length(LM.Diags) = 11));
   finally
     GSemaAllE2289 := False;
     GProj.Free;
@@ -24254,6 +24323,7 @@ begin
   TestAttributeArgsNonConst;
   TestNestedToReference;
   TestAttributeE2289;
+  TestForwardSection;
   TestAttributeE2289Lists;
   TestAttributeE2289Hidden;
   TestForCounterChecks;

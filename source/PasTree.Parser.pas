@@ -96,6 +96,12 @@ type
     // visibility word is a section marker only inside one (IsVisibilityWord,
     // 11.2.1) - at unit or routine level it is an ordinary name.
     FStructDepth: Integer;
+    // The member list being parsed, for the rules dcc applies to a class,
+    // record or object body and not to an interface's or a routine's
+    // (11.1.2, 11.1.3, 15.3.1): 0 none (an interface, or no struct), 1 a
+    // class / record / object body, 2 a helper's. ParseMemberList sets it
+    // and restores it.
+    FMemberBody: Integer;
     FStuckCount: Integer;
     // Watchdogs (see notes on ParseGuard):
     FFuel: Int64;              // decremented in CurKind; trips at 0
@@ -274,6 +280,8 @@ type
     function IsDirectiveWord: Boolean; overload;
     function IsDirectiveWord(AVisIndex: Integer): Boolean; overload;
     function IsHintWord(AVisIndex: Integer): Boolean;
+    function IsWordAt(AVisIndex: Integer; const AWord: string): Boolean;
+    function MemberDirectiveRank(AVisIndex: Integer): Integer;
     { At `class` with the word `operator` after it: an operator overload,
       not a class member of another kind. }
     function AtClassOperator: Boolean;
@@ -3011,8 +3019,12 @@ begin
     MarkContextKeyword;   // color 'helper'
     Next; // helper
   end;
-  // Forward declaration: class; / interface;
-  if (CurKind = tkSemicolon) and not LIsHelper then
+  // Forward declaration: class; / interface; - not `class abstract;` or
+  // `class sealed;`, a complete class with no members of its own as
+  // `class(TBase);` is (11.1.1; System.Messaging's `TMessageBase = class
+  // abstract;`, dcc64 37.0, local/probe-park/sa4-classes fwd W7).
+  if (CurKind = tkSemicolon) and not LIsHelper and
+     not (LAbstract or LSealed) then
   begin
     // On nkInterfaceType Aux 1 already MEANS dispinterface, so the forward
     // mark is a separate bit there - written as 1 it made every forward
@@ -3093,8 +3105,8 @@ end;
 
 procedure TPasParser.ParseMemberList(AOwner: Integer);
 var
-  LVis, LNode: Integer;
-  LStrict, LIsThreadvar: Boolean;
+  LVis, LNode, LSavedBody: Integer;
+  LStrict, LIsThreadvar, LAfterMember: Boolean;
 
   // Slice-based: this test runs for EVERY member of every class body, and the
   // old string-typed version paid a VisibleText copy per call.
@@ -3114,6 +3126,17 @@ var
 
 begin
   Inc(FStructDepth);
+  LSavedBody := FMemberBody;
+  case FB.Kind(AOwner) of
+    nkInterfaceType: FMemberBody := 0;
+    nkHelperType: FMemberBody := 2;
+  else
+    FMemberBody := 1;
+  end;
+  // A method or a property read since the last section start: a field
+  // list now is E2169 (11.1.2) - once, at its first name; a visibility
+  // word or a `var` / `class var` starts a new field list.
+  LAfterMember := False;
   try
   while not (CurKind in [tkEnd, tkEndOfFile]) do
   begin
@@ -3141,6 +3164,7 @@ begin
       Next;
       FB.SetLast(LVis, FPos - 1);
       FB.Adopt(AOwner, LVis);
+      LAfterMember := False;
       Continue;
     end;
 
@@ -3162,6 +3186,7 @@ begin
                 Next;
                 Next;
                 FB.Adopt(AOwner, ParseVarSection(True));
+                LAfterMember := False;
               end;
             tkThreadvar:
               begin
@@ -3172,22 +3197,26 @@ begin
                 LNode := ParseVarSection(True);
                 FB.AddFlag(LNode, nfThreadvar);
                 FB.Adopt(AOwner, LNode);
+                LAfterMember := False;
               end;
             tkProcedure, tkFunction, tkConstructor, tkDestructor:
               begin
                 Next;
                 FB.Adopt(AOwner, ParseRoutine(True, False));
+                LAfterMember := True;
               end;
             tkProperty:
               begin
                 Next;
                 FB.Adopt(AOwner, ParseProperty(True));
+                LAfterMember := True;
               end;
           else
             if AtClassOperator then
             begin
               Next;
               FB.Adopt(AOwner, ParseRoutine(True, False));
+              LAfterMember := True;
             end
             else
             begin
@@ -3197,9 +3226,15 @@ begin
           end;
         end;
       tkProcedure, tkFunction, tkConstructor, tkDestructor:
-        FB.Adopt(AOwner, ParseRoutine(False, False));
+        begin
+          FB.Adopt(AOwner, ParseRoutine(False, False));
+          LAfterMember := True;
+        end;
       tkProperty:
-        FB.Adopt(AOwner, ParseProperty(False));
+        begin
+          FB.Adopt(AOwner, ParseProperty(False));
+          LAfterMember := True;
+        end;
       tkType:
         FB.Adopt(AOwner, ParseTypeSection);
       tkConst, tkResourcestring:
@@ -3211,12 +3246,18 @@ begin
           // the section is still read, and marked, so the tree keeps the word.
           LIsThreadvar := CurKind = tkThreadvar;
           if LIsThreadvar then
-            Error('"end" expected');
+            Error('"end" expected')
+          else if FMemberBody = 2 then
+            // A helper takes no `var` section, a class helper's no more than
+            // a record helper's (15.3.1; dcc64 37.0, spec audit g5 C04,
+            // local/probe-park/sa4-classes fld F4); read all the same.
+            Error('"end" expected, found "var"');
           Next;
           LNode := ParseVarSection(False, True);
           if LIsThreadvar then
             FB.AddFlag(LNode, nfThreadvar);
           FB.Adopt(AOwner, LNode);
+          LAfterMember := False;
         end;
       tkCase:
         ParseVariantPart(AOwner);
@@ -3230,7 +3271,20 @@ begin
           Break;
         end
         else
+        begin
+          // A field list in a helper is E2599 (15.3.1); after a method or a
+          // property in a class, record or object body E2169 (11.1.2) - one
+          // report at the list's first name, the fields read as written.
+          if FMemberBody = 2 then
+            ErrorCode('E2599', 'Field definition not allowed in helper type',
+              NIL_NODE)
+          else if LAfterMember and (FMemberBody = 1) then
+            ErrorCode('E2169',
+              'Field definition not allowed after methods or properties',
+              NIL_NODE);
+          LAfterMember := False;
           ParseFieldList(AOwner, [tkEnd, tkCase]);
+        end;
       // tkString used to be routed here TOO, and it is the one dispatch that
       // could not make progress: ParseFieldList's loop is
       // `while CurKind = tkIdentifier`, so nothing was consumed, the member
@@ -3245,6 +3299,7 @@ begin
   end;
   finally
     Dec(FStructDepth);
+    FMemberBody := LSavedBody;
   end;
 end;
 
@@ -3768,6 +3823,36 @@ begin
   end;
 end;
 
+function TPasParser.IsWordAt(AVisIndex: Integer; const AWord: string): Boolean;
+begin
+  Result := (VisKind(AVisIndex) = tkIdentifier) and
+    FSrc.VisibleTextEquals(AVisIndex, AWord);
+end;
+
+{ The group of a method directive in dcc's order (11.1.3): 1 `reintroduce`,
+  2 `overload`, 3 a binding word (virtual, dynamic, override, message), 4
+  any other (static, final, abstract, inline, a calling convention, a hint,
+  ...). }
+function TPasParser.MemberDirectiveRank(AVisIndex: Integer): Integer;
+var
+  LText: PChar;
+  LLen: Integer;
+begin
+  Result := 4;
+  if VisKind(AVisIndex) <> tkIdentifier then
+    Exit;
+  FSrc.VisibleSlice(AVisIndex, LText, LLen);
+  if SliceEqualsWord(LText, LLen, 'reintroduce') then
+    Result := 1
+  else if SliceEqualsWord(LText, LLen, 'overload') then
+    Result := 2
+  else if SliceEqualsWord(LText, LLen, 'virtual') or
+     SliceEqualsWord(LText, LLen, 'dynamic') or
+     SliceEqualsWord(LText, LLen, 'override') or
+     SliceEqualsWord(LText, LLen, 'message') then
+    Result := 3;
+end;
+
 function TPasParser.AtClassOperator: Boolean;
 begin
   Result := (PeekKind(1) = tkIdentifier) and
@@ -4236,13 +4321,40 @@ var
   LDir, LValue: Integer;
   LIsExternal, LIsForward, LIsAbstract: Boolean;
   LHaveName, LHaveIndex, LHaveDep, LHaveDelayed: Boolean;
+  LStage, LRank, LRejected: Integer;
 begin
   // 6.x: `; directive`* - returns True when the routine has no body.
   LIsExternal := False;
   LIsForward := False;
   LIsAbstract := False;
+  LStage := 0;
+  LRejected := -1;
   while IsDirectiveWord and not DirectiveNameStartsDecl do
   begin
+    // In a class, record, object or helper body dcc reads the directives in
+    // one order (11.1.3): `reintroduce`, then `overload`, then one binding
+    // word (virtual, dynamic, override, message), then the rest. A word of
+    // an earlier group after a later one is no directive to it but the
+    // start of a field - E2169 (E2599 in a helper) at the word. Reported
+    // once; the word stays a directive in the tree, and the checks of the
+    // heading (TPasSemaProject.CheckClassDecls) skip it and what follows.
+    if (FMemberBody <> 0) and (LRejected < 0) then
+    begin
+      LRank := MemberDirectiveRank(FPos);
+      if (LRank < 4) and (LRank <= LStage) then
+      begin
+        LRejected := FPos;
+        if FMemberBody = 2 then
+          ErrorCode('E2599', 'Field definition not allowed in helper type',
+            NIL_NODE)
+        else
+          ErrorCode('E2169',
+            'Field definition not allowed after methods or properties',
+            NIL_NODE);
+      end
+      else if LRank > LStage then
+        LStage := LRank;
+    end;
     LDir := FB.AddNode(nkDirective, NIL_NODE, FPos);
     if IsWord('external') then
     begin
@@ -4342,6 +4454,19 @@ begin
     end;
     FB.SetLast(LDir, FPos - 1);
     FB.Adopt(ARoutine, LDir);
+    // dcc's reading of the rejected word as a field, at an `end` right after
+    // it (dcc64 37.0, local/probe-park/sa4-classes dir, pairs): `reintroduce;`
+    // lacks its `:`, and the type after it is missing; `message N;` passes.
+    // A helper's E2599 has neither.
+    if (LRejected >= 0) and (FMemberBody = 1) and
+       (FB.FirstTokenOf(LDir) = LRejected) and
+       (CurKind = tkSemicolon) and (PeekKind(1) = tkEnd) and
+       not IsWordAt(LRejected, 'message') then
+    begin
+      if IsWordAt(LRejected, 'reintroduce') then
+        ErrorAt(FPos, '"," or ":" expected, found ";"');
+      ErrorAt(FPos + 1, 'type expected, found "end"');
+    end;
     if CurKind = tkSemicolon then
       Next
     else if not IsDirectiveWord then

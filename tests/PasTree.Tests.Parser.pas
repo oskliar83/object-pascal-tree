@@ -1752,14 +1752,16 @@ const
        'Routine''procedure''(Ident''P''#name Directive''virtual'' ' +
        'Directive''final''))))'; ExpectDiags: 0),
     // F4: nfAbstract / nfSealed, dcc64 37.0 probed (x-f4 Q01-Q49): after
-    // `class` and `object`, right after the head word, a forward
-    // declaration and one stopping at its ancestors too, a repeat is one.
+    // `class` and `object`, right after the head word, a declaration with
+    // no body - a complete class, no forward (11.1.1: `class sealed;` as
+    // `class(TObject);`) - and one stopping at its ancestors too, a repeat
+    // is one.
     (Section: '12.2.5'; Name: 'F4: class and object modifiers';
      Source: 'type A = class abstract(TObject) end; B = class sealed; ' +
        'C = class abstract abstract end; D = object sealed end; ' +
        'E = packed class abstract end; F = class sealed(TObject);';
      Expected: 'TypeSec(TypeDecl(Ident''A'' ClassType#abstract(Ident''TObject'')) ' +
-       'TypeDecl(Ident''B'' ClassType#forward#sealed) ' +
+       'TypeDecl(Ident''B'' ClassType#sealed) ' +
        'TypeDecl(Ident''C'' ClassType#abstract) ' +
        'TypeDecl(Ident''D'' ObjectType#sealed) ' +
        'TypeDecl(Ident''E'' ClassType#packed#abstract) ' +
@@ -4702,6 +4704,108 @@ begin
       '  strict private'#13#10'    A, strict: Integer;'#13#10 +
       '  strict'#13#10'  protected'#13#10'    B: Integer;'#13#10 +
       '  end;'#13#10'begin'#13#10'end.'#13#10,
+      ''),
+    // g4 CFieldOrd (11.1.2): a field list after a method or a property is
+    // one E2169 at its first name, in a class, a record and an object.
+    DiagListCase('11.1.2', 'SA CFieldOrd: a field after a method or property',
+      'program C;'#13#10'type'#13#10'  T1 = class'#13#10 +     // 1-3
+      '    procedure M;'#13#10'    F1, F2: Integer;'#13#10 +      // 4-5
+      '    F3: Integer;'#13#10 +                                 // 6
+      '    property P: Integer read F1;'#13#10 +                 // 7
+      '    F4: Integer;'#13#10'  end;'#13#10 +                   // 8-9
+      '  TR = record'#13#10 +                                    // 10
+      '    class operator Add(A, B: TR): TR;'#13#10 +            // 11
+      '    X: Integer;'#13#10'  end;'#13#10 +                    // 12-13
+      '  TO1 = object'#13#10'    procedure M;'#13#10 +           // 14-15
+      '    [Weak] G: TObject;'#13#10'  end;'#13#10 +             // 16-17
+      'begin'#13#10'end.'#13#10,
+      '5:5 E2169 Field definition not allowed after methods or properties; ' +
+      '8:5 E2169 Field definition not allowed after methods or properties; ' +
+      '12:5 E2169 Field definition not allowed after methods or properties; ' +
+      '16:12 E2169 Field definition not allowed after methods or properties; '),
+    DiagListCase('11.1.2', 'SA CFieldOrd2: what starts a new field list',
+      'program C2;'#13#10'type'#13#10'  T1 = class'#13#10 +
+      '    procedure M;'#13#10'    class var CV: Integer;'#13#10 +
+      '    G: Integer;'#13#10'  public'#13#10'    procedure N;'#13#10 +
+      '  public'#13#10'    H: Integer;'#13#10'    procedure O;'#13#10 +
+      '  var'#13#10'    J: Integer;'#13#10'  type'#13#10 +
+      '    TX = Integer;'#13#10'  var'#13#10'    K: TX;'#13#10 +
+      '    property P: Integer read J;'#13#10'  strict private'#13#10 +
+      '    L: Integer;'#13#10'  end;'#13#10 +
+      '  TR = record'#13#10'    procedure M;'#13#10'  var'#13#10 +
+      '    X: Integer;'#13#10'  end;'#13#10 +
+      '  I = interface'#13#10'    function GetP: Integer;'#13#10 +
+      '    property P: Integer read GetP;'#13#10'  end;'#13#10 +
+      'begin'#13#10'end.'#13#10,
+      ''),
+    // g5 C04 (15.3.1): a field list in a helper is E2599, after a method
+    // too; a `var` section is not read in either helper; `class var` is
+    // (dcc64 37.0, local/probe-park/sa4-classes tests TC04).
+    DiagListCase('15.3.1', 'SA C04: a field in a helper',
+      'program TC04;'#13#10'type'#13#10'  TA = class end;'#13#10 +   // 1-3
+      '  TH = class helper for TA'#13#10'    F: Integer;'#13#10 +      // 4-5
+      '    procedure M;'#13#10'    H: Integer;'#13#10'  end;'#13#10 +  // 6-8
+      '  TH2 = class helper for TA'#13#10'  class var'#13#10 +        // 9-10
+      '    CV: Integer;'#13#10'  end;'#13#10 +                         // 11-12
+      '  TR = record end;'#13#10 +                                     // 13
+      '  TRH = record helper for TR'#13#10'    I: Integer;'#13#10 +    // 14-15
+      '  end;'#13#10'  TRH2 = record helper for TR'#13#10 +           // 16-17
+      '  var'#13#10'    J: Integer;'#13#10'  end;'#13#10 +             // 18-20
+      'begin'#13#10'end.'#13#10,
+      '5:5 E2599 Field definition not allowed in helper type; ' +
+      '7:5 E2599 Field definition not allowed in helper type; ' +
+      '15:5 E2599 Field definition not allowed in helper type; ' +
+      '18:3 "end" expected, found "var"; '),
+    // g5 C02*, g4 IMsg / IOvr (11.1.3): in a class, record, object or
+    // helper body the directives go reintroduce, overload, one binding word
+    // (virtual, dynamic, override, message), the rest; an earlier group's
+    // word after a later one starts a field - E2169 (E2599 in a helper),
+    // and at an `end` right after it the field's missing type (dcc64 37.0,
+    // local/probe-park/sa4-classes tests TC02, TC02ok).
+    DiagListCase('11.1.3', 'SA C02: a directive out of dcc''s order',
+      'program TC02;'#13#10'type'#13#10'  TA = class'#13#10 +           // 1-3
+      '    class procedure SP; static; virtual;'#13#10'  end;'#13#10 + // 4-5
+      '  TB = class'#13#10 +                                           // 6
+      '    procedure N(var M: Integer); virtual; message 5;'#13#10 +   // 7
+      '  end;'#13#10'  TC = class'#13#10 +                             // 8-9
+      '    procedure O; stdcall; overload;'#13#10'  end;'#13#10 +      // 10-11
+      '  TD = class'#13#10 +                                           // 12
+      '    procedure Q; virtual; reintroduce;'#13#10'  end;'#13#10 +   // 13-14
+      '  TR = record'#13#10 +                                          // 15
+      '    class procedure S; static; overload;'#13#10'  end;'#13#10 + // 16-17
+      '  TH = class helper for TA'#13#10 +                             // 18
+      '    procedure U; inline; overload;'#13#10'  end;'#13#10 +       // 19-20
+      'begin'#13#10'end.'#13#10,
+      '4:33 E2169 Field definition not allowed after methods or properties; ' +
+      '5:3 type expected, found "end"; ' +
+      '7:43 E2169 Field definition not allowed after methods or properties; ' +
+      '10:27 E2169 Field definition not allowed after methods or properties; ' +
+      '11:3 type expected, found "end"; ' +
+      '13:27 E2169 Field definition not allowed after methods or properties; ' +
+      '13:38 "," or ":" expected, found ";"; ' +
+      '14:3 type expected, found "end"; ' +
+      '16:32 E2169 Field definition not allowed after methods or properties; ' +
+      '17:3 type expected, found "end"; ' +
+      '19:26 E2599 Field definition not allowed in helper type; '),
+    DiagListCase('11.1.3', 'SA C02: the orders dcc takes',
+      'program TC02ok;'#13#10'type'#13#10'  TA = class'#13#10 +
+      '    procedure A; reintroduce; overload; virtual; stdcall; abstract;' +
+      #13#10'    class procedure B; overload; static;'#13#10 +
+      '    class procedure C; static; inline; deprecated;'#13#10 +
+      '    procedure E; virtual; final;'#13#10 +
+      '    procedure F(var M: Integer); message 5;'#13#10 +
+      '    procedure G; dynamic; abstract;'#13#10 +
+      '    procedure H; virtual; deprecated; platform;'#13#10 +
+      '    class procedure I; static; stdcall;'#13#10 +
+      '    procedure J; virtual; noreturn;'#13#10'  end;'#13#10 +
+      '  TB = class(TA)'#13#10'    procedure G; override; final;'#13#10 +
+      '  end;'#13#10 +
+      '  II = interface'#13#10'    procedure M; stdcall; overload;'#13#10 +
+      '  end;'#13#10 +
+      'function F: Integer; inline; overload;'#13#10 +
+      'begin Result := 0; end;'#13#10 +
+      'procedure P; deprecated; overload;'#13#10'begin end;'#13#10 +
+      'begin'#13#10'end.'#13#10,
       ''),
     // g1 EmptyVar, EmptyRs (B, DeclSection): a section word with no
     // declaration after it is E2029 at the next token - in a program, a
