@@ -146,8 +146,14 @@ of less work, not a gap in following the language; its consequences are in
   dcc's E2010 (`PL(S)` for `PL(X: Integer)`), E2033 for a `var` / `out`
   argument of another type (a Byte, a distinct `type Integer` for `var X:
   Integer`), E2197 for a constant there; in an overload set the same rules
-  only rank (E2250, 6.3.1). A constant out of its target's range (`B :=
-  300`, `PB(300)` for a Byte: E1012) is not reported either.
+  only rank (E2250, 6.3.1). A constant out of its target's range is E1012
+  by one rule (CrossType's ConstOutside: an assignment, an initialized
+  declaration, a plain routine's argument, a `for` bound, a `[...]`
+  element, an index, a `case` label), but not for an argument of an
+  overload set, nor a ShortString index (`SS[6]` for a `string[5]`: dcc's
+  E1012), nor a character target (`Ch := #256` is dcc's W1061); W1012 and
+  the other warnings of a constant (W1021-W1023 comparisons, W1058) are
+  not reported.
 
 ## 03-variables-constants.md
 
@@ -307,6 +313,12 @@ of less work, not a gap in following the language; its consequences are in
 ## 06-routines.md
 
 ### 6.3.1 The `overload` directive
+- a Boolean EXPRESSION (`True`, `I > 0`, `Bo and Bo2`, `not Bo`) against
+  overloads for Boolean, ByteBool, WordBool and LongBool is dcc's E2251
+  (spec 2.2.2: only a variable picks its own overload); the ranking takes
+  the Boolean one as exact for any Boolean argument and reports nothing.
+  Telling the two apart is the argument scorer's question (ArgScore), left
+  for an overload batch of its own.
 - which declaration an implementation header completes is decided by
   parameter modes and type identity as far as the unit itself can follow
   it (plain aliases declared in the unit). A type named through another

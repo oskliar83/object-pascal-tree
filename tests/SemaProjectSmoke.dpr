@@ -18059,6 +18059,192 @@ begin
   end;
 end;
 
+{ Spec audit section 4, constants and ranges (dcc64 37.0;
+  local/probe-park/sa4-const KR, KX, KF - each fixture line is what dcc64
+  reports on it, the OK lines nothing): a constant outside its ordinal
+  target is E1012 (2.6.1 - an assignment, an initialized declaration, a
+  plain routine's argument, a `[...]` element against a set's 0..255 or an
+  array's element type, an index, a case label; a 32/64-bit integer only for
+  a negative value into an unsigned one, the rest W1012), a case label E2030
+  / E2011 / E2026 / E2010 (5.3.2), an index of another type E2010 (8.1),
+  `div 0` E2098 and a folded overflow E2099 (4.2.1), a typed constant, a
+  resourcestring in a constant position E2026 (3.2.2), E2194, E2088, E2064 on
+  a constant, E2010 / E2008 relations, E2089, E2054. }
+procedure TestSpecAuditConsts;
+const
+  SYS = 'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class constructor Create; end;'#10 +
+    '  IInterface = interface end;'#10 +
+    'implementation'#10'constructor TObject.Create; begin end;'#10 +
+    'end.'#10;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+
+  function Run(const AName, ASrc: string): TPasSemaModel;
+  begin
+    TFile.WriteAllText(TPath.Combine(LDir, AName + '.dpr'), ASrc);
+    FreeAndNil(GProj);
+    GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+    GProj.AnalyzeProject(TPath.Combine(LDir, AName + '.dpr'));
+    Result := ModelByName(LowerCase(AName));
+  end;
+
+  procedure Expect(const ATag, ACode, AWant: string);
+  begin
+    Ok(ATag + ': ' + ACode + ' [' + DiagLinesOf(LM, ACode) + ']',
+      DiagLinesOf(LM, ACode) = AWant);
+  end;
+
+begin
+  LDir := FreshDir('pastree_sema_sa4const');
+  GProj := nil;
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'), SYS);
+  try
+    LM := Run('KR',
+      'program KR;'#10 +                                                      // 1
+      'type TA = 1..5; TE = (e0, e1, e2, e3); TES = e0..e2; TSB = set ' +
+      'of Byte; TBA = array of Byte;'#10 +                                    // 2
+      'var B: Byte; Sh: ShortInt; W: Word; A: TA; E: TES; C: Cardinal; ' +
+      'U: UInt64; I: Integer; S: TSB; DA: TBA;'#10 +                          // 3
+      'procedure PB(X: Byte); begin end;'#10 +                                // 4
+      'procedure PA(const X: array of Byte); begin end;'#10 +                 // 5
+      'procedure L6; begin B := 300; end;'#10 +                               // 6
+      'procedure L7; begin W := -1; end;'#10 +                                // 7
+      'procedure L8; begin B := 255 + 1; end;'#10 +                           // 8
+      'procedure L9; begin A := 0; end;'#10 +                                 // 9
+      'procedure L10; begin E := e3; end;'#10 +                               // 10
+      'procedure L11; begin PB(300); end;'#10 +                               // 11
+      'procedure L12; begin C := -1; end;'#10 +                               // 12
+      'procedure L13; begin U := -1; end;'#10 +                               // 13
+      'procedure L14; begin var X: Byte := 300; end;'#10 +                    // 14
+      'procedure L15; begin PA([1, 300]); end;'#10 +                          // 15
+      'procedure L16; begin if I in [1, 300] then ; end;'#10 +                // 16
+      'procedure L17; begin S := [256]; end;'#10 +                            // 17
+      'procedure L18; begin DA := [1, 256]; end;'#10 +                        // 18
+      'procedure L19; begin var Y := 3000000000; Y := -1; end;'#10 +          // 19
+      'const K1: Byte = 300;'#10 +                                            // 20
+      'var G: Byte = 256;'#10 +                                               // 21
+      'procedure OK1; begin B := 255; B := 0; Sh := -128; W := 65535; A ' +
+      ':= 5; E := e2; C := 4294967295; U := 0; PB(255); end;'#10 +            // 22
+      'procedure OK2; begin B := Byte(300); B := B + 300; A := A + 10; ' +
+      'E := TES(3); I := 3000000000; C := 5000000000; end;'#10 +              // 23
+      'procedure OK3; begin PA([0, 255]); if 300 in [1, 2] then ; S := ' +
+      '[0, 255]; DA := [0, 255]; var Y := 3000000000; Y := 1; var Q := ' +
+      '300; Q := -1; end;'#10 +                                               // 24
+      'procedure OK4; var L: Integer; begin for L := 0 to 3000000000 do ' +
+      '; end;'#10 +                                                           // 25
+      'begin'#10 +                                                            // 26
+      'end.'#10);                                                             // 27
+    Expect('ranges', 'E1012', '6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21');
+    Ok('ranges: nothing else [' + IntToStr(Length(LM.Diags)) + ']',
+      Length(LM.Diags) = 16);
+    LM := Run('KX',
+      'program KX;'#10 +                                                      // 1
+      'type TE = (e0, e1, e2); TF = (f0, f1);'#10 +                           // 2
+      'const TC: Integer = 3;'#10 +                                           // 3
+      'var S: array[1..3] of Integer; SE: array[TE] of Integer; D: ' +
+      'array of Integer; C: Char; SC: array[''a''..''c''] of Integer; M: ' +
+      'array[1..2, 0..1] of Integer; I: Integer; B: Byte;'#10 +               // 4
+      'procedure L5; begin S[0] := 1; end;'#10 +                              // 5
+      'procedure L6; begin SE[1] := 1; end;'#10 +                             // 6
+      'procedure L7; begin SE[f1] := 1; end;'#10 +                            // 7
+      'procedure L8; begin D[-1] := 1; end;'#10 +                             // 8
+      'procedure L9; begin SC[''z''] := 1; end;'#10 +                         // 9
+      'procedure L10; begin M[1, 2] := 1; end;'#10 +                          // 10
+      'procedure L11; begin M[3][0] := 1; end;'#10 +                          // 11
+      'procedure L12; begin S[1.0] := 1; end;'#10 +                           // 12
+      'procedure L13; begin D[C] := 1; end;'#10 +                             // 13
+      'procedure L14; begin case I of 1: ; 1: ; end; end;'#10 +               // 14
+      'procedure L15; begin case I of 1..5: ; 3..7: ; end; end;'#10 +         // 15
+      'procedure L16; begin case B of 300: ; end; end;'#10 +                  // 16
+      'procedure L17; begin case I of 5..1: ; end; end;'#10 +                 // 17
+      'procedure L18; begin case I of TC: ; end; end;'#10 +                   // 18
+      'procedure L19; begin case C of ''ab'': ; end; end;'#10 +               // 19
+      'procedure L20; begin case I of e1: ; end; end;'#10 +                   // 20
+      'procedure OK1; begin S[1] := 1; S[3] := 1; D[0] := 1; D[100000] ' +
+      ':= 1; SC[''a''] := 1; SE[e2] := 1; M[2, 1] := 1; M[2][1] := 1; ' +
+      'S[Low(S)] := 1; end;'#10 +                                             // 21
+      'procedure OK2; begin case I of 1: ; 2..4: ; 5, 6: ; -1: ; end; ' +
+      'case B of 0..255: ; end; case C of ''a''..''c'': ; ''d'': ; #0: ; end; ' +
+      'case I of 3..3: ; else end; end;'#10 +                                 // 22
+      'procedure L23; var AC: AnsiChar; CT: array[''0''..''1''] of Byte; ' +
+      'AA: array[AnsiChar] of Byte; begin I := CT[AC] + CT[C]; I := ' +
+      'AA[C]; end;'#10 +                                                      // 23
+      'begin'#10 +                                                            // 24
+      'end.'#10);                                                             // 25
+    Expect('index/case', 'E1012', '5 8 9 10 11 16');
+    // Line 23: a subrange of character literals takes an AnsiChar and a
+    // Char index alike (a third-party unit of the client gate); an
+    // `array[AnsiChar]` a Char index not.
+    Expect('index/case', 'E2010', '6 7 12 13 19 20 23');
+    Expect('index/case', 'E2030', '14 15');
+    Expect('index/case', 'E2011', '17');
+    Expect('index/case', 'E2026', '18');
+    Ok('index/case: nothing else [' + IntToStr(Length(LM.Diags)) + ']',
+      Length(LM.Diags) = 17);
+    Ok('index/case: the selector named first [' + DiagText(LM, 'E2010') + ']',
+      Pos('''TE'' and ''Integer''', DiagText(LM, 'E2010')) > 0);
+    LM := Run('KF',
+      'program KF;'#10 +                                                      // 1
+      '{$J-}'#10 +                                                            // 2
+      'type TS = set of Byte; TX = (x0, x1);'#10 +                            // 3
+      'const KB = 5; KC = 4294967295; KT: Integer = 5; TC: Integer = 3;'#10 + // 4
+      'const K1 = 1 div 0;'#10 +                                              // 5
+      'const K2 = MaxInt + 1;'#10 +                                           // 6
+      'const K3 = 100000 * 100000;'#10 +                                      // 7
+      'const K4 = Cardinal(1) - 2;'#10 +                                      // 8
+      'const K5 = 4294967295 + 1;'#10 +                                       // 9
+      'const K6 = KT + 1;'#10 +                                               // 10
+      'type TA = array[0..KT] of Byte;'#10 +                                  // 11
+      'var G: Integer = KT;'#10 +                                             // 12
+      'var I: Integer; S: string; S1, S2: TS; D: Double; B: Boolean; E: ' +
+      'TX; P: Pointer;'#10 +                                                  // 13
+      'threadvar T: Integer = 5;'#10 +                                        // 14
+      'var XA: Byte absolute $400;'#10 +                                      // 15
+      'resourcestring R1 = 5;'#10 +                                           // 16
+      'resourcestring R2 = ''a''; R3 = ''x'' + R2;'#10 +                      // 17
+      'procedure L18; begin I := I div 0; end;'#10 +                          // 18
+      'procedure L19; begin TC := 1; end;'#10 +                               // 19
+      'procedure L20; begin KB := 1; end;'#10 +                               // 20
+      'procedure L21; begin B := I = S; end;'#10 +                            // 21
+      'procedure L22; begin B := S1 < S2; end;'#10 +                          // 22
+      'procedure L23; begin I := Integer(D); end;'#10 +                       // 23
+      'procedure L24; begin Writeln(E); end;'#10 +                            // 24
+      'procedure L25; begin Writeln(P^); end;'#10 +                           // 25
+      'const OK1 = Int64(2147483647) + 1; OK2 = Byte(200) + Byte(200); ' +
+      'OK3 = 1 shl 33; OK4 = $FFFFFFFF - 1; OK5 = SizeOf(KT); OK6 = ' +
+      'High(KT); OK7: Pointer = @KT; OK8 = KC - 1;'#10 +                      // 26
+      'resourcestring OKR = ''k'' + ''z'';'#10 +                              // 27
+      'var OKA: Integer absolute I;'#10 +                                     // 28
+      'procedure OK9; begin B := S1 <= S2; D := Double(I); Writeln(I, ' +
+      'S, D:5:2, B); B := S = ''x''; end;'#10 +                               // 29
+      '{$J+}'#10 +                                                            // 30
+      'const TJ: Integer = 3;'#10 +                                           // 31
+      'procedure OK10; begin TJ := 1; end;'#10 +                              // 32
+      'begin'#10 +                                                            // 33
+      'end.'#10);                                                             // 34
+    Expect('fold', 'E2098', '5 18');
+    Expect('fold', 'E2099', '6 7 8 9');
+    Expect('fold', 'E2026', '10 11 12 17');
+    Expect('fold', 'E2194', '14');
+    Expect('fold', 'E2088', '15');
+    Expect('fold', 'E2010', '16 21');
+    Expect('fold', 'E2064', '19 20');
+    Expect('fold', 'E2008', '22');
+    Expect('fold', 'E2089', '23');
+    Expect('fold', 'E2054', '24 25');
+    Ok('fold: nothing else [' + IntToStr(Length(LM.Diags)) + ']',
+      Length(LM.Diags) = 20);
+    Ok('fold: the string named first [' + DiagText(LM, 'E2010') + ']',
+      Pos('''string'' and ''Integer''', DiagText(LM, 'E2010')) > 0);
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 var
   LDir: string;
   LA, LB, LC, LD, LE, LOvl: TPasSemaModel;
@@ -24341,6 +24527,7 @@ begin
   TestArgShapes;
   TestConstParamWrites;
   TestParamLegalShapes;
+  TestSpecAuditConsts;
   TestOpenArrayValue;
   TestPropertyAccessChecks;
   TestGenericInferErrors;

@@ -22240,6 +22240,12 @@ var
         nkCall:
           if IsConstArgX(AId, LCore) then
             Exit;
+        // A literal of two characters or more is no character (`C :=
+        // 'ab'`, a `case C of 'ab':` label: E2010 'Char' and 'string';
+        // 2.2.3, 5.3.2, dcc64 37.0, local/probe-park/sa4-const T3).
+        nkStrLit:
+          if (D <> tcChar) or (StrLitUnitsUpTo(LM.Tree, LCore, 0) < 2) then
+            Exit;
       else
         Exit;
       end;
@@ -22808,6 +22814,12 @@ var
             skParam:
               LHit := (LM.Tree.Nodes[ADst].Kind = nkIdent) and
                 IsConstParam(LMid, LSym);
+            // 3.2.2: a true constant, and a typed one but under {$J+}
+            // (`TC := 1` under {$J-}, `K := 1`).
+            skConst:
+              LHit := not (sfBuiltin in FModels[LMid].Symbols[LSym].Flags) and
+                not ((FModels[LMid].Symbols[LSym].TypeNode <> NIL_NODE) and
+                     (sfWriteableConst in FModels[LMid].Symbols[LSym].Flags));
           end;
       nkIndex:
         begin
@@ -23360,6 +23372,82 @@ var
         LSrcName := XTypeText(LSrcX);
       EmitAt(LM, AAt, 'E2010', Format(SE2010_IncompatibleTypes,
         [XTypeText(LDstX), LSrcName]), ConvNoteX(LDstX, LSrcX));
+    end;
+
+    // The values a constant of the ordinal target AX may take (2.6.1): an
+    // enumeration's or a subrange's own range (a character subrange too), a
+    // builtin integer's. AWide: a 32- or 64-bit integer, where a constant
+    // outside the range is only dcc's W1012 - but a negative one into an
+    // unsigned one is still E1012. A character or Boolean builtin is no
+    // target here (`Ch := #256` is W1061).
+    function ConstRange(const AX: TSemaXType; out ALo, AHi: Double;
+      out AWide: Boolean): Boolean;
+    var
+      LF: TSemaOrdFacts;
+      LKind: TPasCondKind;
+    begin
+      Result := False;
+      AWide := False;
+      ALo := 0;
+      AHi := 0;
+      if not XValid(AX) or not (XCatOf(CanonTypeX(AX)) in [tcInteger, tcEnum,
+         tcChar]) then
+        Exit;
+      LF := OrdFactsX(AId, NIL_NODE, AX);
+      if LF.HasRange then
+      begin
+        ALo := LF.Lo;
+        AHi := LF.Hi;
+        Exit(ALo <= AHi);
+      end;
+      if (LF.Cat <> tcInteger) or (LF.Builtin = '') or
+         not PasBuiltinOrdinalRange(LF.Builtin, FTarget, ALo, AHi, LKind) or
+         (ALo > AHi) then
+        Exit;
+      AWide := AHi - ALo >= 4294967295.0;
+      Result := True;
+    end;
+
+    { 2.6.1: the constant ASrc, going to the ordinal target ADst typed ADstX
+      at the statement or declaration AStmt, lies outside the target's
+      range - dcc's E1012 Constant expression violates subrange bounds (`B
+      := 300`, `A := 0` for `1..5`, `C := -1` for a Cardinal; for a 32- or
+      64-bit integer only a negative value into an unsigned one). The value
+      is FoldedIntValue's: a typecast truncates (`Byte(300)` fits), a
+      non-constant operand anywhere gives none. The conversion itself is the
+      caller's to have judged - an E2010 is no E1012 too. }
+    function ConstOutside(AStmt, ADst, ASrc: Integer;
+      const ADstX: TSemaXType): Boolean;
+    var
+      LV: Int64;
+      LLo, LHi: Double;
+      LWide: Boolean;
+    begin
+      Result := False;
+      // The fold first: it stops at 64 nested operators, where the constant
+      // test walks a whole chain (10,000 terms in TestOperatorChains).
+      if (ASrc = NIL_NODE) or not ConstRange(ADstX, LLo, LHi, LWide) or
+         not FoldedIntValue(LM.Tree, ASrc, 0, ConstFactsX(AId),
+           OrdNameValueX(AId), LV) or
+         not IsConstExprX(AId, ASrc) then
+        Exit;
+      if LWide then
+        Result := (LLo >= 0) and (LV < 0)
+      else
+        Result := (LV < LLo) or (LV > LHi);
+      Result := Result and not InUntypedWith(AStmt) and
+        not Unreliable(AStmt, ADst, ADstX) and
+        not Unreliable(AStmt, ASrc, GetX(ASrc));
+    end;
+
+    // ConstOutside for a value whose conversion no other check judges here
+    // (an argument, an element, an index, a case label): only a value that
+    // converts to ADstX is out of its range.
+    function ConstOutsideConv(AStmt, ASrc: Integer;
+      const ADstX: TSemaXType): Boolean;
+    begin
+      Result := ConstOutside(AStmt, ASrc, ASrc, ADstX) and
+        (AssignConvX(AStmt, ASrc, ADstX, GetX(ASrc)) <> TSemaConv.scNone);
     end;
 
     // A static array whose element is no character (one of a character
@@ -24220,7 +24308,9 @@ var
          (XCatOf(CanonTypeX(LDstX)) = tcRecord) and
          (XCatOf(CanonTypeX(LSrcX)) in [tcString, tcChar]) then
         Exit;
-      CheckConv(N, LType, LInit, LInit, LDstX, LSrcX);
+      if not CheckConv(N, LType, LInit, LInit, LDstX, LSrcX) and
+         ConstOutside(N, LType, LInit, LDstX) then
+        EmitAt(LM, LInit, 'E1012', SE1012_ConstViolatesBounds);
     end;
 
     { The default values of a parameter list N (nkParams; 6.2.5), in order,
@@ -24333,30 +24423,13 @@ var
       LVar, LFrom, LTo: Integer;
       LVarX: TSemaXType;
 
-      // 5.5.1: an integer constant bound outside an integer counter's range
-      // (`for B := 0 to 300` over a Byte) is E1012, as in an assignment
-      // (dcc64 37.0, spec audit g3 ForCtr line 16).
+      // 5.5.1: a constant bound outside the counter's range (`for B := 0 to
+      // 300` over a Byte) is E1012, as in an assignment - ConstOutside's
+      // rule, so `to 3000000000` over an Integer is only W1012 (dcc64 37.0,
+      // spec audit g3 ForCtr line 16, local/probe-park/sa4-const P1).
       function BoundOutside(ABound: Integer): Boolean;
-      var
-        LV: Int64;
       begin
-        Result := (XCatOf(CanonTypeX(LVarX)) = tcInteger) and
-          IsConstExprX(AId, ABound) and
-          FoldedIntValue(LM.Tree, ABound, 0, ConstFactsX(AId),
-            OrdNameValueX(AId), LV);
-        if not Result then
-          Exit;
-        // A subrange's bounds, or a builtin integer's (Byte, ShortInt...).
-        var LF := OrdFactsX(AId, NIL_NODE, LVarX);
-        var LLo: Double := LF.Lo;
-        var LHi: Double := LF.Hi;
-        var LKind: TPasCondKind;
-        if not LF.HasRange then
-          LF.HasRange := (LF.Builtin <> '') and
-            PasBuiltinOrdinalRange(LF.Builtin, FTarget, LLo, LHi, LKind);
-        Result := LF.HasRange and (LLo <= LHi) and
-          ((LV < LLo) or (LV > LHi)) and
-          not InUntypedWith(N) and not Unreliable(N, LVar, LVarX);
+        Result := ConstOutside(N, LVar, ABound, LVarX);
       end;
 
     begin
@@ -25152,6 +25225,854 @@ var
         [LM.Tree.NodeText(N)]));
     end;
 
+    { The constant checks of one node (2.6.1, 3.2.2, 4.2.1, 5.3.2, 8.1):
+      called for every node before the walk's own `case`, dispatching on the
+      kind here, so the walk's arms stay as they are. }
+    procedure CheckConsts(N: Integer);
+
+      function OpOf(ANode: Integer): TPasTokenKind;
+      begin
+        if (LM.Tree.Nodes[ANode].Aux >= 0) and
+           (LM.Tree.Nodes[ANode].Aux <= High(LM.Tree.Source.Visible)) then
+          Result := LM.Tree.Source.VisibleKind(LM.Tree.Nodes[ANode].Aux)
+        else
+          Result := tkUnknown;
+      end;
+
+      function Fold(ANode: Integer; out AV: Int64): Boolean;
+      begin
+        Result := FoldedIntValue(LM.Tree, ANode, 0, ConstFactsX(AId),
+          OrdNameValueX(AId), AV);
+      end;
+
+      // Is the section the declaration ADecl (model AMid) stands in headed
+      // by the word AWord (`threadvar`, `resourcestring`)?
+      function SectionWord(AMid, ADecl: Integer; AWord: TPasTokenKind): Boolean;
+      var
+        LSec, LTok: Integer;
+      begin
+        Result := False;
+        if ADecl = NIL_NODE then
+          Exit;
+        LSec := FModels[AMid].Tree.Nodes[ADecl].Parent;
+        if LSec = NIL_NODE then
+          Exit;
+        LTok := FModels[AMid].Tree.Nodes[LSec].FirstToken;
+        Result := (LTok >= 0) and
+          (LTok <= High(FModels[AMid].Tree.Source.Visible)) and
+          (FModels[AMid].Tree.Source.VisibleKind(LTok) = AWord);
+      end;
+
+      // Does the expression ANode name a resourcestring - no constant
+      // (3.2.3: `R3 = 'x' + R2` is E2026)?
+      function NamesResStr(ANode, ADepth: Integer): Boolean;
+      var
+        LKid, LMid, LSym, LDecl: Integer;
+      begin
+        Result := False;
+        if (ANode = NIL_NODE) or (ADepth > 8) then
+          Exit;
+        if LM.Tree.Nodes[ANode].Kind in [nkIdent, nkMember] then
+        begin
+          if TargetSym(ANode, LMid, LSym) and
+             (FModels[LMid].Symbols[LSym].Kind = skConst) then
+          begin
+            LDecl := FModels[LMid].Symbols[LSym].DeclNode;
+            if LDecl <> NIL_NODE then
+              LDecl := FModels[LMid].Tree.Nodes[LDecl].Parent;
+            Result := (LDecl <> NIL_NODE) and
+              (FModels[LMid].Tree.Nodes[LDecl].Kind = nkConstDecl) and
+              SectionWord(LMid, LDecl, tkResourcestring);
+          end;
+          Exit;
+        end;
+        if not (LM.Tree.Nodes[ANode].Kind in [nkBinaryOp, nkParen]) then
+          Exit;
+        LKid := LM.Tree.Nodes[ANode].FirstChild;
+        while (LKid <> NIL_NODE) and not Result do
+        begin
+          Result := NamesResStr(LKid, ADepth + 1);
+          LKid := LM.Tree.Nodes[LKid].NextSibling;
+        end;
+      end;
+
+      // 3.2.2, B.10: in a constant position a typed constant, a variable, a
+      // resourcestring or a function call read by value is E2026
+      // (CertainlyNotConst); an address (`@KT` for a Pointer) is a
+      // constant.
+      function NotConst(ANode: Integer): Boolean;
+      var
+        LOpd: Integer;
+      begin
+        ANode := PeelParens(LM.Tree, ANode);
+        Result := (ANode <> NIL_NODE) and
+          not IsAddrOfExpr(LM.Tree, ANode, LOpd) and
+          (CertainlyNotConst(ANode, 0) or NamesResStr(ANode, 0)) and
+          not InUntypedWith(ANode);
+      end;
+
+      // 4.10: a value typecast of a real to an ordinal type is E2089
+      // Invalid typecast (`Integer(D)`, `Int64(Cu)` of a Currency, `Byte(1.5)`,
+      // `Boolean(D)`, `TE(D)`; dcc64 37.0, local/probe-park/sa4-const P2).
+      procedure CheckCast;
+      var
+        LCallee, LArg, LMid, LSym: Integer;
+        LTo, LFrom: TSemaXType;
+      begin
+        LCallee := PeelParens(LM.Tree, LM.Tree.Nodes[N].FirstChild);
+        if (LCallee = NIL_NODE) or
+           not (LM.Tree.Nodes[LCallee].Kind in [nkIdent, nkMember]) then
+          Exit;
+        LArg := LM.Tree.Nodes[LM.Tree.Nodes[N].FirstChild].NextSibling;
+        if (LArg = NIL_NODE) or (LM.Tree.Nodes[LArg].NextSibling <> NIL_NODE) or
+           not TargetSym(LCallee, LMid, LSym) or
+           not (FModels[LMid].Symbols[LSym].Kind in [skType,
+             skBuiltinType]) then
+          Exit;
+        LTo := CanonTypeX(XPlain(LMid, LSym));
+        LFrom := GetX(LArg);
+        if XValid(LTo) and XValid(LFrom) and
+           (XCatOf(LTo) in [tcInteger, tcBoolean, tcChar, tcEnum]) and
+           (XCatOf(CanonTypeX(LFrom)) = tcFloat) and not InUntypedWith(N) and
+           not Unreliable(N, LArg, LFrom) then
+          EmitAt(LM, N, 'E2089', SE2089_InvalidTypecast);
+      end;
+
+      // 4.11.2: a Write / Writeln argument of a type it cannot print is
+      // E2054 Illegal type in Write/Writeln statement - an enumeration, a
+      // set, a record, an object, a class reference, a procedural value, a
+      // pointer that is no character pointer, an untyped `P^` (a file as
+      // the first argument is the target; dcc64 37.0, local/probe-park/
+      // sa4-const P2). One report a call.
+      procedure CheckWrite;
+      var
+        LCallee, LArg, LCore, LMid, LSym: Integer;
+        LX, LC: TSemaXType;
+        LBad, LFirst: Boolean;
+      begin
+        LCallee := PeelParens(LM.Tree, LM.Tree.Nodes[N].FirstChild);
+        if (LCallee = NIL_NODE) or (LM.Tree.Nodes[LCallee].Kind <> nkIdent) or
+           not TargetSym(LCallee, LMid, LSym) or
+           not (sfBuiltin in FModels[LMid].Symbols[LSym].Flags) or
+           (FModels[LMid].Symbols[LSym].Kind <> skRoutine) or
+           not ((FModels[LMid].Symbols[LSym].NameLower = 'write') or
+                (FModels[LMid].Symbols[LSym].NameLower = 'writeln')) or
+           InUntypedWith(N) then
+          Exit;
+        LFirst := True;
+        LArg := LM.Tree.Nodes[LM.Tree.Nodes[N].FirstChild].NextSibling;
+        while LArg <> NIL_NODE do
+        begin
+          LCore := LArg;
+          if LM.Tree.Nodes[LCore].Kind = nkFormattedArg then
+            LCore := LM.Tree.Nodes[LCore].FirstChild;
+          LCore := PeelParens(LM.Tree, LCore);
+          if LCore = NIL_NODE then
+            Exit;
+          LBad := False;
+          LX := GetX(LCore);
+          if (LM.Tree.Nodes[LCore].Kind = nkDeref) and not XValid(LX) then
+          begin
+            // `P^` of an untyped Pointer.
+            LC := CanonTypeX(GetX(LM.Tree.Nodes[LCore].FirstChild));
+            LBad := XValid(LC) and (XCatOf(LC) = tcPointer) and
+              not XValid(PointeeX(LC));
+          end
+          else if XValid(LX) and not Unreliable(N, LCore, LX) then
+          begin
+            LC := CanonTypeX(LX);
+            case XCatOf(LC) of
+              tcFile:
+                if not LFirst then
+                  Exit;
+              tcEnum, tcSet, tcRecord, tcClass, tcInterface, tcClassOf,
+              tcProc:
+                LBad := True;
+              tcPointer:
+                LBad := not XValid(PointeeX(LC)) or
+                  (XCatOf(CanonTypeX(PointeeX(LC))) <> tcChar);
+            end;
+          end;
+          if LBad then
+          begin
+            EmitAt(LM, LCore, 'E2054', SE2054_IllegalWriteType);
+            Exit;
+          end;
+          LFirst := False;
+          LArg := LM.Tree.Nodes[LArg].NextSibling;
+        end;
+      end;
+
+      // 4.5, 4.6: a relation between a string and a number, a Boolean or an
+      // enumeration is E2010 with the string's type first (`I = S`: 'string'
+      // and 'Integer'), a Char with an integer E2008, and `<` / `>` of two
+      // sets E2008 (dcc64 37.0, local/probe-park/sa4-const P2, G3).
+      procedure CheckRelation;
+      var
+        LOp: TPasTokenKind;
+        LL, LR: Integer;
+        LLX, LRX, LLc, LRc: TSemaXType;
+        LCl, LCr: TSemaTypeCat;
+      begin
+        LOp := OpOf(N);
+        if not (LOp in [tkEqual, tkNotEqual, tkLess, tkGreater, tkLessEqual,
+           tkGreaterEqual]) then
+          Exit;
+        LL := LM.Tree.Nodes[N].FirstChild;
+        if LL = NIL_NODE then
+          Exit;
+        LR := LM.Tree.Nodes[LL].NextSibling;
+        if LR = NIL_NODE then
+          Exit;
+        if (LM.Tree.Nodes[PeelParens(LM.Tree, LL)].Kind = nkSetCtor) or
+           (LM.Tree.Nodes[PeelParens(LM.Tree, LR)].Kind = nkSetCtor) then
+          Exit;
+        LLX := GetX(LL);
+        LRX := GetX(LR);
+        if not XValid(LLX) or not XValid(LRX) or InUntypedWith(N) or
+           Unreliable(N, LL, LLX) or Unreliable(N, LR, LRX) then
+          Exit;
+        LLc := CanonTypeX(LLX);
+        LRc := CanonTypeX(LRX);
+        LCl := XCatOf(LLc);
+        LCr := XCatOf(LRc);
+        if (LCl = tcSet) and (LCr = tcSet) then
+        begin
+          if LOp in [tkLess, tkGreater] then
+            EmitAtToken(LM, N, LM.Tree.Nodes[N].Aux, 'E2008',
+              SE2008_IncompatibleTypes);
+        end
+        else if (LCl = tcString) and
+                (LCr in [tcInteger, tcFloat, tcBoolean, tcEnum]) then
+          EmitAtToken(LM, N, LM.Tree.Nodes[N].Aux, 'E2010',
+            Format(SE2010_IncompatibleTypes, [XTypeText(LLX), XTypeText(LRX)]))
+        else if (LCr = tcString) and
+                (LCl in [tcInteger, tcFloat, tcBoolean, tcEnum]) then
+          EmitAtToken(LM, N, LM.Tree.Nodes[N].Aux, 'E2010',
+            Format(SE2010_IncompatibleTypes, [XTypeText(LRX), XTypeText(LLX)]))
+        else if ((LCl = tcChar) and (LCr = tcInteger)) or
+                ((LCl = tcInteger) and (LCr = tcChar)) then
+          EmitAtToken(LM, N, LM.Tree.Nodes[N].Aux, 'E2008',
+            SE2008_IncompatibleTypes);
+      end;
+
+      // The plain routine (no overload set, no intrinsic) ACall binds, and
+      // its AIndex-th parameter AMid.ASym - a typed value or const one.
+      function PlainArgParam(ACall, AIndex: Integer;
+        out AMid, ASym: Integer): Boolean;
+      var
+        LHead, LRMid, LRSym, LDecl: Integer;
+        LPars: TArray<Integer>;
+      begin
+        Result := False;
+        LHead := PeelParens(LM.Tree, LM.Tree.Nodes[ACall].FirstChild);
+        if (LHead = NIL_NODE) or
+           not (LM.Tree.Nodes[LHead].Kind in [nkIdent, nkMember]) or
+           not TargetSym(LHead, LRMid, LRSym) or
+           (FModels[LRMid].Symbols[LRSym].Kind <> skRoutine) or
+           (FModels[LRMid].Symbols[LRSym].NextOverload <> NIL_SYM) or
+           (FModels[LRMid].Symbols[LRSym].Flags * [sfBuiltin, sfOverload,
+             sfOverloadDirective, sfOverrideDirective] <> []) then
+          Exit;
+        LPars := XParamSyms(LRMid, LRSym);
+        if (AIndex < 0) or (AIndex > High(LPars)) then
+          Exit;
+        AMid := LRMid;
+        ASym := LPars[AIndex];
+        if FModels[AMid].Symbols[ASym].TypeNode = NIL_NODE then
+          Exit;   // untyped
+        LDecl := FModels[AMid].Symbols[ASym].DeclNode;
+        if LDecl <> NIL_NODE then
+          LDecl := FModels[AMid].Tree.Nodes[LDecl].Parent;
+        Result := (LDecl <> NIL_NODE) and
+          (FModels[AMid].Tree.Nodes[LDecl].Kind = nkParam) and
+          (FModels[AMid].Tree.Nodes[LDecl].Flags * [nfVar, nfOut] = []);
+      end;
+
+      // The elements of the `[...]` ACtor (a range's bounds too) against
+      // the element type AElemX - or, ASet, against a set's 0..255: an
+      // integer constant element outside it is E1012 (4.6: `I in [1, 300]`,
+      // `S := [256]`; a set of 1..10 takes `[11]`). One report a
+      // constructor.
+      procedure CheckCtor(ACtor: Integer; const AElemX: TSemaXType;
+        ASet: Boolean);
+      var
+        LElem, LPart: Integer;
+        LV: Int64;
+        LBad: Boolean;
+      begin
+        LElem := LM.Tree.Nodes[ACtor].FirstChild;
+        while LElem <> NIL_NODE do
+        begin
+          if LM.Tree.Nodes[LElem].Kind = nkRange then
+            LPart := LM.Tree.Nodes[LElem].FirstChild
+          else
+            LPart := LElem;
+          while LPart <> NIL_NODE do
+          begin
+            if ASet then
+              LBad := (XCatOf(CanonTypeX(GetX(LPart))) = tcInteger) and
+                Fold(LPart, LV) and IsConstExprX(AId, LPart) and
+                ((LV < 0) or (LV > 255)) and not InUntypedWith(ACtor)
+            else
+              LBad := ConstOutsideConv(ACtor, LPart, AElemX);
+            if LBad then
+            begin
+              EmitAt(LM, LPart, 'E1012', SE1012_ConstViolatesBounds);
+              Exit;
+            end;
+            if LPart = LElem then
+              Break;
+            LPart := LM.Tree.Nodes[LPart].NextSibling;
+          end;
+          LElem := LM.Tree.Nodes[LElem].NextSibling;
+        end;
+      end;
+
+      // A `[...]` going to the type AX: a set's elements, a dynamic array's.
+      procedure CtorTo(ACtor: Integer; const AX: TSemaXType);
+      var
+        LC: TSemaXType;
+      begin
+        LC := CanonTypeX(AX);
+        if not XValid(LC) or OpenX(LC) or NestedInGenericX(LC) then
+          Exit;
+        if XCatOf(LC) = tcSet then
+          CheckCtor(ACtor, XNil, True)
+        else if IsDynArrayTypeX(LC) then
+          CheckCtor(ACtor, ArrayElemX(LC), False);
+      end;
+
+      // A `[...]` N where its target is known: `X in [...]`, an assignment,
+      // an initialized declaration, a plain routine's argument.
+      procedure CheckSetCtor;
+      var
+        LUp, LFirst, LMid, LSym, LIdx, LArg, LTn: Integer;
+      begin
+        LUp := LM.Tree.Nodes[N].Parent;
+        if LUp = NIL_NODE then
+          Exit;
+        LFirst := LM.Tree.Nodes[LUp].FirstChild;
+        if LFirst = N then
+          Exit;
+        case LM.Tree.Nodes[LUp].Kind of
+          nkBinaryOp:
+            if OpOf(LUp) = tkIn then
+              CheckCtor(N, XNil, True);
+          nkAssign:
+            CtorTo(N, GetX(LFirst));
+          nkVarDecl, nkConstDecl, nkInlineVar, nkInlineConst:
+            if (LM.Tree.Nodes[LUp].Kind <> nkVarDecl) or
+               (LM.Tree.Nodes[LUp].Aux <> 1) then
+              CtorTo(N, DeclaredX(LFirst));
+          nkCall:
+            begin
+              LIdx := 0;
+              LArg := LM.Tree.Nodes[LFirst].NextSibling;
+              while (LArg <> NIL_NODE) and (LArg <> N) do
+              begin
+                Inc(LIdx);
+                LArg := LM.Tree.Nodes[LArg].NextSibling;
+              end;
+              if (LArg = N) and PlainArgParam(LUp, LIdx, LMid, LSym) then
+              begin
+                LTn := FModels[LMid].Symbols[LSym].TypeNode;
+                if FModels[LMid].Tree.Nodes[LTn].Kind = nkArrayType then
+                  CheckCtor(N, InlineArrayElemX(LMid, LSym), False)
+                else
+                  CtorTo(N, DeclTypeX(LMid, LSym));
+              end;
+            end;
+        end;
+      end;
+
+      // A plain routine's constant arguments against their parameters.
+      procedure CheckArgs;
+      var
+        LArg, LIdx, LMid, LSym: Integer;
+      begin
+        LArg := LM.Tree.Nodes[N].FirstChild;
+        if LArg = NIL_NODE then
+          Exit;
+        LArg := LM.Tree.Nodes[LArg].NextSibling;
+        LIdx := 0;
+        while LArg <> NIL_NODE do
+        begin
+          if (LM.Tree.Nodes[PeelParens(LM.Tree, LArg)].Kind <> nkSetCtor) and
+             PlainArgParam(N, LIdx, LMid, LSym) and
+             (FModels[LMid].Tree.Nodes[FModels[LMid].Symbols[LSym].TypeNode]
+               .Kind <> nkArrayType) and
+             ConstOutsideConv(N, LArg, DeclTypeX(LMid, LSym)) then
+          begin
+            EmitAt(LM, LArg, 'E1012', SE1012_ConstViolatesBounds);
+            Exit;
+          end;
+          Inc(LIdx);
+          LArg := LM.Tree.Nodes[LArg].NextSibling;
+        end;
+      end;
+
+      // The array definition ADef (model AMid) of the array type AX, or of
+      // the element node AElem of model AMid - False when it is no array
+      // that takes an index list (`array of const` takes none here).
+      function ArrayDefOf(const AX: TSemaXType; AElem: Integer;
+        var AMid: Integer; out ADef: Integer): Boolean;
+      var
+        LX: TSemaXType;
+      begin
+        Result := False;
+        ADef := NIL_NODE;
+        if AElem <> NIL_NODE then
+        begin
+          if FModels[AMid].Tree.Nodes[AElem].Kind = nkArrayType then
+            ADef := AElem
+          else
+          begin
+            LX := CanonTypeX(ResolveTypeExprNested(AMid, AElem));
+            if not XValid(LX) then
+              Exit;
+            AMid := LX.UnitId;
+            ADef := TypeDefNodeOf(LX.UnitId, LX.Sym);
+          end;
+        end
+        else
+        begin
+          LX := CanonTypeX(AX);
+          if not XValid(LX) or OpenX(LX) or NestedInGenericX(LX) then
+            Exit;
+          AMid := LX.UnitId;
+          ADef := TypeDefNodeOf(LX.UnitId, LX.Sym);
+        end;
+        Result := (ADef <> NIL_NODE) and
+          (FModels[AMid].Tree.Nodes[ADef].Kind = nkArrayType) and
+          (FModels[AMid].Tree.Nodes[ADef].Aux <> 1);
+      end;
+
+      // ADef / ASkip past ACount more indices: the next dimension, or the
+      // element's array type once ADef's dimensions are spent.
+      function Advance(var AMid, ADef, ASkip: Integer;
+        ACount: Integer): Boolean;
+      begin
+        Result := True;
+        Inc(ASkip, ACount);
+        while ASkip >= PasArrayDims(FModels[AMid].Tree, ADef) do
+        begin
+          Dec(ASkip, PasArrayDims(FModels[AMid].Tree, ADef));
+          if not ArrayDefOf(XNil, PasArrayElemNode(FModels[AMid].Tree, ADef),
+             AMid, ADef) then
+            Exit(False);
+        end;
+      end;
+
+      // The array definition ADef (model AMid) and how many of its
+      // dimensions are taken (ASkip) where the index list of an nkIndex
+      // over ABase begins: the base's array type, past every enclosing
+      // index (`M[1][0]`). False for anything but an array - a string, a
+      // pointer, a default or array property.
+      function ArrayDefAt(ABase: Integer; out AMid, ADef, ASkip: Integer;
+        ADepth: Integer): Boolean;
+      var
+        LIdx, LCount, LMid, LSym: Integer;
+      begin
+        Result := False;
+        AMid := AId;
+        ADef := NIL_NODE;
+        ASkip := 0;
+        ABase := PeelParens(LM.Tree, ABase);
+        if (ABase = NIL_NODE) or (ADepth > 8) then
+          Exit;
+        if LM.Tree.Nodes[ABase].Kind = nkIndex then
+        begin
+          if not ArrayDefAt(LM.Tree.Nodes[ABase].FirstChild, AMid, ADef, ASkip,
+             ADepth + 1) then
+            Exit;
+          LCount := 0;
+          LIdx := LM.Tree.Nodes[LM.Tree.Nodes[ABase].FirstChild].NextSibling;
+          while LIdx <> NIL_NODE do
+          begin
+            Inc(LCount);
+            LIdx := LM.Tree.Nodes[LIdx].NextSibling;
+          end;
+          Exit(Advance(AMid, ADef, ASkip, LCount));
+        end;
+        if IsArrayPropertyDesignator(ABase) then
+          Exit;
+        // A variable, field or typed constant whose array type is written
+        // in place (`S: array[1..3] of Integer`) - not an open-array
+        // parameter.
+        if (LM.Tree.Nodes[ABase].Kind in [nkIdent, nkMember]) and
+           TargetSym(ABase, LMid, LSym) and
+           (FModels[LMid].Symbols[LSym].Kind in [skVar, skField, skConst]) and
+           (FModels[LMid].Symbols[LSym].TypeNode <> NIL_NODE) and
+           (FModels[LMid].Tree.Nodes[FModels[LMid].Symbols[LSym].TypeNode]
+             .Kind = nkArrayType) then
+        begin
+          AMid := LMid;
+          ADef := FModels[LMid].Symbols[LSym].TypeNode;
+          Exit(FModels[AMid].Tree.Nodes[ADef].Aux <> 1);
+        end;
+        Result := ArrayDefOf(GetX(ABase), NIL_NODE, AMid, ADef);
+      end;
+
+      // 8.1: each constant index against its dimension's index type - a
+      // value outside it is E1012 (`S[0]` over `array[1..3]`, `SC['z']`),
+      // a negative one into a dynamic array too (`D[-1]`); an index of
+      // another type is E2010 (`SE[1]`, `S[1.0]`; a dynamic array's index
+      // is NativeInt, which dcc64 names Int64). One report an index list.
+      procedure CheckIndex;
+      var
+        LMid, LDef, LSkip, LIdx, LKid, LStep: Integer;
+        LTree: TPasTree;
+        LIdxX: TSemaXType;
+        LLo, LHi, LV: Int64;
+      begin
+        if InUntypedWith(N) or
+           not ArrayDefAt(LM.Tree.Nodes[N].FirstChild, LMid, LDef, LSkip, 0) then
+          Exit;
+        LIdx := LM.Tree.Nodes[LM.Tree.Nodes[N].FirstChild].NextSibling;
+        while LIdx <> NIL_NODE do
+        begin
+          LTree := FModels[LMid].Tree;
+          // `array of T` writes no index type.
+          if LTree.Nodes[LTree.Nodes[LDef].FirstChild].NextSibling =
+             NIL_NODE then
+          begin
+            if FPlatform = pfWin64 then
+              LIdxX := BuiltinX(AId, 'int64')
+            else
+              LIdxX := BuiltinX(AId, 'integer');
+            if CheckConv(N, LIdx, LIdx, LIdx, LIdxX, GetX(LIdx)) then
+              Exit;
+            if Fold(LIdx, LV) and (LV < 0) and IsConstExprX(AId, LIdx) and
+               not Unreliable(N, LIdx, GetX(LIdx)) then
+            begin
+              EmitAt(LM, LIdx, 'E1012', SE1012_ConstViolatesBounds);
+              Exit;
+            end;
+          end
+          else
+          begin
+            LKid := LTree.Nodes[LDef].FirstChild;
+            for LStep := 1 to LSkip do
+              if LKid <> NIL_NODE then
+                LKid := LTree.Nodes[LKid].NextSibling;
+            if LKid = NIL_NODE then
+              Exit;
+            LIdxX := IndexTypeNodeX(LMid, LKid, NIL_INST);
+            if not XValid(LIdxX) then
+              Exit;
+            // A subrange of character literals takes either character type
+            // (`array['0'..'1']` indexed by `AnsiChar(S[I])` compiles - a
+            // third-party unit of the client gate): no E2010 between two.
+            if not ((LTree.Nodes[LKid].Kind = nkSubrange) and
+                    (XCatOf(LIdxX) = tcChar) and
+                    (XCatOf(CanonTypeX(GetX(LIdx))) = tcChar)) and
+               CheckConv(N, LIdx, LIdx, LIdx, LIdxX, GetX(LIdx)) then
+              Exit;
+            if LTree.Nodes[LKid].Kind = nkSubrange then
+            begin
+              if OrdinalDefRange(LTree, LKid, OrdNameValueX(LMid), LLo, LHi,
+                 ConstFactsX(LMid)) and Fold(LIdx, LV) and
+                 ((LV < LLo) or (LV > LHi)) and IsConstExprX(AId, LIdx) and
+                 not Unreliable(N, LIdx, GetX(LIdx)) then
+              begin
+                EmitAt(LM, LIdx, 'E1012', SE1012_ConstViolatesBounds);
+                Exit;
+              end;
+            end
+            else if ConstOutside(N, LIdx, LIdx, LIdxX) then
+            begin
+              EmitAt(LM, LIdx, 'E1012', SE1012_ConstViolatesBounds);
+              Exit;
+            end;
+          end;
+          if not Advance(LMid, LDef, LSkip, 1) then
+            Exit;
+          LIdx := LM.Tree.Nodes[LIdx].NextSibling;
+        end;
+      end;
+
+      // 5.3.2: each label of the case N against its selector - E2026 a
+      // label no constant (a typed constant), E2010 one of another type,
+      // E1012 one outside the selector's range, E2011 a reversed range,
+      // E2030 a value an earlier label took. One report a label.
+      procedure CheckCase;
+      var
+        LSel, LArm, LLab, LLo, LHi, I: Integer;
+        LSelX: TSemaXType;
+        LVLo, LVHi: Int64;
+        LSeen: TArray<Int64>;
+        LWide, LDup: Boolean;
+      begin
+        LSel := LM.Tree.Nodes[N].FirstChild;
+        if LSel = NIL_NODE then
+          Exit;
+        LSelX := GetX(LSel);
+        if not XValid(LSelX) or not (XCatOf(CanonTypeX(LSelX)) in [tcInteger,
+           tcChar, tcEnum, tcBoolean]) or InUntypedWith(N) or
+           Unreliable(N, LSel, LSelX) then
+          Exit;
+        // An Int64 / UInt64 selector compares on 32 bits (5.3.2): its
+        // repeats are not judged.
+        LWide := (XCatOf(CanonTypeX(LSelX)) = tcInteger) and
+          (OrdFactsX(AId, NIL_NODE, LSelX).Rank = 4);
+        LSeen := nil;
+        LArm := LM.Tree.Nodes[LSel].NextSibling;
+        while (LArm <> NIL_NODE) and (LM.Tree.Nodes[LArm].Kind = nkCaseSel) do
+        begin
+          LLab := LM.Tree.Nodes[LArm].FirstChild;
+          if (LLab <> NIL_NODE) and
+             (LM.Tree.Nodes[LLab].Kind = nkCaseLabels) then
+            LLab := LM.Tree.Nodes[LLab].FirstChild
+          else
+            LLab := NIL_NODE;
+          while LLab <> NIL_NODE do
+          begin
+            if LM.Tree.Nodes[LLab].Kind = nkRange then
+            begin
+              LLo := LM.Tree.Nodes[LLab].FirstChild;
+              LHi := NIL_NODE;
+              if LLo <> NIL_NODE then
+                LHi := LM.Tree.Nodes[LLo].NextSibling;
+            end
+            else
+            begin
+              LLo := LLab;
+              LHi := LLab;
+            end;
+            if (LLo = NIL_NODE) or (LHi = NIL_NODE) then
+              // a label the parser could not read
+            else if NotConst(LLo) then
+              EmitAt(LM, LLo, 'E2026', SE2026_ConstantExpected)
+            else if (LHi <> LLo) and NotConst(LHi) then
+              EmitAt(LM, LHi, 'E2026', SE2026_ConstantExpected)
+            else if CheckConv(N, LSel, LLo, LLo, LSelX, GetX(LLo)) or
+                    ((LHi <> LLo) and
+                     CheckConv(N, LSel, LHi, LHi, LSelX, GetX(LHi))) then
+              // E2010
+            else if ConstOutside(N, LSel, LLo, LSelX) then
+              EmitAt(LM, LLo, 'E1012', SE1012_ConstViolatesBounds)
+            else if (LHi <> LLo) and ConstOutside(N, LSel, LHi, LSelX) then
+              EmitAt(LM, LHi, 'E1012', SE1012_ConstViolatesBounds)
+            else if Fold(LLo, LVLo) and Fold(LHi, LVHi) and
+                    IsConstExprX(AId, LLo) and IsConstExprX(AId, LHi) then
+            begin
+              if LVLo > LVHi then
+                EmitAt(LM, LLab, 'E2011', SE2011_LowBoundExceedsHigh)
+              else if not LWide then
+              begin
+                LDup := False;
+                I := 0;
+                while I < High(LSeen) do
+                begin
+                  if (LVLo <= LSeen[I + 1]) and (LVHi >= LSeen[I]) then
+                  begin
+                    LDup := True;
+                    Break;
+                  end;
+                  Inc(I, 2);
+                end;
+                if LDup then
+                  EmitAt(LM, LLab, 'E2030', SE2030_DuplicateCaseLabel)
+                else
+                  LSeen := LSeen + [LVLo, LVHi];
+              end;
+            end;
+            LLab := LM.Tree.Nodes[LLab].NextSibling;
+          end;
+          LArm := LM.Tree.Nodes[LArm].NextSibling;
+        end;
+      end;
+
+      // 4.2.1: a folded operator leaving its type is E2099 (`MaxInt + 1`) -
+      // looked for from an expression's outermost operator down, reported
+      // at the innermost one that fails (the enclosing ones then fold
+      // nothing). The operands come first, as dcc reads them.
+      function FaultIn(ANode, ADepth: Integer): Boolean;
+      var
+        LKid: Integer;
+      begin
+        Result := False;
+        ANode := PeelParens(LM.Tree, ANode);
+        if (ANode = NIL_NODE) or (ADepth > 64) or
+           not (LM.Tree.Nodes[ANode].Kind in [nkBinaryOp, nkUnaryOp]) then
+          Exit;
+        LKid := LM.Tree.Nodes[ANode].FirstChild;
+        while LKid <> NIL_NODE do
+        begin
+          if FaultIn(LKid, ADepth + 1) then
+            Exit(True);
+          LKid := LM.Tree.Nodes[LKid].NextSibling;
+        end;
+        if FoldedIntOverflow(LM.Tree, ANode, ConstFactsX(AId),
+           OrdNameValueX(AId)) then
+        begin
+          EmitAt(LM, ANode, 'E2099', SE2099_Overflow);
+          Result := True;
+        end;
+      end;
+
+      // 4.2: a constant zero divisor of `div` / `mod` is E2098, whatever
+      // the dividend (`I div 0`, `KB mod (KB - 5)`); then E2099 from an
+      // outermost integer constant operator.
+      procedure CheckFold;
+      var
+        LUp, LRight: Integer;
+        LV: Int64;
+      begin
+        if (LM.Tree.Nodes[N].Kind = nkBinaryOp) and
+           (OpOf(N) in [tkDiv, tkMod]) then
+        begin
+          LRight := LM.Tree.Nodes[N].FirstChild;
+          if LRight <> NIL_NODE then
+            LRight := LM.Tree.Nodes[LRight].NextSibling;
+          if (LRight <> NIL_NODE) and Fold(LRight, LV) and (LV = 0) and
+             IsConstExprX(AId, LRight) and not InUntypedWith(N) then
+            EmitAt(LM, LRight, 'E2098', SE2098_DivisionByZero);
+        end;
+        LUp := LM.Tree.Nodes[N].Parent;
+        while (LUp <> NIL_NODE) and (LM.Tree.Nodes[LUp].Kind = nkParen) do
+          LUp := LM.Tree.Nodes[LUp].Parent;
+        if (LUp <> NIL_NODE) and
+           (LM.Tree.Nodes[LUp].Kind in [nkBinaryOp, nkUnaryOp]) then
+          Exit;
+        // No constant test of the whole: FaultIn's fold decides, and stops
+        // at 64 nested operators where a chain may run to thousands.
+        if not InUntypedWith(N) then
+          FaultIn(N, 0);
+      end;
+
+      // A typed constant's, an initialized global's or a true constant's
+      // value, a subrange bound: E2026 when it is no constant (3.2.2).
+      procedure CheckConstPlace;
+      var
+        LKid, LVal, LCount: Integer;
+        LX: TSemaXType;
+      begin
+        case LM.Tree.Nodes[N].Kind of
+          nkSubrange:
+            begin
+              LKid := LM.Tree.Nodes[N].FirstChild;
+              while LKid <> NIL_NODE do
+              begin
+                if NotConst(LKid) then
+                begin
+                  EmitAt(LM, LKid, 'E2026', SE2026_ConstantExpected);
+                  Exit;
+                end;
+                LKid := LM.Tree.Nodes[LKid].NextSibling;
+              end;
+            end;
+          nkConstDecl, nkVarDecl:
+            begin
+              if (LM.Tree.Nodes[N].Kind = nkVarDecl) and
+                 ((LM.Tree.Nodes[N].Parent = NIL_NODE) or
+                  (LM.Tree.Nodes[LM.Tree.Nodes[N].Parent].Kind <> nkVarSec)) then
+                Exit;
+              // The value: the last child that is neither a name, a hint
+              // nor an attribute - after the type when there are two.
+              LVal := NIL_NODE;
+              LCount := 0;
+              LKid := LM.Tree.Nodes[N].FirstChild;
+              while LKid <> NIL_NODE do
+              begin
+                if (LM.Tree.Nodes[LKid].Kind in [nkDirective, nkAttrGroup]) or
+                   (nfName in LM.Tree.Nodes[LKid].Flags) or
+                   ((LKid = LM.Tree.Nodes[N].FirstChild) and
+                    (LM.Tree.Nodes[N].Kind = nkConstDecl)) then
+                  // a name, a hint, an attribute
+                else
+                begin
+                  Inc(LCount);
+                  LVal := LKid;
+                end;
+                LKid := LM.Tree.Nodes[LKid].NextSibling;
+              end;
+              if (LVal = NIL_NODE) or
+                 ((LM.Tree.Nodes[N].Kind = nkVarDecl) and (LCount < 2)) then
+                Exit;
+              if LM.Tree.Nodes[N].Kind = nkVarDecl then
+              begin
+                // 3.1.4: an `absolute` target is a variable's name -
+                // `absolute $400`, `absolute G + 1`, `absolute A[1]` are
+                // E2088 (`R.F` is one).
+                if LM.Tree.Nodes[N].Aux = 1 then
+                begin
+                  LKid := PeelParens(LM.Tree, LVal);
+                  while (LKid <> NIL_NODE) and
+                        (LM.Tree.Nodes[LKid].Kind = nkMember) do
+                    LKid := LM.Tree.Nodes[LKid].FirstChild;
+                  if (LKid = NIL_NODE) or (LM.Tree.Nodes[LKid].Kind <> nkIdent)
+                     or (LM.Tree.Nodes[PeelParens(LM.Tree, LVal)].Kind
+                       in [nkParen]) then
+                    EmitAt(LM, LVal, 'E2088', SE2088_VariableNameExpected);
+                  Exit;
+                end;
+                // 3.1.5: a thread variable takes no initializer (E2194).
+                if SectionWord(AId, N, tkThreadvar) then
+                begin
+                  EmitAt(LM, LVal, 'E2194', SE2194_ThreadVarInit);
+                  Exit;
+                end;
+              end
+              // 3.2.3: a resourcestring's value is a string (`R1 = 5` is
+              // E2010 'string' and 'Integer').
+              else if SectionWord(AId, N, tkResourcestring) then
+              begin
+                if not NotConst(LVal) then
+                begin
+                  LX := GetX(LVal);
+                  if XValid(LX) and not (XCatOf(CanonTypeX(LX)) in [tcString,
+                     tcChar]) and not Unreliable(N, LVal, LX) then
+                    EmitAt(LM, LVal, 'E2010', Format(SE2010_IncompatibleTypes,
+                      ['string', XTypeText(LX)]));
+                  Exit;
+                end;
+              end;
+              if LM.Tree.Nodes[LVal].Kind in [nkAggregate, nkSetCtor] then
+                Exit;
+              if LCount >= 2 then
+              begin
+                // A procedural, pointer or reference target takes an
+                // address or a routine; only an ordinal, real, string or
+                // set value is judged.
+                LX := CanonTypeX(DeclaredX(LM.Tree.Nodes[N].FirstChild));
+                if not XValid(LX) or not (XCatOf(LX) in [tcInteger, tcFloat,
+                   tcBoolean, tcChar, tcString, tcEnum, tcSet]) then
+                  Exit;
+              end;
+              if NotConst(LVal) then
+                EmitAt(LM, LVal, 'E2026', SE2026_ConstantExpected);
+            end;
+        end;
+      end;
+
+    begin
+      case LM.Tree.Nodes[N].Kind of
+        nkSetCtor:
+          CheckSetCtor;
+        nkCall:
+          begin
+            CheckArgs;
+            CheckCast;
+            CheckWrite;
+          end;
+        nkIndex:
+          CheckIndex;
+        nkCaseStmt:
+          CheckCase;
+        nkBinaryOp:
+          begin
+            CheckFold;
+            CheckRelation;
+          end;
+        nkUnaryOp:
+          CheckFold;
+        nkSubrange, nkConstDecl, nkVarDecl:
+          CheckConstPlace;
+      end;
+    end;
+
   var
     N, LDst, LSrc: Integer;
   begin
@@ -25159,6 +26080,8 @@ var
     LCustomAttrX := XNil;
     LNestTops := nil;
     for N := 0 to High(LM.Tree.Nodes) do
+    begin
+      CheckConsts(N);
       case LM.Tree.Nodes[N].Kind of
         nkAssign:
           begin
@@ -25168,7 +26091,9 @@ var
             LSrc := LM.Tree.Nodes[LDst].NextSibling;
             if LSrc = NIL_NODE then
               Continue;
-            CheckConv(N, LDst, LSrc, LSrc, GetX(LDst), GetX(LSrc));
+            if not CheckConv(N, LDst, LSrc, LSrc, GetX(LDst), GetX(LSrc)) and
+               ConstOutside(N, LDst, LSrc, GetX(LDst)) then
+              EmitAt(LM, LSrc, 'E1012', SE1012_ConstViolatesBounds);
             CheckStaticCtor(N, LDst, LSrc);
             CheckWriteTarget(N, LDst);
             CheckReadOnlyTarget(N, LDst);
@@ -25235,6 +26160,7 @@ var
         nkAttribute:
           CheckAttrArgs(N);
       end;
+    end;
     FreeAndNil(LNestTops);
     // `A[0, 1]` over `array of TCells`: the comma list ran from the array
     // into a default property (13.1.4) - recorded by the walk.
@@ -28603,10 +29529,7 @@ begin
               OrdNameValueX(LBMid), AValue, ConstFactsX(LBMid));
         skConst:
           if sfBuiltin in LS.Flags then
-          begin
-            Result := (LS.NameLower = 'true') or (LS.NameLower = 'false');
-            AValue := Ord(LS.NameLower = 'true');
-          end
+            Result := BuiltinConstOrdValue(LS.NameLower, AValue)
           else if (LS.TypeNode = NIL_NODE) and (LDecl <> NIL_NODE) and
                   (LT.Nodes[LDecl].Parent <> NIL_NODE) and
                   (LT.Nodes[LT.Nodes[LDecl].Parent].Kind = nkConstDecl) then

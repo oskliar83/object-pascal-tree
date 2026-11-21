@@ -1836,6 +1836,21 @@ function FoldedIntValue(const ATree: TPasTree; ANode, ADepth: Integer;
   const AFacts: TSemaConstFactsFunc; const AName: TSemaOrdNameValue;
   out AValue: Int64): Boolean;
 
+{ Does the operator ANode (an nkBinaryOp or nkUnaryOp, parentheses peeled)
+  fold its operands but leave its type - FoldedIntValue's own refusal that
+  is dcc's E2099 Overflow in conversion or arithmetic operation (4.2.1:
+  `MaxInt + 1`, `100000 * 100000`, `Cardinal(1) - 2`, `-KMin`)? Only the
+  node's own operator: an operand that does not fold answers False, so an
+  enclosing operator over an overflowing one is not a second report. }
+function FoldedIntOverflow(const ATree: TPasTree; ANode: Integer;
+  const AFacts: TSemaConstFactsFunc; const AName: TSemaOrdNameValue): Boolean;
+
+{ The ordinal value of a compiler-provided constant, which has no
+  declaration to fold: True / False, MaxInt / MaxLongint (High(Integer) -
+  so `MaxInt + 1` is E2099, 4.2.1). }
+function BuiltinConstOrdValue(const ANameLower: string;
+  out AValue: Int64): Boolean;
+
 { The integer shape - rank and signedness, as TSemaOpFacts has them - of
   Ord's answer AAns of a fixed builtin (oaShortInt .. oaCardinal); False for
   oaLeft and the rest. }
@@ -5854,6 +5869,17 @@ function OperatorAnswer(AOp: TPasTokenKind; AUnary: Boolean;
       LLU := True;
     if AR.NonNeg and (LRL = 3) and LLU then
       LRU := True;
+    // So does a non-negative constant beside a Cardinal constant: `$FFFFFFFF
+    // - 1`, `2 + 4294967293` are Cardinal, `4294967295 + 1` and `0 -
+    // 4294967295` E2099; `-1 + 4294967295` meets it in Int64 (W1024; 4.2.1,
+    // dcc64 37.0, 2026-11-21, local/probe-park/sa4-const T2).
+    if AL.IntConst and AR.IntConst then
+    begin
+      if (AL.IntValue >= 0) and (LRR = 3) and LRU then
+        LLU := True;
+      if (AR.IntValue >= 0) and (LRL = 3) and LLU then
+        LRU := True;
+    end;
     if (LRL = 4) or (LRR = 4) then
       Exit(IntAns(4, ((LRL = 4) and LLU) or ((LRR = 4) and LRU), LRL, LRR,
         LLU, LRU));
@@ -6619,13 +6645,24 @@ end;
   and calls followed (the cap a cycle of constants needs, 8), ANest the
   operators and calls ANode is nested in: an operator chain's left spine is
   as deep as the chain is long (audit A1-01), and every integer operand is
-  folded (OpFacts) - a chain past 64 has no value here. }
+  folded (OpFacts) - a chain past 64 has no value here. AOverflow, when
+  given, is set when ANode's OWN operator - its operands folded - leaves its
+  type (dcc's E2099; FoldedIntOverflow); the operands are asked without it. }
 function FoldIntNode(const ATree: TPasTree; ANode, ADepth, ANest: Integer;
   AOperand: Boolean; const AFacts: TSemaConstFactsFunc;
-  const AName: TSemaOrdNameValue; out AF: TSemaOpFacts): Boolean;
+  const AName: TSemaOrdNameValue; out AF: TSemaOpFacts;
+  AOverflow: PBoolean = nil): Boolean;
 var
   LOp: TPasTokenKind;
   LV: Int64;
+
+  // ANode's own operator overflows: its operands folded, its result not.
+  function Overflow: Boolean;
+  begin
+    if AOverflow <> nil then
+      AOverflow^ := True;
+    Result := False;
+  end;
 
   function OpTok(N: Integer): TPasTokenKind;
   begin
@@ -6660,7 +6697,7 @@ var
              not IntAnswerShape(OperatorAnswer(tkMinus, True, LA,
                Default(TSemaOpFacts), False, False), LR, LUns) or
              not OpFits(-LV, LR, LUns) then
-            Exit;
+            Exit(Overflow);
           LV := -LV;
         end;
       tkNot:
@@ -6726,14 +6763,14 @@ var
               begin
                 if ((B > 0) and (A > High(Int64) - B)) or
                    ((B < 0) and (A < Low(Int64) - B)) then
-                  Exit;
+                  Exit(Overflow);
                 LV := A + B;
               end;
             tkMinus:
               begin
                 if ((B < 0) and (A > High(Int64) + B)) or
                    ((B > 0) and (A < Low(Int64) + B)) then
-                  Exit;
+                  Exit(Overflow);
                 LV := A - B;
               end;
             tkStar:
@@ -6742,7 +6779,7 @@ var
                 begin
                   if (A = Low(Int64)) or (B = Low(Int64)) or
                      (Abs(A) > High(Int64) div Abs(B)) then
-                    Exit;
+                    Exit(Overflow);
                 end;
                 LV := A * B;
               end;
@@ -6753,7 +6790,7 @@ var
             if B = -1 then
             begin
               if A = Low(Int64) then
-                Exit;
+                Exit(Overflow);
               if LOp = tkDiv then
                 LV := -A
               else
@@ -6765,7 +6802,7 @@ var
               LV := A mod B;
           end;
           if not OpFits(LV, LShR, LUns) then
-            Exit;
+            Exit(Overflow);
         end;
       tkAnd:
         LV := A and B;
@@ -7074,6 +7111,35 @@ var
 begin
   Result := FoldIntNode(ATree, ANode, ADepth, 0, False, AFacts, AName, LF);
   AValue := LF.IntValue;
+end;
+
+function BuiltinConstOrdValue(const ANameLower: string;
+  out AValue: Int64): Boolean;
+begin
+  Result := True;
+  if (ANameLower = 'maxint') or (ANameLower = 'maxlongint') then
+    AValue := High(Integer)
+  else if (ANameLower = 'true') or (ANameLower = 'false') then
+    AValue := Ord(ANameLower = 'true')
+  else
+  begin
+    AValue := 0;
+    Result := False;
+  end;
+end;
+
+function FoldedIntOverflow(const ATree: TPasTree; ANode: Integer;
+  const AFacts: TSemaConstFactsFunc; const AName: TSemaOrdNameValue): Boolean;
+var
+  LF: TSemaOpFacts;
+  LOver: Boolean;
+begin
+  LOver := False;
+  ANode := PeelParens(ATree, ANode);
+  Result := (ANode <> NIL_NODE) and
+    (ATree.Nodes[ANode].Kind in [nkBinaryOp, nkUnaryOp]) and
+    not FoldIntNode(ATree, ANode, 0, 0, False, AFacts, AName, LF, @LOver) and
+    LOver;
 end;
 
 function OrdAnswerShape(AAns: TSemaOpAnswer; out ARank: Byte;
@@ -10346,11 +10412,7 @@ begin
               AValue, ConstFacts());
         skConst:
           if sfBuiltin in M.Symbols[LSym].Flags then
-          begin
-            Result := (M.Symbols[LSym].NameLower = 'true') or
-              (M.Symbols[LSym].NameLower = 'false');
-            AValue := Ord(M.Symbols[LSym].NameLower = 'true');
-          end
+            Result := BuiltinConstOrdValue(M.Symbols[LSym].NameLower, AValue)
           else if (M.Symbols[LSym].TypeNode = NIL_NODE) and
                   (LDecl <> NIL_NODE) and (T.Nodes[LDecl].Parent <> NIL_NODE)
                   and (Kind(T.Nodes[LDecl].Parent) = nkConstDecl) then

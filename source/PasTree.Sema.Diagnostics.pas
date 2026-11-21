@@ -160,6 +160,15 @@ const
   SE2034_TooManyActualParams  = 'E2034 Too many actual parameters';
   SE2035_NotEnoughActualParams = 'E2035 Not enough actual parameters';
   SE2026_ConstantExpected = 'E2026 Constant expression expected';
+  // Constant folding and case labels (4.2.1, 5.3.2; dcc64 37.0 wording).
+  SE2098_DivisionByZero = 'E2098 Division by zero';
+  SE2099_Overflow = 'E2099 Overflow in conversion or arithmetic operation';
+  SE2011_LowBoundExceedsHigh = 'E2011 Low bound exceeds high bound';
+  SE2030_DuplicateCaseLabel = 'E2030 Duplicate case label';
+  SE2089_InvalidTypecast = 'E2089 Invalid typecast';
+  SE2054_IllegalWriteType = 'E2054 Illegal type in Write/Writeln statement';
+  SE2088_VariableNameExpected = 'E2088 Variable name expected';
+  SE2194_ThreadVarInit = 'E2194 Cannot initialize thread local variables';
   // The attribute class's name as declared, unquoted (dcc64 37.0).
   SE2289_UnresolvedCustomAttribute = 'E2289 Unresolved custom attribute: %s';
   // A trailing comma in a call (`F(1,)`) with a parameter still due: dcc's
