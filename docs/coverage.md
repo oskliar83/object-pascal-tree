@@ -616,6 +616,14 @@ of less work, not a gap in following the language; its consequences are in
 
 ## 17-anonymous-methods.md
 
+### 17.1.1 Anonymous-method reference types
+- a `reference to` type written in place (not a type declaration's right
+  side) is E2003 on `reference` and E2029 at the token after `procedure` /
+  `function`, worded as dcc words a variable's; a parameter's, an inline
+  variable's and a typed constant's E2029 read differently in dcc, and its
+  recovery errors after them are not reproduced. The type stays in the
+  tree.
+
 ### 17.2.1 Inline `procedure`/`function` literals
 - a literal fits a `reference to` parameter by its parameter count,
   procedure / function kind and parameter types (overload scoring,

@@ -15636,6 +15636,48 @@ begin
   end;
 end;
 
+// `reference to` is a type only as a type declaration's right side (spec
+// 17.1.1): written as a variable's, a parameter's or a field's type, or as
+// another reference type's result, `reference` is E2003 and the heading
+// dcc reads after it E2029 (dcc64 37.0; spec audit g3 NestP;
+// local/probe-park/sa4-flow RT1-RT14).
+procedure TestRefTypeInPlace;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_refpl');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    '  IInterface = interface end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'RefX.dpr'),
+    'program RefX;'#10 +                                                 // 1
+    'type TP = reference to procedure; TQ = reference to function: Integer;'#10 + // 2
+    '  TG<T> = reference to function(A: T): T; TS = type TP;'#10 +       // 3
+    'var R: reference to procedure;'#10 +                                // 4 E2003 E2029
+    'procedure Q(X: reference to procedure); begin end;'#10 +            // 5 E2003 E2029
+    'type TR = record F: reference to procedure; end;'#10 +              // 6 E2003 E2029
+    '  TZ = reference to function: reference to procedure;'#10 +         // 7 E2003 E2029
+    'var reference: Integer; P: TP;'#10 +                                // 8
+    'begin'#10 +                                                         // 9
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'RefX.dpr'));
+    LM := ModelByName('refx');
+    Ok('refpl: E2003 lines [' + DiagLinesOf(LM, 'E2003') + ']',
+      DiagLinesOf(LM, 'E2003') = '4 5 6 7');
+    Ok('refpl: E2029 lines [' + DiagLinesOf(LM, 'E2029') + ']',
+      DiagLinesOf(LM, 'E2029') = '4 5 6 7');
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // A write to a `const` parameter (spec 6.2.3): E2064 for the parameter
 // itself, a field of a record one at any depth (through `with` too), an
 // element of a static array one or of a `const` open array; a dynamic
@@ -24614,6 +24656,7 @@ begin
   TestNestedProcValue;
   TestRaiseOperands;
   TestForInMembers;
+  TestRefTypeInPlace;
   TestOpenArrayValue;
   TestPropertyAccessChecks;
   TestGenericInferErrors;
