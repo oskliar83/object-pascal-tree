@@ -15880,8 +15880,13 @@ begin
     '  L2: ;'#10 +                                                       // 34 E2127
     '  try goto L3; L3: ; finally end;'#10 +                             // 35
     'end;'#10 +                                                          // 36
-    'begin'#10 +                                                         // 37
-    '  Exit(1);'#10 +                                                    // 38 E2025
+    'function ExTwo: Integer; begin Exit(1, 2); end;'#10 +               // 37 E2029
+    'function ExFin: Integer; begin'#10 +                                // 38
+    '  try G := 1; finally Exit(1, 2, 3); end; end;'#10 +                // 39 E2029
+    'procedure ExProc; begin Exit(1, 2); end;'#10 +                      // 40 E2025
+    'function ExGap: Integer; begin Exit(1 2); end;'#10 +                // 41 E2066
+    'begin'#10 +                                                         // 42
+    '  Exit(1);'#10 +                                                    // 43 E2025
     'end.'#10);
   GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
   try
@@ -15890,7 +15895,14 @@ begin
     Ok('flow: E2097 lines [' + DiagLinesOf(LM, 'E2097') + ']',
       DiagLinesOf(LM, 'E2097') = '4 5 10 24');
     Ok('flow: E2025 lines [' + DiagLinesOf(LM, 'E2025') + ']',
-      DiagLinesOf(LM, 'E2025') = '6 26 38');
+      DiagLinesOf(LM, 'E2025') = '6 26 40 43');
+    // `Exit(1, 2)` (5.6.3): the parser's E2029 at the comma in a function,
+    // one per call and instead of E2126; E2025 alone in a procedure; no
+    // comma, no E2029.
+    Ok('flow: E2029 lines [' + DiagLinesOf(LM, 'E2029') + ']',
+      DiagLinesOf(LM, 'E2029') = '37 39');
+    Ok('flow: E2029 wording [' + DiagText(LM, 'E2029') + ']',
+      Pos('E2029 '')'' expected but '','' found', DiagText(LM, 'E2029')) > 0);
     Ok('flow: E2126 lines [' + DiagLinesOf(LM, 'E2126') + ']',
       DiagLinesOf(LM, 'E2126') = '14 16 17');
     Ok('flow: E2127 lines [' + DiagLinesOf(LM, 'E2127') + ']',

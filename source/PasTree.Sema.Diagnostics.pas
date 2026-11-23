@@ -211,6 +211,9 @@ const
   // An attribute class with more after its name (`[TA + 1]`, 19.3.2): the
   // token, quoted - `identifier 'X'` for a name, a word upper-cased.
   SE2029_ListExpected = 'E2029 '','' or '']'' expected but %s found';
+  // `Exit(1, 2)` in a function (5.6.3): the intrinsic takes one expression,
+  // dcc's parser stops at the comma.
+  SE2029_RParenExpectedComma = 'E2029 '')'' expected but '','' found';
   // Generic type-parameter constraints (16.4.1). Wording and codes verified
   // against dcc32 37.0; the single %s is the PARAMETER name (E2515 takes the
   // constraint type name second).

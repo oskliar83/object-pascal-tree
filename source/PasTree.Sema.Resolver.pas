@@ -6037,6 +6037,26 @@ type
     FModel.AddDiag(MakeDiag(ACode, AMsg, ANode, LFileId, LLine, LCol));
   end;
 
+  // E2029 at the comma after AArg, the call's first argument. `Exit(1 2)`
+  // reaches here too (the parser's E2066 recovery keeps the second operand
+  // as an argument): no comma, no E2029.
+  procedure ReportAtComma(AArg: Integer);
+  var
+    LVis: TPasVisibleToken;
+    LTok, LFileId, LLine, LCol: Integer;
+  begin
+    LTok := FTree.Nodes[AArg].LastToken + 1;
+    if (LTok < 0) or (LTok > High(FTree.Source.Visible)) or
+       (FTree.Source.VisibleKind(LTok) <> tkComma) then
+      Exit;
+    LVis := FTree.Source.Visible[LTok];
+    LFileId := LVis.FileId;
+    FTree.Source.Files[LFileId].OffsetToLineCol(
+      FTree.Source.Files[LFileId].Tokens[LVis.TokenIndex].Start, LLine, LCol);
+    FModel.AddDiag(MakeDiag('E2029', SE2029_RParenExpectedComma, AArg,
+      LFileId, LLine, LCol));
+  end;
+
   // The statement AStmt (an nkExprStmt) when it is Break, Continue or Exit:
   // the head ident, its call (when written with parentheses) in ACall.
   function FlowHead(AStmt: Integer; out AKind: TFlowKind;
@@ -6111,6 +6131,18 @@ type
       end;
       LCur := LUp;
       LUp := FTree.Nodes[LCur].Parent;
+    end;
+    // `Exit(1, 2)` in a function is dcc's parse error at the comma ahead of
+    // the second argument (5.6.3) - one per call, and it wins over E2126
+    // (dcc's parser never reaches the finally check). In a procedure the
+    // arguments are E2025's below, with no E2029.
+    if (LKind = fkExit) and (LCall <> NIL_NODE) and
+       (NextSib(FirstChild(LCall)) <> NIL_NODE) and
+       (NextSib(NextSib(FirstChild(LCall))) <> NIL_NODE) and
+       not HasNoResult(LUp) then
+    begin
+      ReportAtComma(NextSib(FirstChild(LCall)));
+      Exit;
     end;
     if (LKind = fkBreak) and not LLoop then
       Report(AStmt, 'E2097', SE2097_BreakOutsideLoop)
