@@ -3751,6 +3751,18 @@ begin
         Next;
         FB.Adopt(LParam, ParseExpression);
       end;
+    end
+    else if LByMode and (CurKind = tkEqual) then
+    begin
+      // An untyped parameter with a default (`const A = nil`, `var A = 0`)
+      // reads on: dcc parses it and rejects it as E2268, a sema check
+      // (CheckParamDefaults, 6.2.5). The value is read and left an ORPHAN -
+      // never adopted: every child after the names is the type, and an
+      // untyped parameter has none, so adopting it would turn the value into
+      // the type for each consumer of nkParam. Its tokens stay inside the
+      // parameter's span, which is how the check finds the `=`.
+      Next;
+      ParseExpression;
     end;
     FB.SetLast(LParam, FPos - 1);
     FB.Adopt(Result, LParam);

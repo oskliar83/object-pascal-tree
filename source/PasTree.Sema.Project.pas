@@ -1375,6 +1375,8 @@ type
       const AT, AE: TSemaXType): TSemaXType;
     function RecordOperatorX(AOp: TPasTokenKind; AUnary: Boolean;
       const AL, AR: TSemaXType): TSemaXType;
+    function RecordDeclaresOperatorX(AOp: TPasTokenKind; AUnary: Boolean;
+      const AOwner: TSemaXType): Boolean;
     function UntypedInitTypeX(AMid, ANode: Integer;
       AFollowForeign: Boolean): TSemaXType;
     function InferredDeclTypeX(AMid, ASym: Integer;
@@ -14116,11 +14118,150 @@ var
     end;
   end;
 
+  { 6.3.1 (dcc64 37.0, spec audit g3 OvAmb, local/probe-park/sa5-exprs
+    o1, o2): two `overload` routines of one scope - a program's, a unit
+    section's, a routine's own - whose parameter lists match are one routine
+    declared twice, E2004 at the later one, whatever their results (`F(X:
+    Integer): Integer` beside `F(X: Integer): string`, a function beside a
+    procedure). A slot matches by type alone - `var`, `const`, `out` and a
+    value one are the same slot - an untyped one only another untyped one.
+    Read where certain: both types resolved to one type (an alias is its
+    target, a distinct `type Integer` is not), no inline `array of`, no
+    ShortString beside another mode (it compiles), no generic routine, no
+    `forward` (its body is no second declaration). }
+  procedure CheckOverloadTwins;
+
+    function SameSlot(AP, BP: Integer): Boolean;
+    var
+      LA, LB: TSemaXType;
+      LAN, LBN: Integer;
+    begin
+      LAN := LM.Symbols[AP].TypeNode;
+      LBN := LM.Symbols[BP].TypeNode;
+      if (LAN = NIL_NODE) or (LBN = NIL_NODE) then
+        Exit((LAN = NIL_NODE) and (LBN = NIL_NODE) and
+          (LM.Symbols[AP].DeclNode <> NIL_NODE) and
+          (LM.Symbols[BP].DeclNode <> NIL_NODE));
+      Result := False;
+      if (KindOf(LAN) = nkArrayType) or (KindOf(LBN) = nkArrayType) then
+        Exit;
+      LA := DeclTypeX(AId, AP);
+      LB := DeclTypeX(AId, BP);
+      if not XValid(LA) or not XValid(LB) then
+        Exit;
+      LA := CanonTypeX(LA);
+      LB := CanonTypeX(LB);
+      if not XValid(LA) or not XValid(LB) or
+         (FModels[LA.UnitId].Symbols[LA.Sym].Kind = skGenericParam) or
+         (FModels[LB.UnitId].Symbols[LB.Sym].Kind = skGenericParam) then
+        Exit;
+      if (LA.UnitId = LB.UnitId) and (LA.Sym = LB.Sym) and
+         (LA.Inst = LB.Inst) then
+        Result := True
+      else
+        // Two seeds of one built-in type (LongInt and Integer, a Win64
+        // NativeInt and Int64): the overload test's identity.
+        Result :=
+          (FModels[LA.UnitId].Symbols[LA.Sym].Kind = skBuiltinType) and
+          (FModels[LB.UnitId].Symbols[LB.Sym].Kind = skBuiltinType) and
+          XSameType(LA, LB);
+      if Result and (ParamModeOf(LM, AP) <> ParamModeOf(LM, BP)) and
+         (FModels[LA.UnitId].Symbols[LA.Sym].Kind = skBuiltinType) and
+         (FModels[LA.UnitId].Symbols[LA.Sym].NameLower = 'shortstring') then
+        Result := False;
+    end;
+
+    function Candidate(ASym: Integer): Boolean;
+    begin
+      Result := (LM.Symbols[ASym].Kind = skRoutine) and
+        (LM.Symbols[ASym].DeclNode <> NIL_NODE) and
+        (LM.Symbols[ASym].MemberScope <> NIL_SCOPE) and
+        (LM.Symbols[ASym].Flags * [sfOverloadDirective, sfForward, sfGeneric,
+          sfBuiltin] = [sfOverloadDirective]);
+    end;
+
+    // The parameter names the declaration of routine ASym writes - a scope
+    // list that was never bound reads as none.
+    function WrittenParams(ASym: Integer): Integer;
+    var
+      LParams, LP, LC: Integer;
+    begin
+      Result := 0;
+      LParams := ChildOfKind(LM.Tree.Nodes[LM.Symbols[ASym].DeclNode].Parent,
+        nkParams);
+      if LParams = NIL_NODE then
+        Exit;
+      LP := LM.Tree.Nodes[LParams].FirstChild;
+      while LP <> NIL_NODE do
+      begin
+        LC := LM.Tree.Nodes[LP].FirstChild;
+        while LC <> NIL_NODE do
+        begin
+          if nfName in LM.Tree.Nodes[LC].Flags then
+            Inc(Result);
+          LC := LM.Tree.Nodes[LC].NextSibling;
+        end;
+        LP := LM.Tree.Nodes[LP].NextSibling;
+      end;
+    end;
+
+    function Twins(A, B: Integer): Boolean;
+    var
+      LPA, LPB: TArray<Integer>;
+    begin
+      LPA := XParamSyms(AId, A);
+      LPB := XParamSyms(AId, B);
+      Result := (Length(LPA) = Length(LPB)) and
+        (Length(LPA) = WrittenParams(A)) and
+        (Length(LPB) = WrittenParams(B));
+      for var LI := 0 to High(LPA) do
+        if Result then
+          Result := SameSlot(LPA[LI], LPB[LI]);
+    end;
+
+  var
+    LSym, LA, LB, LScope: Integer;
+  begin
+    for LSym := 0 to LM.SymCount - 1 do
+    begin
+      if (LM.Symbols[LSym].Kind <> skRoutine) or
+         (LM.Symbols[LSym].NextOverload = NIL_SYM) or
+         (sfOverload in LM.Symbols[LSym].Flags) then
+        Continue;   // only a chain's head
+      LScope := LM.Symbols[LSym].Scope;
+      if (LScope = NIL_SCOPE) or not (LM.Scopes[LScope].Kind in [sckUnit,
+         sckImplementation, sckRoutine]) then
+        Continue;
+      LB := LM.Symbols[LSym].NextOverload;
+      while LB <> NIL_SYM do
+      begin
+        if Candidate(LB) and not LM.HasDiagAt(LM.Symbols[LB].DeclNode) then
+        begin
+          LA := LSym;
+          while LA <> LB do
+          begin
+            if Candidate(LA) and Twins(LA, LB) then
+            begin
+              EmitAt(LM, LM.Symbols[LB].DeclNode, 'E2004',
+                Format(SE2004_IdentifierRedeclared,
+                [LM.Tree.NodeText(LM.Symbols[LB].DeclNode)]));
+              Break;
+            end;
+            LA := LM.Symbols[LA].NextOverload;
+          end;
+        end;
+        LB := LM.Symbols[LB].NextOverload;
+      end;
+    end;
+  end;
+
 var
   LNode: Integer;
 begin
   LM := FModels[AId];
   LResolved := LM.AllUsesResolved and not UsesLeafGuessed(LM);
+  if LResolved then
+    CheckOverloadTwins;
   for LNode := 0 to High(LM.Tree.Nodes) do
     case LM.Tree.Nodes[LNode].Kind of
       nkGenericParam:
@@ -26508,12 +26649,108 @@ var
           [XTypeText(LLX), XTypeText(LRX)]));
     end;
 
+    // An operator with a record operand (9.3.1): only the operand records'
+    // own `class operator`s apply - no built-in operator, and an Implicit
+    // only to a string type against a string operand (spec 9.3.1). When no
+    // operand record declares an operator of the token's name and arity -
+    // none, or only one E2517 rejected (`Add(A: TR)`) - it is E2015 at the
+    // operator. A declared candidate that does not fit is left to the
+    // scorer, a Variant operand and a record with an Implicit left out.
+    // dcc64 37.0, 2026-11-22 (spec audit g4 ROpAr; local/probe-park/
+    // sa5-exprs r2-r5).
+    procedure CheckRecordOps(N: Integer);
+    var
+      LL, LR, LTok: Integer;
+      LOp: TPasTokenKind;
+      LUnary: Boolean;
+      LLX, LRX, LLc, LRc: TSemaXType;
+      LExt: TPasExtRef;
+
+      // Does the record type AX declare a `class operator Implicit`?
+      function HasImplicit(const AX: TSemaXType): Boolean;
+      var
+        LOm: TPasSemaModel;
+        LScope: Integer;
+      begin
+        LOm := FModels[AX.UnitId];
+        LScope := LOm.Symbols[AX.Sym].MemberScope;
+        if (LScope = NIL_SCOPE) or (LOm.Scopes[LScope].Symbols.Count = 0) then
+          Exit(True);   // not read: not known to have none
+        for var LSym in LOm.Scopes[LScope].Symbols do
+          if (LOm.Symbols[LSym].Kind = skRoutine) and
+             (LOm.Symbols[LSym].NameLower = 'implicit') and
+             (LOm.RoutineHead(LSym) = rhOperator) then
+            Exit(True);
+        Result := False;
+      end;
+
+    begin
+      LTok := LM.Tree.Nodes[N].Aux;
+      if (LTok < 0) or (LTok > High(LM.Tree.Source.Visible)) then
+        Exit;
+      LOp := LM.Tree.Source.VisibleKind(LTok);
+      LUnary := LM.Tree.Nodes[N].Kind = nkUnaryOp;
+      if LUnary then
+      begin
+        if not (LOp in [tkMinus, tkPlus, tkNot]) then
+          Exit;
+      end
+      else if not (LOp in [tkPlus, tkMinus, tkStar, tkSlash, tkDiv, tkMod,
+         tkShl, tkShr, tkAnd, tkOr, tkXor, tkEqual, tkNotEqual, tkLess,
+         tkLessEqual, tkGreater, tkGreaterEqual, tkIn]) then
+        Exit;
+      LL := LM.Tree.Nodes[N].FirstChild;
+      if LL = NIL_NODE then
+        Exit;
+      LR := LM.Tree.Nodes[LL].NextSibling;
+      if not LUnary and (LR = NIL_NODE) then
+        Exit;
+      LLX := GetX(LL);
+      if not XValid(LLX) then
+        Exit;
+      LLc := CanonTypeX(LLX);
+      LRX := LLX;
+      if LUnary then
+        LRc := LLc
+      else
+      begin
+        LRX := GetX(LR);
+        if not XValid(LRX) then
+          Exit;
+        LRc := CanonTypeX(LRX);
+      end;
+      if not XValid(LLc) or not XValid(LRc) or
+         ((XCatOf(LLc) <> tcRecord) and (XCatOf(LRc) <> tcRecord)) or
+         (XCatOf(LLc) in [tcUnknown, tcVariant]) or
+         (XCatOf(LRc) in [tcUnknown, tcVariant]) or
+         OpenX(LLc) or OpenX(LRc) then
+        Exit;
+      if RecordDeclaresOperatorX(LOp, LUnary, LLc) or
+         (not LUnary and RecordDeclaresOperatorX(LOp, False, LRc)) then
+        Exit;
+      // A record helper's `class operator` applies too (r4): a type with a
+      // helper active in the unit is not judged. Nor is a record with an
+      // `Implicit`: one to a string type takes a string's operator against
+      // a string operand (`S + R`, `'ab' + R`, `R = S` compile - not
+      // against a Char, `'a' + R` is E2015; r5), which this does not tell.
+      if ((XCatOf(LLc) = tcRecord) and (ActiveHelperOf(AId, LLc, LExt, -1) or
+          HasImplicit(LLc))) or
+         ((XCatOf(LRc) = tcRecord) and (ActiveHelperOf(AId, LRc, LExt, -1) or
+          HasImplicit(LRc))) then
+        Exit;
+      if InUntypedWith(N) or Unreliable(N, LL, LLX) or
+         (not LUnary and Unreliable(N, LR, LRX)) then
+        Exit;
+      EmitAtToken(LM, N, LTok, 'E2015', SE2015_OperatorNotApplicable);
+    end;
+
     // The operator checks of a binary operator that are not CheckCompare's.
     procedure CheckOperands(N: Integer);
     begin
       CheckPointerOps(N);
       CheckArrayPlus(N);
       CheckIsAs(N);
+      CheckRecordOps(N);
     end;
 
     // Where a file type may not stand (10.2.1), in one pass over the
@@ -26725,12 +26962,16 @@ var
       LHead := PeelParens(LM.Tree, LM.Tree.Nodes[N].FirstChild);
       if LHead = NIL_NODE then
         Exit;
-      // A head that binds no routine says nothing: an intrinsic taking a
-      // type (`Default(IFoo)`) need not bind, and an undeclared routine
-      // (dcc's E2232 beside its E2003) is left to the E2003.
-      LBuiltin := not TargetSym(LHead, LMid, LSym) or
-        (FModels[LMid].Symbols[LSym].Kind <> skRoutine) or
-        (sfBuiltin in FModels[LMid].Symbols[LSym].Flags);
+      // A head that binds no routine says nothing - an intrinsic taking a
+      // type (`Default(IFoo)`) need not bind - unless it is reported
+      // undeclared: dcc's E2232 stands beside its E2003 (`Supports(O,
+      // INoGuid)` without SysUtils; spec audit g5 I01 line 17).
+      if TargetSym(LHead, LMid, LSym) then
+        LBuiltin := (FModels[LMid].Symbols[LSym].Kind <> skRoutine) or
+          (sfBuiltin in FModels[LMid].Symbols[LSym].Flags)
+      else
+        LBuiltin := (LM.Tree.Nodes[LHead].Kind <> nkIdent) or
+          not LM.HasDiagAt(LHead);
       if not LBuiltin and not InUntypedWith(N) then
       begin
         LArg := LM.Tree.Nodes[LM.Tree.Nodes[N].FirstChild].NextSibling;
@@ -27539,7 +27780,8 @@ var
       every list - a routine's, a forward or interface one and its
       implementation alike, a procedural type's: E2268 for a type that takes
       none - an open array, a Variant / OleVariant, a record or `object`, a
-      static array (an untyped one is the parser's) - asked before the mode;
+      static array, an untyped one (its value is left out of the tree by the
+      parser, UntypedDefault) - asked before the mode;
       E2239 for a `var` / `out` / `const [Ref]` one; E2026 for a dynamic
       array's that is not `nil`. A default (E2268's and E2026's too, not
       E2239's) makes each later parameter without one E2238, an untyped one
@@ -27549,6 +27791,23 @@ var
       LParam, LChild, LName, LType, LDflt, LAttr, LCore: Integer;
       LSeen, LByRef: Boolean;
       LX: TSemaXType;
+
+      // An untyped parameter whose span goes on past its last child: the
+      // parser read a `= value` there and left it out of the tree.
+      function UntypedDefault(AParam: Integer): Boolean;
+      var
+        LLast, LTok: Integer;
+      begin
+        Result := False;
+        LLast := LM.Tree.LastChild(AParam);
+        if LLast = NIL_NODE then
+          Exit;
+        LTok := LM.Tree.Nodes[LLast].LastToken + 1;
+        Result := (LTok <= LM.Tree.Nodes[AParam].LastToken) and
+          (LTok <= High(LM.Tree.Source.Visible)) and
+          (LM.Tree.Source.VisibleKind(LTok) = tkEqual);
+      end;
+
     begin
       LSeen := False;
       LParam := LM.Tree.Nodes[N].FirstChild;
@@ -27587,7 +27846,18 @@ var
           end;
           if LName = NIL_NODE then
             Exit;   // a list being typed
-          if LDflt = NIL_NODE then
+          if (LType = NIL_NODE) and UntypedDefault(LParam) then
+          begin
+            // `const A = nil`, `var A = 0`, `const A = 1 + 2`: an untyped
+            // parameter takes no default - E2268 (not E2239 for a var / out
+            // one). A `const` one counts as a default for E2238, a var / out
+            // one does not, as for E2239 (dcc64 37.0, local/probe-park/
+            // sa5-exprs p1, p2; the parser leaves the value out of the tree).
+            EmitAt(LM, LName, 'E2268', SE2268_NoDefaultForType);
+            if not LByRef then
+              LSeen := True;
+          end
+          else if LDflt = NIL_NODE then
           begin
             if LSeen then
             begin
@@ -28743,6 +29013,7 @@ var
         LCallee, LArg, LCore, LMid, LSym: Integer;
         LX, LC: TSemaXType;
         LBad, LFirst: Boolean;
+        LSig: TPasProcSig;
       begin
         LCallee := PeelParens(LM.Tree, LM.Tree.Nodes[N].FirstChild);
         if (LCallee = NIL_NODE) or (LM.Tree.Nodes[LCallee].Kind <> nkIdent) or
@@ -28765,7 +29036,13 @@ var
             Exit;
           LBad := False;
           LX := GetX(LCore);
-          if (LM.Tree.Nodes[LCore].Kind = nkDeref) and not XValid(LX) then
+          if LM.Tree.Nodes[LCore].Kind = nkAnonMethod then
+            // An anonymous method literal is a procedural value, in
+            // parentheses too, and called where it is written as well
+            // (`Writeln(function: Integer begin ... end())` is E2066, then
+            // this; 17.2.1).
+            LBad := True
+          else if (LM.Tree.Nodes[LCore].Kind = nkDeref) and not XValid(LX) then
           begin
             // `P^` of an untyped Pointer.
             LC := CanonTypeX(GetX(LM.Tree.Nodes[LCore].FirstChild));
@@ -28775,6 +29052,24 @@ var
           else if XValid(LX) and not Unreliable(N, LCore, LX) then
           begin
             LC := CanonTypeX(LX);
+            // A procedural value - a `reference to` one too - is called
+            // when its function takes no argument, and its result is what
+            // prints (`Writeln(F)` for `F: reference to function: Integer`
+            // compiles); a procedure's is E2054 (`procedure of object`,
+            // `reference to procedure`).
+            if ProcTypeSigX(LC, LSig) then
+            begin
+              if not LSig.IsFunc then
+                LBad := True
+              else
+              begin
+                LC := ProcResultX(LC);
+                if not XValid(LC) then
+                  Exit;
+                LC := CanonTypeX(LC);
+              end;
+            end;
+            if not LBad then
             case XCatOf(LC) of
               tcFile:
                 if not LFirst then
@@ -29567,6 +29862,8 @@ var
             CheckCompare(N);
             CheckOperands(N);
           end;
+        nkUnaryOp:
+          CheckRecordOps(N);
         nkCall:
           begin
             CheckVarArgs(N);
@@ -34325,10 +34622,97 @@ end;
   overloads all give TPointF - so an unknown operand or a real ambiguity
   leaves the expression untyped rather than guessed. A generic record's
   operator is read in the operand's instantiation frame. }
+type
+  TRecordOpNames = array[0..1] of string;
+
+{ The `class operator` names the token AOp stands for (9.3.1): `+` Add or,
+  unary, Positive; `and` LogicalAnd and BitwiseAnd; ... - ANames[0] empty
+  when the token names none. }
+procedure RecordOperatorNames(AOp: TPasTokenKind; AUnary: Boolean;
+  out ANames: TRecordOpNames);
+begin
+  ANames[0] := '';
+  ANames[1] := '';
+  if AUnary then
+    case AOp of
+      tkMinus: ANames[0] := 'negative';
+      tkPlus: ANames[0] := 'positive';
+      tkNot: ANames[0] := 'logicalnot';
+    end
+  else
+    case AOp of
+      tkPlus: ANames[0] := 'add';
+      tkMinus: ANames[0] := 'subtract';
+      tkStar: ANames[0] := 'multiply';
+      tkSlash: ANames[0] := 'divide';
+      tkDiv: ANames[0] := 'intdivide';
+      tkMod: ANames[0] := 'modulus';
+      tkShl: ANames[0] := 'leftshift';
+      tkShr: ANames[0] := 'rightshift';
+      tkAnd:
+        begin
+          ANames[0] := 'logicaland';
+          ANames[1] := 'bitwiseand';
+        end;
+      tkOr:
+        begin
+          ANames[0] := 'logicalor';
+          ANames[1] := 'bitwiseor';
+        end;
+      tkXor:
+        begin
+          ANames[0] := 'logicalxor';
+          ANames[1] := 'bitwisexor';
+        end;
+      // A comparison's operator may give any type (4.5).
+      tkEqual: ANames[0] := 'equal';
+      tkNotEqual: ANames[0] := 'notequal';
+      tkLess: ANames[0] := 'lessthan';
+      tkLessEqual: ANames[0] := 'lessthanorequal';
+      tkGreater: ANames[0] := 'greaterthan';
+      tkGreaterEqual: ANames[0] := 'greaterthanorequal';
+      tkIn: ANames[0] := 'in';
+    end;
+end;
+
+{ Does the record type AOwner (canonical) declare a `class operator` the
+  token AOp stands for, with as many parameters as the operator has
+  operands? One of the wrong arity is E2517 at its declaration and no
+  candidate (9.3.1). False for a token that names no operator. }
+function TPasSemaProject.RecordDeclaresOperatorX(AOp: TPasTokenKind;
+  AUnary: Boolean; const AOwner: TSemaXType): Boolean;
+var
+  LNames: TRecordOpNames;
+  LOm: TPasSemaModel;
+  LScope, LCount: Integer;
+begin
+  Result := False;
+  RecordOperatorNames(AOp, AUnary, LNames);
+  if (LNames[0] = '') or not XValid(AOwner) or
+     (XCatOf(AOwner) <> tcRecord) then
+    Exit;
+  LOm := FModels[AOwner.UnitId];
+  LScope := LOm.Symbols[AOwner.Sym].MemberScope;
+  // No member list read (one never bound, an empty record): not known.
+  if (LScope = NIL_SCOPE) or (LOm.Scopes[LScope].Symbols.Count = 0) then
+    Exit(True);
+  for var LSym in LOm.Scopes[LScope].Symbols do
+    if (LOm.Symbols[LSym].Kind = skRoutine) and
+       ((LOm.Symbols[LSym].NameLower = LNames[0]) or
+        (LOm.Symbols[LSym].NameLower = LNames[1])) and
+       (LOm.RoutineHead(LSym) = rhOperator) then
+    begin
+      LCount := Length(XParamSyms(AOwner.UnitId, LSym));
+      // None read: a parameter list never bound - not known to be wrong.
+      if (LCount = 0) or (LCount = 2 - Ord(AUnary)) then
+        Exit(True);
+    end;
+end;
+
 function TPasSemaProject.RecordOperatorX(AOp: TPasTokenKind; AUnary: Boolean;
   const AL, AR: TSemaXType): TSemaXType;
 var
-  LNames: array[0..1] of string;
+  LNames: TRecordOpNames;
   LBest: Integer;
   LWin: TSemaXType;
   LAgreed: Boolean;
@@ -34419,48 +34803,7 @@ var
 
 begin
   Result := XNil;
-  LNames[0] := '';
-  LNames[1] := '';
-  if AUnary then
-    case AOp of
-      tkMinus: LNames[0] := 'negative';
-      tkPlus: LNames[0] := 'positive';
-      tkNot: LNames[0] := 'logicalnot';
-    end
-  else
-    case AOp of
-      tkPlus: LNames[0] := 'add';
-      tkMinus: LNames[0] := 'subtract';
-      tkStar: LNames[0] := 'multiply';
-      tkSlash: LNames[0] := 'divide';
-      tkDiv: LNames[0] := 'intdivide';
-      tkMod: LNames[0] := 'modulus';
-      tkShl: LNames[0] := 'leftshift';
-      tkShr: LNames[0] := 'rightshift';
-      tkAnd:
-        begin
-          LNames[0] := 'logicaland';
-          LNames[1] := 'bitwiseand';
-        end;
-      tkOr:
-        begin
-          LNames[0] := 'logicalor';
-          LNames[1] := 'bitwiseor';
-        end;
-      tkXor:
-        begin
-          LNames[0] := 'logicalxor';
-          LNames[1] := 'bitwisexor';
-        end;
-      // A comparison's operator may give any type (4.5).
-      tkEqual: LNames[0] := 'equal';
-      tkNotEqual: LNames[0] := 'notequal';
-      tkLess: LNames[0] := 'lessthan';
-      tkLessEqual: LNames[0] := 'lessthanorequal';
-      tkGreater: LNames[0] := 'greaterthan';
-      tkGreaterEqual: LNames[0] := 'greaterthanorequal';
-      tkIn: LNames[0] := 'in';
-    end;
+  RecordOperatorNames(AOp, AUnary, LNames);
   if LNames[0] = '' then
     Exit;
   LBest := -1;

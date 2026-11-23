@@ -287,11 +287,15 @@ of less work, not a gap in following the language; its consequences are in
 - an operator on a record operand is typed by the `class operator` it
   calls (RecordOperatorX, 9.3.1): the arithmetic, logical and unary ones,
   and the comparisons and `in`, whose result need not be Boolean (4.5); the
-  unit's own typer leaves them to the project's. Not reported: an operator
-  no `class operator` of the record takes (`R + 1` beside only `Add(TR,
-  TR)`, `P = P2` for a record with no `Equal`: E2015), and an arithmetic
-  operator on a class or interface operand (E2015) - only two scalar
-  operands are judged. Best-scoring overloads that disagree on their result
+  unit's own typer leaves them to the project's. An operator no operand
+  record declares under its name and arity is E2015 (`P = P2` for a record
+  with no `Equal`, `R + R` beside an E2517 `Add(A: TR)`; CheckRecordOps);
+  not reported: one a declared operator does not fit (`R + 1` beside only
+  `Add(TR, TR)`: E2015), one with a Variant operand, one on a record a
+  helper is active for or that declares an `Implicit` (`I + 1` for an
+  Implicit to Integer is E2015, `S + R` for one to string compiles - the
+  operand's type decides, spec 9.3.1), and an arithmetic operator on a
+  class or interface operand (E2015). Best-scoring overloads that disagree on their result
   type leave the expression untyped.
 
 ## 05-statements.md
@@ -339,7 +343,18 @@ of less work, not a gap in following the language; its consequences are in
 
 ## 06-routines.md
 
+### 6.2.6 Open array & `array of const` parameters
+- `P(1..3)` against an open array is dcc's E2192 (a constant range, read
+  only there: against any other parameter, and for `P(I..J)`, it is E2029
+  at the `..`). The parser reads no range in a call argument - the reading
+  depends on the resolved callee - so PasTree reports the E2029 every time.
+
 ### 6.3.1 The `overload` directive
+- two `overload` routines with one parameter list are E2004 (CheckDeclRules'
+  CheckOverloadTwins) only where every slot's type resolves - an inline
+  `array of` slot, a type parameter or an unresolved type leaves the pair
+  unjudged - and only in a program, a unit section or a routine; the same
+  pair of methods in a class is dcc's E2252, not reported.
 - a Boolean EXPRESSION (`True`, `I > 0`, `Bo and Bo2`, `not Bo`) against
   overloads for Boolean, ByteBool, WordBool and LongBool is dcc's E2251
   (spec 2.2.2: only a variable picks its own overload); the ranking takes

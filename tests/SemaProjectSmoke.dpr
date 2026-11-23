@@ -15619,8 +15619,10 @@ end;
 // type that takes none (open array, Variant, record, static array), then
 // E2239 for `var` / `out` / `const [Ref]`, E2026 for a dynamic array's that
 // is not nil, E2238 for each parameter without a default after one (an
-// E2268 one counts, an E2239 one does not); legal defaults stay silent
-// (dcc64 37.0; spec-audit g3 Defaults*, local/p P3-P5).
+// E2268 one counts, an E2239 one does not); an untyped parameter with a
+// default is E2268, counted for E2238 when `const` only; legal defaults
+// stay silent (dcc64 37.0; spec-audit g3 Defaults*, local/p P3-P5,
+// local/probe-park/sa5-exprs p1-p2).
 procedure TestParamDefaults;
 var
   LDir: string;
@@ -15657,7 +15659,11 @@ begin
     'procedure B2(const A: Integer = 0; S: string = ''x''; P: Pointer = nil;'#10 + // 23
     '  O: TObject = nil; C: Char = ''q''; D: TDA = nil); begin end;'#10 + // 24
     'procedure B3(A: Integer; B: Integer = 1); begin end;'#10 +          // 25
-    'begin'#10 +                                                         // 26
+    'procedure U1(const A = nil; B: Integer); begin end;'#10 +           // 26 E2268 E2238
+    'procedure U2(out A = nil; const B); begin end;'#10 +                // 27 E2268
+    'procedure U3(var A = 1 + 2); begin end;'#10 +                       // 28 E2268
+    'type TU = procedure(const A, B = nil);'#10 +                        // 29 E2268
+    'begin'#10 +                                                         // 30
     'end.'#10);
   GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
   try
@@ -15666,9 +15672,9 @@ begin
     Ok('pdflt: E2239 lines [' + DiagLinesOf(LM, 'E2239') + ']',
       DiagLinesOf(LM, 'E2239') = '7 11 13 20 21');
     Ok('pdflt: E2268 lines [' + DiagLinesOf(LM, 'E2268') + ']',
-      DiagLinesOf(LM, 'E2268') = '10 15 16 17 18');
+      DiagLinesOf(LM, 'E2268') = '10 15 16 17 18 26 27 28 29');
     Ok('pdflt: E2238 lines [' + DiagLinesOf(LM, 'E2238') + ']',
-      DiagLinesOf(LM, 'E2238') = '14 14 16 22');
+      DiagLinesOf(LM, 'E2238') = '14 14 16 22 26');
     Ok('pdflt: E2026 lines [' + DiagLinesOf(LM, 'E2026') + ']',
       DiagLinesOf(LM, 'E2026') = '19');
     Ok('pdflt: names', DiagHasText(LM, 'E2238', 'required for ''C''') and
@@ -19671,6 +19677,169 @@ begin
     Ok('decl-after-unit: FF has no diagnostics', Length(LM.Diags) = 0);
   finally
     LProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
+{ Spec audit block 5, expressions and calls (dcc64 37.0; local/probe-park/
+  sa5-exprs - each fixture line is what dcc64 reports on it, the OK lines
+  nothing): a Write argument that is an anonymous method literal or a
+  procedure-typed value is E2054, a parameterless function-typed one (a
+  `reference to` too) prints its result (4.11.2); two `overload` routines
+  of one scope with the same parameter types - modes aside - are E2004 at
+  the later, whatever their results (6.3.1); a GUID-less interface passed
+  to an undeclared routine is E2232 beside the E2003 (14.1.1); an operator
+  with a record operand whose record declares no operator of the name and
+  arity - a helper's counts - is E2015 (9.3.1). }
+procedure TestSa5Exprs;
+const
+  SYS = 'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class constructor Create; end;'#10 +
+    '  IInterface = interface end;'#10 +
+    'implementation'#10'constructor TObject.Create; begin end;'#10 +
+    'end.'#10;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+
+  function Run(const AName, ASrc: string): TPasSemaModel;
+  begin
+    TFile.WriteAllText(TPath.Combine(LDir, AName + '.dpr'), ASrc);
+    FreeAndNil(GProj);
+    GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+    GProj.AnalyzeProject(TPath.Combine(LDir, AName + '.dpr'));
+    Result := ModelByName(LowerCase(AName));
+  end;
+
+  procedure Expect(const ATag, ACode, AWant: string);
+  begin
+    Ok(ATag + ': ' + ACode + ' [' + DiagLinesOf(LM, ACode) + ']',
+      DiagLinesOf(LM, ACode) = AWant);
+  end;
+
+  procedure Total(const ATag: string; ACount: Integer);
+  begin
+    Ok(ATag + ': nothing else [' + IntToStr(Length(LM.Diags)) + ']',
+      Length(LM.Diags) = ACount);
+  end;
+
+begin
+  LDir := FreshDir('pastree_sema_sa5exprs');
+  GProj := nil;
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'), SYS);
+  try
+    LM := Run('WA',
+      'program WA;'#10 +                                                      // 1
+      'type TF = reference to function: Integer; TQ = reference to ' +
+      'procedure; TM = procedure of object;'#10 +                            // 2
+      'var F: TF; Q: TQ; M: TM; P: procedure; G: function: Integer;'#10 +    // 3
+      'procedure L4; begin Writeln(function: Integer begin Result := 7 ' +
+      'end); end;'#10 +                                                       // 4
+      'procedure L5; begin Write((procedure begin end)); end;'#10 +           // 5
+      'procedure L6; begin Writeln(1, function: Integer begin Result := ' +
+      '7 end()); end;'#10 +                                                   // 6
+      'procedure L7; begin Writeln(Q); end;'#10 +                             // 7
+      'procedure L8; begin Writeln(M); end;'#10 +                             // 8
+      'procedure L9; begin Writeln(P); end;'#10 +                             // 9
+      'procedure OK10; begin Writeln(F); Writeln(G, F); end;'#10 +            // 10
+      'begin'#10 +                                                            // 11
+      'end.'#10);                                                             // 12
+    Expect('write', 'E2054', '4 5 6 7 8 9');
+    Expect('write', 'E2066', '6');
+    Total('write', 7);
+    TFile.WriteAllText(TPath.Combine(LDir, 'UO.pas'),
+      'unit UO;'#10 +                                                         // 1
+      'interface'#10 +                                                        // 2
+      'procedure P(X: Integer); overload;'#10 +                               // 3
+      'procedure P(const X: string); overload;'#10 +                          // 4
+      'implementation'#10 +                                                   // 5
+      'procedure P(X: Integer); begin end;'#10 +                              // 6
+      'procedure P(const X: string); begin end;'#10 +                         // 7
+      'procedure P(X: Double); overload; begin end;'#10 +                     // 8
+      'procedure R(X: Integer); overload; forward;'#10 +                      // 9
+      'procedure R(X: string); overload; forward;'#10 +                       // 10
+      'procedure R(X: Integer); begin end;'#10 +                              // 11
+      'procedure R(X: string); begin end;'#10 +                               // 12
+      'procedure N;'#10 +                                                     // 13
+      '  procedure Z(var X); overload; begin end;'#10 +                       // 14
+      '  procedure Z(const X); overload; begin end;'#10 +                     // 15
+      'begin end;'#10 +                                                       // 16
+      'end.'#10);                                                             // 17
+    LM := Run('OV',
+      'program OV;'#10 +                                                      // 1
+      'uses UO;'#10 +                                                         // 2
+      'type TI = type Integer; TA = Integer;'#10 +                            // 3
+      'procedure P(X: Integer); overload; begin end;'#10 +                    // 4
+      'procedure P(X: Integer); overload; begin end;'#10 +                    // 5
+      'procedure Q(X: Integer); overload; begin end;'#10 +                    // 6
+      'procedure Q(out X: Integer); overload; begin end;'#10 +                // 7
+      'function F(X: Integer): Integer; overload; begin Result := 0 end;'#10 + // 8
+      'function F(X: Integer): string; overload; begin Result := '''' end;'#10 + // 9
+      'function G(X: Integer): Integer; overload; begin Result := 0 end;'#10 + // 10
+      'procedure G(X: Integer); overload; begin end;'#10 +                    // 11
+      'procedure H(X: Integer); overload; begin end;'#10 +                    // 12
+      'procedure H(X: TA); overload; begin end;'#10 +                         // 13
+      'procedure OK1(X: Integer); overload; begin end;'#10 +                  // 14
+      'procedure OK1(X: TI); overload; begin end;'#10 +                       // 15
+      'procedure OK2(X: Integer); overload; begin end;'#10 +                  // 16
+      'procedure OK2(X: Integer; Y: Integer = 0); overload; begin end;'#10 + // 17
+      'procedure OK3(var X); overload; begin end;'#10 +                       // 18
+      'procedure OK3(X: Integer); overload; begin end;'#10 +                  // 19
+      'begin'#10 +                                                            // 20
+      'end.'#10);                                                             // 21
+    Expect('twins', 'E2004', '5 7 9 11 13');
+    Ok('twins: named', DiagHasText(LM, 'E2004', 'redeclared: ''F'''));
+    Total('twins', 5);
+    LM := ModelByName('uo');
+    Expect('twins unit', 'E2004', '15');
+    Total('twins unit', 1);
+    LM := Run('GU',
+      'program GU;'#10 +                                                      // 1
+      'type INoGuid = interface procedure A; end;'#10 +                       // 2
+      'var O: TObject;'#10 +                                                  // 3
+      'begin'#10 +                                                            // 4
+      '  if Supports(O, INoGuid) then ;'#10 +                                 // 5
+      'end.'#10);                                                             // 6
+    Expect('guid', 'E2003', '5');
+    Expect('guid', 'E2232', '5');
+    Total('guid', 2);
+    LM := Run('RO',
+      'program RO;'#10 +                                                      // 1
+      'type'#10 +                                                             // 2
+      '  TR = record'#10 +                                                    // 3
+      '    class operator Add(A: TR): TR;'#10 +                               // 4
+      '    class operator Negative(A, B: TR): TR;'#10 +                       // 5
+      '  end;'#10 +                                                           // 6
+      '  TI = record class operator Implicit(A: TI): Integer; end;'#10 +      // 7
+      '  TA = record class operator Add(A: TA; B: Integer): TA; end;'#10 +    // 8
+      '  TQ = record X: Integer; end;'#10 +                                   // 9
+      '  TH = record X: Integer; end;'#10 +                                   // 10
+      '  THH = record helper for TH class operator Add(A, B: TH): TH; ' +
+      'end;'#10 +                                                             // 11
+      'class operator TR.Add(A: TR): TR; begin Result := A; end;'#10 +        // 12
+      'class operator TR.Negative(A, B: TR): TR; begin Result := A; ' +
+      'end;'#10 +                                                             // 13
+      'class operator TI.Implicit(A: TI): Integer; begin Result := 0; ' +
+      'end;'#10 +                                                             // 14
+      'class operator TA.Add(A: TA; B: Integer): TA; begin Result := A; ' +
+      'end;'#10 +                                                             // 15
+      'class operator THH.Add(A, B: TH): TH; begin Result := A; end;'#10 +    // 16
+      'var R: TR; I: TI; A: TA; Q: TQ; H: TH; N: Integer; B: Boolean;'#10 +  // 17
+      'procedure L18; begin R := R + R; end;'#10 +                            // 18
+      'procedure L19; begin R := -R; end;'#10 +                               // 19
+      'procedure L20; begin N := I + 1; end;'#10 +                            // 20 dcc E2015, a record with Implicit not judged
+      'procedure L21; begin B := Q = Q; end;'#10 +                            // 21
+      'procedure L22; begin B := not Q; end;'#10 +                            // 22
+      'procedure L23; begin N := Q * 2; end;'#10 +                            // 23
+      'procedure OK24; begin A := A + 1; H := H + H; N := I; end;'#10 +       // 24
+      'begin'#10 +                                                            // 25
+      'end.'#10);                                                             // 26
+    Expect('recop', 'E2517', '4 5');
+    Expect('recop', 'E2015', '18 19 21 22 23');
+    Total('recop', 7);
+  finally
+    FreeAndNil(GProj);
     if TDirectory.Exists(LDir) then
       TDirectory.Delete(LDir, True);
   end;
@@ -26172,6 +26341,7 @@ begin
   TestSa4Interfaces;
   TestSa4Generics;
   TestSa4ProgramRules;
+  TestSa5Exprs;
 
   if GCounter.Finish('SemaProjectSmoke') then
     ExitCode := 1;
