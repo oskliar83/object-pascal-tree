@@ -15917,6 +15917,175 @@ begin
   end;
 end;
 
+// The flow limits for a QUALIFIED intrinsic (spec 5.6, 5.6.3): `System.Exit(1)`
+// in a procedure is E2025, `System.Break` / `System.Continue` outside a loop
+// E2097, leaving a finally E2126 - while a used unit's own `Break` / `Exit` /
+// `Continue` hides the intrinsic and is an ordinary call, bare or qualified by
+// that unit (dcc64 37.0; local/probe-park/sa6-small Q1-Q4).
+procedure TestQualifiedFlow;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_qflow');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'QShadow.pas'),
+    'unit QShadow;'#10'interface'#10 +
+    'procedure Break;'#10'procedure Exit(X: Integer);'#10 +
+    'implementation'#10 +
+    'procedure Break; begin end;'#10 +
+    'procedure Exit(X: Integer); begin end;'#10 +
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'QFlow.dpr'),
+    'program QFlow;'#10 +                                                // 1
+    'uses QShadow;'#10 +                                                 // 2
+    'var G: Integer;'#10 +                                               // 3
+    'procedure P1; begin System.Exit(1); end;'#10 +                      // 4 E2025
+    'procedure P2; begin System.Break; end;'#10 +                        // 5 E2097
+    'procedure P3; begin System.Continue; end;'#10 +                     // 6 E2097
+    'procedure P4; var I: Integer; begin'#10 +                           // 7
+    '  for I := 0 to 1 do begin System.Break; System.Continue; end; end;'#10 + // 8
+    'function F1: Integer; begin System.Exit(1); end;'#10 +              // 9
+    'function F2: Integer; begin'#10 +                                   // 10
+    '  try G := 1; finally System.Exit(2); end; end;'#10 +               // 11 E2126
+    'procedure S1; begin Break; Exit(1); QShadow.Break; end;'#10 +       // 12
+    'procedure S2; begin QShadow.Exit(1); System.Exit; end;'#10 +        // 13
+    'begin'#10 +                                                         // 14
+    '  System.Break;'#10 +                                               // 15 E2097
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'QFlow.dpr'));
+    LM := ModelByName('qflow');
+    Ok('qflow: E2097 lines [' + DiagLinesOf(LM, 'E2097') + ']',
+      DiagLinesOf(LM, 'E2097') = '5 6 15');
+    Ok('qflow: E2025 lines [' + DiagLinesOf(LM, 'E2025') + ']',
+      DiagLinesOf(LM, 'E2025') = '4');
+    Ok('qflow: E2126 lines [' + DiagLinesOf(LM, 'E2126') + ']',
+      DiagLinesOf(LM, 'E2126') = '11');
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
+// A method implementation header completes a member its struct declares
+// ITSELF (spec 11.1.3, 9.3.1): with none of the name - an ancestor's included,
+// a `class operator` the struct lacks - E2003 at the name; a field or a
+// property of the name E2037. An alias, a declared operator, a routine of
+// another signature stay silent here (dcc64 37.0; local/probe-park/sa6-small
+// O1-O5).
+procedure TestImplHeaderMembers;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_implhdr');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'ImplH.dpr'),
+    'program ImplH;'#10 +                                                // 1
+    'type'#10 +                                                          // 2
+    '  TB = class public procedure M; virtual; end;'#10 +                // 3
+    '  TC = class(TB) public F: Integer;'#10 +                           // 4
+    '    property P: Integer read F; procedure N(X: Integer); end;'#10 + // 5
+    '  TR = record class operator Add(A, B: TR): TR; end;'#10 +          // 6
+    '  TA = TC;'#10 +                                                    // 7
+    'procedure TB.M; begin end;'#10 +                                    // 8
+    'procedure TC.M; begin end;'#10 +                                    // 9 E2003
+    'procedure TC.F; begin end;'#10 +                                    // 10 E2037
+    'procedure TC.P; begin end;'#10 +                                    // 11 E2037
+    'procedure TC.N(X: Integer); begin end;'#10 +                        // 12
+    'class operator TR.Add(A, B: TR): TR; begin Result := A; end;'#10 +  // 13
+    'class operator TR.Subtract(A, B: TR): TR; begin Result := A; end;'#10 + // 14 E2003
+    'class operator TC.Add(A, B: TC): TC; begin Result := A; end;'#10 +  // 15 E2003
+    'procedure TA.X; begin end;'#10 +                                    // 16
+    'begin'#10 +                                                         // 17
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'ImplH.dpr'));
+    LM := ModelByName('implh');
+    Ok('implhdr: E2003 lines [' + DiagLinesOf(LM, 'E2003') + ']',
+      DiagLinesOf(LM, 'E2003') = '9 14 15');
+    Ok('implhdr: E2003 names the member [' + DiagText(LM, 'E2003') + ']',
+      Pos('Undeclared identifier: ''Subtract''', DiagText(LM, 'E2003')) > 0);
+    Ok('implhdr: E2037 lines [' + DiagLinesOf(LM, 'E2037') + ']',
+      DiagLinesOf(LM, 'E2037') = '10 11');
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
+// Two members of one struct with one parameter list (spec 6.3.1): E2252 at
+// the later, with or without `overload`, whatever the results, class beside
+// instance, constructor beside procedure; a generic method, another count, an
+// ancestor's twin are not. Conversion operators count the result: E2301
+// (dcc64 37.0; local/probe-park/sa6-small T1-T4).
+procedure TestMemberOverloadTwins;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_mtwins');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    '  TI = Integer;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'MTw.dpr'),
+    'program MTw;'#10 +                                                  // 1
+    'type'#10 +                                                          // 2
+    '  TB = class public procedure Z(X: Integer); overload; virtual; end;'#10 + // 3
+    '  TC = class(TB)'#10 +                                              // 4
+    '  public'#10 +                                                      // 5
+    '    procedure A(X: Integer); overload;'#10 +                        // 6
+    '    function A(var X: TI): Integer; overload;'#10 +                 // 7 E2252
+    '    procedure B(X: Integer);'#10 +                                  // 8
+    '    class procedure B(X: Integer);'#10 +                            // 9 E2252
+    '    constructor C(X: Integer); overload;'#10 +                      // 10
+    '    procedure C(X: Integer); overload;'#10 +                        // 11 E2252
+    '    procedure G<T>(X: Integer); overload;'#10 +                     // 12
+    '    procedure G(X: Integer); overload;'#10 +                        // 13
+    '    procedure H(X: Integer; Y: Integer = 0); overload;'#10 +        // 14
+    '    procedure H(X: Integer); overload;'#10 +                        // 15
+    '    procedure Z(X: Integer); overload;'#10 +                        // 16
+    '  end;'#10 +                                                        // 17
+    '  TR = record'#10 +                                                 // 18
+    '    class operator Implicit(A: TR): Integer;'#10 +                  // 19
+    '    class operator Implicit(A: TR): Boolean;'#10 +                  // 20
+    '    class operator Implicit(A: TR): TI;'#10 +                       // 21 E2301
+    '    class operator Negative(A: TR): TR;'#10 +                       // 22
+    '    class operator Negative(const A: TR): Integer;'#10 +            // 23 E2252
+    '  end;'#10 +                                                        // 24
+    'begin'#10 +                                                         // 25
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'MTw.dpr'));
+    LM := ModelByName('mtw');
+    Ok('mtwins: E2252 lines [' + DiagLinesOf(LM, 'E2252') + ']',
+      DiagLinesOf(LM, 'E2252') = '7 9 11 23');
+    Ok('mtwins: E2252 wording [' + DiagText(LM, 'E2252') + ']',
+      Pos('Method ''A'' with identical parameters already exists',
+        DiagText(LM, 'E2252')) > 0);
+    Ok('mtwins: E2301 lines [' + DiagLinesOf(LM, 'E2301') + ']',
+      DiagLinesOf(LM, 'E2301') = '21');
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // A nested routine as a plain procedural value is E2094 (spec 6.9), a
 // function against a function type too; `@Inner`, a global routine and a
 // `reference to` target (E2555 instead) are not (dcc64 37.0; spec audit g3
@@ -26336,6 +26505,9 @@ begin
   TestParamLegalShapes;
   TestSpecAuditConsts;
   TestFlowExits;
+  TestQualifiedFlow;
+  TestImplHeaderMembers;
+  TestMemberOverloadTwins;
   TestNestedProcValue;
   TestRaiseOperands;
   TestForInMembers;

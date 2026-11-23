@@ -330,6 +330,9 @@ of less work, not a gap in following the language; its consequences are in
   variable - are not.
 - Break / Continue / Exit in an unopened `with` body (the binding a guess)
   are not judged.
+- a used unit's own `Exit(X: Integer)` hides the intrinsic, and a bare
+  `Exit;` then lacks its argument (dcc's E2035); PasTree treats the call as
+  that routine's and does not report the missing argument.
 
 ### 5.7 The `with` statement
 - the write rule behind `with (R) do X := 1` (E2064, a write into a part of
@@ -353,8 +356,11 @@ of less work, not a gap in following the language; its consequences are in
 - two `overload` routines with one parameter list are E2004 (CheckDeclRules'
   CheckOverloadTwins) only where every slot's type resolves - an inline
   `array of` slot, a type parameter or an unresolved type leaves the pair
-  unjudged - and only in a program, a unit section or a routine; the same
-  pair of methods in a class is dcc's E2252, not reported.
+  unjudged. The same pair of members of one struct is E2252 (E2301 for
+  conversion operators of one result) under the same slot rule; dcc's
+  E2254 / E2267 beside it (`overload` missing on one of them) are not
+  reported, and the E2252 sits at the later member's name where dcc puts
+  it after the heading - on the next line when no directive follows.
 - a Boolean EXPRESSION (`True`, `I > 0`, `Bo and Bo2`, `not Bo`) against
   overloads for Boolean, ByteBool, WordBool and LongBool is dcc's E2251
   (spec 2.2.2: only a variable picks its own overload); the ranking takes
@@ -555,6 +561,9 @@ of less work, not a gap in following the language; its consequences are in
   says `E2015 Operator not applicable to this operand type`.
 - a record helper's `class operator` (dcc accepts the declaration) is not
   checked for its name or arity.
+- `class operator TR.Add(...)` for an operator TR does not declare is E2003
+  (11.1.3's rule); one TR declares with another parameter list (dcc's
+  E2037) is not reported.
 
 ## 10-pointers-files.md
 
@@ -581,6 +590,11 @@ of less work, not a gap in following the language; its consequences are in
   with what follows.
 - `F, G: Integer` in a helper is dcc's E2599 plus an E2029 "'END' expected
   but ';' found" at the `;`; PasTree reports the E2599 alone.
+- an implementation header naming no member of its struct (E2003) or a
+  field or property (E2037) is judged for a struct declared in the same
+  unit only: a header through an alias (`TA = TC; procedure TA.X`), or of
+  another unit's type, is not; nor is dcc's cascade E2003 at that body's
+  `Result`.
 
 ### 11.2.1 `private` / `protected` / `public` / `published` (+ `strict`)
 - E2361 / E2362 (ReportVisibility, opt-in by design) are judged at a

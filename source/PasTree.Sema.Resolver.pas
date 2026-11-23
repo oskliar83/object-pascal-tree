@@ -36,6 +36,11 @@ uses
   PasTree.Sema.Model;
 
 type
+  { The flow intrinsic a statement head names (TPasSemaResolver.
+    CheckFlowExitsOf): 0 none - another declaration, or unbound -, 1 Break or
+    Continue, 2 Exit. }
+  TPasFlowHeadFunc = reference to function(AIdent: Integer): Integer;
+
   // A structured typed-const/var initializer (3.2.2, `X: TPoint = (X: 0;
   // Y: 0)`) noted during Collect, resolved once BindTypes has run - see
   // ResolveAggregates for why this can't happen any earlier.
@@ -61,6 +66,9 @@ type
   private
     FModel: TPasSemaModel;
     FTree: TPasTree;
+    // CheckFlowExits' binding test when a project asks (CheckFlowExitsOf);
+    // nil: the unit's own RefMap.
+    FFlowHead: TPasFlowHeadFunc;
     FSys: Integer;
     FIntf: Integer;   // interface scope (importable)
     FImpl: Integer;   // implementation scope (parent = FIntf)
@@ -217,6 +225,7 @@ type
     procedure CollectEnum(ANode, AOuter, ATypeSym: Integer);
     procedure CollectVariantPart(ANode, AScope: Integer);
     procedure CollectUsesItem(AItem, AScope: Integer);
+    procedure CheckImplHeaderMember(ATypeSym, ANameNode: Integer);
     procedure CollectRoutine(ANode, AScope: Integer);
     function DeclaresInOwnScope(ANode: Integer): Boolean;
     procedure Collect(ANode, AScope: Integer);
@@ -281,6 +290,13 @@ type
       ASkipTyper: Boolean = False;
       APlatform: TPasPlatform = pfWin32;
       AProjectAssign: Boolean = False): TPasSemaModel; static;
+    { The flow-control limits (CheckFlowExits) over a model a project has
+      cross-resolved: AFlowHead says which statement heads are the
+      intrinsics. A project model's Phase 1 leaves them to this call - only
+      the cross pass knows a used unit's own `Break` (BuiltinShadows) and
+      what `System.Exit` binds. }
+    class procedure CheckFlowExitsOf(AModel: TPasSemaModel;
+      const AFlowHead: TPasFlowHeadFunc); static;
   end;
 
 implementation
@@ -2674,6 +2690,54 @@ begin
   Inc(FUsesCount);
 end;
 
+{ 11.1.3 / 9.3.1 (dcc64 37.0, local/probe-park/sa6-small O1-O5): a method
+  implementation header `TC.M` - `class operator TC.Add` too - completes a
+  member the struct TC declares ITSELF. With no member of the name it is
+  `E2003 Undeclared identifier: 'M'` at the name, an ancestor's `M` or
+  `Create` included; a field or a property of the name is `E2037
+  Declaration of 'M' differs from previous declaration`. Read only for a
+  struct declared in this unit with its body here - a class, record, object
+  or helper - so an alias, a forward-only type and another unit's type stay
+  silent; a routine member of another signature is not judged here (that
+  is CheckHeadingPairs' E2037), nor a
+  header naming an operator the struct declares (which is never bound by
+  name, DeclareSym). dcc's
+  further E2003 at the body's `Result` is its cascade and is not repeated. }
+procedure TPasSemaResolver.CheckImplHeaderMember(ATypeSym, ANameNode: Integer);
+var
+  LDef, LMember, LFileId, LLine, LCol: Integer;
+  LCode, LMsg: string;
+begin
+  if FModel.Symbols[ATypeSym].MemberScope = NIL_SCOPE then
+    Exit;
+  LDef := TypeDefNode(ATypeSym);
+  if (LDef = NIL_NODE) or not (KindOf(LDef) in [nkClassType, nkRecordType,
+     nkObjectType, nkHelperType]) or
+     ((KindOf(LDef) = nkClassType) and (FTree.Nodes[LDef].Aux = 1)) then
+    Exit;
+  LMember := FModel.FindLocal(FModel.Symbols[ATypeSym].MemberScope,
+    NodeKey(ANameNode));
+  if LMember = NIL_SYM then
+  begin
+    // A `class operator` is in the declaration order only, never bound
+    // under its name (DeclareSym).
+    if FModel.DeclaresOperator(FModel.Symbols[ATypeSym].MemberScope,
+       NodeNameLower(ANameNode)) then
+      Exit;
+    LCode := 'E2003';
+    LMsg := Format(SE2003_UndeclaredIdentifier, [NodeText(ANameNode)]);
+  end
+  else if FModel.Symbols[LMember].Kind in [skField, skProperty] then
+  begin
+    LCode := 'E2037';
+    LMsg := Format(SE2037_DeclarationDiffers, [NodeText(ANameNode)]);
+  end
+  else
+    Exit;
+  NodePos(ANameNode, LFileId, LLine, LCol);
+  FModel.AddDiag(MakeDiag(LCode, LMsg, ANameNode, LFileId, LLine, LCol));
+end;
+
 procedure TPasSemaResolver.CollectRoutine(ANode, AScope: Integer);
 var
   LRoutine, LChild, LNameNode, LSegIdent, LSegLast: Integer;
@@ -2768,6 +2832,10 @@ begin
   if LQualified then
   begin
     var LTy := NIL_SYM;
+    // Every segment found at its written arity: the member check below
+    // judges only such a chain (an impl-section `TSelfAr` beside the
+    // interface's `TSelfAr<C>` is not the type `TSelfAr<C>.M` names).
+    var LArityOk := True;
     for var LSegIdx := 0 to High(LQualIdents) do
     begin
       var LSeg := LQualIdents[LSegIdx];
@@ -2791,7 +2859,9 @@ begin
         var LAlt := ArityOnChain(FModel.Symbols[LCand].NextOverload,
           LQualArity[LSegIdx]);
         if LAlt <> NIL_SYM then
-          LCand := LAlt;
+          LCand := LAlt
+        else
+          LArityOk := False;
       end;
       LTy := LCand;
       if FModel.Symbols[LTy].MemberScope <> NIL_SCOPE then
@@ -2830,6 +2900,8 @@ begin
          (FModel.Symbols[LDeclSym].MemberScope <> NIL_SCOPE) then
         FModel.JoinScope(LRoutine, FModel.Symbols[LDeclSym].MemberScope);
     end;
+    if (LTy <> NIL_SYM) and LArityOk and (LNameNode <> NIL_NODE) then
+      CheckImplHeaderMember(LTy, LNameNode);
   end;
   if (LNameNode <> NIL_NODE) and not LQualified then
   begin
@@ -5983,7 +6055,10 @@ end;
       label. (dcc's other two E2127 cases - a for-in whose enumerator has a
       destructor, a block declaring an inline variable - are not checked.)
   The three intrinsics are told by their binding (sfBuiltin), not their
-  text: a unit's own `procedure Break` is an ordinary call (5.6). In an
+  text: a unit's own `procedure Break` is an ordinary call (5.6). A
+  project's model is checked after its cross pass (CheckFlowExitsOf, with
+  FFlowHead): only that pass knows a used unit's `Break` that hides the
+  intrinsic and what a qualified `System.Exit` binds. In an
   unopened with body the binding is a guess, and nothing is said there.
   dcc stops at the first E2126 of a compilation; every one is reported here,
   each a real error. A flat scan over the statements; the climbs are short. }
@@ -6086,6 +6161,16 @@ type
     if (LHead = NIL_NODE) or (KindOf(LHead) <> nkIdent) or
        (LHead > High(FModel.RefMap)) then
       Exit;
+    if Assigned(FFlowHead) then
+    begin
+      case FFlowHead(LHead) of
+        1: AKind := fkBreak;
+        2: AKind := fkExit;
+      else
+        Exit;
+      end;
+      Exit(LHead);
+    end;
     LSym := FModel.RefMap[LHead];
     if (LSym = NIL_SYM) or not (sfBuiltin in FModel.Symbols[LSym].Flags) then
       Exit;
@@ -6233,6 +6318,22 @@ begin
   end;
 end;
 
+class procedure TPasSemaResolver.CheckFlowExitsOf(AModel: TPasSemaModel;
+  const AFlowHead: TPasFlowHeadFunc);
+var
+  LR: TPasSemaResolver;
+begin
+  LR := TPasSemaResolver.Create;
+  try
+    LR.FModel := AModel;
+    LR.FTree := AModel.Tree;
+    LR.FFlowHead := AFlowHead;
+    LR.CheckFlowExits;
+  finally
+    LR.Free;
+  end;
+end;
+
 procedure TPasSemaResolver.Run;
 begin
   FSys := SeedSystemScope(FModel, FPlatform);
@@ -6256,7 +6357,9 @@ begin
   CheckBareRaises;    // structural only - see its own header
   CheckCaptures;      // needs RefMap - see its own header
   CheckSlicePositions; // needs RefMap - see its own header
-  CheckFlowExits;     // needs RefMap - see its own header
+  // A project's model is checked after its cross pass (CheckFlowExitsOf).
+  if not FModel.ProjectAssign then
+    CheckFlowExits;   // needs RefMap - see its own header
   FModel.TyperDiagFrom := FModel.DiagCount;
   if not FSkipTyper then
     // The platform reaches the typer for one rule only: a 64-bit ordinal

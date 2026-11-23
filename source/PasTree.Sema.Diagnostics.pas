@@ -136,6 +136,12 @@ const
     'E2014 Statement expected, but expression of type ''%s'' found';
   // E2251 names the routine as declared; its note lists the tied candidates.
   SE2251_AmbiguousOverload = 'E2251 Ambiguous overloaded call to ''%s''';
+  // Two members of one struct with one parameter list (6.3.1); E2301 is the
+  // conversion operators', whose result is part of the identity.
+  SE2252_IdenticalParams =
+    'E2252 Method ''%s'' with identical parameters already exists';
+  SE2301_IdenticalParamsAndResult = 'E2301 Method ''%s'' with identical ' +
+    'parameters and result type already exists';
   SE2015_OperatorNotApplicable =
     'E2015 Operator not applicable to this operand type';
   // E2008 names nothing either: `I + True`, `Ch + I` (4.2.1).

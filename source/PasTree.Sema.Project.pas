@@ -14128,7 +14128,14 @@ var
     Read where certain: both types resolved to one type (an alias is its
     target, a distinct `type Integer` is not), no inline `array of`, no
     ShortString beside another mode (it compiles), no generic routine, no
-    `forward` (its body is no second declaration). }
+    `forward` (its body is no second declaration).
+    The members of one struct - a class, record, object, interface or
+    helper - follow the same slot rule (local/probe-park/sa6-small T1-T4):
+    E2252 at the later one, with or without `overload` on either, whatever
+    the results, a class method beside an instance one, a constructor
+    beside a procedure; an ancestor's twin is hidden (W1010), not judged.
+    `class operator`s of one name are twins the same way, except Implicit
+    and Explicit, whose result counts: E2301 when it is the same too. }
   procedure CheckOverloadTwins;
 
     function SameSlot(AP, BP: Integer): Boolean;
@@ -14171,13 +14178,45 @@ var
         Result := False;
     end;
 
-    function Candidate(ASym: Integer): Boolean;
+    // A member needs no `overload` to be judged: dcc reports the twin
+    // whether or not either says it (beside its E2254 / E2267).
+    function Candidate(ASym: Integer; AMember: Boolean): Boolean;
     begin
       Result := (LM.Symbols[ASym].Kind = skRoutine) and
         (LM.Symbols[ASym].DeclNode <> NIL_NODE) and
-        (LM.Symbols[ASym].MemberScope <> NIL_SCOPE) and
-        (LM.Symbols[ASym].Flags * [sfOverloadDirective, sfForward, sfGeneric,
-          sfBuiltin] = [sfOverloadDirective]);
+        (LM.Symbols[ASym].MemberScope <> NIL_SCOPE);
+      if not Result then
+        Exit;
+      if AMember then
+      begin
+        Result := LM.Symbols[ASym].Flags * [sfGeneric, sfBuiltin] = [];
+        // A generic method (`G<T>(X: Integer)`) is another routine, and so
+        // is a class constructor or destructor (`class destructor Destroy`
+        // beside `destructor Destroy; override;` compiles).
+        var LRoutine := RoutineNodeOf(LM, ASym);
+        if Result and ((LRoutine = NIL_NODE) or
+           (ChildOfKind(LRoutine, nkGenericParams) <> NIL_NODE) or
+           ((LM.Tree.Nodes[LRoutine].Aux = 1) and
+            (LM.RoutineHead(ASym) in [rhConstructor, rhDestructor]))) then
+          Result := False;
+      end
+      else
+        Result := LM.Symbols[ASym].Flags * [sfOverloadDirective, sfForward,
+          sfGeneric, sfBuiltin] = [sfOverloadDirective];
+    end;
+
+    // Both results resolved to one type.
+    function SameResult(A, B: Integer): Boolean;
+    var
+      LA, LB: TSemaXType;
+    begin
+      Result := False;
+      if (LM.Symbols[A].TypeNode = NIL_NODE) or
+         (LM.Symbols[B].TypeNode = NIL_NODE) then
+        Exit;
+      LA := TypeAt(LM.Symbols[A].TypeNode);
+      LB := TypeAt(LM.Symbols[B].TypeNode);
+      Result := XValid(LA) and XValid(LB) and XSameType(LA, LB);
     end;
 
     // The parameter names the declaration of routine ASym writes - a scope
@@ -14219,32 +14258,87 @@ var
           Result := SameSlot(LPA[LI], LPB[LI]);
     end;
 
+    // A `class operator` is never on a name's chain (DeclareSym): its twin is
+    // an earlier operator of the name in the struct's declaration order.
+    procedure CheckOperatorTwin(AScope, ASym: Integer);
+    var
+      LList: TSemaSymList;
+      LA: Integer;
+      LConv: Boolean;
+    begin
+      if not Candidate(ASym, True) or
+         LM.HasDiagAt(LM.Symbols[ASym].DeclNode) then
+        Exit;
+      LConv := (LM.Symbols[ASym].NameLower = 'implicit') or
+        (LM.Symbols[ASym].NameLower = 'explicit');
+      LList := LM.Scopes[AScope].Symbols;
+      for var LIdx := 0 to LList.Count - 1 do
+      begin
+        LA := LList[LIdx];
+        if LA = ASym then
+          Exit;
+        if (LM.Symbols[LA].Kind <> skRoutine) or
+           (LM.Symbols[LA].NameLower <> LM.Symbols[ASym].NameLower) or
+           (LM.RoutineHead(LA) <> rhOperator) or not Candidate(LA, True) or
+           not Twins(LA, ASym) then
+          Continue;
+        if not LConv then
+          EmitAt(LM, LM.Symbols[ASym].DeclNode, 'E2252',
+            Format(SE2252_IdenticalParams,
+            [LM.Tree.NodeText(LM.Symbols[ASym].DeclNode)]))
+        else if SameResult(LA, ASym) then
+          EmitAt(LM, LM.Symbols[ASym].DeclNode, 'E2301',
+            Format(SE2301_IdenticalParamsAndResult,
+            [LM.Tree.NodeText(LM.Symbols[ASym].DeclNode)]))
+        else
+          Continue;
+        Exit;
+      end;
+    end;
+
   var
     LSym, LA, LB, LScope: Integer;
+    LMember: Boolean;
   begin
     for LSym := 0 to LM.SymCount - 1 do
     begin
-      if (LM.Symbols[LSym].Kind <> skRoutine) or
-         (LM.Symbols[LSym].NextOverload = NIL_SYM) or
-         (sfOverload in LM.Symbols[LSym].Flags) then
-        Continue;   // only a chain's head
+      if LM.Symbols[LSym].Kind <> skRoutine then
+        Continue;
       LScope := LM.Symbols[LSym].Scope;
-      if (LScope = NIL_SCOPE) or not (LM.Scopes[LScope].Kind in [sckUnit,
+      if LScope = NIL_SCOPE then
+        Continue;
+      LMember := LM.Scopes[LScope].Kind = sckStruct;
+      if not LMember and not (LM.Scopes[LScope].Kind in [sckUnit,
          sckImplementation, sckRoutine]) then
         Continue;
+      if (LM.Symbols[LSym].NextOverload = NIL_SYM) or
+         (sfOverload in LM.Symbols[LSym].Flags) then
+      begin
+        if LMember and (LM.Symbols[LSym].NextOverload = NIL_SYM) and
+           not (sfOverload in LM.Symbols[LSym].Flags) and
+           (LM.RoutineHead(LSym) = rhOperator) then
+          CheckOperatorTwin(LScope, LSym);
+        Continue;   // only a chain's head
+      end;
       LB := LM.Symbols[LSym].NextOverload;
       while LB <> NIL_SYM do
       begin
-        if Candidate(LB) and not LM.HasDiagAt(LM.Symbols[LB].DeclNode) then
+        if Candidate(LB, LMember) and
+           not LM.HasDiagAt(LM.Symbols[LB].DeclNode) then
         begin
           LA := LSym;
           while LA <> LB do
           begin
-            if Candidate(LA) and Twins(LA, LB) then
+            if Candidate(LA, LMember) and Twins(LA, LB) then
             begin
-              EmitAt(LM, LM.Symbols[LB].DeclNode, 'E2004',
-                Format(SE2004_IdentifierRedeclared,
-                [LM.Tree.NodeText(LM.Symbols[LB].DeclNode)]));
+              if LMember then
+                EmitAt(LM, LM.Symbols[LB].DeclNode, 'E2252',
+                  Format(SE2252_IdenticalParams,
+                  [LM.Tree.NodeText(LM.Symbols[LB].DeclNode)]))
+              else
+                EmitAt(LM, LM.Symbols[LB].DeclNode, 'E2004',
+                  Format(SE2004_IdentifierRedeclared,
+                  [LM.Tree.NodeText(LM.Symbols[LB].DeclNode)]));
               Break;
             end;
             LA := LM.Symbols[LA].NextOverload;
@@ -14260,6 +14354,31 @@ var
 begin
   LM := FModels[AId];
   LResolved := LM.AllUsesResolved and not UsesLeafGuessed(LM);
+  // 5.6: Break / Continue / Exit, told by what the cross pass bound - a used
+  // unit's own `Break` (BuiltinShadows) is no intrinsic, `System.Exit` is.
+  TPasSemaResolver.CheckFlowExitsOf(LM,
+    function(AIdent: Integer): Integer
+    var
+      LMid, LSym: Integer;
+      LExt: TPasExtRef;
+    begin
+      Result := 0;
+      LMid := AId;
+      LSym := LM.RefMap[AIdent];
+      if (LSym = NIL_SYM) and LM.ExtRefMap.TryGetValue(AIdent, LExt) then
+      begin
+        LMid := LExt.UnitId;
+        LSym := LExt.Sym;
+      end;
+      if (LSym = NIL_SYM) or (LMid < 0) or (LMid >= FModels.Count) or
+         not (sfBuiltin in FModels[LMid].Symbols[LSym].Flags) then
+        Exit;
+      if (FModels[LMid].Symbols[LSym].NameLower = 'break') or
+         (FModels[LMid].Symbols[LSym].NameLower = 'continue') then
+        Result := 1
+      else if FModels[LMid].Symbols[LSym].NameLower = 'exit' then
+        Result := 2;
+    end);
   if LResolved then
     CheckOverloadTwins;
   for LNode := 0 to High(LM.Tree.Nodes) do
