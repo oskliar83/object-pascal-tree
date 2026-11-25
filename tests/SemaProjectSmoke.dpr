@@ -15851,6 +15851,49 @@ begin
       DiagHasText(LM, 'E2010', '''array of Byte'' and ''Integer'''));
   finally
     FreeAndNil(GProj);
+  end;
+  // A function's own name in its body is its result as an assignment's
+  // target only - a character, an element, at any nesting depth, a
+  // method's too; in `Inc`, as a `var` argument and in a cast it is the
+  // call (local/probe-park/sa7-params C1; a client library unit's HexB).
+  TFile.WriteAllText(TPath.Combine(LDir, 'VWCB.dpr'),
+    'program VWCB;'#10 +                                                 // 1
+    'type TA = array[0..1] of Integer;'#10 +                             // 2
+    '  TC = class function M: string; function N: Integer; end;'#10 +    // 3
+    'procedure V(var X: Integer); begin end;'#10 +                       // 4
+    'procedure W(var A: array of Integer); begin end;'#10 +              // 5
+    'procedure PY(const A: array of Byte); begin end;'#10 +              // 6
+    'function HexB(B: Byte): AnsiString;'#10 +                           // 7
+    '  function Inner: string;'#10 +                                     // 8
+    '  begin Inner := ''ab''; Inner[1] := ''x''; HexB[2] := ''y''; end;'#10 + // 9
+    'begin SetLength(Result, 2); HexB[1] := ''a''; Inner; end;'#10 +    // 10
+    'function GA: TA; begin GA[0] := 1; end;'#10 +                       // 11
+    'function TC.M: string; begin M := ''ab''; M[1] := ''x''; end;'#10 + // 12
+    'function TC.N: Integer; begin N := 1; end;'#10 +                    // 13
+    'function GI: Integer;'#10 +                                         // 14
+    'begin'#10 +                                                         // 15
+    '  GI := 0;'#10 +                                                    // 16
+    '  Inc(GI);'#10 +                                                    // 17 E2064
+    '  V(GI);'#10 +                                                      // 18 E2197
+    '  W(GI);'#10 +                                                      // 19 E2036
+    '  PY(Byte(GI));'#10 +                                               // 20 E2036
+    'end;'#10 +                                                          // 21
+    'function GS: string; begin Result := ''a''; end;'#10 +              // 22
+    'procedure Q; begin GS[1] := ''a''; end;'#10 +                       // 23 E2064
+    'begin'#10 +                                                         // 24
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'VWCB.dpr'));
+    LM := ModelByName('vwcb');
+    Ok('vwcb: E2064 lines [' + DiagLinesOf(LM, 'E2064') + ']',
+      DiagLinesOf(LM, 'E2064') = '17 23');
+    Ok('vwcb: E2197 lines [' + DiagLinesOf(LM, 'E2197') + ']',
+      DiagLinesOf(LM, 'E2197') = '18');
+    Ok('vwcb: E2036 lines [' + DiagLinesOf(LM, 'E2036') + ']',
+      DiagLinesOf(LM, 'E2036') = '19 20');
+  finally
+    FreeAndNil(GProj);
     if TDirectory.Exists(LDir) then
       TDirectory.Delete(LDir, True);
   end;

@@ -25706,6 +25706,46 @@ var
 
   function IsValueOnly(AAssign, B: Integer): Boolean; forward;
 
+  { Is the function (AMid, ASym), named by a bare name in the target of the
+    assignment AAssign, one whose body - at any nesting depth - holds that
+    assignment? There its own name is its result variable (`HexB[1] := C`,
+    `GA[0] := 1`, `M[1] := 'x'` in `TC.M`, from a nested routine too). Only
+    as an assignment's target: dcc calls the function in `Inc(GI)`, `V(GI)`
+    and `W(GI)` (E2064, E2197, E2036; spec 6.2.3, dcc64 37.0, 2026-11-25,
+    local/probe-park/sa7-params C1). }
+  function OwnResultTarget(AAssign, AMid, ASym: Integer): Boolean;
+  var
+    LP, LC, LName: Integer;
+  begin
+    Result := False;
+    if (AAssign = NIL_NODE) or (LM.Tree.Nodes[AAssign].Kind <> nkAssign) or
+       (AMid < 0) or (FModels[AMid] <> LM) or
+       (LM.Symbols[ASym].Kind <> skRoutine) or
+       (LM.Symbols[ASym].TypeNode = NIL_NODE) then
+      Exit;
+    LP := LM.Tree.Nodes[AAssign].Parent;
+    while LP <> NIL_NODE do
+    begin
+      if LM.Tree.Nodes[LP].Kind = nkRoutine then
+      begin
+        // Its own name: the last name segment of its header.
+        LName := NIL_NODE;
+        LC := LM.Tree.Nodes[LP].FirstChild;
+        while LC <> NIL_NODE do
+        begin
+          if (LM.Tree.Nodes[LC].Kind = nkIdent) and
+             (nfName in LM.Tree.Nodes[LC].Flags) then
+            LName := LC;
+          LC := LM.Tree.Nodes[LC].NextSibling;
+        end;
+        if (LName <> NIL_NODE) and
+           LM.Tree.NodeTextEquals(LName, LM.Symbols[ASym].Name) then
+          Exit(True);
+      end;
+      LP := LM.Tree.Nodes[LP].Parent;
+    end;
+  end;
+
   // Does the unit hold a `with` at all? Asked for every bare field written,
   // answered once per walk.
   function HasWith: Boolean;
@@ -25778,8 +25818,13 @@ var
         nkIdent, nkMember:
           if TargetSym(B, LMid, LSym) then
             case FModels[LMid].Symbols[LSym].Kind of
-              skRoutine, skProperty:
-                Result := True;   // a paren-less call's result, a property's value
+              // A paren-less call's result, a property's value - but a
+              // function's own name in its body, written to, is its result.
+              skRoutine:
+                Result := (LM.Tree.Nodes[B].Kind <> nkIdent) or
+                  not OwnResultTarget(AAssign, LMid, LSym);
+              skProperty:
+                Result := True;
               skField:
                 Result := FieldOfValue(AAssign, B, LMid, LSym);
               skParam:
@@ -27540,7 +27585,19 @@ var
               tcPointer])) or
             (((LName = 'include') or (LName = 'exclude')) and
              (XCatOf(CanonTypeX(GetX(LArg))) = tcSet))) then
+        begin
           CheckWriteTarget(N, LArg);
+          // A function's name is its call here, in its own body too
+          // (`Inc(GI)` in GI; OwnResultTarget).
+          var LFMid, LFSym: Integer;
+          if (LM.Tree.Nodes[LArg].Kind in [nkIdent, nkMember]) and
+             TargetSym(LArg, LFMid, LFSym) and
+             (FModels[LFMid].Symbols[LFSym].Kind = skRoutine) and
+             (FModels[LFMid].Symbols[LFSym].TypeNode <> NIL_NODE) and
+             not (sfBuiltin in FModels[LFMid].Symbols[LFSym].Flags) and
+             not InUntypedWith(N) and not LM.HasDiagAt(LArg) then
+            EmitAt(LM, LArg, 'E2064', SE2064_LeftSideCannotBeAssigned);
+        end;
       end;
       // `Copy(A, ...)` of an open-array parameter: E2008, as SetLength
       // (6.2.6), whatever the arguments - but an `array of Char` is a
