@@ -1388,6 +1388,11 @@ begin
     SetLength(FReported, Length(FTree.Nodes));
   if FReported[ADeclNode] then
     Exit;
+  // A field on a line after a variant part (9.1.3) is a branch label for
+  // dcc, which declares nothing: a tag or branch field of its name is no
+  // clash (dcc64 37.0, local/probe-park/sa7-rvar V8-V10).
+  if PasStrayVariantBranch(FTree, FTree.Nodes[ADeclNode].Parent) then
+    Exit;
   FReported[ADeclNode] := True;
   NodePos(ADeclNode, LFileId, LLine, LCol);
   // A type is reported where dcc knows the declaration for a second one: at

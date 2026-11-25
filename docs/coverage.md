@@ -547,14 +547,21 @@ of less work, not a gap in following the language; its consequences are in
 ## 09-records.md
 
 ### 9.1.3 Variant records (`case` part)
-- a field after the variant part (`A: Integer;` on its own line after a
-  branch) gets dcc's diagnostics - `E2003 Undeclared identifier: 'A'` at
-  the name, the E2029 at the record's `end` - but stays a field in the
-  tree, as the same text is while the author types the next field below a
-  `case`. A name that IS a declared constant is dcc's `'(' expected`
-  instead; it gets the E2003 here. A list of labels on that line (`A, B:
-  Integer;`) is read as labels: each undeclared one is reported, where dcc
-  shows the first alone.
+- a branch label is not checked: a variable or a type name (`E2026
+  Constant expression expected`), a constant of another type than the tag
+  (E2010) and a value an earlier branch has (`E2027 Duplicate tag value`)
+  are silent. So a line after the variant part (`A: Integer;`, `A, B:
+  Integer;`, kept as fields in the tree) whose label is such a name gets
+  the `'(' expected` of a declared label instead of dcc's E2026 / E2010,
+  and a label line split over two lines misses dcc's E2027.
+- dcc drops an error 10 columns or fewer after the last one it showed on
+  the same line (09 sec. 9.1.3: `X := Y + Z;` with all three undeclared is
+  one E2003). PasTree applies that only to the line after a variant part;
+  everywhere else it reports each error it finds.
+- the record's `end` after such a line gets the E2029 dcc gives for a type
+  that ends in a name or is `string`; an `array` type there (`A, B:
+  array[0..1] of Byte;`, which dcc reads as an attribute) or a subrange
+  (`A: 0..9;`) gets `type expected` where dcc's errors differ.
 - a branch field of a generic record typed by an unconstrained type
   parameter (`0: (V: T)`) is not reported; dcc says `E2569 Type parameter
   'T' may need finalization` at the declaration.

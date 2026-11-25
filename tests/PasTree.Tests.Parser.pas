@@ -4641,29 +4641,42 @@ begin
       'Params(Param(Ident''constref''#name Ident''X''#name ' +
       'Ident''Integer'')) RoutineBody(Block)) Block)', 1),
     // g4 RVar2 (9.1.3): a field after the variant part is a further branch
-    // for dcc - its name a label, E2003 there, the record's `end` the
-    // E2029; the tree keeps the fields as fields, in that branch.
+    // for dcc - its name a label - and the record's `end` the E2029; the
+    // tree keeps the fields as fields, in that branch. The label's own
+    // error is a lookup, the semantic layer's (SemaProjectSmoke strayvar).
     DiagListCase('9.1.3', 'SA RVar2: a field after the variant part',
       'program RVar2;'#13#10'type'#13#10'  TV = record'#13#10 +
       '    case Integer of'#13#10'      0: (I: Integer);'#13#10 +
       '    A: Integer;'#13#10'  end;'#13#10'begin'#13#10'end.'#13#10,
-      '6:5 E2003 Undeclared identifier: ''A''; 7:3 type expected, found "end"; '),
+      '7:3 type expected, found "end"; '),
     DiagListCase('9.1.3', 'SA RVar2: two fields after it',
       'program V1;'#13#10'type'#13#10'  TV = record'#13#10 +
       '    case Integer of'#13#10'      0: (I: Integer);'#13#10 +
       '    A: Integer;'#13#10'    B: Byte;'#13#10'  end;'#13#10 +
       'begin'#13#10'end.'#13#10,
-      '6:5 E2003 Undeclared identifier: ''A''; 8:3 ")" expected, found "end"; '),
+      '8:3 ")" expected, found "end"; '),
     DiagListCase('9.1.3', 'SA RVar2: no semicolon after it',
       'program V3;'#13#10'type'#13#10'  TV = record'#13#10 +
       '    case Integer of'#13#10'      0: (I: Integer);'#13#10 +
       '    A: Integer'#13#10'  end;'#13#10'begin'#13#10'end.'#13#10,
-      '6:5 E2003 Undeclared identifier: ''A''; 7:3 "," or ":" expected, found "end"; '),
+      '7:3 "," or ":" expected, found "end"; '),
     DiagListCase('9.1.3', 'SA RVar2: a literal label with no (',
       'program V5;'#13#10'type'#13#10'  TV = record'#13#10 +
       '    case Integer of'#13#10'      0: (I: Integer);'#13#10 +
       '    1: Integer;'#13#10'  end;'#13#10'begin'#13#10'end.'#13#10,
-      '6:8 "(" expected; 7:3 type expected, found "end"; '),
+      '7:3 type expected, found "end"; '),
+    // A `string` type leaves dcc's reading no type to want at the `end`, a
+    // `)` instead (local/probe-park/sa7-rvar X1, W2).
+    DiagListCase('9.1.3', 'SA RVar2: a string field after it',
+      'program X1;'#13#10'type'#13#10'  TV = record'#13#10 +
+      '    case Integer of'#13#10'      0: (I: Integer);'#13#10 +
+      '    A: string;'#13#10'  end;'#13#10'begin'#13#10'end.'#13#10,
+      '7:3 ")" expected, found "end"; '),
+    DiagListCase('9.1.3', 'SA RVar2: two string labels after it',
+      'program W2;'#13#10'type'#13#10'  TV = record'#13#10 +
+      '    case Integer of'#13#10'      0: (I: Integer);'#13#10 +
+      '    A, B: string;'#13#10'  end;'#13#10'begin'#13#10'end.'#13#10,
+      '7:3 ")" expected, found "end"; '),
     DeclTreeCase('9.1.3', 'SA RVar2: the fields stay fields',
       'program RVar2;'#13#10'type'#13#10'  TV = record'#13#10 +
       '    case Integer of'#13#10'      0: (I: Integer);'#13#10 +
@@ -4673,7 +4686,7 @@ begin
       'VariantPart(Ident''Integer'' VariantBranch(IntLit''0'' ' +
       'VarDecl(Ident''I''#name Ident''Integer'')) VariantBranch(' +
       'VarDecl(Ident''A''#name Ident''Integer'') VarDecl(Ident''B''#name ' +
-      'Ident''Byte'')))))) Block)', 2),
+      'Ident''Byte'')))))) Block)', 1),
     DiagListCase('9.1.3', 'SA RVar2: legal variant parts stay clean',
       'program V0;'#13#10'type'#13#10'  TV = record'#13#10 +
       '    A: Integer;'#13#10'    case T: Byte of'#13#10 +

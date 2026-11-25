@@ -189,7 +189,10 @@ type
     nkPropSpec,       // read/write/index/stored/default/implements + expr
     nkMethodResolution, // 14.2.2: IFace.Method = ImplName
     nkVariantPart,    // 9.1.3: [tag] type + branches
-    nkVariantBranch,  //   labels : ( fields )
+    nkVariantBranch,  //   labels : ( fields ); Aux = the `:` after the
+                      // labels on a line dcc reads as a branch with no `(`
+                      // - a field after the variant part, kept as fields
+                      // (PasStrayVariantBranch); NIL_NODE otherwise
     nkGenericParams,  // 16.1: <T; U: constraints>
     nkGenericParam,
     nkConstraint,     // class/record/constructor/typeref
@@ -545,6 +548,13 @@ type
     group's (`<[A] K, [B] V: class>`, 19.3.2) - are read through it. }
   function PasSkipAttrGroups(const ATree: TPasTree; ANode: Integer): Integer;
 
+  { 9.1.3: ANode - an nkVariantBranch or a field declaration in one - is on a
+    line after the variant part (`A: Integer;`, `A, B: Integer;`) that dcc
+    reads as a further branch with no `(`, its first names labels, and the
+    tree keeps as fields. Those fields declare nothing for dcc: no E2004, no
+    E2154 / E2651 on them. }
+  function PasStrayVariantBranch(const ATree: TPasTree; ANode: Integer): Boolean;
+
   { ANode lies inside a routine's or an anonymous method's body (an
     nkRoutineBody: its local declarations and its block), not in a header or
     a declaration around it. }
@@ -722,6 +732,15 @@ begin
   Result := ANode;
   while (Result <> NIL_NODE) and (ATree.Nodes[Result].Kind = nkAttrGroup) do
     Result := ATree.Nodes[Result].NextSibling;
+end;
+
+function PasStrayVariantBranch(const ATree: TPasTree; ANode: Integer): Boolean;
+begin
+  if (ANode <> NIL_NODE) and (ATree.Nodes[ANode].Kind = nkVarDecl) then
+    ANode := ATree.Nodes[ANode].Parent;
+  Result := (ANode <> NIL_NODE) and
+    (ATree.Nodes[ANode].Kind = nkVariantBranch) and
+    (ATree.Nodes[ANode].Aux <> NIL_NODE);
 end;
 
 function PasHeritageRef(const ATree: TPasTree; ADef: Integer): Integer;

@@ -1484,8 +1484,14 @@ type
     function UnitNameOf(AId, ANode: Integer): Integer;
     function UnitNamedBy(AId: Integer; const AText: string): Integer;
     function UsesNamed(AM: TPasSemaModel; const AText: string): Integer;
+    { AStray: the caller is CheckRecordDecls' reading of a line after a
+      variant part (9.1.3), which alone reports that line's labels - the
+      passes that resolve them skip them (dcc drops all but some). }
     procedure EmitE2003(AModel: TPasSemaModel; ANode: Integer;
-      AId: Integer = -1);
+      AId: Integer = -1; AStray: Boolean = False);
+    { A visible token as dcc quotes the one it found: `identifier 'X'` for a
+      name, a word upper-cased, anything else as written - quoted. }
+    function DccTokenText(AModel: TPasSemaModel; ATok: Integer): string;
     function PointerTargetPlaceholder(AModel: TPasSemaModel;
       ANode: Integer): Boolean;
     function UnknownAncestryX(const AX: TSemaXType): Boolean;
@@ -10899,12 +10905,36 @@ begin
   Result := LRefs >= 2;
 end;
 
+function TPasSemaProject.DccTokenText(AModel: TPasSemaModel;
+  ATok: Integer): string;
+begin
+  Result := AModel.Tree.Source.VisibleText(ATok);
+  if AModel.Tree.Source.VisibleKind(ATok) = tkIdentifier then
+    Exit('identifier ' + QuotedStr(Result));
+  if (Result <> '') and CharInSet(Result[1], ['A'..'Z', 'a'..'z']) then
+    Result := UpperCase(Result);   // a word: dcc spells it so
+  Result := QuotedStr(Result);
+end;
+
 procedure TPasSemaProject.EmitE2003(AModel: TPasSemaModel; ANode: Integer;
-  AId: Integer = -1);
+  AId: Integer = -1; AStray: Boolean = False);
 var
   LStruct, LAttr: Integer;
   LSilent: Boolean;
 begin
+  // A name on a line after a variant part (9.1.3): CheckRecordDecls reads
+  // that line as dcc does and reports what dcc shows of it - the labels
+  // before its `:`; the type and the fields after it dcc reads in its
+  // recovery, resolving none of them (`A: TTypo;` is E2003 at `A` alone).
+  if not AStray then
+  begin
+    var LUp := AModel.Tree.Nodes[ANode].Parent;
+    while (LUp <> NIL_NODE) and not (AModel.Tree.Nodes[LUp].Kind in
+           [nkVariantBranch, nkRecordType]) do
+      LUp := AModel.Tree.Nodes[LUp].Parent;
+    if (LUp <> NIL_NODE) and PasStrayVariantBranch(AModel.Tree, LUp) then
+      Exit;
+  end;
   // The one gate of every undeclared-name verdict, whichever pass reached it
   // and whatever it gated on itself (most passes AllUsesResolved alone): a
   // unit with an import found only by the search's tolerance (UsesLeafGuessed)
@@ -13171,7 +13201,6 @@ var
     LChain, LName, LSym, LKMid, LUp, LTok: Integer;
     LExt: TPasExtRef;
     LX: TSemaXType;
-    LText: string;
   begin
     Result := False;
     LChain := PasAttrExprHead(LM.Tree, AAttr);
@@ -13217,17 +13246,8 @@ var
           LTok := LM.Tree.Nodes[LChain].LastToken + 1;
           if LTok > High(LM.Tree.Source.Visible) then
             Exit;
-          LText := LM.Tree.Source.VisibleText(LTok);
-          if LM.Tree.Source.VisibleKind(LTok) = tkIdentifier then
-            LText := 'identifier ' + QuotedStr(LText)
-          else
-          begin
-            if (LText <> '') and CharInSet(LText[1], ['A'..'Z', 'a'..'z']) then
-              LText := UpperCase(LText);   // a word: dcc spells it so
-            LText := QuotedStr(LText);
-          end;
           EmitAtToken(LM, AAttr, LTok, 'E2029', Format(SE2029_ListExpected,
-            [LText]));
+            [DccTokenText(LM, LTok)]));
         end;
     end;
   end;
@@ -15461,6 +15481,109 @@ var
     end;
   end;
 
+  // 9.1.3: a line after the variant part (PasStrayVariantBranch) is a
+  // further branch for dcc - `A: Integer;`, `A, B: Integer;` - its names up
+  // to the `:` labels, and no `(` after it. The line's errors, in source
+  // order: E2003 at each undeclared label, `'(' expected` at the token after
+  // the `:`, `',' or ':' expected` at the `;` the type ends at - each one
+  // dropped where it stands on the line of the last one shown, 10 columns
+  // after it or fewer, as dcc drops any error (dcc64 37.0, local/probe-park/
+  // sa7-rvar V1-V17, T1-T9, G1). The record's `end` is the parser's.
+  procedure CheckStrayBranch(ABranch: Integer);
+  var
+    LColon, LKid, LDecl, LType, LTok, LSym, LRMid: Integer;
+    LLastLine, LLastCol: Integer;
+
+    // A candidate at visible token ATok: shown unless the last one shown
+    // is on its line, 10 columns or fewer before it.
+    function Shown(ATok: Integer): Boolean;
+    var
+      LFile, LLine, LCol: Integer;
+    begin
+      if not TokenLineCol(LM, ATok, LFile, LLine, LCol) then
+        Exit(False);
+      Result := (LLine <> LLastLine) or (LCol - LLastCol > 10);
+      if Result then
+      begin
+        LLastLine := LLine;
+        LLastCol := LCol;
+      end;
+    end;
+
+  begin
+    LColon := LT.Nodes[ABranch].Aux;
+    // A name dcc might find in a unit the search only guessed: no verdict.
+    if not UndeclaredReported(LM) then
+      Exit;
+    LLastLine := -1;
+    LLastCol := 0;
+    LType := NIL_NODE;
+    LKid := PasSkipAttrGroups(LT, LT.Nodes[ABranch].FirstChild);
+    if (LKid <> NIL_NODE) and (LT.Nodes[LKid].Kind = nkVarDecl) then
+    begin
+      // `A: Integer;` - one label, kept as the field's name: looked up from
+      // where the record is declared, its own members not in scope (a tag
+      // or branch field named `A` is no constant: E2003, V9, V10).
+      LDecl := LKid;
+      LKid := LT.Nodes[LDecl].FirstChild;
+      LType := TypeOf(LDecl);
+      if (LKid <> NIL_NODE) and (LT.Nodes[LKid].Kind = nkIdent) then
+      begin
+        var LName := LowerCase(LT.NodeText(LKid));
+        var LUp := LT.Nodes[ABranch].Parent;
+        while (LUp <> NIL_NODE) and (LT.Nodes[LUp].Kind <> nkRecordType) do
+          LUp := LT.Nodes[LUp].Parent;
+        LSym := NIL_SYM;
+        LRMid := AId;
+        if (LUp <> NIL_NODE) and (LT.Nodes[LUp].Parent <> NIL_NODE) and
+           (Length(LM.NodeScope) = Length(LT.Nodes)) and
+           (LM.NodeScope[LT.Nodes[LUp].Parent] <> NIL_SCOPE) then
+        begin
+          LSym := LM.Resolve(LM.NodeScope[LT.Nodes[LUp].Parent], LName);
+          if LSym = NIL_SYM then
+            ResolveRealDecl(AId, LName, LRMid, LSym);
+        end
+        else
+          OracleResolveFrom(AId, LKid, LName, LRMid, LSym);
+        if (LSym = NIL_SYM) and Shown(LT.Nodes[LKid].FirstToken) then
+          EmitE2003(LM, LKid, AId, True);
+      end;
+    end
+    else
+    begin
+      // `A, B: Integer;` - the labels are references, bound or not; the
+      // type, when there is one, starts right after the `:`.
+      while (LKid <> NIL_NODE) and
+            (LT.Nodes[LKid].FirstToken <> LColon + 1) do
+      begin
+        if (LT.Nodes[LKid].Kind = nkIdent) and
+           (LT.Nodes[LKid].LastToken < LColon) and
+           (LKid <= High(LM.RefMap)) and (LM.RefMap[LKid] = NIL_SYM) and
+           not LM.ExtRefMap.ContainsKey(LKid) and
+           Shown(LT.Nodes[LKid].FirstToken) then
+          EmitE2003(LM, LKid, AId, True);
+        LKid := LT.Nodes[LKid].NextSibling;
+      end;
+      if (LKid <> NIL_NODE) and (LT.Nodes[LKid].Kind <> nkVarDecl) then
+        LType := LKid;
+    end;
+    if LType = NIL_NODE then
+      Exit;
+    LTok := LColon + 1;
+    if Shown(LTok) then
+      EmitAtToken(LM, ABranch, LTok, 'E2029', Format(SE2029_Expected,
+        ['''(''', DccTokenText(LM, LTok)]));
+    // dcc's reading goes on from a name in the type (`Integer`, `^Integer`,
+    // `set of Byte`) and stops at the `;`; from a `string` it reaches the
+    // record's `end` instead, the parser's `)` (W2, X1, Z1, Z3).
+    LTok := LT.Nodes[LType].LastToken + 1;
+    if (LTok <= High(LT.Source.Visible)) and
+       (LT.Source.VisibleKind(LTok - 1) = tkIdentifier) and
+       (LT.Source.VisibleKind(LTok) = tkSemicolon) and Shown(LTok) then
+      EmitAtToken(LM, ABranch, LTok, 'E2029', Format(SE2029_Expected,
+        [''','' or '':''', DccTokenText(LM, LTok)]));
+  end;
+
   // 9.1.3: the fields of variant part APart, its nested parts too.
   procedure CheckVariantPart(APart: Integer);
   var
@@ -15470,7 +15593,9 @@ var
     LBranch := LT.Nodes[APart].FirstChild;
     while LBranch <> NIL_NODE do
     begin
-      if LT.Nodes[LBranch].Kind = nkVariantBranch then
+      if PasStrayVariantBranch(LT, LBranch) then
+        CheckStrayBranch(LBranch)
+      else if LT.Nodes[LBranch].Kind = nkVariantBranch then
       begin
         LKid := LT.Nodes[LBranch].FirstChild;
         while LKid <> NIL_NODE do

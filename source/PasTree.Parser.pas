@@ -3447,16 +3447,18 @@ begin
         Break;
       end;
       // After a branch, `A: Integer;` on its own line is a field after the
-      // variant part - a further branch for dcc, `A` its label: `E2003
-      // Undeclared identifier: 'A'` there, and the record's `end` the
-      // E2029, by what the branch still wants: a type after `A: Integer;`,
-      // a `)` after more fields, a `,` or `:` with no `;` (9.1.3; dcc64
-      // 37.0, spec audit g4 RVar2, local/probe-park/sa2-decl V1-V3). The
-      // tree keeps the fields as fields, in that branch - the same text is
-      // the author typing the next field below a `case` (ResilienceSmoke).
+      // variant part - a further branch for dcc, `A` its label - and the
+      // record's `end` the E2029, by what the branch still wants: a type
+      // after `A: Integer;`, a `)` after more fields, a `,` or `:` with no
+      // `;` (9.1.3; dcc64 37.0, spec audit g4 RVar2, local/probe-park/
+      // sa2-decl V1-V3). The label's own verdict - E2003 when nothing
+      // declares `A`, `"(" expected` at the type when something does - is a
+      // lookup, the semantic layer's (CheckRecordDecls; local/probe-park/
+      // sa7-rvar V1, V9). The tree keeps the fields as fields, in that
+      // branch - the same text is the author typing the next field below a
+      // `case` (ResilienceSmoke) - and Aux marks the branch, at the `:`.
       LBranch := FB.AddNode(nkVariantBranch, NIL_NODE, FPos);
-      ErrorCode('E2003', Format('Undeclared identifier: ''%s''', [CurText]),
-        LBranch);
+      FB.SetAux(LBranch, FPos + 1);
       while CurKind = tkIdentifier do
       begin
         LStart := FPos;
@@ -3464,8 +3466,11 @@ begin
         if FPos = LStart then
           Break;
       end;
+      // A `string` type (`A: string;`) gives dcc's reading no type to want
+      // at the `end` - a `)` instead (local/probe-park/sa7-rvar X1, W3).
       if CurKind = tkEnd then
-        if FB.ChildCount(LBranch) > 1 then
+        if (FB.ChildCount(LBranch) > 1) or
+           (VisKind(FB.AuxOf(LBranch) + 1) = tkString) then
           Error('")" expected, found "end"')
         else if VisKind(FPos - 1) = tkSemicolon then
           Error('type expected, found "end"')
@@ -3492,19 +3497,19 @@ begin
     end;
     // A field after the variant part, `0: (I: Integer);` NEWLINE `A:
     // Integer;` NEWLINE `end`, is read by dcc as a further branch: `A` a
-    // label (E2003 when undeclared, the resolver's), no `(` after its `:`
-    // (E2029, reported only where the label is no lone name - an
-    // undeclared one's E2003 stands on that line alone), and the record's
-    // `end` where the branch still wants a type, a `)` or a `,`/`:` (dcc64
-    // 37.0, spec audit g4 RVar2, local/probe-park/sa2-decl V1-V6). The type
-    // and the fields after it stay in the tree, in the branch.
+    // label, no `(` after its `:`, and the record's `end` where the branch
+    // still wants a type, a `)` or a `,`/`:` (dcc64 37.0, spec audit g4
+    // RVar2, local/probe-park/sa2-decl V1-V6). Which labels are declared
+    // decides the line's own errors - the first undeclared one's E2003, or
+    // `"(" expected` at the type when there is none - so they are the
+    // semantic layer's (CheckRecordDecls; local/probe-park/sa7-rvar). The
+    // type and the fields after it stay in the tree, in the branch, and Aux
+    // marks the branch, at the `:`.
     if (LBranches > 0) and (FB.Kind(AOwner) <> nkVariantBranch) and
        (CurKind = tkColon) and (PeekKind(1) <> tkLParen) then
     begin
+      FB.SetAux(LBranch, FPos);
       Next; // :
-      if (FB.ChildCount(LBranch) <> 1) or
-         (FB.Kind(FB.FirstChild(LBranch)) <> nkIdent) then
-        Error('"(" expected');
       if not (CurKind in [tkEnd, tkSemicolon, tkEndOfFile]) then
         FB.Adopt(LBranch, ParseTypeExpr);
       if CurKind <> tkSemicolon then
@@ -3513,7 +3518,10 @@ begin
       begin
         Next;
         if CurKind = tkEnd then
-          Error('type expected, found "end"')
+          if VisKind(FB.AuxOf(LBranch) + 1) = tkString then
+            Error('")" expected, found "end"')   // as above (W2)
+          else
+            Error('type expected, found "end"')
         else
         begin
           while not (CurKind in [tkEnd, tkEndOfFile]) do

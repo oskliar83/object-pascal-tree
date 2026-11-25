@@ -101,7 +101,7 @@ type reference" is an nkIdent, nkMember or nkTypeArgs.
 | nkPropSpec | the word (see 3), its values `, ...`; `default` with no value is the trailing `default;` of an array property and owns its `;` |
 | nkMethodResolution | the head word, the segments `.` between, `=` the last child `;` |
 | nkVariantPart | `case` [attributes] [tag `:`] type `of` branches `;` each - the tag when two children after the attributes come before the branches |
-| nkVariantBranch | labels `, ... : (` fields - each nkVarDecl followed by `;`, attributes before any of them - [nkVariantPart] `)` |
+| nkVariantBranch | labels `, ... : (` fields - each nkVarDecl followed by `;`, attributes before any of them - [nkVariantPart] `)`; in invalid code, a line after the variant part that dcc reads as a branch with no `(` (`A: Integer;`, `A, B: Integer;`) has Aux naming its `:` - the fields, or labels `:` type and the fields after them (`PasStrayVariantBranch`) |
 | nkGenericParams, nkGenericParam | `< c0; ... >`; names `, ...` (attributes may stand before each) [`:` nkConstraint `, ...`] |
 | nkConstraint | its child, or its head word (see 3) |
 | nkAttrGroup, nkAttribute | `[ c0, ... ]`; [target `:` - nfAttrTarget, see 5] `c0 [( args, ... )]` when c0 is a type reference, else c0 alone - any one expression, which dcc drops (W1074) |

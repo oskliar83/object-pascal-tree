@@ -16785,6 +16785,165 @@ begin
   end;
 end;
 
+// Every diagnostic of AModel as `line:col code`, in source order.
+function DiagSitesAll(AModel: TPasSemaModel): string;
+var
+  LKeys: TList<string>;
+begin
+  LKeys := TList<string>.Create;
+  try
+    for var LIdx := 0 to High(AModel.Diags) do
+      LKeys.Add(Format('%.4d:%.4d %s', [AModel.Diags[LIdx].Line,
+        AModel.Diags[LIdx].Col, AModel.Diags[LIdx].Code]));
+    LKeys.Sort;
+    Result := '';
+    for var LKey in LKeys do
+    begin
+      if Result <> '' then
+        Result := Result + ' ';
+      Result := Result + IntToStr(StrToInt(Copy(LKey, 1, 4))) + ':' +
+        IntToStr(StrToInt(Copy(LKey, 6, 4))) + Copy(LKey, 10, MaxInt);
+    end;
+  finally
+    LKeys.Free;
+  end;
+end;
+
+// A line after a record's variant part (spec 9.1.3; dcc64 37.0,
+// local/probe-park/sa7-rvar): a further branch for dcc, its names up to the
+// `:` labels, no `(` after it. E2003 at an undeclared label, `'(' expected`
+// at the type, `',' or ':' expected` at the `;` - each dropped 10 columns
+// or fewer after the last one shown on its line, as dcc drops any error. The
+// lines' fields declare nothing for dcc: no E2004, no E2154, no E2003 in
+// their types. The record's `end` is the parser's E2029.
+procedure TestRecordStrayVariantLine;
+var
+  LDir: string;
+  LCount: Integer;
+
+  function Check(const AConst, ATag, ALine, AWant: string): TPasSemaModel;
+  var
+    LName: string;
+  begin
+    Inc(LCount);
+    LName := 'SV' + IntToStr(LCount);
+    TFile.WriteAllText(TPath.Combine(LDir, LName + '.dpr'),
+      'program ' + LName + ';'#10 +                                      // 1
+      AConst + #10 +                                                     // 2
+      'type'#10 +                                                        // 3
+      '  TV = record'#10 +                                               // 4
+      '    case ' + ATag + ' of'#10 +                                    // 5
+      '      0: (I: Integer);'#10 +                                      // 6
+      '    ' + ALine + #10 +                                             // 7
+      '  end;'#10 +                                                      // 8
+      'begin'#10'end.'#10);
+    GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+    GProj.AnalyzeProject(TPath.Combine(LDir, LName + '.dpr'));
+    Result := ModelByName(LowerCase(LName));
+    Ok('strayvar: ' + AConst + ' `' + ALine + '` [' + DiagSitesAll(Result) +
+      ']', DiagSitesAll(Result) = AWant);
+  end;
+
+var
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_strayvar');
+  LCount := 0;
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  try
+    // V1, V9: a declared label is the `(` error at the type, an undeclared
+    // one the E2003 - and the `;` 10 columns after it is dropped.
+    LM := Check('const A = 1;', 'Integer', 'A: Integer;',
+      '7:8 E2029 8:3 E2029');
+    Ok('strayvar: dcc''s wording',
+      DiagHasText(LM, 'E2029', '''('' expected but identifier ''Integer'' found'));
+    FreeAndNil(GProj);
+    Check('', 'Integer', 'A: Integer;', '7:5 E2003 8:3 E2029');
+    FreeAndNil(GProj);
+    // V2-V5, V11, V13, V14: the first undeclared label alone; the `;` 13
+    // columns after it shown, 10 dropped.
+    Check('', 'Integer', 'A, B: Integer;', '7:5 E2003 7:18 E2029 8:3 E2029');
+    FreeAndNil(GProj);
+    Check('const A = 1;', 'Integer', 'A, B: Integer;', '7:8 E2003 8:3 E2029');
+    FreeAndNil(GProj);
+    Check('const B = 1;', 'Integer', 'A, B: Integer;',
+      '7:5 E2003 7:18 E2029 8:3 E2029');
+    FreeAndNil(GProj);
+    Check('const A = 1; B = 2;', 'Integer', 'A, B: Integer;',
+      '7:11 E2029 8:3 E2029');
+    FreeAndNil(GProj);
+    Check('const A = 1;', 'Integer', 'A, B, C: Integer;',
+      '7:8 E2003 7:21 E2029 8:3 E2029');
+    FreeAndNil(GProj);
+    Check('', 'Integer', 'A, 1: Integer;', '7:5 E2003 7:18 E2029 8:3 E2029');
+    FreeAndNil(GProj);
+    Check('', 'Integer', '1, A: Integer;', '7:8 E2003 8:3 E2029');
+    FreeAndNil(GProj);
+    // T1-T3, T6, Z1: the distance decides, not the shape.
+    Check('', 'Integer', 'A, B, C, D: Integer;', '7:5 E2003 7:17 E2029 8:3 E2029');
+    FreeAndNil(GProj);
+    Check('', 'Integer', 'A, 1, 2, 3, B: Integer;', '7:5 E2003 7:17 E2003 8:3 E2029');
+    FreeAndNil(GProj);
+    Check('', 'Integer', 'A:         Integer;', '7:5 E2003 7:16 E2029 8:3 E2029');
+    FreeAndNil(GProj);
+    Check('', 'Integer', 'A: Integer ;', '7:5 E2003 7:16 E2029 8:3 E2029');
+    FreeAndNil(GProj);
+    Check('', 'Integer', 'A: ^Integer;', '7:5 E2003 7:16 E2029 8:3 E2029');
+    FreeAndNil(GProj);
+    Check('', 'Integer', 'A, B: TObject;', '7:5 E2003 7:18 E2029 8:3 E2029');
+    FreeAndNil(GProj);
+    // V8-V10: a tag or branch field of the name is no constant, and no clash.
+    Check('const A = 1;', 'A: Integer', 'A: Integer;', '7:8 E2029 8:3 E2029');
+    FreeAndNil(GProj);
+    Check('', 'A: Integer', 'A: Integer;', '7:5 E2003 8:3 E2029');
+    FreeAndNil(GProj);
+    Check('', 'Integer', 'I: Integer;', '7:5 E2003 8:3 E2029');
+    FreeAndNil(GProj);
+    // W7: the fields after the line.
+    Check('', 'Integer', 'A, B: Integer; C, D: Byte;',
+      '7:5 E2003 7:18 E2029 8:3 E2029');
+    FreeAndNil(GProj);
+    // X1, W2, W3: a `string` field is no E2154, the `end` wants a `)`.
+    LM := Check('', 'Integer', 'A: string;', '7:5 E2003 8:3 E2029');
+    Ok('strayvar: `A: string;` ends at a `)`',
+      DiagHasText(LM, 'E2029', '")" expected'));
+    FreeAndNil(GProj);
+    LM := Check('const A = 1;', 'Integer', 'A: string;', '7:8 E2029 8:3 E2029');
+    Ok('strayvar: a word found is upper-cased',
+      DiagHasText(LM, 'E2029', '''('' expected but ''STRING'' found'));
+    FreeAndNil(GProj);
+    Check('', 'Integer', 'A, B: string;', '7:5 E2003 8:3 E2029');
+    FreeAndNil(GProj);
+    // U1: the type is no reference for dcc.
+    Check('', 'Integer', 'A: TTypo;', '7:5 E2003 8:3 E2029');
+    FreeAndNil(GProj);
+    // U2: a routine's constant is found from a record declared there.
+    TFile.WriteAllText(TPath.Combine(LDir, 'SVL.dpr'),
+      'program SVL;'#10 +                                                // 1
+      'procedure P;'#10 +                                                // 2
+      'const A = 1;'#10 +                                                // 3
+      'type'#10 +                                                        // 4
+      '  TV = record'#10 +                                               // 5
+      '    case Integer of'#10 +                                         // 6
+      '      0: (I: Integer);'#10 +                                      // 7
+      '    A: Integer;'#10 +                                             // 8
+      '  end;'#10 +                                                      // 9
+      'begin'#10'end;'#10'begin'#10'end.'#10);
+    GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'SVL.dpr'));
+    LM := ModelByName('svl');
+    Ok('strayvar: a local constant [' + DiagSitesAll(LM) + ']',
+      DiagSitesAll(LM) = '8:8 E2029 9:3 E2029');
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // A System for the type / expression checks of the spec audit's section 4:
 // PByte declared under {$POINTERMATH ON} as in the real one, a GUID'd
 // IInterface and a TInterfacedObject listing it.
@@ -26760,6 +26919,7 @@ begin
   TestRefTypeInPlace;
   TestRecordDecls;
   TestRecordVariantFields;
+  TestRecordStrayVariantLine;
   TestOpenArrayValue;
   TestPropertyAccessChecks;
   TestGenericInferErrors;

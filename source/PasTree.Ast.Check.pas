@@ -1262,6 +1262,8 @@ begin
   case AKind of
     nkUnaryOp, nkBinaryOp, nkParam:
       Result := True;
+    nkVariantBranch:   // a `:` token, see CheckAux
+      Result := (AAux = NIL_NODE) or (AAux >= 0);
     nkInterfaceType:
       Result := (AAux >= 0) and (AAux <= 3);   // bit set: 1 disp, 2 forward
     nkVisibility:
@@ -2195,6 +2197,14 @@ var
               'UnaryOp operator at {a} is not before its operand at {a}',
               [LAux, LLo[LFirstKid]]);
         end;
+      // A line after the variant part read as a branch (invalid code only,
+      // PasStrayVariantBranch): Aux names the `:` after its labels.
+      nkVariantBranch:
+        if (LAux <> NIL_NODE) and ((LAux < ATree.Nodes[ANode].FirstToken) or
+           (LAux > ATree.Nodes[ANode].LastToken) or
+           (TokKind(LAux) <> tkColon)) then
+          Report(ccAux, ANode, Site(ANode),
+            'VariantBranch Aux {d} names no `:` of its own', [LAux]);
       nkVisibility:
         // `strict public` too: dcc's E2375, the section read as written.
         if (nfNegated in ATree.Nodes[ANode].Flags) and

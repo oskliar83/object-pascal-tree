@@ -227,6 +227,10 @@ const
   // `Exit(1, 2)` in a function (5.6.3): the intrinsic takes one expression,
   // dcc's parser stops at the comma.
   SE2029_RParenExpectedComma = 'E2029 '')'' expected but '','' found';
+  // dcc's general syntax wording: what it wanted, quoted, then the token it
+  // found (TPasSemaProject.DccTokenText). A line after a record's variant
+  // part (9.1.3) is one: `'(' expected but identifier 'Integer' found`.
+  SE2029_Expected = 'E2029 %s expected but %s found';
   // Generic type-parameter constraints (16.4.1). Wording and codes verified
   // against dcc32 37.0; the single %s is the PARAMETER name (E2515 takes the
   // constraint type name second).
