@@ -25683,7 +25683,28 @@ var
     Result := Shape and not Unreliable(AAssign, B, GetX(B));
   end;
 
-  // E2064 at an assignment AAssign whose target ADst is a part of a value.
+  // 3.2.2: a constant written to - a true constant, and a typed one but
+  // under {$J+} (`TC := 1` under {$J-}, `K := 1`).
+  function ReadOnlyConst(AMid, ASym: Integer): Boolean;
+  begin
+    Result := not (sfBuiltin in FModels[AMid].Symbols[ASym].Flags) and
+      not ((FModels[AMid].Symbols[ASym].TypeNode <> NIL_NODE) and
+           (sfWriteableConst in FModels[AMid].Symbols[ASym].Flags));
+  end;
+
+  // Is the designator B, indexed, a string (no PChar, no array of Char)?
+  function StringAt(AAssign, B: Integer): Boolean;
+  var
+    LX: TSemaXType;
+  begin
+    LX := GetX(B);
+    Result := XValid(LX) and (XCatOf(CanonTypeX(LX)) = tcString) and
+      not Unreliable(AAssign, B, LX);
+  end;
+
+  // E2064 at an assignment AAssign whose target ADst is a part of a value -
+  // or, AAssign an `Inc` / `Dec` / `Include` / `Exclude` call, its first
+  // argument ADst (6.2.3).
   procedure CheckWriteTarget(AAssign, ADst: Integer);
   var
     LMid, LSym, LBase: Integer;
@@ -25702,12 +25723,8 @@ var
             skParam:
               LHit := (LM.Tree.Nodes[ADst].Kind = nkIdent) and
                 IsConstParam(LMid, LSym);
-            // 3.2.2: a true constant, and a typed one but under {$J+}
-            // (`TC := 1` under {$J-}, `K := 1`).
             skConst:
-              LHit := not (sfBuiltin in FModels[LMid].Symbols[LSym].Flags) and
-                not ((FModels[LMid].Symbols[LSym].TypeNode <> NIL_NODE) and
-                     (sfWriteableConst in FModels[LMid].Symbols[LSym].Flags));
+              LHit := ReadOnlyConst(LMid, LSym);
           end;
       nkIndex:
         begin
@@ -25723,6 +25740,35 @@ var
              (FModels[LMid].Tree.Nodes[FModels[LMid].Symbols[LSym].TypeNode]
                .Kind = nkArrayType) then
             LHit := True;
+          // A character of a string that is no variable (6.2.3): a
+          // `const` parameter, a field of a value record, a call's result,
+          // a parenthesized string, a true constant and a typed one under
+          // {$J-} (`S[1] := 'a'`, `KS[1]`, `GS[1]`, `(S)[1]`).
+          // An array property's element (`Grid.Cells[0, 0]`, `Values[N]`)
+          // is a write through its setter, and a string property's
+          // character is not judged.
+          if not LHit and (LBase <> NIL_NODE) and
+             (LM.Tree.Nodes[LBase].NextSibling <> NIL_NODE) and
+             (LM.Tree.Nodes[LM.Tree.Nodes[LBase].NextSibling].NextSibling =
+              NIL_NODE) and
+             not IsArrayPropertyDesignator(LBase) and
+             StringAt(AAssign, LBase) then
+            if (LM.Tree.Nodes[LBase].Kind in [nkIdent, nkMember]) and
+               TargetSym(LBase, LMid, LSym) then
+            begin
+              case FModels[LMid].Symbols[LSym].Kind of
+                skConst:
+                  LHit := ReadOnlyConst(LMid, LSym);
+                skProperty:
+                  LHit := False;
+              else
+                LHit := IsValueOnly(AAssign, LBase);
+              end;
+            end
+            else if LM.Tree.Nodes[LBase].Kind in [nkIdent, nkMember] then
+              LHit := False   // a name that binds nothing says nothing
+            else
+              LHit := IsValueOnly(AAssign, LBase);
         end;
     end;
     if LHit and not InUntypedWith(AAssign) then
@@ -27208,6 +27254,22 @@ var
       Result := True;
     end;
 
+    // Is ANode (through parentheses) an open-array parameter of characters
+    // (`array of Char`, `array of AnsiChar`)? OpenArrayParamOf's question first.
+    function OpenCharArray(ANode: Integer): Boolean;
+    var
+      LCore, LMid, LSym: Integer;
+      LElemX: TSemaXType;
+    begin
+      Result := False;
+      LCore := PeelParens(LM.Tree, ANode);
+      if (LCore = NIL_NODE) or not TargetSym(LCore, LMid, LSym) then
+        Exit;
+      LElemX := InlineArrayElemX(LMid, LSym);
+      Result := not XValid(LElemX) or
+        (XCatOf(CanonTypeX(LElemX)) = tcChar);
+    end;
+
     { An open-array parameter used as a value inside its routine (6.2.6):
       it is no dynamic array. Assigned to a typed target, E2010 naming the
       target and `array of T` - a string target takes an `array of Char`,
@@ -27338,6 +27400,37 @@ var
          not (sfBuiltin in FModels[LMid].Symbols[LSym].Flags) then
         Exit;
       LName := FModels[LMid].Symbols[LSym].NameLower;
+      // The variable Inc, Dec, Include and Exclude write: no part of a
+      // value, as an assignment's target (6.2.3: `Inc(X)` of a `const`
+      // parameter or a constant is E2064).
+      if (LName = 'inc') or (LName = 'dec') or (LName = 'include') or
+         (LName = 'exclude') then
+      begin
+        LArg := CallFirstArg(LM.Tree, N);
+        // Of a type they take - Include / Exclude of no set, Inc of no
+        // ordinal is another error first (E2008 for `Include(X, 1)`).
+        if (LArg <> NIL_NODE) and
+           ((((LName = 'inc') or (LName = 'dec')) and
+             (XCatOf(CanonTypeX(GetX(LArg))) in [tcInteger, tcChar, tcEnum,
+              tcPointer])) or
+            (((LName = 'include') or (LName = 'exclude')) and
+             (XCatOf(CanonTypeX(GetX(LArg))) = tcSet))) then
+          CheckWriteTarget(N, LArg);
+      end;
+      // `Copy(A, ...)` of an open-array parameter: E2008, as SetLength
+      // (6.2.6), whatever the arguments - but an `array of Char` is a
+      // string to Copy (8.1.1).
+      if LName = 'copy' then
+      begin
+        LArg := CallFirstArg(LM.Tree, N);
+        var LTxt: string;
+        if (LArg <> NIL_NODE) and OpenArrayParamOf(LArg, LTxt) and
+           not OpenCharArray(LArg) and not InUntypedWith(N) then
+        begin
+          EmitAt(LM, LArg, 'E2008', SE2008_IncompatibleTypes);
+          Exit;
+        end;
+      end;
       if (LName <> 'inc') and (LName <> 'dec') and (LName <> 'copy') and
          (LName <> 'setlength') and (LName <> 'delete') and
          (LName <> 'insert') and (LName <> 'concat') and
@@ -27460,6 +27553,237 @@ var
           Result := FModels[AMid].Tree.Nodes[Result].Parent;
       end;
 
+      // A function's result, ANode through parentheses: the call of a
+      // routine that is nothing builtin, or such a routine named alone.
+      function UserResult(ANode: Integer): Boolean;
+      var
+        LCore, LHead, LMid, LSym: Integer;
+      begin
+        Result := False;
+        LCore := PeelParens(LM.Tree, ANode);
+        if LCore = NIL_NODE then
+          Exit;
+        LHead := LCore;
+        if LM.Tree.Nodes[LCore].Kind = nkCall then
+          LHead := PeelParens(LM.Tree, LM.Tree.Nodes[LCore].FirstChild);
+        Result := (LHead <> NIL_NODE) and
+          (LM.Tree.Nodes[LHead].Kind in [nkIdent, nkMember]) and
+          not IsTypeDesignator(LHead) and TargetSym(LHead, LMid, LSym) and
+          (FModels[LMid].Symbols[LSym].Kind = skRoutine) and
+          not (sfBuiltin in FModels[LMid].Symbols[LSym].Flags);
+      end;
+
+      // A scalar's size in bytes (an ordinal of an integer, character or
+      // enumeration type): False where it is not known.
+      function ScalarSize(const AX: TSemaXType; out ABytes: Int64): Boolean;
+      var
+        LC: TSemaXType;
+      begin
+        Result := False;
+        ABytes := 0;
+        if not XValid(AX) then
+          Exit;
+        LC := CanonTypeX(AX);
+        Result := XValid(LC) and (XCatOf(LC) in [tcInteger, tcChar, tcEnum]) and
+          TypeSizeOf(LC.UnitId, LC.Sym, ABytes);
+      end;
+
+      { An intrinsic's value for an open array (6.2.6, dcc64 37.0,
+        2026-11-25, local/probe-park/sa7-params B1, B2): ANode a call of a
+        builtin with one argument. 0: not judged; 1: E2036 - `Succ` /
+        `Pred` of an enumeration value, `Chr`, `Swap`, `Sqr` of an
+        integer; 2: E2010 naming ATxt, the type dcc gives the value -
+        `Succ` / `Pred` of an integer (`Integer`, `Int64` for a 64-bit
+        one), of a character (its type) or a Boolean, `Ord` (`Integer`),
+        `Odd` (`Boolean`), `Abs` of an integer as `Succ`, `Abs` / `Sqr` of
+        a real (`Double`, where Extended is one), `Round` / `Trunc`
+        (`Int64`), `Hi` / `Lo` (`Integer`), `Length` of a string
+        (`Integer`). }
+      function IntrinsicVerdict(ANode: Integer; out ATxt: string): Integer;
+      var
+        LHead, LMid, LSym, LOpd: Integer;
+        LName: string;
+        LOx: TSemaXType;
+        LCat: TSemaTypeCat;
+        LSize: Int64;
+        LIntTxt: string;
+      begin
+        Result := 0;
+        ATxt := '';
+        if LM.Tree.Nodes[ANode].Kind <> nkCall then
+          Exit;
+        LHead := PeelParens(LM.Tree, LM.Tree.Nodes[ANode].FirstChild);
+        if (LHead = NIL_NODE) or (LM.Tree.Nodes[LHead].Kind <> nkIdent) or
+           not TargetSym(LHead, LMid, LSym) or
+           (FModels[LMid].Symbols[LSym].Kind <> skRoutine) or
+           not (sfBuiltin in FModels[LMid].Symbols[LSym].Flags) then
+          Exit;
+        LOpd := CallFirstArg(LM.Tree, ANode);
+        if (LOpd = NIL_NODE) or (LM.Tree.Nodes[LOpd].NextSibling <> NIL_NODE) then
+          Exit;
+        LOx := GetX(LOpd);
+        if not XValid(LOx) or OpenX(CanonTypeX(LOx)) then
+          Exit;
+        LCat := XCatOf(CanonTypeX(LOx));
+        LIntTxt := 'Integer';
+        if (LCat = tcInteger) and ScalarSize(LOx, LSize) and (LSize = 8) then
+          LIntTxt := 'Int64';
+        LName := FModels[LMid].Symbols[LSym].NameLower;
+        if (LName = 'succ') or (LName = 'pred') then
+          case LCat of
+            tcEnum:
+              Result := 1;
+            tcInteger:
+              begin
+                Result := 2;
+                ATxt := LIntTxt;
+              end;
+            tcChar:
+              begin
+                Result := 2;
+                ATxt := XTypeText(LOx);
+              end;
+            tcBoolean:
+              begin
+                Result := 2;
+                ATxt := 'Boolean';
+              end;
+          end
+        else if LName = 'ord' then
+        begin
+          if LCat in [tcInteger, tcChar, tcEnum, tcBoolean] then
+          begin
+            Result := 2;
+            ATxt := 'Integer';
+          end;
+        end
+        else if (LName = 'abs') or (LName = 'sqr') then
+        begin
+          if LCat = tcInteger then
+          begin
+            if LName = 'sqr' then
+              Result := 1
+            else
+            begin
+              Result := 2;
+              ATxt := LIntTxt;
+            end;
+          end
+          else if (LCat = tcFloat) and (FInfo.ExtendedBytes <= 8) then
+          begin
+            Result := 2;
+            ATxt := 'Double';
+          end;
+        end
+        else if (LName = 'odd') or (LName = 'hi') or (LName = 'lo') then
+        begin
+          if LCat = tcInteger then
+          begin
+            Result := 2;
+            if LName = 'odd' then
+              ATxt := 'Boolean'
+            else
+              ATxt := 'Integer';
+          end;
+        end
+        else if (LName = 'round') or (LName = 'trunc') then
+        begin
+          if LCat = tcFloat then
+          begin
+            Result := 2;
+            ATxt := 'Int64';
+          end;
+        end
+        else if (LName = 'chr') or (LName = 'swap') then
+        begin
+          if LCat = tcInteger then
+            Result := 1;
+        end
+        else if LName = 'length' then
+        begin
+          if LCat = tcString then
+          begin
+            Result := 2;
+            ATxt := 'Integer';
+          end;
+        end;
+      end;
+
+      { A call's value for an open array that is no `array of const`, its
+        element type AElemX (6.2.6; dcc64 37.0, 2026-11-25, local/
+        probe-park/sa7-params A3, B1, B2). A function's result is a
+        variable for a value or `const` one, and so is a cast of a variable
+        that keeps or narrows its size. 0: passes or not judged; 1: E2036 -
+        a cast of an operator's or an intrinsic's value, of a function's
+        result to another size, of a variable to a larger one (`Integer(I *
+        2)`, `TE(GI)`, `Integer(E)`), an intrinsic IntrinsicVerdict refuses
+        so, and for a `var` / `out` one (AByRef) a cast of a function's
+        result; 2: E2010 naming ATxt (IntrinsicVerdict). Judged where the
+        value is of the element type (a cast to it; an intrinsic's E2036),
+        and an E2010 for an element of a scalar type only. }
+      function OpenCallVerdict(ACore: Integer; const AElemX: TSemaXType;
+        AByRef: Boolean; out ATxt: string): Integer;
+      var
+        LHead, LOpd, LOpdCore, LAddr: Integer;
+        LCastX, LElemC: TSemaXType;
+        LTo, LFrom: Int64;
+        LTxt: string;
+      begin
+        Result := 0;
+        ATxt := '';
+        LElemC := CanonTypeX(AElemX);
+        if not XValid(LElemC) or OpenX(LElemC) or
+           not (XCatOf(LElemC) in [tcInteger, tcChar, tcEnum, tcBoolean,
+             tcFloat]) or
+           (LM.Tree.Nodes[ACore].Kind <> nkCall) then
+          Exit;
+        LHead := PeelParens(LM.Tree, LM.Tree.Nodes[ACore].FirstChild);
+        if (LHead = NIL_NODE) or
+           not (LM.Tree.Nodes[LHead].Kind in [nkIdent, nkMember]) then
+          Exit;
+        if IsTypeDesignator(LHead) then
+        begin
+          LOpd := CallFirstArg(LM.Tree, ACore);
+          if (LOpd = NIL_NODE) or (LM.Tree.Nodes[LOpd].NextSibling <> NIL_NODE) then
+            Exit;
+          LOpdCore := PeelParens(LM.Tree, LOpd);
+          LCastX := GetX(ACore);
+          // A cast to the element type, an ordinal of no Boolean type
+          // (`Boolean(I)` is refused where `Byte(I)` passes).
+          if not XValid(LCastX) or not XSameType(CanonTypeX(LCastX), LElemC) or
+             not (XCatOf(LElemC) in [tcInteger, tcChar, tcEnum]) then
+            Exit;
+          if AByRef then
+          begin
+            if UserResult(LOpdCore) then
+              Result := 1;
+            Exit;
+          end;
+          if (LM.Tree.Nodes[LOpdCore].Kind = nkBinaryOp) or
+             (LM.Tree.Nodes[LOpdCore].Kind = nkUnaryOp) and
+             not IsAddrOfExpr(LM.Tree, LOpdCore, LAddr) or
+             (IntrinsicVerdict(LOpdCore, LTxt) > 0) then
+            Exit(1);
+          if not ScalarSize(LCastX, LTo) or not ScalarSize(GetX(LOpd), LFrom) then
+            Exit;
+          if UserResult(LOpdCore) then
+          begin
+            if LTo <> LFrom then
+              Result := 1;
+          end
+          else if VarDesignator(LOpdCore) and (LTo > LFrom) then
+            Result := 1;
+          Exit;
+        end;
+        if AByRef then
+          Exit;
+        Result := IntrinsicVerdict(ACore, ATxt);
+        // E2036 for a value of the element type alone.
+        if (Result = 1) and not (XValid(GetX(ACore)) and
+           XSameType(CanonTypeX(GetX(ACore)), LElemC)) then
+          Result := 0;
+      end;
+
       // The arguments that are no variable - see the block comment.
       procedure ShapeArgs(AHead, AMid, ASym: Integer;
         const APars: TArray<Integer>);
@@ -27498,6 +27822,28 @@ var
           begin
             EmitAt(LM, LArg, 'E2197', SE2197_ConstObjectToVar);
             Exit;
+          end;
+          // A call's value for an open array (OpenCallVerdict).
+          if LOpen and (LM.Tree.Nodes[LCore].Kind = nkCall) then
+          begin
+            var LOA, LOC: Boolean;
+            LPX := ParamFitTypeX(AMid, APars[LPI], CtxAt(AHead), LOA, LOC);
+            if not LOC then
+              case OpenCallVerdict(LCore, LPX, LByRef, LTxt) of
+                1:
+                  if not Unreliable(N, LArg, GetX(LArg)) then
+                  begin
+                    EmitAt(LM, LArg, 'E2036', SE2036_VariableRequired);
+                    Exit;
+                  end;
+                2:
+                  if not Unreliable(N, LArg, GetX(LArg)) then
+                  begin
+                    EmitAt(LM, LArg, 'E2010', Format(SE2010_IncompatibleTypes,
+                      ['array of ' + XTypeText(LPX), LTxt]));
+                    Exit;
+                  end;
+              end;
           end;
           // An open array passed on to a parameter of a named type: no
           // dynamic array (6.2.6) - E2010 for a value one, E2033 for a
@@ -27562,9 +27908,19 @@ var
           (LOm.Tree.Nodes[LOm.Symbols[APars[LPI]].TypeNode].Kind =
            nkArrayType);
         case LWhy of
+          // Against a `var` / `out` open array, a value of the element type:
+          // a function's result E2036 (`W(GI)`), the rest E2197 as against
+          // a typed parameter (`W(O.PI)`, `W(I + 1)`, `W(Succ(I))`; 6.2.6).
           awByRefShape:
             if not LOpen then
-              EmitAt(LM, LWhyArg, 'E2197', SE2197_ConstObjectToVar);
+              EmitAt(LM, LWhyArg, 'E2197', SE2197_ConstObjectToVar)
+            else if XValid(LWhyArgX) and XValid(LWhyParX) and
+                    not OpenX(CanonTypeX(LWhyParX)) and
+                    XSameType(CanonTypeX(LWhyArgX), CanonTypeX(LWhyParX)) then
+              if UserResult(LCore) then
+                EmitAt(LM, LWhyArg, 'E2036', SE2036_VariableRequired)
+              else
+                EmitAt(LM, LWhyArg, 'E2197', SE2197_ConstObjectToVar);
           awUntypedConst:
             EmitAt(LM, LWhyArg, 'E2036', SE2036_VariableRequired);
           // A variable's type alone: an operator's or a call's value may be

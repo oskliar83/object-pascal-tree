@@ -15767,6 +15767,95 @@ begin
   end;
 end;
 
+// Writes into values and calls as open-array arguments (spec 6.2.3, 6.2.6):
+// a character of a `const` string parameter, of a constant, of a call's
+// result, and `Inc` / `Dec` / `Include` of a `const` parameter, a field of
+// a `const` record or a constant are E2064; `Copy` of an open array (not
+// of characters) E2008; for an open array a cast of an operator's value,
+// of a function's result to another size, of a variable to a larger one and
+// `Succ` of an enumeration value are E2036, other intrinsics E2010 naming
+// dcc's type; against a `var` open array a function's result is E2036, a
+// property E2197. Variables, narrowing casts, function results for a value
+// open array stay silent (dcc64 37.0; local/probe-park/sa7-params A1-A3,
+// B1-B3).
+procedure TestValueWritesAndCallArgs;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_vwca');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    '  TArray<T> = array of T;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'VWCA.dpr'),
+    'program VWCA;'#10 +                                                 // 1
+    '{$J-}'#10 +                                                         // 2
+    'type TE = (e0, e1); TSE = set of TE; TR = record F: Integer; S: string; end;'#10 + // 3
+    '  TC = class FI: Integer; property PI: Integer read FI write FI; end;'#10 + // 4
+    'const KS = ''ab''; KT: string = ''ab''; K = 5; KI: Integer = 1;'#10 + // 5
+    'function GS: string; begin Result := ''x''; end;'#10 +              // 6
+    'function GI: Integer; begin Result := 0; end;'#10 +                 // 7
+    'function GE: TE; begin Result := e0; end;'#10 +                     // 8
+    'procedure A1(const S: string); begin S[1] := ''a''; end;'#10 +      // 9 E2064
+    'procedure A2; begin KS[1] := ''a''; KT[1] := ''a''; end;'#10 +      // 10 E2064 x2
+    'procedure A3; begin GS[1] := ''a''; end;'#10 +                      // 11 E2064
+    'procedure A4(const R: TR); begin R.S[1] := ''a''; Inc(R.F); end;'#10 + // 12 E2064 x2
+    'procedure A5(const C: Char); begin Dec(C, 2); end;'#10 +            // 13 E2064
+    'procedure A6(const X: Integer); begin Inc(X); end;'#10 +            // 14 E2064
+    'procedure A7(const S: TSE); begin Include(S, e1); end;'#10 +        // 15 E2064
+    'procedure A8(S: string; var T: string; X: Integer); begin S[1] := ''a'';'#10 + // 16
+    '  T[1] := ''a''; Inc(X); end;'#10 +                                 // 17
+    'procedure A9(const P: PChar); begin P[0] := ''a''; Inc(KI); end;'#10 + // 18 E2064
+    'procedure C1(const A: array of Integer); var D: TArray<Integer>;'#10 + // 19
+    '  begin D := Copy(A); D := Copy(A, 0, 1); end;'#10 +                // 20 E2008 x2
+    'procedure C2(const A: array of Char); var S: string;'#10 +          // 21
+    '  begin S := Copy(A, 1, 1); end;'#10 +                              // 22
+    'procedure P(const A: array of Integer); begin end;'#10 +            // 23
+    'procedure PE(const A: array of TE); begin end;'#10 +                // 24
+    'procedure PC(const A: array of Char); begin end;'#10 +              // 25
+    'procedure PY(const A: array of Byte); begin end;'#10 +              // 26
+    'procedure W(var A: array of Integer); begin end;'#10 +              // 27
+    'var I: Integer; E: TE; C: Char; Y: Byte; O: TC; W2: Word;'#10 +    // 28
+    'begin'#10 +                                                         // 29
+    '  P(Integer(I * 2));'#10 +                                          // 30 E2036
+    '  PE(Succ(E));'#10 +                                                // 31 E2036
+    '  PE(TE(GI));'#10 +                                                 // 32 E2036
+    '  P(Integer(W2));'#10 +                                             // 33 E2036
+    '  PC(Succ(C));'#10 +                                                // 34 E2010
+    '  P(Ord(E));'#10 +                                                  // 35 E2010
+    '  PY(Succ(Y));'#10 +                                                // 36 E2010
+    '  W(GI);'#10 +                                                      // 37 E2036
+    '  W(O.PI);'#10 +                                                    // 38 E2197
+    '  P(GI); P(Integer(GI)); PE(TE(I)); PY(Byte(I)); P(Integer(E) + 0);'#10 + // 39 E2010
+    '  P(I); W(I); PE(GE);'#10 +                                         // 40
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'VWCA.dpr'));
+    LM := ModelByName('vwca');
+    Ok('vwca: E2064 lines [' + DiagLinesOf(LM, 'E2064') + ']',
+      DiagLinesOf(LM, 'E2064') = '9 10 10 11 12 12 13 14 15 18');
+    Ok('vwca: E2008 lines [' + DiagLinesOf(LM, 'E2008') + ']',
+      DiagLinesOf(LM, 'E2008') = '20 20');
+    Ok('vwca: E2036 lines [' + DiagLinesOf(LM, 'E2036') + ']',
+      DiagLinesOf(LM, 'E2036') = '30 31 32 33 37');
+    Ok('vwca: E2010 lines [' + DiagLinesOf(LM, 'E2010') + ']',
+      DiagLinesOf(LM, 'E2010') = '34 35 36 39');
+    Ok('vwca: E2197 lines [' + DiagLinesOf(LM, 'E2197') + ']',
+      DiagLinesOf(LM, 'E2197') = '38');
+    Ok('vwca: E2010 texts',
+      DiagHasText(LM, 'E2010', '''array of Char'' and ''Char''') and
+      DiagHasText(LM, 'E2010', '''array of Integer'' and ''Integer''') and
+      DiagHasText(LM, 'E2010', '''array of Byte'' and ''Integer'''));
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // Legal shapes the wide gate found reported (spec 6.2.2, 6.2.5): an empty
 // `[]` is a dynamic array parameter's default as nil is (a `[...]` with
 // elements is E2026); `@P` of a procedural variable is the variable - one
@@ -26655,6 +26744,7 @@ begin
   TestVarParamIdentity;
   TestParamDefaults;
   TestArgShapes;
+  TestValueWritesAndCallArgs;
   TestConstParamWrites;
   TestParamLegalShapes;
   TestSpecAuditConsts;
