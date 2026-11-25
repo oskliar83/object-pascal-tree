@@ -151,3 +151,13 @@ a batch's six fixes read the spec only to append to it).
 **Measure with range checks on.** A flaky measurement is usually an index bug
 reading garbage, not a race - build the checked configuration before believing
 a number or a diagnosis.
+
+**Measure performance both single-threaded and multi-threaded.** A perf gate
+is `-st` on bigflat (the CPU each stage costs) AND a multi-threaded light A/B
+on the frozen client (`-light:lib`, interleaved runs, stage sums - the kit is
+`local/perf-light-2026-11/ab.ps1`). The two answer different questions: `-st`
+cannot see contention. v0.191.1 computed `UsesOrder` under one global
+`TMonitor`, so the parallel xresolve stage ran its ~3,000 units one at a time
+(38 -> 650 ms) - invisible single-threaded, it shipped and stayed for 25
+versions until the hosts' light analysis had gone from 1.2 to 2.2 s
+(2026-11-25).

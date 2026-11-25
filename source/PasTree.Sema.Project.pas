@@ -9342,17 +9342,23 @@ end;
 function TPasSemaProject.UsesOrder(AId: Integer): TArray<Integer>;
 var
   LM: TPasSemaModel;
+  LOrder: TArray<Integer>;
 begin
   LM := FModels[AId];
   if TInterlocked.CompareExchange(LM.UsesOrderState, 0, 0) = 1 then
     Exit(LM.UsesOrder);
   // The fill reads other models' symbols and maps only, never this lock or
-  // a lookup that would ask for an order: no re-entry.
+  // a lookup that would ask for an order: no re-entry. It runs OUTSIDE the
+  // lock: every unit asks for its order once in the cross pass, and one
+  // lock around the computation serialized all of them (light client
+  // xresolve 38 -> 650 ms, 0.191.1). Two threads may compute the same order;
+  // the first published wins, and both read the same fixed data.
+  LOrder := ComputeUsesOrder(AId);
   TMonitor.Enter(FUsesOrderLock);
   try
     if LM.UsesOrderState <> 1 then
     begin
-      LM.UsesOrder := ComputeUsesOrder(AId);
+      LM.UsesOrder := LOrder;
       TInterlocked.Exchange(LM.UsesOrderState, 1);
     end;
     Result := LM.UsesOrder;
@@ -14127,12 +14133,13 @@ var
                   LKey := FModels[LJ.UnitId].Tree.NodeNameLower(LS);
                   if LName.StartsWith('&') then
                     Delete(LName, 1, 1);
-                  if (LResNames.IndexOf(LKey) < 0) and
-                     (LDone.IndexOf(Format('%d.%d.%s', [LJ.UnitId, LJ.Sym,
-                       LKey])) < 0) then
+                  var LDoneKey := '';
+                  if LResNames.IndexOf(LKey) < 0 then
+                    LDoneKey := IntToStr(LJ.UnitId) + '.' + IntToStr(LJ.Sym) +
+                      '.' + LKey;
+                  if (LDoneKey <> '') and (LDone.IndexOf(LDoneKey) < 0) then
                   begin
-                    LDone.Add(Format('%d.%d.%s', [LJ.UnitId, LJ.Sym,
-                      LKey]));
+                    LDone.Add(LDoneKey);
                     LMissing := True;
                     if FindMemberX(AId, LClassX, LKey, LMMid,
                        LMSym, LCtx) then
@@ -26567,6 +26574,21 @@ var
     // FoldAt's and ConstAt's answers by node, parentheses peeled.
     LFoldMemo: TPasIntMap<TSemaFoldMemo>;
     LConstMemo: TPasIntMap<Boolean>;
+    // IsDynArrayTypeX's answers by type for CheckArrayPlus (nil until the
+    // first): a builtin operand (Integer, string) has no declaration, and
+    // the test then looks for one by name through every used unit - at
+    // every `+` of the module (perf audit 2026-11).
+    LDynMemo: TDictionary<TSemaXType, Boolean>;
+
+    function DynArrayMemo(const AX: TSemaXType): Boolean;
+    begin
+      if LDynMemo = nil then
+        LDynMemo := TDictionary<TSemaXType, Boolean>.Create
+      else if LDynMemo.TryGetValue(AX, Result) then
+        Exit;
+      Result := IsDynArrayTypeX(AX);
+      LDynMemo.Add(AX, Result);
+    end;
 
     { FoldedIntValue of ANode at depth 0 - the value the constant checks
       read - and AOverflow, FoldedIntOverflow's flag of ANode's own operator,
@@ -27016,8 +27038,8 @@ var
       LRc := CanonTypeX(LRX);
       if not XValid(LLc) or not XValid(LRc) then
         Exit;
-      LDynL := IsDynArrayTypeX(LLc);
-      LDynR := IsDynArrayTypeX(LRc);
+      LDynL := DynArrayMemo(LLc);
+      LDynR := DynArrayMemo(LRc);
       LStatL := NonCharStaticArray(LLc);
       LStatR := NonCharStaticArray(LRc);
       if not (LDynL or LDynR or (LStatL and LStatR)) then
@@ -28149,7 +28171,22 @@ var
           Inc(LPI);
           LArg := LM.Tree.Nodes[LArg].NextSibling;
         end;
-        // The rest is the scorer's: why it refused the first argument.
+        // The rest is the scorer's: why it refused the first argument. It
+        // notes a reason (NoteWhy) only for a `var` / `out`, an untyped or
+        // an open array parameter - read off the parameter alone, as
+        // ScoreCandidate reads it - so a routine with none of them is not
+        // scored again: that re-score of every plain call was most of this
+        // check's cost (perf audit 2026-11).
+        LPI := 0;
+        while (LPI <= High(APars)) and
+              not ParamIsByRef(LOm, APars[LPI]) and
+              not ParamIsUntyped(LOm, APars[LPI]) and
+              not ((LOm.Symbols[APars[LPI]].TypeNode <> NIL_NODE) and
+                   (LOm.Tree.Nodes[LOm.Symbols[APars[LPI]].TypeNode].Kind =
+                    nkArrayType)) do
+          Inc(LPI);
+        if LPI > High(APars) then
+          Exit;
         LWhy := awNone;
         LWhyOn := True;
         try
@@ -30938,6 +30975,7 @@ var
     LConstFacts := ConstFactsX(AId);
     LOrdNames := OrdNameValueX(AId);
     LRangeMemo := nil;
+    LDynMemo := nil;
     LRangeLastKey := XNil;
     LFoldMemo := Default(TPasIntMap<TSemaFoldMemo>);
     LConstMemo := Default(TPasIntMap<Boolean>);
@@ -31042,6 +31080,7 @@ var
       if not InUntypedWith(N) then
         EmitAt(LM, N, 'E2016', SE2016_ArrayTypeRequired);
     FreeAndNil(LRangeMemo);
+    FreeAndNil(LDynMemo);
     LFoldMemo.Clear;
     LConstMemo.Clear;
   end;
