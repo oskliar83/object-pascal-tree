@@ -15899,6 +15899,94 @@ begin
   end;
 end;
 
+// An operator's value for an open array (spec 6.2.6) and variant-part branch
+// labels (9.1.3). For an open array: a string or Variant value of the
+// element type and `not` of an integer of it are E2036, any other operator
+// value E2010 naming the type as dcc prints it - `Integer` / `Int64` by size,
+// a real `Double` on Win64, the operand's own after `not`; a Variant
+// operator (`V + 1`) is a Variant (4.2.1). A branch label: E2026 not a
+// constant (a variable, a type), E2010 another type than the tag's, E1012
+// outside a Byte tag (the value then cut to the Byte), E2027 a value taken
+// earlier in the same part - a refused label counts as 0, a nested part has
+// its own values (dcc64 37.0; local/sa8-2026-11 P2, V1, M1, M2, L1-L4).
+procedure TestOperatorArgsAndVariantLabels;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_opvl');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'OPVL.dpr'),
+    'program OPVL;'#10 +                                                 // 1
+    'type TE = (e0, e1, e2);'#10 +                                       // 2
+    'procedure PD(const A: array of Double); begin end;'#10 +            // 3
+    'procedure PX(const A: array of Extended); begin end;'#10 +          // 4
+    'procedure PVr(const A: array of Variant); begin end;'#10 +          // 5
+    'procedure PI(const A: array of Integer); begin end;'#10 +           // 6
+    'procedure PY(const A: array of Byte); begin end;'#10 +              // 7
+    'procedure PS(const A: array of string); begin end;'#10 +            // 8
+    'var D: Double; V: Variant; I: Integer; B, B2: Byte; S: string;'#10 + // 9
+    '  C: Cardinal; P: Pointer;'#10 +                                    // 10
+    'type'#10 +                                                          // 11
+    '  TV = record'#10 +                                                 // 12
+    '    case Integer of'#10 +                                           // 13
+    '      0: (A1: Integer);'#10 +                                       // 14
+    '      I: (A2: Integer);'#10 +                                       // 15 E2026
+    '      ''x'': (A3: Integer);'#10 +                                   // 16 E2010
+    '      TObject: (A4: Integer);'#10 +                                 // 17 E2026
+    '      1, 0: (A5: Integer);'#10 +                                    // 18 E2027
+    '      e1: (A6: Integer);'#10 +                                      // 19 E2010
+    '      2: (A7: Integer;'#10 +                                        // 20
+    '        case Byte of'#10 +                                          // 21
+    '          0: (A8: Byte);'#10 +                                      // 22
+    '          300: (A9: Byte);'#10 +                                    // 23 E1012
+    '          44: (A10: Byte));'#10 +                                   // 24 E2027
+    '  end;'#10 +                                                        // 25
+    'begin'#10 +                                                         // 26
+    '  PD(D * 2);'#10 +                                                  // 27 E2010
+    '  PX(D * 2);'#10 +                                                  // 28 E2010
+    '  PVr(V + 1);'#10 +                                                 // 29 E2036
+    '  PI(not C);'#10 +                                                  // 30 E2010
+    '  PY(not B);'#10 +                                                  // 31 E2036
+    '  PY(B + B2);'#10 +                                                 // 32 E2010
+    '  PS(S + ''a'');'#10 +                                              // 33 E2036
+    '  PI(V + 1);'#10 +                                                  // 34 E2010
+    '  P := V + 1;'#10 +                                                 // 35 E2010
+    '  PI(I); PD(D); PVr(V); I := V + 1;'#10 +                           // 36
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'OPVL.dpr'));
+    LM := ModelByName('opvl');
+    Ok('opvl: E2026 lines [' + DiagLinesOf(LM, 'E2026') + ']',
+      DiagLinesOf(LM, 'E2026') = '15 17');
+    Ok('opvl: E2027 lines [' + DiagLinesOf(LM, 'E2027') + ']',
+      DiagLinesOf(LM, 'E2027') = '18 24');
+    Ok('opvl: E1012 lines [' + DiagLinesOf(LM, 'E1012') + ']',
+      DiagLinesOf(LM, 'E1012') = '23');
+    Ok('opvl: E2010 lines [' + DiagLinesOf(LM, 'E2010') + ']',
+      DiagLinesOf(LM, 'E2010') = '16 19 27 28 30 32 34 35');
+    Ok('opvl: E2036 lines [' + DiagLinesOf(LM, 'E2036') + ']',
+      DiagLinesOf(LM, 'E2036') = '29 31 33');
+    Ok('opvl: E2010 texts',
+      DiagHasText(LM, 'E2010', '''Integer'' and ''Char''') and
+      DiagHasText(LM, 'E2010', '''Integer'' and ''TE''') and
+      DiagHasText(LM, 'E2010', '''array of Double'' and ''Double''') and
+      DiagHasText(LM, 'E2010', '''array of Extended'' and ''Double''') and
+      DiagHasText(LM, 'E2010', '''array of Integer'' and ''Cardinal''') and
+      DiagHasText(LM, 'E2010', '''array of Byte'' and ''Integer''') and
+      DiagHasText(LM, 'E2010', '''array of Integer'' and ''Variant''') and
+      DiagHasText(LM, 'E2010', '''Pointer'' and ''Variant'''));
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // Legal shapes the wide gate found reported (spec 6.2.2, 6.2.5): an empty
 // `[]` is a dynamic array parameter's default as nil is (a `[...]` with
 // elements is E2026); `@P` of a procedural variable is the variable - one
@@ -26947,6 +27035,7 @@ begin
   TestParamDefaults;
   TestArgShapes;
   TestValueWritesAndCallArgs;
+  TestOperatorArgsAndVariantLabels;
   TestConstParamWrites;
   TestParamLegalShapes;
   TestSpecAuditConsts;

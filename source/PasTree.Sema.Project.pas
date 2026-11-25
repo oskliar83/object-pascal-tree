@@ -27966,6 +27966,88 @@ var
           Result := 0;
       end;
 
+      { An operator's value for a value or `const` open array that is no
+        `array of const`, its element type AElemX (6.2.6; dcc64 / dcc32
+        37.0, 2026-11-25, local/sa8-2026-11 P2, R1, V1, M1, M2). 0: not
+        judged; 1: E2036 - a string or a Variant value of the element type
+        (`PS(S + 'a')`, `PVr(V + 1)`), and `not` of an integer of it (`not`
+        keeps its operand's type: `PY(not B)`); 2: E2010 naming ATxt, the
+        value's type as dcc prints it - the operand's own after an integer
+        `not` (`PI(not C)`: 'Cardinal'), `Integer` / `Int64` (by size) for
+        any other integer value (`PY(B + B2)`, `PCard(C + C)`: 'Integer';
+        `PU(U + U)`: 'Int64'), `Double` for a real one where Extended is
+        8 bytes, `Extended` where not (`PD(D * 2)`, `PX(D * 2)`), the type
+        itself for a Boolean, string or Variant one. A Currency or Comp
+        value (dcc prints `Cu + Cu` as 'Comp', `Cu * 2` as 'Double') and
+        `@X` are not judged. }
+      function OperatorOpenVerdict(ACore: Integer; const AElemX: TSemaXType;
+        out ATxt: string): Integer;
+      var
+        LX, LXc, LElemC: TSemaXType;
+        LCat: TSemaTypeCat;
+        LSize: Int64;
+        LAddr: Integer;
+        LSame, LNot: Boolean;
+      begin
+        Result := 0;
+        ATxt := '';
+        LElemC := CanonTypeX(AElemX);
+        if not XValid(LElemC) or OpenX(LElemC) or
+           (LM.Tree.Nodes[ACore].Kind = nkUnaryOp) and
+           IsAddrOfExpr(LM.Tree, ACore, LAddr) then
+          Exit;
+        LX := GetX(ACore);
+        if not XValid(LX) then
+          Exit;
+        LXc := CanonTypeX(LX);
+        if not XValid(LXc) or OpenX(LXc) then
+          Exit;
+        LCat := XCatOf(LXc);
+        LSame := XSameType(LXc, LElemC);
+        LNot := (LM.Tree.Nodes[ACore].Kind = nkUnaryOp) and
+          (LM.Tree.Nodes[ACore].Aux >= 0) and
+          (LM.Tree.Nodes[ACore].Aux <= High(LM.Tree.Source.Visible)) and
+          (LM.Tree.Source.VisibleKind(LM.Tree.Nodes[ACore].Aux) = tkNot);
+        case LCat of
+          tcInteger:
+            if LNot then
+            begin
+              if LSame then
+                Exit(1);
+              ATxt := XTypeText(LX);
+            end
+            else if ScalarSize(LXc, LSize) and (LSize = 8) then
+              ATxt := 'Int64'
+            else
+              ATxt := 'Integer';
+          tcFloat:
+            begin
+              if (FModels[LXc.UnitId].Symbols[LXc.Sym].Kind =
+                  skBuiltinType) and
+                 ((FModels[LXc.UnitId].Symbols[LXc.Sym].NameLower =
+                   'currency') or
+                  (FModels[LXc.UnitId].Symbols[LXc.Sym].NameLower =
+                   'comp')) then
+                Exit;
+              if FInfo.ExtendedBytes <= 8 then
+                ATxt := 'Double'
+              else
+                ATxt := 'Extended';
+            end;
+          tcBoolean:
+            ATxt := 'Boolean';
+          tcString, tcVariant:
+            begin
+              if LSame then
+                Exit(1);
+              ATxt := XTypeText(LX);
+            end;
+        else
+          Exit;
+        end;
+        Result := 2;
+      end;
+
       // The arguments that are no variable - see the block comment.
       procedure ShapeArgs(AHead, AMid, ASym: Integer;
         const APars: TArray<Integer>);
@@ -27973,7 +28055,6 @@ var
         LArg, LPI, LCore, LPDecl, LCMid, LCSym: Integer;
         LOpen, LByRef: Boolean;
         LOm: TPasSemaModel;
-        LCat: TSemaTypeCat;
         LTxt: string;
         LPX: TSemaXType;
       begin
@@ -28005,13 +28086,21 @@ var
             EmitAt(LM, LArg, 'E2197', SE2197_ConstObjectToVar);
             Exit;
           end;
-          // A call's value for an open array (OpenCallVerdict).
-          if LOpen and (LM.Tree.Nodes[LCore].Kind = nkCall) then
+          // A call's or an operator's value for an open array
+          // (OpenCallVerdict, OperatorOpenVerdict).
+          if LOpen and ((LM.Tree.Nodes[LCore].Kind = nkCall) or
+             not LByRef and
+             (LM.Tree.Nodes[LCore].Kind in [nkBinaryOp, nkUnaryOp])) then
           begin
             var LOA, LOC: Boolean;
+            var LVerdict: Integer;
             LPX := ParamFitTypeX(AMid, APars[LPI], CtxAt(AHead), LOA, LOC);
+            if LM.Tree.Nodes[LCore].Kind = nkCall then
+              LVerdict := OpenCallVerdict(LCore, LPX, LByRef, LTxt)
+            else
+              LVerdict := OperatorOpenVerdict(LCore, LPX, LTxt);
             if not LOC then
-              case OpenCallVerdict(LCore, LPX, LByRef, LTxt) of
+              case LVerdict of
                 1:
                   if not Unreliable(N, LArg, GetX(LArg)) then
                   begin
@@ -28124,21 +28213,8 @@ var
                 EmitAt(LM, LWhyArg, 'E2010', Format(SE2010_IncompatibleTypes,
                   ['array of ' + XTypeText(LWhyParX), LTxt]));
           end;
-          awOpenNotVar:
-            if not LByRef and
-               (LM.Tree.Nodes[LCore].Kind in [nkBinaryOp, nkUnaryOp]) then
-            begin
-              LCat := XCatOf(CanonTypeX(LWhyArgX));
-              if LCat in [tcString, tcVariant] then
-                EmitAt(LM, LWhyArg, 'E2036', SE2036_VariableRequired)
-              else if LCat in [tcInteger, tcFloat, tcChar, tcBoolean,
-                      tcEnum] then
-                // The element type named twice: the value is of it (an
-                // Extended product is a Double on Win64).
-                EmitAt(LM, LWhyArg, 'E2010', Format(SE2010_IncompatibleTypes,
-                  ['array of ' + XTypeText(LWhyParX),
-                   XTypeText(LWhyParX)]));
-            end;
+          // An operator's value is OperatorOpenVerdict's, above; what it
+          // leaves (a Currency or Comp value) is not judged.
         end;
       end;
 
@@ -30494,6 +30570,159 @@ var
         end;
       end;
 
+      { 9.1.3: each branch label of the variant part N against its tag type,
+        as CheckCase judges a case statement's (dcc64 37.0, 2026-11-25,
+        local/sa8-2026-11 L1-L7): E2026 a label no constant (a variable, a
+        typed constant, a type name), E2010 one of another type (`'Integer'
+        and 'Char'`, the tag's type first), E1012 one outside the tag's
+        range, E2027 a value an earlier branch of this part took (a nested
+        part has its own values). One report a label. dcc goes on with the
+        value 0 for a label it refused as E2026 / E2010 (`'bc'` then `#0`
+        is E2027), and with the value cut to the tag's size for an E1012
+        one of a whole 1- or 2-byte integer type (`300` then `44` for a
+        Byte, `200` then `-56` for a ShortInt); a subrange's (`0..9`,
+        `a1..a2`) is kept nowhere. A tag of another than an ordinal type,
+        and the lines after the part (PasStrayVariantBranch), are not
+        judged here. dcc reports each error at the token after the label,
+        here at the label. }
+      procedure CheckVariantLabels;
+      var
+        LKid, LTag, LTagSym, LTagMid, LBranch, LLab, I: Integer;
+        LTagX: TSemaXType;
+        LSeen: TArray<Int64>;
+        LSeenLen: Integer;
+        LV: Int64;
+        LLo, LHi: Double;
+        LWide, LRecord, LDup: Boolean;
+        LSize: Int64;
+
+        procedure Note(AValue: Int64);
+        begin
+          if LSeenLen >= Length(LSeen) then
+            SetLength(LSeen, 2 * LSeenLen + 8);
+          LSeen[LSeenLen] := AValue;
+          Inc(LSeenLen);
+        end;
+
+        // A whole integer type of 1 or 2 bytes: an E1012 value cut to it.
+        function CutValue(var AValue: Int64): Boolean;
+        var
+          LSpan: Int64;
+        begin
+          Result := False;
+          if LWide or (XCatOf(CanonTypeX(LTagX)) <> tcInteger) or
+             not TypeSizeOf(CanonTypeX(LTagX).UnitId, CanonTypeX(LTagX).Sym,
+               LSize) or not (LSize in [1, 2]) then
+            Exit;
+          LSpan := Int64(1) shl (8 * LSize);
+          if LLo < 0 then
+          begin
+            if (LLo <> -(LSpan div 2)) or (LHi <> LSpan div 2 - 1) then
+              Exit;
+          end
+          else if (LLo <> 0) or (LHi <> LSpan - 1) then
+            Exit;
+          AValue := AValue and (LSpan - 1);
+          if (LLo < 0) and (AValue >= LSpan div 2) then
+            AValue := AValue - LSpan;
+          Result := True;
+        end;
+
+      begin
+        LKid := PasSkipAttrGroups(LM.Tree, LM.Tree.Nodes[N].FirstChild);
+        if (LKid = NIL_NODE) or InUntypedWith(N) then
+          Exit;
+        LTagX := XNil;
+        LTag := LM.Tree.Nodes[LKid].NextSibling;
+        if (LM.Tree.Nodes[LKid].Kind = nkIdent) and (LTag <> NIL_NODE) and
+           (LM.Tree.Nodes[LTag].Kind <> nkVariantBranch) then
+        begin
+          // A named tag: the field it declares.
+          LTagSym := RefAt(LKid);
+          if (LTagSym <> NIL_SYM) and
+             (LM.Symbols[LTagSym].TypeNode <> NIL_NODE) then
+            LTagX := DeclTypeX(AId, LTagSym);
+        end
+        else if (LM.Tree.Nodes[LKid].Kind in [nkIdent, nkMember]) and
+                TargetSym(LKid, LTagMid, LTagSym) and
+                (FModels[LTagMid].Symbols[LTagSym].Kind in [skType,
+                  skBuiltinType]) then
+          LTagX := XPlain(LTagMid, LTagSym);
+        if not XValid(LTagX) or not (XCatOf(CanonTypeX(LTagX)) in [tcInteger,
+           tcChar, tcEnum, tcBoolean]) then
+          Exit;
+        if not ConstRange(LTagX, LLo, LHi, LWide) then
+        begin
+          LLo := 0;
+          LHi := 0;
+          LWide := True;
+        end;
+        LSeen := nil;
+        LSeenLen := 0;
+        LBranch := LM.Tree.Nodes[LKid].NextSibling;
+        while LBranch <> NIL_NODE do
+        begin
+          if (LM.Tree.Nodes[LBranch].Kind = nkVariantBranch) and
+             not PasStrayVariantBranch(LM.Tree, LBranch) then
+          begin
+            LLab := LM.Tree.Nodes[LBranch].FirstChild;
+            while LLab <> NIL_NODE do
+            begin
+              if not (LM.Tree.Nodes[LLab].Kind in [nkVarDecl, nkVariantPart,
+                 nkAttrGroup, nkRange, nkMissing, nkAmbiguous]) then
+              begin
+                LRecord := False;
+                LV := 0;
+                if NotConst(LLab) or
+                   (PeelParens(LM.Tree, LLab) <> NIL_NODE) and
+                   (LM.Tree.Nodes[PeelParens(LM.Tree, LLab)].Kind in [nkIdent,
+                     nkMember]) and
+                   IsTypeDesignator(PeelParens(LM.Tree, LLab)) then
+                begin
+                  EmitAt(LM, LLab, 'E2026', SE2026_ConstantExpected);
+                  LRecord := True;
+                end
+                else if CheckConv(N, LKid, LLab, LLab, LTagX, GetX(LLab)) then
+                  LRecord := True   // E2010
+                // A cast is a constant label too (`TE(1)` then `e1` is
+                // E2027): ConstExprKind's typed reading, not ConstAt's.
+                else if Fold(LLab, LV) and
+                        (ConstExprKind(LM.Tree, PeelParens(LM.Tree, LLab), 0,
+                          LConstFacts) <> sckNone) then
+                begin
+                  if ConstOutside(N, LKid, LLab, LTagX) then
+                  begin
+                    EmitAt(LM, LLab, 'E1012', SE1012_ConstViolatesBounds);
+                    LRecord := CutValue(LV);
+                  end
+                  // An Int64 / UInt64 tag keeps a label on 32 bits (L7):
+                  // one past Integer's range is neither judged nor kept.
+                  else if not LWide or (LV >= Low(Integer)) and
+                          (LV <= High(Integer)) then
+                  begin
+                    LDup := False;
+                    for I := 0 to LSeenLen - 1 do
+                      if LSeen[I] = LV then
+                      begin
+                        LDup := True;
+                        Break;
+                      end;
+                    if LDup then
+                      EmitAt(LM, LLab, 'E2027', SE2027_DuplicateTagValue)
+                    else
+                      LRecord := True;
+                  end;
+                end;
+                if LRecord then
+                  Note(LV);
+              end;
+              LLab := LM.Tree.Nodes[LLab].NextSibling;
+            end;
+          end;
+          LBranch := LM.Tree.Nodes[LBranch].NextSibling;
+        end;
+      end;
+
       // 4.2.1: a folded operator leaving its type is E2099 (`MaxInt + 1`) -
       // looked for from an expression's outermost operator down, reported
       // at the innermost one that fails (the enclosing ones then fold
@@ -30686,6 +30915,8 @@ var
           CheckIndex;
         nkCaseStmt:
           CheckCase;
+        nkVariantPart:
+          CheckVariantLabels;
         nkBinaryOp:
           begin
             CheckFold;
@@ -35127,8 +35358,8 @@ begin
   end;
   if (LcL = tcRecord) or (LcR = tcRecord) then
     Exit(RecordOperatorX(LOp, LUnary, LL, LR));
-  if (LcL in [tcClass, tcInterface, tcVariant]) or
-     (LcR in [tcClass, tcInterface, tcVariant]) then
+  // A Variant operand is OperatorAnswer's: a Variant result (4.2.1).
+  if (LcL in [tcClass, tcInterface]) or (LcR in [tcClass, tcInterface]) then
     Exit;
   LNodeL := LM.Tree.Nodes[AOpNode].FirstChild;
   LNodeR := NIL_NODE;
@@ -35722,8 +35953,8 @@ begin
   LcR := XCatOf(LR);
   if (LcL = tcRecord) or (LcR = tcRecord) then
     Exit(RecordOperatorX(AOp, False, LL, LR));
-  if (LcL in [tcClass, tcInterface, tcVariant]) or
-     (LcR in [tcClass, tcInterface, tcVariant]) then
+  // A Variant operand is OperatorAnswer's: a Variant result (4.2.1).
+  if (LcL in [tcClass, tcInterface]) or (LcR in [tcClass, tcInterface]) then
     Exit;
   Result := OpAnswerX(AMid, OperatorAnswer(AOp, False,
     OpFactsX(AMid, NIL_NODE, LL), OpFactsX(AMid, NIL_NODE, LR),

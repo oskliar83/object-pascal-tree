@@ -210,6 +210,7 @@ const
   SE2099_Overflow = 'E2099 Overflow in conversion or arithmetic operation';
   SE2011_LowBoundExceedsHigh = 'E2011 Low bound exceeds high bound';
   SE2030_DuplicateCaseLabel = 'E2030 Duplicate case label';
+  SE2027_DuplicateTagValue = 'E2027 Duplicate tag value';   // 9.1.3
   SE2089_InvalidTypecast = 'E2089 Invalid typecast';
   SE2054_IllegalWriteType = 'E2054 Illegal type in Write/Writeln statement';
   SE2088_VariableNameExpected = 'E2088 Variable name expected';

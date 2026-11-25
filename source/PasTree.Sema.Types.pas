@@ -30,8 +30,8 @@ type
     a Cardinal, and an alias of a builtin had no rank (audit A4-15, A4-14,
     D2-08).
 
-    oaNone: no built-in rule applies (a record, class, Variant or mismatched
-    pair - the typer's own business); oaUntyped: the operator applies but
+    oaNone: no built-in rule applies (a record, class or mismatched pair -
+    the typer's own business); oaUntyped: the operator applies but
     the type is not decided here (two string kinds dcc mixes); oaLeft /
     oaRight: the (canonical) left / right operand's own type. }
   TSemaOpAnswer = (oaNone, oaUntyped, oaBoolean, oaInteger, oaInt64, oaLeft,
@@ -6004,10 +6004,33 @@ function OperatorAnswer(AOp: TPasTokenKind; AUnary: Boolean;
       Result := IntAns(LRL, LLU, LRL, 0, LLU, False);
   end;
 
+const
+  // What meets a Variant in an operator for a Variant result (4.2.1).
+  CVarPeer = [tcVariant, tcInteger, tcFloat, tcString, tcChar, tcBoolean,
+    tcEnum];
 var
   LNum: Boolean;
 begin
   Result := oaNone;
+  // A Variant operand: the operation is the Variant's, of the leftmost
+  // Variant operand's type - `V + 1`, `I + V`, `-V`, `not V`, `V and Bo`
+  // are Variant, `O + V` OleVariant, `V + O` Variant; a comparison stays
+  // Boolean. Beside a set or a pointer dcc refuses (E2008), so untyped
+  // (4.2.1; dcc64 37.0, 2026-11-25, local/sa8-2026-11 V1, V2).
+  if AUnary then
+  begin
+    if (AL.Cat = tcVariant) and (AOp in [tkMinus, tkPlus, tkNot]) then
+      Exit(oaLeft);
+  end
+  else if ((AL.Cat = tcVariant) or (AR.Cat = tcVariant)) and
+          (AL.Cat in CVarPeer) and (AR.Cat in CVarPeer) and
+          not (AOp in [tkEqual, tkNotEqual, tkLess, tkLessEqual, tkGreater,
+            tkGreaterEqual, tkIn, tkIs]) then
+  begin
+    if AL.Cat = tcVariant then
+      Exit(oaLeft);
+    Exit(oaRight);
+  end;
   if AUnary then
   begin
     case AOp of
