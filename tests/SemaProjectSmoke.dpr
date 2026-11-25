@@ -16079,6 +16079,160 @@ begin
         DiagText(LM, 'E2252')) > 0);
     Ok('mtwins: E2301 lines [' + DiagLinesOf(LM, 'E2301') + ']',
       DiagLinesOf(LM, 'E2301') = '21');
+    Ok('mtwins: E2254 lines [' + DiagLinesOf(LM, 'E2254') + ']',
+      DiagLinesOf(LM, 'E2254') = '9');
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
+// The `overload` directive on a name declared twice in one scope (spec
+// 6.3.1). Members: a later one without it E2254, else beside a first without
+// it E2267, each on its own; an override says what the method it overrides
+// says. A scope's routines: until one has said it the
+// next is E2267, after that one without it E2254; the implementation goes on
+// from the interface's declarations, a completion counts for nothing, a twin
+// is E2004 alone. A class constructor is no overload (dcc64 37.0;
+// local/probe-park/sa6-small E1-E8).
+procedure TestOverloadMarks;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_ovmarks');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'OvU.pas'),
+    'unit OvU;'#10 +                                                     // 1
+    'interface'#10 +                                                     // 2
+    'procedure A(X: Integer); overload;'#10 +                            // 3
+    'procedure B(X: Integer);'#10 +                                      // 4
+    'procedure C(X: Integer); overload;'#10 +                            // 5
+    'implementation'#10 +                                                // 6
+    'procedure A(X: Integer); begin end;'#10 +                           // 7
+    'procedure A(X: string); begin end;'#10 +                            // 8 E2254
+    'procedure B(X: Integer); begin end;'#10 +                           // 9
+    'procedure B(X: string); overload; begin end;'#10 +                  // 10 E2267
+    'procedure C(X: string); overload; begin end;'#10 +                  // 11
+    'procedure C(X: Integer); begin end;'#10 +                           // 12
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'OvM.dpr'),
+    'program OvM;'#10 +                                                  // 1
+    'uses OvU;'#10 +                                                     // 2
+    'type'#10 +                                                          // 3
+    '  TC = class'#10 +                                                  // 4
+    '    procedure A(X: Integer);'#10 +                                  // 5
+    '    procedure A(X: string); overload;'#10 +                         // 6 E2267
+    '    procedure A(X: Char); overload;'#10 +                           // 7 E2267
+    '    procedure B(X: Integer); overload;'#10 +                        // 8
+    '    procedure B(X: string);'#10 +                                   // 9 E2254
+    '    procedure B(X: Char); overload;'#10 +                           // 10
+    '    class constructor Create;'#10 +                                 // 11
+    '    constructor Create(X: Integer);'#10 +                           // 12
+    '    procedure G<T>(X: T);'#10 +                                     // 13
+    '    procedure G(X: string);'#10 +                                   // 14 E2254
+    '  end;'#10 +                                                        // 15
+    '  TB = class procedure S(X: Integer); overload; virtual; abstract;'#10 + // 16
+    '    procedure R(X: Integer); virtual; abstract; end;'#10 +          // 17
+    '  TD = class(TB) procedure S(X: Integer); override;'#10 +           // 18
+    '    procedure S(X: string); procedure R(X: Integer); override;'#10 + // 19 E2254
+    '    procedure R(X: string); overload; end;'#10 +                    // 20 E2267
+    '  TE = class(TB) procedure S(X: Integer); override; procedure S(X: string); overload; end;'#10 + // 21
+    'procedure P(X: Integer); begin end;'#10 +                           // 22
+    'procedure P(X: string); overload; begin end;'#10 +                  // 23 E2267
+    'procedure P(X: Char); overload; begin end;'#10 +                    // 24
+    'procedure Q(X: Integer); begin end;'#10 +                           // 25
+    'procedure Q(X: string); begin end;'#10 +                            // 26 E2267
+    'procedure Q(X: Char); begin end;'#10 +                              // 27 E2254
+    'procedure T(X: Integer); begin end;'#10 +                           // 28
+    'procedure T(X: Integer); begin end;'#10 +                           // 29 E2004
+    'procedure V(X: Integer); forward;'#10 +                             // 30
+    'procedure V(X: string); overload; forward;'#10 +                    // 31 E2267
+    'procedure V(X: Integer); begin end;'#10 +                           // 32
+    'procedure V(X: string); begin end;'#10 +                            // 33
+    'begin'#10 +                                                         // 34
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'OvM.dpr'));
+    LM := ModelByName('ovm');
+    Ok('ovmarks: E2254 lines [' + DiagLinesOf(LM, 'E2254') + ']',
+      DiagLinesOf(LM, 'E2254') = '9 14 19 27');
+    Ok('ovmarks: E2267 lines [' + DiagLinesOf(LM, 'E2267') + ']',
+      DiagLinesOf(LM, 'E2267') = '6 7 20 23 26 31');
+    Ok('ovmarks: E2004 lines [' + DiagLinesOf(LM, 'E2004') + ']',
+      DiagLinesOf(LM, 'E2004') = '29');
+    Ok('ovmarks: E2254 wording [' + DiagText(LM, 'E2254') + ']',
+      Pos('Overloaded procedure ''B'' must be marked with the ''overload'' ' +
+        'directive', DiagText(LM, 'E2254')) > 0);
+    LM := ModelByName('ovu');
+    Ok('ovmarks: unit E2254 lines [' + DiagLinesOf(LM, 'E2254') + ']',
+      DiagLinesOf(LM, 'E2254') = '8');
+    Ok('ovmarks: unit E2267 lines [' + DiagLinesOf(LM, 'E2267') + ']',
+      DiagLinesOf(LM, 'E2267') = '10');
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
+// A call statement of a bare name (`Foo;`) calls it with no arguments: a
+// unit-level set with no routine callable so is E2035 (spec 6.6.1) - a used
+// unit's plain `Exit(X: Integer)` hides the intrinsic, so a bare `Exit;` is
+// one (5.6). An overloaded set (dcc's E2250), a method, a procedural
+// variable and an all-defaulted routine are not (dcc64 37.0;
+// local/probe-park/sa6-small X1-X3, Q2).
+procedure TestBareCallArgs;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_barecall');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'BcU.pas'),
+    'unit BcU;'#10'interface'#10 +
+    'procedure Exit(X: Integer);'#10 +
+    'procedure Foo(X: Integer);'#10 +
+    'procedure Bar(X: Integer); overload;'#10 +
+    'procedure Def(X: Integer = 0);'#10 +
+    'implementation'#10 +
+    'procedure Exit(X: Integer); begin end;'#10 +
+    'procedure Foo(X: Integer); begin end;'#10 +
+    'procedure Bar(X: Integer); begin end;'#10 +
+    'procedure Def(X: Integer); begin end;'#10 +
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'Bc.dpr'),
+    'program Bc;'#10 +                                                   // 1
+    'uses BcU;'#10 +                                                     // 2
+    'type TC = class procedure M(X: Integer); procedure N; end;'#10 +    // 3
+    'procedure Own(A, B: Integer); begin end;'#10 +                      // 4
+    'procedure Baz(X: Integer); overload; begin end;'#10 +               // 5
+    'procedure TC.M(X: Integer); begin end;'#10 +                        // 6
+    'procedure TC.N; begin M; end;'#10 +                                 // 7
+    'procedure P1; begin Exit; end;'#10 +                                // 8 E2035
+    'function F1: Integer; begin Result := 0; Exit; end;'#10 +           // 9 E2035
+    'procedure P2; begin Foo; Own; end;'#10 +                            // 10 E2035 x2
+    'procedure P3; begin Bar; Baz; Def; end;'#10 +                       // 11
+    'procedure P4; begin System.Exit; Foo(1); end;'#10 +                 // 12
+    'var V: procedure;'#10 +                                             // 13
+    'begin'#10 +                                                         // 14
+    '  V;'#10 +                                                          // 15
+    '  if True then Exit else Foo;'#10 +                                 // 16 E2035 x2
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'Bc.dpr'));
+    LM := ModelByName('bc');
+    Ok('barecall: E2035 lines [' + DiagLinesOf(LM, 'E2035') + ']',
+      DiagLinesOf(LM, 'E2035') = '8 9 10 10 16 16');
   finally
     FreeAndNil(GProj);
     if TDirectory.Exists(LDir) then
@@ -26508,6 +26662,8 @@ begin
   TestQualifiedFlow;
   TestImplHeaderMembers;
   TestMemberOverloadTwins;
+  TestOverloadMarks;
+  TestBareCallArgs;
   TestNestedProcValue;
   TestRaiseOperands;
   TestForInMembers;

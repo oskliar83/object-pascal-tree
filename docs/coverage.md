@@ -330,9 +330,9 @@ of less work, not a gap in following the language; its consequences are in
   variable - are not.
 - Break / Continue / Exit in an unopened `with` body (the binding a guess)
   are not judged.
-- a used unit's own `Exit(X: Integer)` hides the intrinsic, and a bare
-  `Exit;` then lacks its argument (dcc's E2035); PasTree treats the call as
-  that routine's and does not report the missing argument.
+- a used unit's own `Exit(X: Integer); overload;` hides the intrinsic,
+  which does not join its set: a bare `Exit;` is dcc's E2250, not reported
+  (6.6.1 below). Without `overload` it is E2035, reported.
 
 ### 5.7 The `with` statement
 - the write rule behind `with (R) do X := 1` (E2064, a write into a part of
@@ -353,14 +353,20 @@ of less work, not a gap in following the language; its consequences are in
   depends on the resolved callee - so PasTree reports the E2029 every time.
 
 ### 6.3.1 The `overload` directive
-- two `overload` routines with one parameter list are E2004 (CheckDeclRules'
-  CheckOverloadTwins) only where every slot's type resolves - an inline
+- two routines with one parameter list are E2004, `overload` or not
+  (CheckDeclRules' CheckOverloadTwins), only where every slot's type resolves - an inline
   `array of` slot, a type parameter or an unresolved type leaves the pair
   unjudged. The same pair of members of one struct is E2252 (E2301 for
-  conversion operators of one result) under the same slot rule; dcc's
-  E2254 / E2267 beside it (`overload` missing on one of them) are not
-  reported, and the E2252 sits at the later member's name where dcc puts
-  it after the heading - on the next line when no directive follows.
+  conversion operators of one result) under the same slot rule; the E2252
+  sits at the later member's name where dcc puts it after the heading - on
+  the next line when no directive follows.
+- E2254 / E2267 (`overload` missing) are judged on the declarations of one
+  scope. An implementation-section header without `overload` that matches
+  none of the interface's declarations exactly is taken as the completion
+  of the nearest one (CompletionOf's best slot match), so where dcc reports
+  the E2267 / E2254 at that header PasTree reports it at a later header of
+  the name - an interface `D(X: Integer)` with `D(X: string)` then `D(X:
+  Integer)` in the implementation: dcc at the first, PasTree at the second.
 - a Boolean EXPRESSION (`True`, `I > 0`, `Bo and Bo2`, `not Bo`) against
   overloads for Boolean, ByteBool, WordBool and LongBool is dcc's E2251
   (spec 2.2.2: only a variable picks its own overload); the ranking takes
@@ -477,6 +483,13 @@ of less work, not a gap in following the language; its consequences are in
   plain `F(D: Double)` of a used unit and the unit's own `F(X: Integer);
   overload;` is not reported.
 
+### 6.6.1 Procedure/function pointer types
+- a call statement of a bare name whose set has nothing callable without
+  arguments (`Foo;`, dcc's E2035) is judged for a unit-level routine set
+  only, bound by the resolver: a method (`M;` in a method body), a nested
+  routine and an unbound name are not, and an overloaded set (dcc's E2250)
+  is not reported either. A name in an operator or an assignment (`I :=
+  F`) is not judged.
 ### 6.9 Nested routines
 - E2094 is judged where E2555 is: a nested routine as an assignment's whole
   source or as a bare argument whose parameter is read. Against an `of

@@ -142,6 +142,13 @@ const
     'E2252 Method ''%s'' with identical parameters already exists';
   SE2301_IdenticalParamsAndResult = 'E2301 Method ''%s'' with identical ' +
     'parameters and result type already exists';
+  // A name declared twice in one scope without `overload` (6.3.1): on the
+  // later declaration (E2254), or on the earlier one (E2267, reported at the
+  // later).
+  SE2254_OverloadNotMarked = 'E2254 Overloaded procedure ''%s'' must be ' +
+    'marked with the ''overload'' directive';
+  SE2267_PreviousNotMarked = 'E2267 Previous declaration of ''%s'' was not ' +
+    'marked with the ''overload'' directive';
   SE2015_OperatorNotApplicable =
     'E2015 Operator not applicable to this operand type';
   // E2008 names nothing either: `I + True`, `Ch + I` (4.2.1).

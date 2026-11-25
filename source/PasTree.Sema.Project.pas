@@ -11211,12 +11211,16 @@ type
     // set that says `overload` (6.3.1) - Overload: a used unit's does.
     ImplicitFrom: Integer;
     Overload: Boolean;
+    // One of System's and SysInit's had no param info (an intrinsic): the
+    // set is unknown only when they join it. A used unit's plain `Exit(X:
+    // Integer)` hides the intrinsic (5.6), and the sweep used to give up.
+    ImplicitSkip: Boolean;
   end;
 var
   LModel: TPasSemaModel;
   LNode, LCallee, LArg, LArgCount, LLocalHead, LUid, LS, LIdx: Integer;
   LMinReq, LMaxTot, LStruct: Integer;
-  LAnyFit, LAnyVariadic, LHaveAny, LSkip, LTrailing: Boolean;
+  LAnyFit, LAnyVariadic, LHaveAny, LSkip, LTrailing, LBare: Boolean;
   LNoUses, LNoSystem, LAnyOverload: Boolean;
   LName: string;
   LExt: TPasExtRef;
@@ -11309,12 +11313,26 @@ var
     Result.Arities := nil;
     Result.Overload := False;
     Result.ImplicitFrom := 0;
+    Result.ImplicitSkip := False;
     LCount := 0;
     LHeads := BareRoutineHeads(AId, AName, LFrom);
     for var LIdx := 0 to High(LHeads) do
     begin
       if LIdx = LFrom then
         Result.ImplicitFrom := LCount;
+      if LIdx >= LFrom then
+      begin
+        // System's and SysInit's join only a set that says `overload`: an
+        // intrinsic among them (no param info) leaves the rest measurable.
+        Gather(LHeads[LIdx].UnitId, LHeads[LIdx].Sym, Result, LCount);
+        if Result.Skip then
+        begin
+          Result.Skip := False;
+          Result.ImplicitSkip := True;
+          Break;
+        end;
+        Continue;
+      end;
       if LIdx < LFrom then
       begin
         var LCand := LHeads[LIdx].Sym;
@@ -11332,6 +11350,31 @@ var
     if LFrom >= Length(LHeads) then
       Result.ImplicitFrom := LCount;
     SetLength(Result.Arities, LCount);
+  end;
+
+  // A bare call statement's name bound - in this unit (ALocal) or another -
+  // to a unit-level routine that is no intrinsic.
+  function BareCallBound(AModel: TPasSemaModel; ACallee, ALocal: Integer):
+    Boolean;
+  var
+    LExt: TPasExtRef;
+    LBM: TPasSemaModel;
+    LBSym: Integer;
+  begin
+    LBM := AModel;
+    LBSym := ALocal;
+    if LBSym = NIL_SYM then
+    begin
+      if not AModel.ExtRefMap.TryGetValue(ACallee, LExt) then
+        Exit(False);
+      LBM := FModels[LExt.UnitId];
+      LBSym := LExt.Sym;
+    end;
+    Result := (LBM.Symbols[LBSym].Kind = skRoutine) and
+      not (sfBuiltin in LBM.Symbols[LBSym].Flags) and
+      (LBM.Symbols[LBSym].Scope <> NIL_SCOPE) and
+      (LBM.Scopes[LBM.Symbols[LBSym].Scope].Kind in
+        [sckUnit, sckImplementation]);
   end;
 
 begin
@@ -11353,12 +11396,20 @@ begin
   try
   for LNode := AFrom to ATo do
   begin
-    if LModel.Tree.Nodes[LNode].Kind <> nkCall then
+    // A call statement of a bare name (`Foo;`, 5.1.2) calls it with no
+    // arguments like `Foo()`: a set with no routine callable so is E2035
+    // (6.6.1) - and a bare `Exit;` meeting a used unit's `Exit(X: Integer)`
+    // is that set (5.6). Only a name bound to a unit-level routine is
+    // measured; an unbound one may be anything.
+    LBare := LModel.Tree.Nodes[LNode].Kind = nkExprStmt;
+    if not LBare and (LModel.Tree.Nodes[LNode].Kind <> nkCall) then
       Continue;
     LCallee := LModel.Tree.Nodes[LNode].FirstChild;
     if (LCallee = NIL_NODE) or (LModel.Tree.Nodes[LCallee].Kind <> nkIdent) then
       Continue;   // member/qualified calls (methods) are out of scope
     LLocalHead := LModel.RefMap[LCallee];
+    if LBare and not BareCallBound(LModel, LCallee, LLocalHead) then
+      Continue;
     if (LLocalHead <> NIL_SYM) and
        (LModel.Symbols[LLocalHead].Kind in [skType, skBuiltinType]) then
       Continue;   // a type cast, not a call
@@ -11424,8 +11475,8 @@ begin
           Consider(AId, LS);
       end;
     end;
-    if LNoUses and not LAnyOverload then
-      Continue;   // Phase 1's call (see LNoUses)
+    if LNoUses and not LAnyOverload and not LBare then
+      Continue;   // Phase 1's call (see LNoUses); Phase 1 has no bare one
 
     // Same-named routines from every resolved used unit - through the
     // per-name cache (see LSweeps above).
@@ -11442,6 +11493,8 @@ begin
       end;
       if LSweep.Skip then
         LSkip := True
+      else if LSweep.ImplicitSkip and (LAnyOverload or LSweep.Overload) then
+        LSkip := True   // a System intrinsic would join the set
       else if LNoSystem and (LAnyOverload or LSweep.Overload) then
         LSkip := True   // System's overloads unknown (see LNoSystem)
       else
@@ -11497,6 +11550,15 @@ begin
       end
       else
         LModel.ExtRefMap.AddOrSetValue(LCallee, LExt);
+      Continue;
+    end;
+    if LBare then
+    begin
+      // An overloaded set none of which takes no arguments is dcc's E2250
+      // (Exit; beside a used unit's Exit(X: Integer); overload;), not
+      // modelled here.
+      if not LAnyOverload and not LSweep.Overload then
+        EmitAt(LModel, LCallee, 'E2035', SE2035_NotEnoughActualParams);
       Continue;
     end;
     // Trailing comma: a parameter still due is E2029, otherwise E2034 (no
@@ -14119,8 +14181,9 @@ var
   end;
 
   { 6.3.1 (dcc64 37.0, spec audit g3 OvAmb, local/probe-park/sa5-exprs
-    o1, o2): two `overload` routines of one scope - a program's, a unit
-    section's, a routine's own - whose parameter lists match are one routine
+    o1, o2; sa6-small E5): two routines of one scope - a program's, a unit
+    section's, a routine's own, `overload` or not - whose parameter lists
+    match are one routine
     declared twice, E2004 at the later one, whatever their results (`F(X:
     Integer): Integer` beside `F(X: Integer): string`, a function beside a
     procedure). A slot matches by type alone - `var`, `const`, `out` and a
@@ -14201,8 +14264,10 @@ var
           Result := False;
       end
       else
-        Result := LM.Symbols[ASym].Flags * [sfOverloadDirective, sfForward,
-          sfGeneric, sfBuiltin] = [sfOverloadDirective];
+        // Outside a struct the directive does not count either: a twin is
+        // E2004 with or without it (local/probe-park/sa6-small E5 T, U).
+        Result := LM.Symbols[ASym].Flags * [sfForward, sfGeneric,
+          sfBuiltin] = [];
     end;
 
     // Both results resolved to one type.
@@ -14296,6 +14361,162 @@ var
       end;
     end;
 
+    { The `overload` directive on a name declared more than once in one scope
+      (6.3.1; dcc64 37.0, local/probe-park/sa6-small E1-E8), from the chain
+      AHead heads in declaration order. A struct's members: a later one
+      without the directive is E2254, else one beside a first without it
+      E2267 - each later one on its own, twins (E2252) included; an
+      `override` says what the method it overrides says (E9). A scope's
+      routines keep one state: until a declaration has said `overload` (the
+      first, or one already reported) the next is E2267, after that a later
+      one without it E2254; an implementation section's routines continue
+      the interface's chain of the name (an implementation completing a
+      declaration is no symbol), and a twin is E2004 alone. A class
+      constructor or destructor is no overload of an instance one; a generic
+      routine outside a struct is E2530, so its name is left alone. }
+    procedure CheckOverloadMarks(AHead: Integer; AMember: Boolean);
+    var
+      LList: TArray<Integer>;
+      LCount, LX, LIntf: Integer;
+      LMarked: Boolean;
+      LMarks: TArray<Integer>;   // per LList entry: 0 no, 1 yes, -1 unknown
+
+      { Whether member ASym of model AMid says `overload`: an override says
+        what the method it overrides says - found by signature up the
+        ancestry, nearest first, as CheckOverride finds it (local/probe-park/
+        sa6-small E9: `S(X: Integer); override;` of an overloaded `S` beside
+        `S(X: string);` is E2254, of a plain one E2267 the other way). -1
+        when the ancestry cannot be read. }
+      function MemberMark(AMid, ASym, ADepth: Integer): Integer;
+      var
+        LCm: TPasSemaModel;
+        LCur, LNext: TSemaXType;
+        LDef, LFound, LCand, LCr: Integer;
+      begin
+        LCm := FModels[AMid];
+        if sfOverloadDirective in LCm.Symbols[ASym].Flags then
+          Exit(1);
+        if not (sfOverrideDirective in LCm.Symbols[ASym].Flags) then
+          Exit(0);
+        Result := -1;
+        if (ADepth > 40) or (LCm.Symbols[ASym].Scope = NIL_SCOPE) or
+           (LCm.Scopes[LCm.Symbols[ASym].Scope].StructSym = NIL_SYM) then
+          Exit;
+        LCur := XPlain(AMid, LCm.Scopes[LCm.Symbols[ASym].Scope].StructSym);
+        for var LDepth := 1 to 40 do
+        begin
+          LDef := TypeDefNodeOf(LCur.UnitId, LCur.Sym);
+          if (LDef = NIL_NODE) or
+             (HeritageHopX(LCur.UnitId, LCur.Sym, LDef, LNext) <> hhNext) then
+            Exit;
+          LCur := XPlain(LNext.UnitId, LNext.Sym);
+          LCm := FModels[LCur.UnitId];
+          if LCm.Demoted or (LCm.Symbols[LCur.Sym].MemberScope = NIL_SCOPE) then
+            Exit;
+          LFound := LCm.FindLocal(LCm.Symbols[LCur.Sym].MemberScope,
+            FModels[AMid].Symbols[ASym].NameLower);
+          if LFound = NIL_SYM then
+            Continue;
+          if LCm.Symbols[LFound].Kind <> skRoutine then
+            Exit;
+          LCand := LFound;
+          while LCand <> NIL_SYM do
+          begin
+            LCr := RoutineNodeOf(LCm, LCand);
+            if LCr = NIL_NODE then
+              Exit;
+            if not LCm.IsClassCtorDtor(LCand) then
+              case SameMethodSig(AMid, ASym, LCur.UnitId, LCand) of
+                msUnknown:
+                  Exit;
+                msYes:
+                  Exit(MemberMark(LCur.UnitId, LCand, ADepth + 1));
+              end;
+            LCand := LCm.Symbols[LCand].NextOverload;
+          end;
+        end;
+      end;
+
+      function Add(AChain: Integer): Boolean;
+      begin
+        Result := True;
+        while AChain <> NIL_SYM do
+        begin
+          if (LM.Symbols[AChain].Kind <> skRoutine) or
+             (LM.Symbols[AChain].DeclNode = NIL_NODE) or
+             (sfBuiltin in LM.Symbols[AChain].Flags) then
+            Exit(False);
+          var LRoutine := RoutineNodeOf(LM, AChain);
+          if (LRoutine = NIL_NODE) or
+             (not AMember and
+              (ChildOfKind(LRoutine, nkGenericParams) <> NIL_NODE)) then
+            Exit(False);
+          if not LM.IsClassCtorDtor(AChain) and
+             (LM.RoutineHead(AChain) <> rhOperator) then
+          begin
+            if LCount = Length(LList) then
+              SetLength(LList, LCount * 2 + 4);
+            LList[LCount] := AChain;
+            Inc(LCount);
+          end;
+          AChain := LM.Symbols[AChain].NextOverload;
+        end;
+      end;
+
+    begin
+      LCount := 0;
+      if not AMember and
+         (LM.Scopes[LM.Symbols[AHead].Scope].Kind = sckImplementation) and
+         (LM.InterfaceScope <> NIL_SCOPE) then
+      begin
+        LIntf := LM.FindLocal(LM.InterfaceScope, LM.Symbols[AHead].NameLower);
+        if (LIntf <> NIL_SYM) and not Add(LIntf) then
+          Exit;
+      end;
+      if not Add(AHead) or (LCount < 2) then
+        Exit;
+      if AMember then
+      begin
+        // Every mark first: one the ancestry cannot tell leaves the name.
+        SetLength(LMarks, LCount);
+        for var LI := 0 to LCount - 1 do
+        begin
+          LMarks[LI] := MemberMark(AId, LList[LI], 0);
+          if LMarks[LI] < 0 then
+            Exit;
+        end;
+      end;
+      LMarked := LM.RoutineSaysOverload(LList[0]);
+      for var LI := 1 to LCount - 1 do
+      begin
+        LX := LList[LI];
+        if AMember then
+        begin
+          if LMarks[LI] = 0 then
+            EmitAt(LM, LM.Symbols[LX].DeclNode, 'E2254',
+              Format(SE2254_OverloadNotMarked,
+              [LM.Tree.NodeText(LM.Symbols[LX].DeclNode)]))
+          else if LMarks[0] = 0 then
+            EmitAt(LM, LM.Symbols[LX].DeclNode, 'E2267',
+              Format(SE2267_PreviousNotMarked,
+              [LM.Tree.NodeText(LM.Symbols[LX].DeclNode)]));
+        end
+        else if LM.HasDiagAt(LM.Symbols[LX].DeclNode) then
+          Continue   // a twin's E2004, or another error of the declaration
+        else if not LMarked then
+        begin
+          EmitAt(LM, LM.Symbols[LX].DeclNode, 'E2267',
+            Format(SE2267_PreviousNotMarked,
+            [LM.Tree.NodeText(LM.Symbols[LX].DeclNode)]));
+          LMarked := True;
+        end
+        else if not LM.RoutineSaysOverload(LX) then
+          EmitAt(LM, LM.Symbols[LX].DeclNode, 'E2254',
+            Format(SE2254_OverloadNotMarked,
+            [LM.Tree.NodeText(LM.Symbols[LX].DeclNode)]));
+      end;
+    end;
+
   var
     LSym, LA, LB, LScope: Integer;
     LMember: Boolean;
@@ -14317,7 +14538,13 @@ var
         if LMember and (LM.Symbols[LSym].NextOverload = NIL_SYM) and
            not (sfOverload in LM.Symbols[LSym].Flags) and
            (LM.RoutineHead(LSym) = rhOperator) then
-          CheckOperatorTwin(LScope, LSym);
+          CheckOperatorTwin(LScope, LSym)
+        else if not LMember and (LM.Symbols[LSym].NextOverload = NIL_SYM) and
+           not (sfOverload in LM.Symbols[LSym].Flags) and
+           (LM.Scopes[LScope].Kind = sckImplementation) then
+          // The implementation's sole routine of a name the interface
+          // declares continues that chain.
+          CheckOverloadMarks(LSym, False);
         Continue;   // only a chain's head
       end;
       LB := LM.Symbols[LSym].NextOverload;
@@ -14346,6 +14573,7 @@ var
         end;
         LB := LM.Symbols[LB].NextOverload;
       end;
+      CheckOverloadMarks(LSym, LMember);
     end;
   end;
 
