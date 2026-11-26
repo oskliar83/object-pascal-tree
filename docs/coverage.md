@@ -156,11 +156,14 @@ of less work, not a gap in following the language; its consequences are in
   only rank (E2250, 6.3.1). A constant out of its target's range is E1012
   by one rule (CrossType's ConstOutside: an assignment, an initialized
   declaration, a plain routine's argument, a `for` bound, a `[...]`
-  element, an index, a `case` label), but not for an argument of an
-  overload set, nor a ShortString index (`SS[6]` for a `string[5]`: dcc's
-  E1012), nor a character target (`Ch := #256` is dcc's W1061); W1012 and
-  the other warnings of a constant (W1021-W1023 comparisons, W1058) are
-  not reported.
+  element, an index, a `case` label, a default value, `Exit(V)`, an
+  aggregate initializer's elements and fields, a short string's index),
+  but not for an argument of an overload set (`PO(300)`), nor a constant
+  the fold does not read - a cast inside an operator (`TSub(3) + 10`),
+  `Low` / `High` of a static array variable (`A[Low(A) - 1]`) - nor a
+  character target (`Ch := #256` is dcc's W1061). Variant-part labels have
+  their own check (CheckVariantLabels). W1012 and the other warnings of a
+  constant (W1021-W1023 comparisons, W1058) are not reported.
 
 ## 03-variables-constants.md
 
@@ -339,8 +342,8 @@ of less work, not a gap in following the language; its consequences are in
 - Break / Continue / Exit in an unopened `with` body (the binding a guess)
   are not judged.
 - a used unit's own `Exit(X: Integer); overload;` hides the intrinsic,
-  which does not join its set: a bare `Exit;` is dcc's E2250, not reported
-  (6.6.1 below). Without `overload` it is E2035, reported.
+  which does not join its set: a bare `Exit;` is E2250 (6.6.1 below);
+  without `overload` it is E2035.
 
 ### 5.7 The `with` statement
 - the write rule behind `with (R) do X := 1` (E2064, a write into a part of
@@ -355,10 +358,12 @@ of less work, not a gap in following the language; its consequences are in
 ## 06-routines.md
 
 ### 6.2.6 Open array & `array of const` parameters
-- `P(1..3)` against an open array is dcc's E2192 (a constant range, read
-  only there: against any other parameter, and for `P(I..J)`, it is E2029
-  at the `..`). The parser reads no range in a call argument - the reading
-  depends on the resolved callee - so PasTree reports the E2029 every time.
+- `P(1..3)` is no range for dcc: the constant `1` is E2192 at the `..`,
+  whose E2029 goes (an argument is judged at the token after it). Reported
+  so for a plain routine's open array; a procedural variable's (`V(1..3)`)
+  keeps the E2029, and so does an argument's other verdict at the cut
+  (`P(I + 1 ..3)` is dcc's E2010). dcc skips the rest of the block after
+  such a cut; PasTree goes on.
 
 ### 6.3.1 The `overload` directive
 - two routines with one parameter list are E2004, `overload` or not
@@ -492,12 +497,16 @@ of less work, not a gap in following the language; its consequences are in
   overload;` is not reported.
 
 ### 6.6.1 Procedure/function pointer types
-- a call statement of a bare name whose set has nothing callable without
-  arguments (`Foo;`, dcc's E2035) is judged for a unit-level routine set
-  only, bound by the resolver: a method (`M;` in a method body), a nested
-  routine and an unbound name are not, and an overloaded set (dcc's E2250)
-  is not reported either. A name in an operator or an assignment (`I :=
-  F`) is not judged.
+- a call statement of a bare designator whose set has nothing callable
+  without arguments (`Foo;`, `M;`, `C.M;`, `N;`, `inherited M;`) is E2035,
+  E2250 for a set that says `overload`: a unit-level set as CheckCallsRange
+  gathers it, a method's up the ancestry, a nested routine's in its scope.
+  Not judged: an unbound name, a unit-qualified one (`U.Foo;`), a call in
+  an unopened `with`, a generic or varargs routine, a method set with an
+  ancestry that does not resolve, one a helper's routine of the name joins
+  (it may fit), and a constructor called on a class (`TC.Create;`, dcc's
+  E2035) - the name binds to a parameterless ancestor's `Create` the class
+  hides. A name in an operator or an assignment (`I := F`) is not judged.
 ### 6.9 Nested routines
 - E2094 is judged where E2555 is: a nested routine as an assignment's whole
   source or as a bare argument whose parameter is read. Against an `of

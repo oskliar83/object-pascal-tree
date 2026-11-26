@@ -1131,6 +1131,12 @@ type
       G` too. A parser E2066 (TPasParseDiag.Node, the construct it ends) goes
       when an E2003 stands inside that construct before it. }
     procedure DropHiddenE2066;
+    { dcc judges a call's argument at the token after it, so an argument
+      error found there takes that token and the syntax error at it is not
+      reported (spec 6.2.6, dcc64 37.0, local/sa10-2026-11/probes/r1: `P(1..3)`
+      against an open array is E2192 at the `..` alone). A parser E2029 goes
+      when an E2192 stands at its file, line and column. }
+    procedure DropHiddenE2029;
     // How many Diags are filled (Length(Diags) is capacity until TrimDiags).
     property DiagCount: Integer read FDiagCount;
     { Is a diagnostic already anchored at this CST node? For a pass that can
@@ -4170,9 +4176,48 @@ begin
   FDiagCount := LKept;
 end;
 
+procedure TPasSemaModel.DropHiddenE2029;
+var
+  LIdx, LOther, LKept: Integer;
+  LAny, LHidden: Boolean;
+begin
+  LAny := False;
+  for LIdx := 0 to FDiagCount - 1 do
+    if Diags[LIdx].Code = 'E2192' then
+    begin
+      LAny := True;
+      Break;
+    end;
+  if not LAny then
+    Exit;
+  LKept := 0;
+  for LIdx := 0 to FDiagCount - 1 do
+  begin
+    LHidden := False;
+    if (Diags[LIdx].Code = 'E2029') and (Diags[LIdx].DeclNode = NIL_NODE) then
+      for LOther := 0 to FDiagCount - 1 do
+        if (Diags[LOther].Code = 'E2192') and
+           (Diags[LOther].FileId = Diags[LIdx].FileId) and
+           (Diags[LOther].Line = Diags[LIdx].Line) and
+           (Diags[LOther].Col = Diags[LIdx].Col) then
+        begin
+          LHidden := True;
+          Break;
+        end;
+    if not LHidden then
+    begin
+      if LKept <> LIdx then
+        Diags[LKept] := Diags[LIdx];
+      Inc(LKept);
+    end;
+  end;
+  FDiagCount := LKept;
+end;
+
 procedure TPasSemaModel.TrimDiags;
 begin
   DropHiddenE2066;
+  DropHiddenE2029;
   DropHiddenE2289;
   if Length(Diags) <> FDiagCount then
     SetLength(Diags, FDiagCount);

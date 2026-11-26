@@ -11423,6 +11423,21 @@ var
         [sckUnit, sckImplementation]);
   end;
 
+  // The declared name of the routine a bare call statement bound (dcc's
+  // E2250 names it as declared, `s1;` too).
+  function BareSetName(AModel: TPasSemaModel; ACallee, ALocal: Integer):
+    string;
+  var
+    LExt: TPasExtRef;
+  begin
+    if ALocal <> NIL_SYM then
+      Result := AModel.Symbols[ALocal].Name
+    else if AModel.ExtRefMap.TryGetValue(ACallee, LExt) then
+      Result := FModels[LExt.UnitId].Symbols[LExt.Sym].Name
+    else
+      Result := AModel.Tree.NodeText(ACallee);
+  end;
+
 begin
   LModel := FModels[AId];
   if not LModel.AllUsesResolved then
@@ -11600,10 +11615,13 @@ begin
     end;
     if LBare then
     begin
-      // An overloaded set none of which takes no arguments is dcc's E2250
-      // (Exit; beside a used unit's Exit(X: Integer); overload;), not
-      // modelled here.
-      if not LAnyOverload and not LSweep.Overload then
+      // A set that says `overload` is dcc's E2250, naming the routine as
+      // declared (Exit; beside a used unit's Exit(X: Integer); overload;, a
+      // program's LO(X) / LO(S) - local/sa10-2026-11/probes/b B1, B3).
+      if LAnyOverload or LSweep.Overload then
+        EmitAt(LModel, LCallee, 'E2250', Format(SE2250_NoOverload,
+          [BareSetName(LModel, LCallee, LLocalHead)]))
+      else
         EmitAt(LModel, LCallee, 'E2035', SE2035_NotEnoughActualParams);
       Continue;
     end;
@@ -26821,6 +26839,15 @@ var
       end;
     end;
 
+    // An integer literal, signed or not (`256`, `-1`, `(+3)`).
+    function IntLiteralAt(ANode: Integer): Boolean;
+    begin
+      ANode := PeelParens(LM.Tree, ANode);
+      if (ANode <> NIL_NODE) and (LM.Tree.Nodes[ANode].Kind = nkUnaryOp) then
+        ANode := PeelParens(LM.Tree, LM.Tree.Nodes[ANode].FirstChild);
+      Result := (ANode <> NIL_NODE) and (LM.Tree.Nodes[ANode].Kind = nkIntLit);
+    end;
+
     // The values a constant of the ordinal target AX may take (2.6.1): an
     // enumeration's or a subrange's own range (a character subrange too), a
     // builtin integer's. AWide: a 32- or 64-bit integer, where a constant
@@ -28327,7 +28354,8 @@ var
           LCore := PeelParens(LM.Tree, LArg);
           LPDecl := ParamNode(AMid, APars[LPI]);
           if (LCore = NIL_NODE) or (LPDecl = NIL_NODE) or
-             (LM.Tree.Nodes[LCore].Kind in [nkMissing, nkAmbiguous]) then
+             (LM.Tree.Nodes[LCore].Kind in [nkMissing, nkAmbiguous,
+              nkError]) then
             Exit;
           LByRef := LOm.Tree.Nodes[LPDecl].Flags * [nfVar, nfOut] <> [];
           LOpen := (LOm.Symbols[APars[LPI]].TypeNode <> NIL_NODE) and
@@ -28337,7 +28365,16 @@ var
              (LM.Tree.Nodes[LCore].Kind <> nkSetCtor) and
              ConstAt(LCore)) then
           begin
-            EmitAt(LM, LArg, 'E2192', SE2192_ConstOpenArrayArg);
+            // dcc judges an argument at the token after it: where a syntax
+            // error cut the list there (`P(1..3)`, `P(5 X)` - no range is
+            // read in an argument), E2192 stands at that token in place of
+            // the parse error, which TPasSemaModel.DropHiddenE2029 then
+            // drops (6.2.6; local/sa10-2026-11/probes/r1).
+            var LCut := LM.Tree.Nodes[LArg].NextSibling;
+            if (LCut <> NIL_NODE) and (LM.Tree.Nodes[LCut].Kind = nkError) then
+              EmitAt(LM, LCut, 'E2192', SE2192_ConstOpenArrayArg)
+            else
+              EmitAt(LM, LArg, 'E2192', SE2192_ConstOpenArrayArg);
             Exit;
           end;
           if LOpen and LByRef and (LM.Tree.Nodes[LCore].Kind = nkSetCtor) then
@@ -28518,6 +28555,10 @@ var
       LPI := 0;
       while LArg <> NIL_NODE do
       begin
+        // A list a syntax error cut (`P(1..3)`, `P(5 X)`): the arguments
+        // before the cut are whole and judged (ShapeArgs stops at it).
+        if LM.Tree.Nodes[LArg].Kind = nkError then
+          Break;
         if LPI > High(LPars) then
           Exit;   // more arguments than parameters: not this check's call
         LPDecl := LOm.Symbols[LPars[LPI]].DeclNode;
@@ -28545,6 +28586,149 @@ var
       end;
       if not InUntypedWith(N) then
         ShapeArgs(LHead, LMid, LSym, LPars);
+    end;
+
+    { A call statement of a bare designator - `M;`, `C.M;`, `TC.CM;`, `N;`,
+      `inherited M;` - calls it with no arguments (6.6.1): a set with no
+      routine callable so is E2035, E2250 when the set says `overload`.
+      CheckCallsRange judges a unit-level routine's set (it merges across
+      units); here a method's and a nested routine's. A nested routine's set
+      is its own scope's chain - an overloaded one reaches neither the
+      enclosing routine's nor the unit's routines; a method's set climbs the
+      ancestry while a level's chain says `overload` (or overrides), and a
+      routine of the name in a helper active on the way leaves it unjudged
+      (it joins the set). An
+      unreadable ancestry, a generic or varargs routine, a constructor named
+      bare in a method (E2382) and a call in an unopened `with` stay silent.
+      dcc64 37.0, 2026-11-26 (local/sa10-2026-11/probes/b B1-B3). }
+    procedure CheckBareCall(N: Integer);
+    var
+      LExpr, LHead, LMid, LSym, LScope, LCand, LDef, LMs, LHm, LHs: Integer;
+      LOm, LCm: TPasSemaModel;
+      LCur, LNext: TSemaXType;
+      LKey: TSemaKey;
+      LOverload, LLevelOver, LLevelOverride: Boolean;
+
+      // The chain from ACand in model AMid: True when a routine of it is
+      // callable with no arguments, or one cannot be judged. AOver: one says
+      // `overload`; AOverride: one is an override.
+      function ChainFits(AMid, ACand: Integer;
+        var AOver, AOverride: Boolean): Boolean;
+      var
+        LReq, LTot: Integer;
+        LVariadic: Boolean;
+        LSm: TPasSemaModel;
+      begin
+        Result := False;
+        LSm := FModels[AMid];
+        while ACand <> NIL_SYM do
+        begin
+          if LSm.Symbols[ACand].Kind <> skRoutine then
+            Exit(True);
+          if not IsClassCtorDtorSym(AMid, ACand) then
+          begin
+            if (sfVarArgs in LSm.Symbols[ACand].Flags) or
+               IsGenericRoutine(AMid, ACand) or
+               not RoutineHasParams(AMid, ACand) or
+               not RoutineArity(AMid, ACand, LReq, LTot, LVariadic) or
+               LVariadic or (LReq = 0) then
+              Exit(True);
+            if sfOverloadDirective in LSm.Symbols[ACand].Flags then
+              AOver := True;
+            if sfOverrideDirective in LSm.Symbols[ACand].Flags then
+              AOverride := True;
+          end;
+          ACand := LSm.Symbols[ACand].NextOverload;
+        end;
+      end;
+
+    begin
+      LExpr := LM.Tree.Nodes[N].FirstChild;
+      if LExpr = NIL_NODE then
+        Exit;
+      LHead := LExpr;
+      if LM.Tree.Nodes[LExpr].Kind = nkInherited then
+      begin
+        // `inherited M;` - not a bare `inherited;`, not a chain after it.
+        LHead := LM.Tree.Nodes[LExpr].FirstChild;
+        if (LHead = NIL_NODE) or
+           (LM.Tree.Nodes[LHead].NextSibling <> NIL_NODE) or
+           (LM.Tree.Nodes[LHead].Kind <> nkIdent) then
+          Exit;
+      end
+      else if not (LM.Tree.Nodes[LExpr].Kind in [nkIdent, nkMember]) then
+        Exit;
+      if InUntypedWith(N) or not TargetSym(LHead, LMid, LSym) then
+        Exit;
+      LOm := FModels[LMid];
+      if (LOm.Symbols[LSym].Kind <> skRoutine) or
+         (sfBuiltin in LOm.Symbols[LSym].Flags) then
+        Exit;
+      LScope := LOm.Symbols[LSym].Scope;
+      if LScope = NIL_SCOPE then
+        Exit;
+      LOverload := False;
+      LLevelOverride := False;
+      case LOm.Scopes[LScope].Kind of
+        sckRoutine:
+          if ChainFits(LMid, LOm.FindLocal(LScope, LOm.Symbols[LSym].NameLower),
+               LOverload, LLevelOverride) then
+            Exit;
+        sckStruct:
+          begin
+            if (LOm.Scopes[LScope].StructSym = NIL_SYM) or
+               IsConstructorSym(LMid, LSym) and (LExpr = LHead) and
+               (LM.Tree.Nodes[LHead].Kind = nkIdent) then
+              Exit;
+            LCur := XPlain(LMid, LOm.Scopes[LScope].StructSym);
+            if LM.Tree.Nodes[LHead].Kind = nkMember then
+              LKey := PasNodeKey(LM.Tree, LM.Tree.LastChild(LHead))
+            else
+              LKey := PasNodeKey(LM.Tree, LHead);
+            for var LDepth := 1 to 41 do
+            begin
+              if LDepth = 41 then
+                Exit;
+              // A helper's routine of the name joins the set (B2 HO).
+              if HelperMemberHit(AId, LCur, LKey, LHm, LHs, -1) then
+                Exit;
+              LCm := FModels[LCur.UnitId];
+              LMs := LCm.Symbols[LCur.Sym].MemberScope;
+              if LCm.Demoted or (LMs = NIL_SCOPE) then
+                Exit;
+              LCand := LCm.FindLocal(LMs, LOm.Symbols[LSym].NameLower);
+              if LCand <> NIL_SYM then
+              begin
+                LLevelOver := False;
+                LLevelOverride := False;
+                if ChainFits(LCur.UnitId, LCand, LLevelOver, LLevelOverride) then
+                  Exit;
+                if LLevelOver then
+                  LOverload := True
+                else if not LLevelOverride then
+                  Break;   // a plain level hides its ancestors' routines
+              end;
+              LDef := TypeDefNodeOf(LCur.UnitId, LCur.Sym);
+              if LDef = NIL_NODE then
+                Exit;
+              case HeritageHopX(LCur.UnitId, LCur.Sym, LDef, LNext) of
+                hhNext:
+                  LCur := XPlain(LNext.UnitId, LNext.Sym);
+                hhNone:
+                  Break;
+              else
+                Exit;
+              end;
+            end;
+          end;
+      else
+        Exit;   // a unit-level routine: CheckCallsRange's
+      end;
+      if LOverload then
+        EmitAt(LM, LHead, 'E2250', Format(SE2250_NoOverload,
+          [LOm.Symbols[LSym].Name]))
+      else
+        EmitAt(LM, LHead, 'E2035', SE2035_NotEnoughActualParams);
     end;
 
     { Has the property (AMid, ASym) a `read` (AWrite False) or a `write`
@@ -28956,6 +29140,119 @@ var
         Result := GetX(AVar);
     end;
 
+    { The values of an aggregate `(...)` initializer AAggr of the declaration
+      ADecl against the type it fills - the type node ATNode of model ATMid
+      with ADims array dimensions still to peel (-1: not begun), or, with no
+      node, AX: a constant out of an ordinal element's or field's range is
+      E1012, as the same value assigned (2.6.1; `(1, 300)` for an `array of
+      Byte`, `(B: 300)`, `(R: (S: 6))` - dcc64 37.0, 2026-11-26, local/
+      sa10-2026-11/probes/e E1-E3). dcc reports one a line: ALine is the line
+      last reported. A field label is read as TPasSemaProject's label check
+      binds it; a `[...]` value is not judged here. }
+    procedure CheckAggrConsts(ADecl, AAggr, ATMid, ATNode, ADims: Integer;
+      AX: TSemaXType; ADepth: Integer; var ALine: Integer);
+    var
+      LTree: TPasTree;
+      LChild, LName, LValue, LMemMid, LMemSym, LCtx, LDef, LElem: Integer;
+      LExt: TPasExtRef;
+
+      procedure Leaf(AValue: Integer; const AElemX: TSemaXType);
+      var
+        LFile, LLine, LCol: Integer;
+      begin
+        if (LM.Tree.Nodes[PeelParens(LM.Tree, AValue)].Kind = nkSetCtor) or
+           not ConstOutsideConv(ADecl, AValue, AElemX) then
+          Exit;
+        NodeLineCol(LM, AValue, LFile, LLine, LCol);
+        if LLine = ALine then
+          Exit;
+        ALine := LLine;
+        EmitAt(LM, AValue, 'E1012', SE1012_ConstViolatesBounds);
+      end;
+
+    begin
+      if (ADepth > 64) or (AAggr = NIL_NODE) or
+         (LM.Tree.Nodes[AAggr].Kind <> nkAggregate) then
+        Exit;
+      if ATNode <> NIL_NODE then
+      begin
+        LTree := FModels[ATMid].Tree;
+        if LTree.Nodes[ATNode].Kind = nkArrayType then
+        begin
+          if ADims < 0 then
+            ADims := PasArrayDims(LTree, ATNode);
+          LElem := PasArrayElemNode(LTree, ATNode);
+          LChild := LM.Tree.Nodes[AAggr].FirstChild;
+          while LChild <> NIL_NODE do
+          begin
+            if ADims > 1 then
+              CheckAggrConsts(ADecl, LChild, ATMid, ATNode, ADims - 1, XNil,
+                ADepth + 1, ALine)
+            else if LM.Tree.Nodes[LChild].Kind = nkAggregate then
+              CheckAggrConsts(ADecl, LChild, ATMid, LElem, -1, XNil,
+                ADepth + 1, ALine)
+            else if LElem <> NIL_NODE then
+              Leaf(LChild, ResolveTypeExprNested(ATMid, LElem));
+            LChild := LM.Tree.Nodes[LChild].NextSibling;
+          end;
+          Exit;
+        end;
+        AX := ResolveTypeExprNested(ATMid, ATNode);
+      end;
+      AX := CanonTypeX(AX);
+      if not XValid(AX) or OpenX(AX) or NestedInGenericX(AX) then
+        Exit;
+      // A named array type: its definition is the node to peel.
+      LDef := TypeDefNodeOf(AX.UnitId, AX.Sym);
+      if (LDef <> NIL_NODE) and
+         (FModels[AX.UnitId].Tree.Nodes[LDef].Kind = nkArrayType) then
+      begin
+        CheckAggrConsts(ADecl, AAggr, AX.UnitId, LDef, -1, XNil, ADepth + 1,
+          ALine);
+        Exit;
+      end;
+      if XCatOf(AX) <> tcRecord then
+        Exit;
+      LChild := LM.Tree.Nodes[AAggr].FirstChild;
+      while LChild <> NIL_NODE do
+      begin
+        LName := NIL_NODE;
+        if LM.Tree.Nodes[LChild].Kind = nkAggregateField then
+          LName := LM.Tree.Nodes[LChild].FirstChild;
+        if (LName <> NIL_NODE) and (LM.Tree.Nodes[LName].Kind = nkIdent) then
+        begin
+          LMemMid := AId;
+          LMemSym := LM.RefMap[LName];
+          if LMemSym = NIL_SYM then
+          begin
+            if LM.ExtRefMap.TryGetValue(LName, LExt) then
+            begin
+              LMemMid := LExt.UnitId;
+              LMemSym := LExt.Sym;
+            end
+            else if not FindMemberX(AId, AX, PasNodeKey(LM.Tree, LName),
+                      LMemMid, LMemSym, LCtx, 0, True) then
+              LMemSym := NIL_SYM;
+          end;
+          LValue := LM.Tree.Nodes[LName].NextSibling;
+          if (LMemSym <> NIL_SYM) and (LValue <> NIL_NODE) and
+             (FModels[LMemMid].Symbols[LMemSym].Kind = skField) then
+          begin
+            if LM.Tree.Nodes[LValue].Kind <> nkAggregate then
+              Leaf(LValue, SymDeclTypeX(LMemMid, LMemSym))
+            else if FModels[LMemMid].Symbols[LMemSym].TypeNode <> NIL_NODE then
+              CheckAggrConsts(ADecl, LValue, LMemMid,
+                FModels[LMemMid].Symbols[LMemSym].TypeNode, -1, XNil,
+                ADepth + 1, ALine)
+            else
+              CheckAggrConsts(ADecl, LValue, -1, NIL_NODE, -1,
+                SymDeclTypeX(LMemMid, LMemSym), ADepth + 1, ALine);
+          end;
+        end;
+        LChild := LM.Tree.Nodes[LChild].NextSibling;
+      end;
+    end;
+
     // `var X: T = V;`, `const X: T = V;`, `var X: T := V` (3.1, 3.2.2,
     // 3.1.3): the value to the declared type, as an assignment (m2 Set X:
     // the initialized global, the typed constant and the inline variable
@@ -28997,7 +29294,14 @@ var
       if (LType = NIL_NODE) or (LInit = NIL_NODE) or (LName = NIL_NODE) then
         Exit;
       if LM.Tree.Nodes[LInit].Kind = nkAggregate then
+      begin
+        if not InUntypedWith(N) then
+        begin
+          LCount := -1;   // the line last reported
+          CheckAggrConsts(N, LInit, AId, LType, -1, XNil, 0, LCount);
+        end;
         Exit;
+      end;
       LDstX := DeclaredX(LName);
       LSrcX := GetX(LInit);
       if not XValid(LDstX) or not XValid(LSrcX) then
@@ -29136,7 +29440,13 @@ var
                  (LM.Tree.Nodes[LCore].Kind <> nkNilLit) and
                  not ((LM.Tree.Nodes[LCore].Kind = nkSetCtor) and
                       (LM.Tree.Nodes[LCore].FirstChild = NIL_NODE)) then
-                EmitAt(LM, LDflt, 'E2026', SE2026_ConstantExpected);
+                EmitAt(LM, LDflt, 'E2026', SE2026_ConstantExpected)
+              // A constant out of the parameter's range, as an argument
+              // would be (2.6.1: `B: Byte = 300`, `S: TSub = 9`).
+              else if XValid(LX) and XValid(GetX(LDflt)) and
+                      ConstOutsideConv(LParam, LDflt,
+                        ResolveTypeExprNested(AId, LType)) then
+                EmitAt(LM, LDflt, 'E1012', SE1012_ConstViolatesBounds);
               LSeen := True;
             end;
           end;
@@ -29185,6 +29495,41 @@ var
         EmitAt(LM, LFrom, 'E1012', SE1012_ConstViolatesBounds)
       else if (LTo <> NIL_NODE) and BoundOutside(LTo) then
         EmitAt(LM, LTo, 'E1012', SE1012_ConstViolatesBounds);
+    end;
+
+    // `Exit(V)` in a function (5.6): V goes to the result as `Result := V`
+    // does - a constant out of an ordinal result's range is E1012 (2.6.1;
+    // `Exit(300)` for a Byte, `Exit(-1)` for a Cardinal; local/sa10-2026-11/
+    // probes/e E1, E2). The result is the nearest routine scope's implicit
+    // one (an anonymous function's own too); a declared local named Result
+    // is not it.
+    procedure CheckExitValue(N: Integer);
+    var
+      LHead, LArg, LMid, LSym, LScope, LRes: Integer;
+    begin
+      LHead := LM.Tree.Nodes[N].FirstChild;
+      if (LHead = NIL_NODE) or (LM.Tree.Nodes[LHead].Kind <> nkIdent) then
+        Exit;
+      LArg := LM.Tree.Nodes[LHead].NextSibling;
+      if (LArg = NIL_NODE) or (LM.Tree.Nodes[LArg].NextSibling <> NIL_NODE) or
+         (LM.Tree.Nodes[LArg].Kind in [nkError, nkMissing]) or
+         not TargetSym(LHead, LMid, LSym) or
+         not (sfBuiltin in FModels[LMid].Symbols[LSym].Flags) or
+         (FModels[LMid].Symbols[LSym].NameLower <> 'exit') or
+         (N > High(LM.NodeScope)) then
+        Exit;
+      LScope := LM.NodeScope[N];
+      while (LScope <> NIL_SCOPE) and (LM.Scopes[LScope].Kind <> sckRoutine) do
+        LScope := LM.Scopes[LScope].Parent;
+      if LScope = NIL_SCOPE then
+        Exit;
+      LRes := LM.FindLocal(LScope, 'result');
+      if (LRes = NIL_SYM) or (LM.Symbols[LRes].Kind <> skVar) or
+         (LM.Symbols[LRes].DeclNode <> NIL_NODE) or
+         (LM.Symbols[LRes].TypeNode = NIL_NODE) then
+        Exit;
+      if ConstOutsideConv(N, LArg, DeclTypeX(AId, LRes)) then
+        EmitAt(LM, LArg, 'E1012', SE1012_ConstViolatesBounds);
     end;
 
     // A function called as a statement under {$X-} at the token after the
@@ -30125,6 +30470,81 @@ var
         [LM.Tree.NodeText(N)]));
     end;
 
+    { 7.1.3: a constant index of a short string outside 0..N - N its
+      capacity, `string[N]`'s or ShortString's 255 - is E1012 (`S5[6]`,
+      `S5[-1]`, `SS[256]`; `S5[0]` is its length byte; dcc64 37.0,
+      2026-11-26, local/sa10-2026-11/probes/e E4). The base is a variable,
+      field, parameter or typed constant whose type reads so: a `string[N]`
+      written in place or a named type defined so, or ShortString. N, the
+      nkIndex, has one index. }
+    procedure CheckShortIndex(N: Integer);
+    var
+      LBase, LIdx, LMid, LSym, LTn, LDef: Integer;
+      LV, LCap: Int64;
+      LOver: Boolean;
+      LX: TSemaXType;
+
+      // The capacity `string[N]` node ADef of model AMid says.
+      function CapOf(AMid, ADef: Integer): Boolean;
+      var
+        LLen: Integer;
+      begin
+        LLen := FModels[AMid].Tree.Nodes[ADef].FirstChild;
+        Result := (LLen <> NIL_NODE) and
+          FoldedIntValueOver(FModels[AMid].Tree, LLen, ConstFactsX(AMid),
+            OrdNameValueX(AMid), LCap, LOver) and (LCap >= 1) and
+          (LCap <= 255);
+      end;
+
+    begin
+      LBase := PeelParens(LM.Tree, LM.Tree.Nodes[N].FirstChild);
+      if (LBase = NIL_NODE) or
+         not (LM.Tree.Nodes[LBase].Kind in [nkIdent, nkMember]) then
+        Exit;
+      LIdx := LM.Tree.Nodes[LM.Tree.Nodes[N].FirstChild].NextSibling;
+      if (LIdx = NIL_NODE) or (LM.Tree.Nodes[LIdx].NextSibling <> NIL_NODE) or
+         not FoldValue(LIdx, LV) or not ConstAt(LIdx) or
+         not TargetSym(LBase, LMid, LSym) or
+         not (FModels[LMid].Symbols[LSym].Kind in [skVar, skField, skParam,
+           skConst]) then
+        Exit;
+      LTn := FModels[LMid].Symbols[LSym].TypeNode;
+      if (LTn <> NIL_NODE) and
+         (FModels[LMid].Tree.Nodes[LTn].Kind = nkStringType) then
+      begin
+        if not CapOf(LMid, LTn) then
+          Exit;
+      end
+      else
+      begin
+        // A named `string[N]` type first (its canonical type may read as
+        // ShortString), then ShortString itself.
+        LX := DeclTypeX(LMid, LSym);
+        if not XValid(LX) then
+          Exit;
+        LDef := NIL_NODE;
+        if FModels[LX.UnitId].Symbols[LX.Sym].Kind = skType then
+          LDef := TypeDefNodeOf(LX.UnitId, LX.Sym);
+        if (LDef <> NIL_NODE) and
+           (FModels[LX.UnitId].Tree.Nodes[LDef].Kind = nkStringType) then
+        begin
+          if not CapOf(LX.UnitId, LDef) then
+            Exit;
+        end
+        else
+        begin
+          LX := CanonTypeX(LX);
+          if not XValid(LX) or
+             (FModels[LX.UnitId].Symbols[LX.Sym].Kind <> skBuiltinType) or
+             (FModels[LX.UnitId].Symbols[LX.Sym].NameLower <> 'shortstring') then
+            Exit;
+          LCap := 255;
+        end;
+      end;
+      if ((LV < 0) or (LV > LCap)) and not Unreliable(N, LIdx, GetX(LIdx)) then
+        EmitAt(LM, LIdx, 'E1012', SE1012_ConstViolatesBounds);
+    end;
+
     { The constant checks of one node (2.6.1, 3.2.2, 4.2.1, 5.3.2, 8.1):
       called for every node before the walk's own `case`, dispatching on the
       kind here, so the walk's arms stay as they are. }
@@ -30454,8 +30874,11 @@ var
             LPart := LElem;
           while LPart <> NIL_NODE do
           begin
+            // A declaration's `[...]` is not typed by the walk (`var S: set
+            // of Byte = [1, 256]`): an integer literal is an integer there.
             if ASet then
-              LBad := (XCatOf(CanonTypeX(GetX(LPart))) = tcInteger) and
+              LBad := ((XCatOf(CanonTypeX(GetX(LPart))) = tcInteger) or
+                       not XValid(GetX(LPart)) and IntLiteralAt(LPart)) and
                 Fold(LPart, LV) and ConstAt(LPart) and
                 ((LV < 0) or (LV > 255)) and not InUntypedWith(ACtor)
             else
@@ -30473,14 +30896,52 @@ var
         end;
       end;
 
+      // Is ATarget - an assignment's target, a declaration's name - of a
+      // `set of ...` type written in place (it types as nothing)?
+      function InlineSetTarget(ATarget: Integer): Boolean;
+      var
+        LKid, LMid, LSym, LTn: Integer;
+      begin
+        Result := False;
+        if ATarget = NIL_NODE then
+          Exit;
+        if nfName in LM.Tree.Nodes[ATarget].Flags then
+        begin
+          LKid := ATarget;
+          while (LKid <> NIL_NODE) and
+                ((nfName in LM.Tree.Nodes[LKid].Flags) or
+                 (LM.Tree.Nodes[LKid].Kind in [nkDirective, nkAttrGroup])) do
+            LKid := LM.Tree.Nodes[LKid].NextSibling;
+          Exit((LKid <> NIL_NODE) and (LM.Tree.Nodes[LKid].Kind = nkSetType));
+        end;
+        ATarget := PeelParens(LM.Tree, ATarget);
+        if (ATarget = NIL_NODE) or
+           not (LM.Tree.Nodes[ATarget].Kind in [nkIdent, nkMember]) or
+           not TargetSym(ATarget, LMid, LSym) or
+           not (FModels[LMid].Symbols[LSym].Kind in [skVar, skField, skConst])
+        then
+          Exit;
+        LTn := FModels[LMid].Symbols[LSym].TypeNode;
+        Result := (LTn <> NIL_NODE) and
+          (FModels[LMid].Tree.Nodes[LTn].Kind = nkSetType);
+      end;
+
       // A `[...]` going to the type AX: a set's elements, a dynamic array's.
-      procedure CtorTo(ACtor: Integer; const AX: TSemaXType);
+      // ATarget: the node AX is read off, for a type written in place.
+      procedure CtorTo(ACtor: Integer; const AX: TSemaXType;
+        ATarget: Integer = NIL_NODE);
       var
         LC: TSemaXType;
       begin
         LC := CanonTypeX(AX);
         if not XValid(LC) or OpenX(LC) or NestedInGenericX(LC) then
+        begin
+          // A `set of ...` written in place types as nothing (`W: set of
+          // Byte`): the target's declaration says it is a set.
+          if not XValid(LC) and InlineSetTarget(ATarget) then
+            CheckCtor(ACtor, XNil, True);
           Exit;
+        end;
         if XCatOf(LC) = tcSet then
           CheckCtor(ACtor, XNil, True)
         else if IsDynArrayTypeX(LC) then
@@ -30504,11 +30965,11 @@ var
             if OpOf(LUp) = tkIn then
               CheckCtor(N, XNil, True);
           nkAssign:
-            CtorTo(N, GetX(LFirst));
+            CtorTo(N, GetX(LFirst), LFirst);
           nkVarDecl, nkConstDecl, nkInlineVar, nkInlineConst:
             if (LM.Tree.Nodes[LUp].Kind <> nkVarDecl) or
                (LM.Tree.Nodes[LUp].Aux <> 1) then
-              CtorTo(N, DeclaredX(LFirst));
+              CtorTo(N, DeclaredX(LFirst), LFirst);
           nkCall:
             begin
               LIdx := 0;
@@ -30678,9 +31139,14 @@ var
         LIdxX: TSemaXType;
         LLo, LHi, LV: Int64;
       begin
-        if InUntypedWith(N) or
-           not ArrayDefAt(LM.Tree.Nodes[N].FirstChild, LMid, LDef, LSkip, 0) then
+        if InUntypedWith(N) then
           Exit;
+        if not ArrayDefAt(LM.Tree.Nodes[N].FirstChild, LMid, LDef, LSkip, 0)
+        then
+        begin
+          CheckShortIndex(N);
+          Exit;
+        end;
         LIdx := LM.Tree.Nodes[LM.Tree.Nodes[N].FirstChild].NextSibling;
         while LIdx <> NIL_NODE do
         begin
@@ -31614,6 +32080,7 @@ var
             CheckVarArgs(N);
             CheckSetLengthOpen(N);
             CheckIntrinsicArgs(N);
+            CheckExitValue(N);
             LDst := LM.Tree.Nodes[N].FirstChild;
             if (LDst <> NIL_NODE) and
                (LM.Tree.Nodes[PeelParens(LM.Tree, LDst)].Kind in
@@ -31657,8 +32124,11 @@ var
         nkExceptOn:
           CheckHandler(N);
         nkExprStmt:
-          if Length(LM.Tree.Source.SwitchEvents) > 0 then
-            CheckCallStmt(N);
+          begin
+            CheckBareCall(N);
+            if Length(LM.Tree.Source.SwitchEvents) > 0 then
+              CheckCallStmt(N);
+          end;
         nkAttribute:
           CheckAttrArgs(N);
       end;

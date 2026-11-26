@@ -16580,9 +16580,9 @@ end;
 // A call statement of a bare name (`Foo;`) calls it with no arguments: a
 // unit-level set with no routine callable so is E2035 (spec 6.6.1) - a used
 // unit's plain `Exit(X: Integer)` hides the intrinsic, so a bare `Exit;` is
-// one (5.6). An overloaded set (dcc's E2250), a method, a procedural
-// variable and an all-defaulted routine are not (dcc64 37.0;
-// local/probe-park/sa6-small X1-X3, Q2).
+// one (5.6); a method's set alike (`M;`), and an overloaded set is E2250. A
+// procedural variable and an all-defaulted routine are callable so (dcc64
+// 37.0; local/probe-park/sa6-small X1-X3, Q2; local/sa10-2026-11/probes/b).
 procedure TestBareCallArgs;
 var
   LDir: string;
@@ -16612,11 +16612,11 @@ begin
     'procedure Own(A, B: Integer); begin end;'#10 +                      // 4
     'procedure Baz(X: Integer); overload; begin end;'#10 +               // 5
     'procedure TC.M(X: Integer); begin end;'#10 +                        // 6
-    'procedure TC.N; begin M; end;'#10 +                                 // 7
+    'procedure TC.N; begin M; end;'#10 +                                 // 7 E2035
     'procedure P1; begin Exit; end;'#10 +                                // 8 E2035
     'function F1: Integer; begin Result := 0; Exit; end;'#10 +           // 9 E2035
     'procedure P2; begin Foo; Own; end;'#10 +                            // 10 E2035 x2
-    'procedure P3; begin Bar; Baz; Def; end;'#10 +                       // 11
+    'procedure P3; begin Bar; Baz; Def; end;'#10 +                       // 11 E2250 x2
     'procedure P4; begin System.Exit; Foo(1); end;'#10 +                 // 12
     'var V: procedure;'#10 +                                             // 13
     'begin'#10 +                                                         // 14
@@ -16628,7 +16628,101 @@ begin
     GProj.AnalyzeProject(TPath.Combine(LDir, 'Bc.dpr'));
     LM := ModelByName('bc');
     Ok('barecall: E2035 lines [' + DiagLinesOf(LM, 'E2035') + ']',
-      DiagLinesOf(LM, 'E2035') = '8 9 10 10 16 16');
+      DiagLinesOf(LM, 'E2035') = '7 8 9 10 10 16 16');
+    Ok('barecall: E2250 lines [' + DiagLinesOf(LM, 'E2250') + ']',
+      DiagLinesOf(LM, 'E2250') = '11 11');
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
+// sa10 (dcc64 37.0, local/sa10-2026-11/probes): a bare call statement of a
+// method or a nested routine (6.6.1) - E2035, E2250 for a set that says
+// `overload`; a method's set climbs overloaded ancestors, a helper's routine
+// of the name joins it, a nested set reaches no outer routine. A constant
+// argument before a cut argument list (`P(1..3)`) is E2192 at the cut,
+// whose E2029 goes (6.2.6). E1012 at a default value, an `Exit(V)`, an
+// aggregate initializer's element or field, a short string's index and a
+// `[...]` for a set written in place (2.6.1, 7.1.3).
+procedure TestSa10Rest;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_sa10');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'Sa10.dpr'),
+    'program Sa10;'#10 +                                                 // 1
+    'type TB = class procedure BO(X: Integer); overload;'#10 +           // 2
+    '  procedure BO(S: string); overload; procedure B0; overload;'#10 +  // 3
+    '  procedure P(X: Integer); end;'#10 +                               // 4
+    '  TC = class(TB) procedure M(X: Integer);'#10 +                     // 5
+    '  procedure MO(X: Integer); overload; procedure MO(S: string); overload;'#10 + // 6
+    '  procedure B0(X: Integer); overload; procedure P(X: Integer);'#10 + // 7
+    '  procedure HO(X: Integer); overload; procedure Body; end;'#10 +    // 8
+    '  TH = class helper for TC procedure HO; overload; end;'#10 +       // 9
+    '  TSub = 1..5; TS5 = string[5];'#10 +                               // 10
+    '  TR = record B: Byte; S: TSub; end;'#10 +                          // 11
+    'procedure TB.BO(X: Integer); begin end;'#10 +                       // 12
+    'procedure TB.BO(S: string); begin end;'#10 +                        // 13
+    'procedure TB.B0; begin end;'#10 +                                   // 14
+    'procedure TB.P(X: Integer); begin end;'#10 +                        // 15
+    'procedure TC.M(X: Integer); begin end;'#10 +                        // 16
+    'procedure TC.MO(X: Integer); begin end;'#10 +                       // 17
+    'procedure TC.MO(S: string); begin end;'#10 +                        // 18
+    'procedure TC.B0(X: Integer); begin end;'#10 +                       // 19
+    'procedure TC.P(X: Integer); begin end;'#10 +                        // 20
+    'procedure TC.HO(X: Integer); begin end;'#10 +                       // 21
+    'procedure TH.HO; begin end;'#10 +                                   // 22
+    'procedure NO; overload; begin end;'#10 +                            // 23
+    'procedure TC.Body;'#10 +                                            // 24
+    '  procedure N(X: Integer); begin end;'#10 +                         // 25
+    '  procedure NO(X: Integer); overload; begin end;'#10 +              // 26
+    'begin'#10 +                                                         // 27
+    '  M; MO;'#10 +                                                      // 28 E2035, E2250
+    '  BO;'#10 +                                                         // 29 E2250
+    '  B0; HO;'#10 +                                                     // 30
+    '  P; Self.M;'#10 +                                                  // 31 E2035 x2
+    '  N;'#10 +                                                          // 32 E2035
+    '  NO;'#10 +                                                         // 33 E2250
+    '  inherited P;'#10 +                                                // 34 E2035
+    'end;'#10 +                                                          // 35
+    'procedure OA(const A: array of Integer); begin end;'#10 +           // 36
+    'procedure PD(B: Byte = 300; S: TSub = 9; I: Integer = 7); begin end;'#10 + // 37 E1012 x2
+    'function FB: Byte; begin Exit(300); end;'#10 +                      // 38 E1012
+    'function FI: Integer; begin Exit(300); end;'#10 +                   // 39
+    'const CA: array[0..1, 0..1] of Byte = ((1, 2), (3, 256));'#10 +     // 40 E1012
+    '  CR: TR = (B: 1; S: 6);'#10 +                                      // 41 E1012
+    '  CQ: array[0..1] of TR = ((B: 1; S: 1), (B: 300; S: 1));'#10 +     // 42 E1012
+    'var S5: string[5]; T5: TS5; SS: ShortString; Ch: AnsiChar;'#10 +    // 43
+    '  I, J: Integer; W: set of Byte = [1, 256];'#10 +                   // 44 E1012
+    'begin'#10 +                                                         // 45
+    '  OA(1..3);'#10 +                                                   // 46 E2192
+    '  OA(I..J);'#10 +                                                   // 47 E2029
+    '  Ch := S5[6]; Ch := S5[0];'#10 +                                   // 48 E1012
+    '  Ch := T5[-1];'#10 +                                               // 49 E1012
+    '  Ch := SS[255]; Ch := SS[256];'#10 +                               // 50 E1012
+    '  W := [0, 300];'#10 +                                              // 51 E1012
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'Sa10.dpr'));
+    LM := ModelByName('sa10');
+    Ok('sa10: E2035 lines [' + DiagLinesOf(LM, 'E2035') + ']',
+      DiagLinesOf(LM, 'E2035') = '28 31 31 32 34');
+    Ok('sa10: E2250 lines [' + DiagLinesOf(LM, 'E2250') + ']',
+      DiagLinesOf(LM, 'E2250') = '28 29 33');
+    Ok('sa10: E2192 lines [' + DiagLinesOf(LM, 'E2192') + ']',
+      DiagLinesOf(LM, 'E2192') = '46');
+    Ok('sa10: E2029 lines [' + DiagLinesOf(LM, 'E2029') + ']',
+      DiagLinesOf(LM, 'E2029') = '47');
+    Ok('sa10: E1012 lines [' + DiagLinesOf(LM, 'E1012') + ']',
+      DiagLinesOf(LM, 'E1012') = '37 37 38 40 41 42 44 48 49 50 51');
   finally
     FreeAndNil(GProj);
     if TDirectory.Exists(LDir) then
@@ -27222,6 +27316,7 @@ begin
   TestMemberOverloadTwins;
   TestOverloadMarks;
   TestBareCallArgs;
+  TestSa10Rest;
   TestNestedProcValue;
   TestRaiseOperands;
   TestForInMembers;
