@@ -221,12 +221,14 @@ of less work, not a gap in following the language; its consequences are in
   constant or another unit's name - and for every inline-var initializer.
   An operand that Phase 1 bound to a TYPE name (an inherited cross-unit
   member named `Word`) types the operator as nothing and is not judged.
-- a message names a real operation's value `Extended` on Win64 too (`P := D
-  * 2` is `'Pointer' and 'Extended'` here, `'Double'` for dcc64) and a
-  Currency one `Currency` (dcc: `'Comp'` / `'Double'`); the code is dcc's.
-  Only an open-array argument's E2010 names it as dcc does. A Variant
-  beside a set or a pointer (dcc's E2008) and `V in St` (E2015) type as
-  nothing / Boolean and are not reported.
+- an E2010 names an operation's value as dcc does (4.2.1's table: `P := D
+  * 2` 'Double' on Win64, `Cu + Cu` 'Comp') at an assignment, an argument,
+  an open-array argument and a string compared with a number - but not
+  the unit typer's string-and-number operator E2010 (`S + (D * 2)` names
+  'Extended' where dcc64 says 'Double', `S + (Cu + Cu)` 'Currency' for
+  'Comp'); the code is dcc's. An integer operation or an argument for a
+  `Pointer` (`P := B + B`, `PP(D * 2)`) is not judged at all (an operator
+  for a pointer may be a constant 0).
 - the type `var X :=` infers for `and` / `or` / `xor` over a narrow
   SUBRANGE operand is Integer here; dcc's follows neither the hull of the
   operands nor their order alone (`Su and Su2` of two `0..9` ShortInt, `W
@@ -357,9 +359,6 @@ of less work, not a gap in following the language; its consequences are in
   only there: against any other parameter, and for `P(I..J)`, it is E2029
   at the `..`). The parser reads no range in a call argument - the reading
   depends on the resolved callee - so PasTree reports the E2029 every time.
-- an operator's value for an open array is judged (E2036 / E2010 naming the
-  type as dcc prints it) except a Currency or Comp one, which dcc names
-  `'Comp'` or `'Double'` by a rule not modelled.
 
 ### 6.3.1 The `overload` directive
 - two routines with one parameter list are E2004, `overload` or not
@@ -558,15 +557,9 @@ of less work, not a gap in following the language; its consequences are in
 ### 9.1.3 Variant records (`case` part)
 - branch labels are checked (E2026, E2010, E1012, E2027) at the label,
   where dcc reports at the token after it - another line only for a label
-  that ends its line. Not judged: a cast to an enumeration (`TE(1)` folds
-  to no value, so `e1` after it is no E2027), a tag of an inline subrange
-  type (`case T: 0..9 of` has no range here, so `10:` is no E1012), a
-  32-bit unsigned or 64-bit tag past Integer's range (dcc's own 32-bit
-  reading), and the lines after the variant part: such a line (`A:
-  Integer;`, `A, B: Integer;`, kept as fields in the tree) whose label is a
-  variable or a constant of another type gets the `'(' expected` of a
-  declared label instead of dcc's E2026 / E2010, and a label line split
-  over two lines misses dcc's E2027.
+  that ends its line (a line after the variant part is judged at dcc's
+  token). Not judged: a 32-bit unsigned or 64-bit tag past Integer's range
+  (dcc's own 32-bit reading).
 - dcc drops an error 10 columns or fewer after the last one it showed on
   the same line (09 sec. 9.1.3: `X := Y + Z;` with all three undeclared is
   one E2003). PasTree applies that only to the line after a variant part;

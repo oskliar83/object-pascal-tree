@@ -15987,6 +15987,182 @@ begin
   end;
 end;
 
+// The rest of the variant-part labels (spec 9.1.3) and dcc's names of
+// operation values (4.2.1), Variant beside a set or a pointer (dcc64 /
+// dcc32 37.0; local/sa9-2026-11 L9, L10, S1-S14, N1-N7, V3-V5). A label
+// cast to an enumeration folds (`TE(1)` after `e1` E2027, `TE(5)` E1012); an
+// inline subrange tag has its range (`4` for `0..3`, `'d'` for `'a'..'c'`:
+// E1012); a line after the part is a further branch whose labels are judged
+// at the token after them, dcc dropping an error 10 columns or fewer after
+// the last one shown (`A: Integer;` with `A = 0` E2027 alone, `C, X:
+// Integer;` E2026 at `X`, an undeclared `Q` NEWLINE `: Integer;` E2003 then
+// E2027 for its value 0). An E2010 names an operation's value as dcc does:
+// 'Double' / 'Extended' by the target, a Currency one by dcc's table
+// ('Comp', 'Double', 'Currency'), an integer one 'Integer' / 'Int64', `not`
+// its operand's, a true real constant of a Currency's value 'Comp'. A
+// Variant beside a set or a pointer is E2008 under `+` and a comparison,
+// E2015 under the rest and under `in` (a character pointer under `+` is a
+// string), the operation untyped.
+procedure TestVariantLabelsAndOpNames;
+var
+  LDir, LSrc: string;
+  LM, LA, LB: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_sa9');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'SA.pas'),
+    'unit SA;'#10 +                                                      // 1
+    'interface'#10 +                                                     // 2
+    'const A = 0; C = 1;'#10 +                                           // 3
+    'var X: Integer;'#10 +                                               // 4
+    'type'#10 +                                                          // 5
+    '  T1 = record'#10 +                                                 // 6
+    '    case Integer of'#10 +                                           // 7
+    '      0: (I: Integer);'#10 +                                        // 8
+    '    C, X: Integer;'#10 +                                            // 9 E2026
+    '  end;'#10 +                                                        // 10
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'SC.pas'),
+    'unit SC;'#10 +                                                      // 1
+    'interface'#10 +                                                     // 2
+    'const A = 0;'#10 +                                                  // 3
+    'type'#10 +                                                          // 4
+    '  T1 = record'#10 +                                                 // 5
+    '    case Integer of'#10 +                                           // 6
+    '      0: (I: Integer);'#10 +                                        // 7
+    '    A: Integer;'#10 +                                               // 8 E2027
+    '  end;'#10 +                                                        // 9
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'SB.pas'),
+    'unit SB;'#10 +                                                      // 1
+    'interface'#10 +                                                     // 2
+    'type'#10 +                                                          // 3
+    '  T2 = record'#10 +                                                 // 4
+    '    case Integer of'#10 +                                           // 5
+    '      0: (I: Integer);'#10 +                                        // 6
+    '    Q'#10 +                                                         // 7 E2003
+    '    : Integer;'#10 +                                                // 8 E2027
+    '  end;'#10 +                                                        // 9
+    'implementation'#10'end.'#10);
+  LSrc :=
+    'program SA9;'#10 +                                                  // 1
+    'uses SA, SB, SC;'#10 +                                              // 2
+    'type TE = (e0, e1, e2); TSt = set of Byte;'#10 +                    // 3
+    'const KR = 2.5;'#10 +                                               // 4
+    'procedure PI(const A: array of Integer); begin end;'#10 +           // 5
+    'var D: Double; Cu: Currency; B: Byte; U: UInt64; S: string;'#10 +  // 6
+    '  P: Pointer; Sg: Single; V: Variant; St: TSt; I: Integer;'#10 +    // 7
+    '  PC: PChar; Bo: Boolean;'#10 +                                     // 8
+    'type'#10 +                                                          // 9
+    '  T3 = record'#10 +                                                 // 10
+    '    case TE of'#10 +                                                // 11
+    '      e1: (I1: Integer);'#10 +                                      // 12
+    '      TE(1): (I2: Integer);'#10 +                                   // 13 E2027
+    '      TE(5): (I3: Integer);'#10 +                                   // 14 E1012
+    '  end;'#10 +                                                        // 15
+    '  T4 = record'#10 +                                                 // 16
+    '    case T: 0..3 of'#10 +                                           // 17
+    '      4: (I1: Integer);'#10 +                                       // 18 E1012
+    '      3: (I2: Integer);'#10 +                                       // 19
+    '  end;'#10 +                                                        // 20
+    '  T5 = record'#10 +                                                 // 21
+    '    case T: ''a''..''c'' of'#10 +                                   // 22
+    '      ''d'': (I1: Integer);'#10 +                                   // 23 E1012
+    '      1: (I2: Integer);'#10 +                                       // 24 E2010
+    '  end;'#10 +                                                        // 25
+    'begin'#10 +                                                         // 26
+    '  P := D * 2;'#10 +                                                 // 27 E2010
+    '  P := Cu + Cu;'#10 +                                               // 28 E2010
+    '  P := Cu * 2;'#10 +                                                // 29 E2010
+    '  P := Cu * Cu;'#10 +                                               // 30 E2010
+    '  P := 2.5 * Cu;'#10 +                                              // 31 E2010
+    '  P := (Cu + Cu) * Cu;'#10 +                                        // 32 E2010
+    '  P := -Cu;'#10 +                                                   // 33 E2010
+    '  P := +Sg;'#10 +                                                   // 34 E2010
+    '  P := KR;'#10 +                                                    // 35 E2010
+    '  S := B + B;'#10 +                                                 // 36 E2010
+    '  S := U + U;'#10 +                                                 // 37 E2010
+    '  S := not B;'#10 +                                                 // 38 E2010
+    '  PI(Cu + Cu);'#10 +                                                // 39 E2010
+    '  if S = D * 2 then ;'#10 +                                         // 40 E2010
+    '  V := V + St;'#10 +                                                // 41 E2008
+    '  V := V * St;'#10 +                                                // 42 E2015
+    '  Bo := V in St;'#10 +                                              // 43 E2015
+    '  Bo := I in V;'#10 +                                               // 44 E2015
+    '  Bo := V = P;'#10 +                                                // 45 E2008
+    '  V := V - P;'#10 +                                                 // 46 E2015
+    '  P := V in St;'#10 +                                               // 47 E2015
+    '  S := PC + V; Bo := V = PC;'#10 +                                  // 48
+    'end.'#10;
+  TFile.WriteAllText(TPath.Combine(LDir, 'SA9.dpr'), LSrc);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'SA9.dpr'));
+    LM := ModelByName('sa9');
+    LA := ModelByName('sa');
+    LB := ModelByName('sb');
+    Ok('sa9: E2027 lines [' + DiagLinesOf(LM, 'E2027') + ']',
+      DiagLinesOf(LM, 'E2027') = '13');
+    Ok('sa9: E1012 lines [' + DiagLinesOf(LM, 'E1012') + ']',
+      DiagLinesOf(LM, 'E1012') = '14 18 23');
+    Ok('sa9: E2010 lines [' + DiagLinesOf(LM, 'E2010') + ']',
+      DiagLinesOf(LM, 'E2010') =
+        '24 27 28 29 30 31 32 33 34 35 36 37 38 39 40');
+    Ok('sa9: E2008 lines [' + DiagLinesOf(LM, 'E2008') + ']',
+      DiagLinesOf(LM, 'E2008') = '41 45');
+    Ok('sa9: E2015 lines [' + DiagLinesOf(LM, 'E2015') + ']',
+      DiagLinesOf(LM, 'E2015') = '42 43 44 46 47');
+    Ok('sa9: E2010 texts (Win64)',
+      DiagHasText(LM, 'E2010', '''Char'' and ''Integer''') and
+      DiagHasText(LM, 'E2010', '''Pointer'' and ''Double''') and
+      DiagHasText(LM, 'E2010', '''Pointer'' and ''Comp''') and
+      DiagHasText(LM, 'E2010', '''Pointer'' and ''Currency''') and
+      DiagHasText(LM, 'E2010', '''Pointer'' and ''Single''') and
+      DiagHasText(LM, 'E2010', '''string'' and ''Integer''') and
+      DiagHasText(LM, 'E2010', '''string'' and ''Int64''') and
+      DiagHasText(LM, 'E2010', '''string'' and ''Byte''') and
+      DiagHasText(LM, 'E2010', '''array of Integer'' and ''Comp''') and
+      DiagHasText(LM, 'E2010', '''string'' and ''Double''') and
+      not DiagHasText(LM, 'E2010', '''Extended''') and
+      not DiagHasText(LM, 'E2010', '''Boolean'''));
+    Ok('sa9: SA E2026 [' + DiagLinesOf(LA, 'E2026') + '] E2029 [' +
+      DiagLinesOf(LA, 'E2029') + ']',
+      (DiagLinesOf(LA, 'E2026') = '9') and
+      not DiagHasText(LA, 'E2029', '''(''') and
+      (DiagLinesOf(LA, 'E2003') = ''));
+    LA := ModelByName('sc');
+    Ok('sa9: SC E2027 [' + DiagLinesOf(LA, 'E2027') + '] E2029 [' +
+      DiagLinesOf(LA, 'E2029') + ']',
+      (DiagLinesOf(LA, 'E2027') = '8') and
+      not DiagHasText(LA, 'E2029', '''(''') and
+      (DiagLinesOf(LA, 'E2003') = ''));
+    Ok('sa9: SB E2003 lines [' + DiagLinesOf(LB, 'E2003') + '] E2027 [' +
+      DiagLinesOf(LB, 'E2027') + ']',
+      (DiagLinesOf(LB, 'E2003') = '7') and (DiagLinesOf(LB, 'E2027') = '8'));
+  finally
+    FreeAndNil(GProj);
+  end;
+  // dcc32 names every real or Currency operation's value 'Extended'.
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'SA9.dpr'));
+    LM := ModelByName('sa9');
+    Ok('sa9: E2010 texts (Win32)',
+      DiagHasText(LM, 'E2010', '''Pointer'' and ''Extended''') and
+      DiagHasText(LM, 'E2010', '''Pointer'' and ''Single''') and
+      DiagHasText(LM, 'E2010', '''Pointer'' and ''Comp''') and
+      not DiagHasText(LM, 'E2010', '''Pointer'' and ''Double''') and
+      not DiagHasText(LM, 'E2010', '''Pointer'' and ''Currency'''));
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // Legal shapes the wide gate found reported (spec 6.2.2, 6.2.5): an empty
 // `[]` is a dynamic array parameter's default as nil is (a `[...]` with
 // elements is E2026); `@P` of a procedural variable is the variable - one
@@ -27036,6 +27212,7 @@ begin
   TestArgShapes;
   TestValueWritesAndCallArgs;
   TestOperatorArgsAndVariantLabels;
+  TestVariantLabelsAndOpNames;
   TestConstParamWrites;
   TestParamLegalShapes;
   TestSpecAuditConsts;

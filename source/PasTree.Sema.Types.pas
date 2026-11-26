@@ -6015,13 +6015,19 @@ begin
   // A Variant operand: the operation is the Variant's, of the leftmost
   // Variant operand's type - `V + 1`, `I + V`, `-V`, `not V`, `V and Bo`
   // are Variant, `O + V` OleVariant, `V + O` Variant; a comparison stays
-  // Boolean. Beside a set or a pointer dcc refuses (E2008), so untyped
-  // (4.2.1; dcc64 37.0, 2026-11-25, local/sa8-2026-11 V1, V2).
+  // Boolean. Beside a set or a pointer dcc refuses (E2008 / E2015), and
+  // `in` with a Variant on either side (E2015) - a comparison and `in`
+  // too are untyped then, which leaves dcc's one error (4.2.1; dcc64 37.0,
+  // 2026-11-25/26, local/sa8-2026-11 V1, V2, local/sa9-2026-11 V3, V4).
   if AUnary then
   begin
     if (AL.Cat = tcVariant) and (AOp in [tkMinus, tkPlus, tkNot]) then
       Exit(oaLeft);
   end
+  else if ((AL.Cat = tcVariant) or (AR.Cat = tcVariant)) and
+          ((AOp = tkIn) or (AL.Cat in [tcSet, tcPointer, tcNil]) or
+           (AR.Cat in [tcSet, tcPointer, tcNil])) then
+    Exit(oaNone)
   else if ((AL.Cat = tcVariant) or (AR.Cat = tcVariant)) and
           (AL.Cat in CVarPeer) and (AR.Cat in CVarPeer) and
           not (AOp in [tkEqual, tkNotEqual, tkLess, tkLessEqual, tkGreater,
@@ -8706,6 +8712,15 @@ begin
      (Kind(PeelParens(T, LRight)) <> nkSetCtor)) then
     Exit;
   LOp := OpKind(N);
+  // A Variant beside a set, a pointer or nil, and `in` with a Variant: dcc
+  // refuses the operator (E2008 / E2015, OperatorAnswer), so no Boolean -
+  // the project's typing judges it (VariantRefusedX).
+  if ((LL <> NIL_SYM) and (CatOf(LL) = tcVariant) or
+      (LR <> NIL_SYM) and (CatOf(LR) = tcVariant)) and
+     ((LOp = tkIn) or (LL <> NIL_SYM) and (CatOf(LL) in [tcSet, tcPointer,
+      tcNil]) or (LR <> NIL_SYM) and (CatOf(LR) in [tcSet, tcPointer,
+      tcNil])) then
+    Exit;
   if LOp in [tkEqual, tkNotEqual, tkLess, tkLessEqual, tkGreater,
      tkGreaterEqual, tkIn, tkIs] then
   begin
