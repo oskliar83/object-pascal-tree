@@ -17884,6 +17884,239 @@ begin
   end;
 end;
 
+// The `unmanaged` constraint (Delphi 13; spec 16.4.1, dcc64 37.0, 2026-11-27,
+// local/probe-park/unmanaged t1): no keyword stands with it in either order
+// (E2516 naming the later word), nor an interface type (E2666) or a class type
+// (E2665), nor itself again (E2603); at an instantiation E2668 refuses exactly
+// the managed types - a type written in place judged as a named one - and a
+// generic method's explicit argument the same. A type NAMED `unmanaged` does
+// not change the word (UmC). dcc64 reports exactly these lines.
+procedure TestUnmanagedConstraint;
+const
+  UA =
+    'unit UmA;'#13#10 +                                                   // 1
+    'interface'#13#10 +                                                   // 2
+    'type'#13#10 +                                                        // 3
+    '  TG<T: unmanaged> = record F: T; end;'#13#10 +                      // 4
+    '  TF = class'#13#10 +                                                // 5
+    '    procedure M<U: unmanaged>(A: U);'#13#10 +                        // 6
+    '  end;'#13#10 +                                                      // 7
+    'implementation'#13#10 +                                              // 8
+    'procedure TF.M<U>(A: U); begin end;'#13#10 +                         // 9
+    'end.'#13#10;                                                        // 10
+  UB =
+    'unit UmB;'#13#10 +                                                   // 1
+    'interface'#13#10 +                                                   // 2
+    'uses UmA;'#13#10 +                                                   // 3
+    'type'#13#10 +                                                        // 4
+    '  TRecI = record A: Integer; end;'#13#10 +                           // 5
+    '  TRecS = record S: string; end;'#13#10 +                            // 6
+    '  TRecN = record R: TRecS; end;'#13#10 +                             // 7
+    '  TRecM = record X: Integer; class operator Initialize(out D: TRecM); end;'#13#10 + // 8
+    '  IFoo = interface end;'#13#10 +                                     // 9
+    '  TObj = class end;'#13#10 +                                         // 10
+    '  TCls = class of TObj;'#13#10 +                                     // 11
+    '  TPlainP = procedure;'#13#10 +                                      // 12
+    '  TRefP = reference to procedure;'#13#10 +                           // 13
+    '  TDyn = array of Integer;'#13#10 +                                  // 14
+    '  TStatS = array[0..1] of string;'#13#10 +                           // 15
+    '  TStatI = array[0..1] of Integer;'#13#10 +                          // 16
+    '  TEnum = (en1, en2);'#13#10 +                                       // 17
+    '  TSet = set of TEnum;'#13#10 +                                      // 18
+    '  TC1<T: unmanaged, record> = record end;'#13#10 +                   // 19
+    '  TC2<T: record, unmanaged> = record end;'#13#10 +                   // 20
+    '  TC3<T: unmanaged, class> = record end;'#13#10 +                    // 21
+    '  TC4<T: constructor, unmanaged> = record end;'#13#10 +              // 22
+    '  TC5<T: unmanaged, IFoo> = record end;'#13#10 +                     // 23
+    '  TC6<T: IFoo, unmanaged> = record end;'#13#10 +                     // 24
+    '  TC7<T: unmanaged, TObj> = record end;'#13#10 +                     // 25
+    '  TC8<T: TObj, unmanaged> = record end;'#13#10 +                     // 26
+    '  TC9<T: unmanaged, unmanaged> = record end;'#13#10 +                // 27
+    '  TC10<T: unmanaged; U: unmanaged> = record end;'#13#10 +            // 28
+    'var'#13#10 +                                                         // 29
+    '  Bad1: TG<string>;'#13#10 +                                         // 30
+    '  Bad2: TG<Variant>;'#13#10 +                                        // 31
+    '  Bad3: TG<IFoo>;'#13#10 +                                           // 32
+    '  Bad4: TG<TDyn>;'#13#10 +                                           // 33
+    '  Bad5: TG<TRefP>;'#13#10 +                                          // 34
+    '  Bad6: TG<TRecS>;'#13#10 +                                          // 35
+    '  Bad7: TG<TRecN>;'#13#10 +                                          // 36
+    '  Bad8: TG<TRecM>;'#13#10 +                                          // 37
+    '  Bad9: TG<TStatS>;'#13#10 +                                         // 38
+    '  Bad10: TG<array[0..1] of string>;'#13#10 +                         // 39
+    '  Ok1: TG<Integer>;'#13#10 +                                         // 40
+    '  Ok2: TG<Char>;'#13#10 +                                            // 41
+    '  Ok3: TG<Double>;'#13#10 +                                          // 42
+    '  Ok4: TG<Pointer>;'#13#10 +                                         // 43
+    '  Ok5: TG<ShortString>;'#13#10 +                                     // 44
+    '  Ok6: TG<TObj>;'#13#10 +                                            // 45
+    '  Ok7: TG<TCls>;'#13#10 +                                            // 46
+    '  Ok8: TG<TPlainP>;'#13#10 +                                         // 47
+    '  Ok9: TG<TRecI>;'#13#10 +                                           // 48
+    '  Ok10: TG<TStatI>;'#13#10 +                                         // 49
+    '  Ok11: TG<TEnum>;'#13#10 +                                          // 50
+    '  Ok12: TG<TSet>;'#13#10 +                                           // 51
+    '  Ok13: TG<array[1..2] of Char>;'#13#10 +                            // 52
+    '  Ok14: TG<(ea1, ea2)>;'#13#10 +                                     // 53
+    '  Ok15: TG<set of Byte>;'#13#10 +                                    // 54
+    '  Ok16: TG<^Integer>;'#13#10 +                                       // 55
+    '  Ok17: TG<string[10]>;'#13#10 +                                     // 56
+    'implementation'#13#10 +                                              // 57
+    'class operator TRecM.Initialize(out D: TRecM); begin end;'#13#10 +   // 58
+    'procedure Use(F: TF);'#13#10 +                                       // 59
+    'begin'#13#10 +                                                       // 60
+    '  F.M<Integer>(1);'#13#10 +                                          // 61
+    '  F.M<string>(''a'');'#13#10 +                                       // 62
+    'end;'#13#10 +                                                        // 63
+    'end.'#13#10;                                                        // 64
+  UC =
+    'unit UmC;'#13#10 +                                                   // 1
+    'interface'#13#10 +                                                   // 2
+    'type'#13#10 +                                                        // 3
+    '  unmanaged = class end;'#13#10 +                                    // 4
+    '  TK<T: unmanaged> = record F: T; end;'#13#10 +                      // 5
+    'var'#13#10 +                                                         // 6
+    '  K1: TK<string>;'#13#10 +                                           // 7
+    '  K2: TK<unmanaged>;'#13#10 +                                        // 8
+    'implementation'#13#10 +                                              // 9
+    'end.'#13#10;                                                        // 10
+var
+  LDir: string;
+  LB, LC: TPasSemaModel;
+  LSeen: TStringList;
+begin
+  LDir := FreshDir('pastree_sema_unmanaged');
+  TFile.WriteAllText(TPath.Combine(LDir, 'UmA.pas'), UA);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UmB.pas'), UB);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UmC.pas'), UC);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  LSeen := TStringList.Create;
+  try
+    GProj.AnalyzeDirectory(LDir);
+    LB := ModelByName('umb');
+    LC := ModelByName('umc');
+    Ok('unmanaged: UmB and UmC loaded', Assigned(LB) and Assigned(LC));
+    if not (Assigned(LB) and Assigned(LC)) then
+      Exit;
+    Ok('unmanaged: UmA, the declaring unit, is clean',
+      Length(ModelByName('uma').Diags) = 0);
+    for var LD in LB.Diags do
+      LSeen.Add(Format('%.2d:%s', [LD.Line, LD.Code]));
+    LSeen.Sort;
+    Ok('unmanaged: dcc''s lines and codes [' + LSeen.CommaText + ']',
+      LSeen.CommaText = '19:E2516,20:E2516,21:E2516,22:E2516,23:E2666,' +
+      '24:E2666,25:E2665,26:E2665,27:E2603,30:E2668,31:E2668,32:E2668,' +
+      '33:E2668,34:E2668,35:E2668,36:E2668,37:E2668,38:E2668,39:E2668,' +
+      '62:E2668');
+    Ok('unmanaged: E2516 names the later word',
+      DiagHasText(LB, 'E2516', 'Constraint ''unmanaged'' is conflicting ' +
+        'with previous constraints') and
+      DiagHasText(LB, 'E2516', 'Constraint ''record'' is conflicting'));
+    Ok('unmanaged: E2665 / E2666 / E2603 as dcc words them',
+      DiagHasText(LB, 'E2665', 'Constraint ''unmanaged'' and class type ' +
+        'constraint cannot be specified together') and
+      DiagHasText(LB, 'E2666', 'Constraint ''unmanaged'' and interface ' +
+        'type constraint cannot be specified together') and
+      DiagHasText(LB, 'E2603', 'Constraint ''unmanaged'' cannot be ' +
+        'specified more than once'));
+    Ok('unmanaged: E2668 names the parameter, the method''s too',
+      DiagHasText(LB, 'E2668', 'Type parameter ''T'' must be a unmanaged ' +
+        'type') and
+      DiagHasText(LB, 'E2668', 'Type parameter ''U'' must be a unmanaged ' +
+        'type'));
+    Ok('unmanaged: a type named unmanaged leaves the word [' +
+      DiagLinesOf(LC, 'E2668') + '/' + IntToStr(Length(LC.Diags)) + ']',
+      (DiagLinesOf(LC, 'E2668') = '7') and (Length(LC.Diags) = 1));
+  finally
+    LSeen.Free;
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
+// A type written in place as a type argument (spec 16.3.1, dcc64 37.0,
+// 2026-11-27, local/probe-park/unmanaged t1 AnB): `TG<array[1..2] of Char>`
+// and its kin parse, and the instance's field is typed by the argument - an
+// index out of the array's bounds is E1012, an anonymous record's missing
+// field E2003, an anonymous enumeration's values are in scope; nothing else
+// is reported. dcc64 says E2018 on line 39 (a member of an array), where the
+// member walk says E2003 for a named array too.
+procedure TestAnonTypeArgs;
+const
+  SRC =
+    'program AnB;'#13#10 +                                                // 1
+    'type'#13#10 +                                                        // 2
+    '  TG<T> = record F: T; end;'#13#10 +                                 // 3
+    '  TMyRecArray = TG<array[1..2] of Char>;'#13#10 +                    // 4
+    '  TX = TG<(tA, tB)>;'#13#10 +                                        // 5
+    '  TR = record A: TG<array[0..1] of Byte>; B: TG<record X: Integer; end>; end;'#13#10 + // 6
+    'var'#13#10 +                                                         // 7
+    '  RA: TMyRecArray;'#13#10 +                                          // 8
+    '  E: TG<(eA, eB)>;'#13#10 +                                          // 9
+    '  X: TX;'#13#10 +                                                    // 10
+    '  R: TR;'#13#10 +                                                    // 11
+    '  P: TG<^Integer>;'#13#10 +                                          // 12
+    '  S: TG<set of Byte>;'#13#10 +                                       // 13
+    '  Q: TG<string[10]>;'#13#10 +                                        // 14
+    '  Fn: TG<function: Integer>;'#13#10 +                                // 15
+    '  D: TG<array of Integer>;'#13#10 +                                  // 16
+    '  M: TG<TG<array[0..1] of Byte>>;'#13#10 +                           // 17
+    '  W: TG<packed array[0..3] of Byte>;'#13#10 +                        // 18
+    '  Fl: TG<file of Integer>;'#13#10 +                                  // 19
+    '  Pr: TG<procedure(A: Integer)>;'#13#10 +                            // 20
+    '  I: Integer;'#13#10 +                                               // 21
+    '  C: Char;'#13#10 +                                                  // 22
+    'begin'#13#10 +                                                       // 23
+    '  C := RA.F[1];'#13#10 +                                             // 24
+    '  RA.F[3] := ''x'';'#13#10 +                                         // 25
+    '  E.F := eB;'#13#10 +                                                // 26
+    '  X.F := tB;'#13#10 +                                                // 27
+    '  R.A.F[1] := 2;'#13#10 +                                            // 28
+    '  R.B.F.X := 1;'#13#10 +                                             // 29
+    '  R.B.F.Y := 1;'#13#10 +                                             // 30
+    '  P.F := @I;'#13#10 +                                                // 31
+    '  P.F^ := 1;'#13#10 +                                                // 32
+    '  S.F := [1, 2];'#13#10 +                                            // 33
+    '  Q.F := ''abc'';'#13#10 +                                           // 34
+    '  I := Fn.F();'#13#10 +                                              // 35
+    '  SetLength(D.F, 2);'#13#10 +                                        // 36
+    '  M.F.F[1] := 3;'#13#10 +                                            // 37
+    '  W.F[2] := 1;'#13#10 +                                              // 38
+    '  RA.F.Nope := 1;'#13#10 +                                           // 39
+    'end.'#13#10;                                                        // 40
+var
+  LDir: string;
+  LM: TPasSemaModel;
+  LSeen: TStringList;
+begin
+  LDir := FreshDir('pastree_sema_anontypeargs');
+  TFile.WriteAllText(TPath.Combine(LDir, 'AnB.dpr'), SRC);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  GProj.ReportUnresolvedMembers := True;
+  LSeen := TStringList.Create;
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'AnB.dpr'));
+    LM := ModelByName('anb');
+    Ok('anon type args: AnB loaded', Assigned(LM));
+    if not Assigned(LM) then
+      Exit;
+    for var LD in LM.Diags do
+      LSeen.Add(Format('%.2d:%s', [LD.Line, LD.Code]));
+    LSeen.Sort;
+    Ok('anon type args: E1012 / E2003 on dcc''s lines alone [' +
+      LSeen.CommaText + ']',
+      LSeen.CommaText = '25:E1012,30:E2003,39:E2003');
+    Ok('anon type args: the anonymous record''s missing field',
+      DiagHasText(LM, 'E2003', '''Y'''));
+  finally
+    LSeen.Free;
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // Program-level and directive rows (spec 1.1.3, 1.2.x, 19.2.1, 20.x; dcc64
 // 37.0, spec audit g1 Circ, Circ2, ExpMeth, g6 R01-R05, M4, MA,
 // local/sa4-intf R1): an interface-only `uses` cycle (F2047, once, at the
@@ -27334,6 +27567,8 @@ begin
   TestPropertyIndexParam;
   TestSa4Interfaces;
   TestSa4Generics;
+  TestUnmanagedConstraint;
+  TestAnonTypeArgs;
   TestSa4ProgramRules;
   TestSa5Exprs;
 

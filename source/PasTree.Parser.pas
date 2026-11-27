@@ -91,6 +91,11 @@ type
     // `reference to` type may be written (17.1.1). Read and cleared by
     // ParseTypeExpr on entry.
     FTypeDeclRhs: Boolean;
+    // Above zero while parsing the declared type of an inline var or const
+    // (`var V: T` in a statement, `for var I: T`): a type argument there is a
+    // type NAME only - dcc reads `var V: TG<set of Byte>` as an expression
+    // (E2003 on `TG`), while a var section takes it (16.3.1).
+    FInlineTypeDepth: Integer;
     // Set while parsing a variant branch's labels: a member name starting its
     // line before `: (` is the label's (`TKind.` NEWLINE `A: (...)`), not the
     // next field's head (see ParseSelectors).
@@ -206,7 +211,8 @@ type
     { The nkTypeArgs over AHead, from the `<` at the cursor through its
       close - an expression's generic list (after ScanGenericArgs said so)
       and a type reference's. }
-    function ParseTypeArgs(AHead: Integer): Integer;
+    function ParseTypeArgs(AHead: Integer; AInType: Boolean): Integer;
+    function ParseTypeArg: Integer;
     function ScanGenericArgs(AFrom: Integer; ADotted: Boolean): Integer;
     { True when the generic-looking list from the `<` at AFrom to the `(` at
       AParen, over the name AHead, is the one shape the parse leaves open
@@ -1189,7 +1195,10 @@ begin
              AtAmbiguousArg(Result, FPos, LScan) then
             Result := ParseAmbiguous(Result)
           else
-            Result := ParseTypeArgs(Result);
+            // An expression position: a type name only - dcc refuses a type
+            // written in place there (`SizeOf(TG<set of Byte>)` is E2003 on
+            // `TG`, 16.3.1).
+            Result := ParseTypeArgs(Result, False);
         end;
     else
       Break;
@@ -1370,7 +1379,7 @@ begin
             Result := LNode;
           end;
         tkLess:
-          Result := ParseTypeArgs(Result);
+          Result := ParseTypeArgs(Result, FInlineTypeDepth = 0);
       else
         Break;
       end;
@@ -1383,7 +1392,39 @@ begin
   end;
 end;
 
-function TPasParser.ParseTypeArgs(AHead: Integer): Integer;
+{ One type argument in a type position (16.3.1, dcc64 37.0, 2026-11-27,
+  local/probe-park/unmanaged B1-B4): a type NAME, or a type written in place -
+  `TG<array[1..2] of Char>`, `TG<(eA, eB)>`, `TG<set of Byte>`, `TG<^Integer>`,
+  `TG<string[10]>`, `TG<procedure(A: Integer)>`, `TG<record X: Integer;
+  end>`, `TG<file of Integer>`, `TG<array of Integer>`. A class, interface or
+  object type there is E2058, as in any other non-type-section slot; a
+  subrange is not writable at all - its upper bound is an expression, which
+  takes the closing `>` as a comparison (`TG<1..5>;` is E2029 at the `;`),
+  so it stays the type-name reading and its error. }
+function TPasParser.ParseTypeArg: Integer;
+begin
+  case CurKind of
+    tkArray, tkPacked, tkSet, tkFile, tkCaret, tkProcedure, tkFunction,
+    tkRecord, tkLParen:
+      Result := ParseTypeExpr;
+    tkString:
+      if PeekKind(1) = tkLBracket then
+        Result := ParseTypeExpr
+      else
+        Result := ParseTypeRef;
+    tkClass, tkInterface, tkDispinterface, tkObject:
+      begin
+        ErrorAt(FPos, 'Class, interface and object types only allowed in ' +
+          'type section');
+        FDiags[FDiagCount - 1].Code := 'E2058';
+        Result := ParseTypeExpr;
+      end;
+  else
+    Result := ParseTypeRef;
+  end;
+end;
+
+function TPasParser.ParseTypeArgs(AHead: Integer; AInType: Boolean): Integer;
 begin
   Result := FB.AddNode(nkTypeArgs, NIL_NODE, FPos);
   FB.Adopt(Result, AHead);
@@ -1398,7 +1439,10 @@ begin
   else
     while not AtGenericClose and (CurKind <> tkEndOfFile) do
     begin
-      FB.Adopt(Result, ParseTypeRef);
+      if AInType then
+        FB.Adopt(Result, ParseTypeArg)
+      else
+        FB.Adopt(Result, ParseTypeRef);
       if CurKind = tkComma then
         Next
       else
@@ -1875,7 +1919,12 @@ begin
     if CurKind = tkColon then
     begin
       Next;
-      FB.Adopt(LVar, ParseTypeExpr);   // same as ParseInlineVar - see there
+      Inc(FInlineTypeDepth);
+      try
+        FB.Adopt(LVar, ParseTypeExpr);   // same as ParseInlineVar - see there
+      finally
+        Dec(FInlineTypeDepth);
+      end;
     end;
     FB.SetLast(LVar, FPos - 1);
     FB.Adopt(LNode, LVar);
@@ -2071,9 +2120,11 @@ begin
     // (dcc64 37.0).
     FEqEndsBound := AConst;
     FProcTail := True;
+    Inc(FInlineTypeDepth);
     try
       FB.Adopt(Result, ParseTypeExpr);
     finally
+      Dec(FInlineTypeDepth);
       FEqEndsBound := False;
       FProcTail := False;
     end;
@@ -3623,6 +3674,21 @@ begin
         case CurKind of
           tkClass, tkRecord, tkConstructor:
             Next;
+          // `unmanaged` (Delphi 13; dcc 36.0 does not know it): a word of its
+          // own in this slot, never a type name - with a type of that name
+          // in scope, `<T: unmanaged>` is still the constraint (16.4.1,
+          // dcc64 37.0, local/probe-park/unmanaged U3_2). Childless like the
+          // reserved words; its head token is the one identifier among them.
+          tkIdentifier:
+            if IsWord('unmanaged') and
+               (PeekKind(1) in [tkComma, tkSemicolon, tkGreater,
+                tkGreaterEqual]) then
+            begin
+              MarkContextKeyword;
+              Next;
+            end
+            else
+              FB.Adopt(LCon, ParseTypeRef);
           tkString:
             begin
               // `string` is a reserved word, no type name: `<T: string>` is

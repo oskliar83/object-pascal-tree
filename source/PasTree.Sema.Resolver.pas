@@ -220,6 +220,7 @@ type
       ASkipSym: Integer): Integer;
     function DeclareAnonStruct(AScope, ANode: Integer): Integer;
     procedure DeclareAnonValueType(AScope, AType: Integer);
+    procedure DeclareAnonTypeArg(AScope, AArg: Integer);
     procedure CollectStruct(ANode, AOuter, ATypeSym: Integer);
     function VisibilityOf(ANode: Integer): TSemaVisibility;
     procedure CollectEnum(ANode, AOuter, ATypeSym: Integer);
@@ -2255,6 +2256,49 @@ begin
   FModel.AnonTypeSyms.AddOrSetValue(AType, LSym);
 end;
 
+{ One argument of an nkTypeArgs, collected - and, when it is a type written in
+  place, given the unnamed type symbol it is (see the nkTypeArgs case of
+  Collect). An enumeration's values are typed as it, as a named one's are:
+  `A: TG<(eA, eB)>; E: (eC)` - `E := eA` is E2010 (dcc64 37.0, 2026-11-27,
+  local/probe-park/unmanaged B2_14). Its values join the enclosing scope as an
+  anonymous enum's do (CollectEnum): `A.F := eB` compiles. }
+procedure TPasSemaResolver.DeclareAnonTypeArg(AScope, AArg: Integer);
+var
+  LSym, LEnumScope: Integer;
+  LList: TSemaSymList;
+begin
+  case KindOf(AArg) of
+    nkArrayType, nkPointerType:
+      DeclareAnonValueType(AScope, AArg);
+    nkSetType, nkEnumType, nkFileType:
+      begin
+        LSym := DeclareAnonStruct(AScope, AArg);
+        case KindOf(AArg) of
+          nkSetType: FModel.Symbols[LSym].TypeCat := tcSet;
+          nkEnumType: FModel.Symbols[LSym].TypeCat := tcEnum;
+        else
+          FModel.Symbols[LSym].TypeCat := tcFile;
+        end;
+        FModel.AnonTypeSyms.AddOrSetValue(AArg, LSym);
+        Collect(AArg, AScope);
+        if KindOf(AArg) = nkEnumType then
+        begin
+          LEnumScope := FNodeScope[AArg];
+          if (LEnumScope <> NIL_SCOPE) and (LEnumScope <> AScope) then
+          begin
+            FModel.Symbols[LSym].MemberScope := LEnumScope;
+            LList := FModel.Scopes[LEnumScope].Symbols;
+            for var LIdx := 0 to LList.Count - 1 do
+              if FModel.Symbols[LList[LIdx]].Kind = skEnumValue then
+                FModel.Symbols[LList[LIdx]].TypeSym := LSym;
+          end;
+        end;
+        Exit;
+      end;
+  end;
+  Collect(AArg, AScope);
+end;
+
 procedure TPasSemaResolver.CollectStruct(ANode, AOuter, ATypeSym: Integer);
 var
   LMembers, LChild, LFirstNew: Integer;
@@ -3548,6 +3592,28 @@ begin
         LChild := PasAttrExprHead(FTree, ANode);
         if LChild <> NIL_NODE then
           Collect(LChild, AScope);
+      end;
+
+    // A type written in place as a type argument (16.3.1): `TG<array[1..2] of
+    // Char>`, `TG<(eA, eB)>`, `TG<set of Byte>`, `TG<^Integer>`. Each such
+    // writing is a type of its own - two of them are two instantiations
+    // (`A := B` over `TG<array[1..2] of Char>` twice is E2008) - so it gets
+    // an unnamed type symbol here, as one in a variable's slot does, and the
+    // instantiation takes it as its argument. A record or procedural one has
+    // its symbol from its own case below.
+    nkTypeArgs:
+      begin
+        LChild := FirstChild(ANode);
+        if LChild <> NIL_NODE then
+        begin
+          Collect(LChild, AScope);
+          LChild := NextSib(LChild);
+        end;
+        while LChild <> NIL_NODE do
+        begin
+          DeclareAnonTypeArg(AScope, LChild);
+          LChild := NextSib(LChild);
+        end;
       end;
 
   else

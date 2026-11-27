@@ -585,6 +585,7 @@ type
     procedure CollectNamespaceChildren(const ANamespace: string);
     function OwnModelTypeX(AOvSym: Integer;
       ADepth: Integer = 0): TSemaXType;
+    function OwnModelAnonX(ANode: Integer): TSemaXType;
     function OwnModelParamX(AOvSym: Integer): TSemaXType;
     function MethodBodyScope(AScope: Integer): Integer;
     function IsOverrideSym(AMid, ASym: Integer): Boolean;
@@ -1433,6 +1434,85 @@ begin
     Result := XPlain(FProjMid, LSym);
 end;
 
+{ The last-good PROJECT identity of a type written in place in the OVERLAY -
+  an argument of `TG<record X: Integer; end>`, `TG<array[1..2] of Char>`
+  (16.3.1). It has no name to bridge by (OwnModelTypeX), so it is found by
+  position: from the nearest enclosing named declaration (a type or a
+  variable, a field included - a field missing from the twin climbs on to its
+  type) the same child path down the last-good model's twin, which must end on
+  a node of the same kind that the resolver gave a symbol. Any mismatch on the
+  way - the edit changed that declaration's shape - answers XNil, and the frame
+  stays open as before. }
+function TPasCompletion.OwnModelAnonX(ANode: Integer): TSemaXType;
+var
+  LM: TPasSemaModel;
+  LPath: TArray<Integer>;
+  LCur, LPar, LIdx, LChild, LName, LSym, LTwin, LStep: Integer;
+begin
+  Result := XNil;
+  if (ANode = NIL_NODE) or (FProj = nil) or (FProjMid < 0) then
+    Exit;
+  if FIsProjectModel then
+  begin
+    if FModel.AnonTypeSyms.TryGetValue(ANode, LSym) then
+      Exit(XPlain(FProjMid, LSym));
+    LSym := FModel.StructSymAtNode(ANode);
+    if LSym <> NIL_SYM then
+      Result := XPlain(FProjMid, LSym);
+    Exit;
+  end;
+  LM := ProjModel(FProjMid, 'OwnModelAnonX');
+  if (LM = nil) or (Length(LM.Tree.Nodes) = 0) or
+     (LM.OwnDeclScope = NIL_SCOPE) then
+    Exit;
+  LPath := nil;
+  LCur := ANode;
+  for LStep := 1 to 64 do
+  begin
+    LPar := FModel.Tree.Nodes[LCur].Parent;
+    if LPar = NIL_NODE then
+      Exit;
+    LIdx := 0;
+    LChild := FModel.Tree.Nodes[LPar].FirstChild;
+    while (LChild <> NIL_NODE) and (LChild <> LCur) do
+    begin
+      Inc(LIdx);
+      LChild := FModel.Tree.Nodes[LChild].NextSibling;
+    end;
+    LPath := [LIdx] + LPath;
+    LCur := LPar;
+    if not (FModel.Tree.Nodes[LCur].Kind in [nkTypeDecl, nkVarDecl]) then
+      Continue;
+    LName := PasSkipAttrGroups(FModel.Tree, FModel.Tree.Nodes[LCur].FirstChild);
+    if (LName = NIL_NODE) or (FModel.Tree.Nodes[LName].Kind <> nkIdent) then
+      Continue;
+    LSym := LM.Resolve(LM.OwnDeclScope, FModel.Tree.NodeNameLower(LName));
+    if (LSym = NIL_SYM) or (LM.Symbols[LSym].DeclNode = NIL_NODE) then
+      Continue;
+    LTwin := LM.Tree.Nodes[LM.Symbols[LSym].DeclNode].Parent;
+    if (LTwin = NIL_NODE) or
+       (LM.Tree.Nodes[LTwin].Kind <> FModel.Tree.Nodes[LCur].Kind) then
+      Continue;
+    for LIdx in LPath do
+    begin
+      LTwin := LM.Tree.Nodes[LTwin].FirstChild;
+      for var LSkip := 1 to LIdx do
+        if LTwin <> NIL_NODE then
+          LTwin := LM.Tree.Nodes[LTwin].NextSibling;
+      if LTwin = NIL_NODE then
+        Exit;
+    end;
+    if LM.Tree.Nodes[LTwin].Kind <> FModel.Tree.Nodes[ANode].Kind then
+      Exit;
+    if LM.AnonTypeSyms.TryGetValue(LTwin, LSym) then
+      Exit(XPlain(FProjMid, LSym));
+    LSym := LM.StructSymAtNode(LTwin);
+    if LSym <> NIL_SYM then
+      Result := XPlain(FProjMid, LSym);
+    Exit;
+  end;
+end;
+
 // The declared type of an OVERLAY value/type symbol, as a mixed-space ref.
 function TPasCompletion.TypeOfOverlaySym(ASym, ADepth: Integer):
   TPasComplTypeRef;
@@ -1898,6 +1978,11 @@ begin
           LArg := ResolveTypeRefNode(LChild, ADepth + 1);
           if not XValid(LArg.X) then
             LArg.X := OwnModelTypeX(LArg.OvSym);
+          // A type written in place (16.3.1): its twin by position.
+          if not XValid(LArg.X) and (FModel.Tree.Nodes[LChild].Kind in
+             [nkArrayType, nkPointerType, nkSetType, nkEnumType, nkFileType,
+              nkRecordType, nkProcType]) then
+            LArg.X := OwnModelAnonX(LChild);
           if XValid(LArg.X) then
             LArgs := LArgs + [LArg.X]
           else
@@ -5602,10 +5687,23 @@ begin
       begin
         if (FTypePos = tpIsAs) and FTypeAfterIs then
           AddKeywords(['not'])
+        // `unmanaged` is an identifier, a constraint word all the same
+        // (Delphi 13, 16.4.1).
         else if FTypePos = tpConstraint then
-          AddKeywords(['class', 'record', 'constructor'])
+          AddKeywords(['class', 'record', 'constructor', 'unmanaged'])
+        // A generic argument in a declaration's type takes a type written in
+        // place (`TG<array[1..2] of Char>`, 16.3.1); in an expression and in
+        // an inline var's type, a type name alone (dcc 37: E2003 there).
         else if FTypePos = tpGenArg then
-          AddKeywords(['string'])
+        begin
+          // Not under a statement part: the caret's node may be the section
+          // itself while the argument is still empty (`TG<|>`).
+          if UpChainKind(AInfo.Node, [nkInlineVar, nkInlineConst,
+             nkBlock]) = nkError then
+            AddKeywords(VAR_TYPE_WORDS)
+          else
+            AddKeywords(['string']);
+        end
         // A type declaration's `T = |` takes a type constructor and the
         // `type` of a distinct type; `T = type |` a type identifier alone.
         else if (FTypePos = tpTypeDecl) and not FTypeAfterType then

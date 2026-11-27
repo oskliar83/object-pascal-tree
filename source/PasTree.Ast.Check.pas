@@ -288,8 +288,8 @@ const
   CELL_WORD_BASE = CELL_IDENT + 1;
 
   // MarkContextKeyword's words - see csContextKeyword.
-  CONTEXT_WORDS: array[0..4] of string = (
-    'reference', 'operator', 'abstract', 'sealed', 'helper');
+  CONTEXT_WORDS: array[0..5] of string = (
+    'reference', 'operator', 'abstract', 'sealed', 'helper', 'unmanaged');
 
   BINARY_OP_TOKENS = [tkEqual, tkNotEqual, tkLess, tkGreater, tkLessEqual,
     tkGreaterEqual, tkIn, tkIs] + PAS_ADD_OPS + PAS_MUL_OPS;
@@ -355,7 +355,7 @@ const
     method is an nkDirective child, and the initializer after a procedural
     type's directives is its declaration's. A new finding of the kind is
     filed here as a `loss:F<n>` row, until the tree holds it. }
-  OWN_RULE_TEXT: array[0..232] of string = (
+  OWN_RULE_TEXT: array[0..233] of string = (
     // ---- leaves: the token is the node's own text ----
     'Ident | <ident> @words @keywords | once | leaf | the name as written; ' +
       'a reserved word only after a dot, as an operator name or as the ' +
@@ -676,6 +676,8 @@ const
     'GenericParam | : | opt | derived | before the Constraint children',
     'Constraint | class record constructor | head opt | contract | the ' +
       'constraint word; a type constraint has a child instead',
+    'Constraint | <ident> | head opt | contract | `unmanaged` (Delphi 13), ' +
+      'the one constraint word that is not reserved (16.4.1)',
     'AttrGroup | [ ] , | - | derived | one pair at least; how many bracket ' +
       'groups is not recorded: [A][B] = [A, B] (normalization list)',
     'Attribute | ( ) | when:noargs | insig | an empty argument list, ' +

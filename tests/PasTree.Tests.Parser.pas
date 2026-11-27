@@ -939,7 +939,7 @@ const
      ExpectDiags: 0)
   );
 
-  DECL_CASES: array[0..255] of TPasCaseRow = (
+  DECL_CASES: array[0..260] of TPasCaseRow = (
     // ---- 3.1 variables ----
     // 3.1.4: the `absolute` expression is an ALIAS, and it lands in the same
     // child slot an initializer would -- only the mark separates them.
@@ -1900,6 +1900,43 @@ const
      Expected: 'TypeSec(TypeDecl(Ident''TBox'' GenericParams(' +
        'GenericParam(Ident''T'' Constraint(Ident''IInterface''))) ' +
        'ClassType))'; ExpectDiags: 0),
+    // Delphi 13's `unmanaged`: an identifier, read as a word like `record` -
+    // childless - before `,` `;` `>`; anywhere else the type name it is
+    // (dcc64 37.0, 2026-11-27, local/probe-park/unmanaged).
+    (Section: '16.4.1'; Name: 'unmanaged is a constraint word';
+     Source: 'type TB<T: unmanaged; U: unmanaged, IInterface> = record end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TB'' GenericParams(' +
+       'GenericParam(Ident''T'' Constraint''unmanaged'') GenericParam(' +
+       'Ident''U'' Constraint''unmanaged'' Constraint(Ident''IInterface''))) ' +
+       'RecordType))'; ExpectDiags: 0),
+    (Section: '16.4.1'; Name: 'a dotted unmanaged is a type name';
+     Source: 'type TB<T: unmanaged.TFoo> = class end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TB'' GenericParams(' +
+       'GenericParam(Ident''T'' Constraint(Member(Ident''unmanaged'' ' +
+       'Ident''TFoo'')))) ClassType))'; ExpectDiags: 0),
+    // A type written in place as a type argument (16.3.1, dcc64 37.0,
+    // 2026-11-27): in a type position every value type a variable may have.
+    (Section: '16.3.1'; Name: 'type arguments written in place';
+     Source: 'type TA = TG<array[1..2] of Char, (eA, eB), set of Byte, ' +
+       '^Integer, string[10], procedure(A: Integer), file of Byte>;';
+     Expected: 'TypeSec(TypeDecl(Ident''TA'' TypeArgs(Ident''TG'' ' +
+       'ArrayType(Subrange(IntLit''1'' IntLit''2'') Ident''Char'') ' +
+       'EnumType(EnumValue(Ident''eA'') EnumValue(Ident''eB'')) ' +
+       'SetType(Ident''Byte'') PointerType(Ident''Integer'') ' +
+       'StringType(IntLit''10'') ProcType(Params(Param(' +
+       'Ident''A''#name Ident''Integer''))) FileType(Ident''Byte''))))';
+     ExpectDiags: 0),
+    (Section: '16.3.1'; Name: 'a record and a nested instance in place';
+     Source: 'var V: TG<record X: Integer; end>; W: TG<TG<array of Byte>>;';
+     Expected: 'VarSec''var''(VarDecl(Ident''V''#name TypeArgs(Ident''TG'' ' +
+       'RecordType(VarDecl(Ident''X''#name Ident''Integer'')))) VarDecl(' +
+       'Ident''W''#name TypeArgs(Ident''TG'' TypeArgs(Ident''TG'' ' +
+       'ArrayType(Ident''Byte'')))))'; ExpectDiags: 0),
+    // A class-like type there is E2058, as in a variable's type.
+    (Section: '16.3.1'; Name: 'a class type argument in place is E2058';
+     Source: 'var V: TG<class end>;';
+     Expected: 'VarSec''var''(VarDecl(Ident''V''#name TypeArgs(Ident''TG'' ' +
+       'ClassType)))'; ExpectDiags: 1),
     // dcc-verified: TWO generic parameters closed with NO space before the
     // `=` that follows (`T, TT >= class`) lex `>=` as ONE fused
     // greater-or-equal token - real source in the wild (a detours library's

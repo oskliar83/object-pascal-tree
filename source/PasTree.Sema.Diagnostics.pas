@@ -238,6 +238,9 @@ const
   SE2511_MustBeClass = 'E2511 Type parameter ''%s'' must be a class type';
   SE2512_MustBeValueType =
     'E2512 Type parameter ''%s'' must be a non-nullable value type';
+  // dcc's own grammar, "a unmanaged" (16.4.1).
+  SE2668_MustBeUnmanaged =
+    'E2668 Type parameter ''%s'' must be a unmanaged type';
   SE2513_MustHaveParamlessCtor = 'E2513 Type parameter ''%s'' must have ' +
     'one public parameterless constructor named Create';
   SE2514_MustSupportInterface =

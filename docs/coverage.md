@@ -764,8 +764,19 @@ of less work, not a gap in following the language; its consequences are in
   tail parses differently in the two readings, so no flat node holds both;
   and a Variant chain `VA < VB > -VC` written after a member (`R.VA <
   ...`), read as type arguments.
+- a type written in place as an argument (`TG<array[1..2] of Char>`) in an
+  expression or an inline var's type is E2029 at its first word, where dcc
+  reads `TG<` as a comparison and reports E2003 on `TG` - the same line. Two
+  instances over different arguments - two writings of one anonymous type,
+  or two named types - are not judged for assignment (dcc: E2008 / E2010).
+  On the completion overlay such an argument takes its last-good twin by
+  position under the enclosing named declaration; an edit that changed that
+  declaration's shape leaves the instance open.
 
 ### 16.4.1 Type-parameter constraints
+- `unmanaged`: an open type parameter as the argument (`TG<U>` in another
+  generic) is not judged - dcc refuses it always (E2668), even `U:
+  unmanaged`.
 - an interface constraint leaves a typed pointer and a procedural type
   argument unjudged (dcc: E2514, but a `reference to` type meets `T:
   IInterface`), and a generic class whose list names another instance of

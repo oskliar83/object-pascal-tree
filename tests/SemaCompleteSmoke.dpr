@@ -3390,6 +3390,56 @@ begin
   GProjMid := -1;
   TDirectory.Delete(GDir, True);
 
+  // ======== a type written in place as a generic argument ==================
+  // 16.3.1 (dcc64 37.0, 2026-11-27): `TG<record X, Y: Integer; end>`,
+  // `TG<array[0..1] of TPt>`, `TG<^TPt>`. The instance's field is typed by
+  // the argument, in the edited unit too - its argument has no name to bridge
+  // by, so OwnModelAnonX finds the last-good twin by position. Written
+  // before the caret, unchanged by the edit, as in the IDE.
+  if TDirectory.Exists(GDir) then
+    TDirectory.Delete(GDir, True);
+  TDirectory.CreateDirectory(GDir);
+  var LAnonMain :=
+    'unit mainu;'#10'interface'#10'type'#10 +
+    '  TPt = record PX, PY: Integer; end;'#10 +
+    '  TG<T> = record F: T; end;'#10 +
+    '  TGA = TG<array[0..1] of TPt>;'#10 +
+    '  THold = class'#10 +
+    '    FR: TG<record X, Y: Integer; end>;'#10 +
+    '  end;'#10 +
+    'var'#10 +
+    '  RE: TG<record X, Y: Integer; end>;'#10 +
+    '  RA: TGA;'#10 +
+    '  RP: TG<^TPt>;'#10 +
+    '  RS: TG<(sA, sB)>;'#10 +
+    'implementation'#10 +
+    'procedure Run(H: THold);'#10'begin'#10'  //X'#10'end;'#10 +
+    'end.'#10;
+  TFile.WriteAllText(TPath.Combine(GDir, 'mainu.pas'), LAnonMain);
+  GProj := TPasSemaProject.Create(pfWin32, [GDir], []);
+  GProjMid := GProj.AnalyzeProject(TPath.Combine(GDir, 'mainu.pas'));
+  ProjCase(StringReplace(LAnonMain, '//X', 'RE.F.|', []));
+  GCounter.Ok('16.3.1: RE.F. over an anonymous record argument lists X, Y',
+    GHit and Has('X') and Has('Y'));
+  ProjCase(StringReplace(LAnonMain, '//X', 'H.FR.F.|', []));
+  GCounter.Ok('16.3.1: a field''s anonymous record argument lists X, Y',
+    GHit and Has('X') and Has('Y'));
+  ProjCase(StringReplace(LAnonMain, '//X', 'RA.F[0].|', []));
+  GCounter.Ok('16.3.1: RA.F[0]. through an alias over an array argument ' +
+    'lists PX', GHit and Has('PX'));
+  ProjCase(StringReplace(LAnonMain, '//X', 'RP.F.|', []));
+  GCounter.Ok('16.3.1: RP.F. over a pointer argument lists PX (implicit ^)',
+    GHit and Has('PX'));
+  ProjCase(StringReplace(LAnonMain, '//X', 'RS.F := s|', []));
+  GCounter.Ok('16.3.1: an anonymous enumeration argument''s values complete',
+    GHit and Has('sA') and Has('sB'));
+  GComp.Free;
+  GComp := nil;
+  GProj.Free;
+  GProj := nil;
+  GProjMid := -1;
+  TDirectory.Delete(GDir, True);
+
   // ======== dotted unit names as qualifiers ================================
   // A used unit is listed under its filed name (`uses Alpha` under the scope
   // name Ns is Ns.Alpha - the row writes the qualified name), and a unit
@@ -4204,7 +4254,9 @@ begin
   ProjCase(EXP_HEAD_A + 'var V1: ^|'#10'  ;' + #10'implementation'#10'end.'#10);
   KwCheck('a pointer type', 'string', 'record,array,interface');
   ProjCase(EXP_HEAD_A + 'var V1: TBoxA<|>;' + #10'implementation'#10'end.'#10);
-  KwCheck('a generic argument', 'string', 'array,record,interface');
+  // A type written in place is an argument too (16.3.1, dcc 37): a
+  // variable's type words, no class-like one (E2058).
+  KwCheck('a generic argument', 'string,array,record', 'interface,class');
   ProjCase(EXP_HEAD_A + 'var V1: set of |;' + #10'implementation'#10'end.'#10);
   KwCheck('set of', '', 'array,record,interface,string');
   ProjCase(EXP_HEAD_A + '  TMyCR = class of |;' + #10'implementation'#10'end.'#10);
@@ -4382,8 +4434,25 @@ begin
   ExpCase('if I < | then;', 'I,ExtCount', '', '', 'ExtReset');
   // A generic constraint: the keywords first, then classes and interfaces;
   // no other type, no value.
-  TypDecl('  TMyBox<T: |> = class end;', 'class,record,constructor',
+  TypDecl('  TMyBox<T: |> = class end;', 'class,record,constructor,unmanaged',
     'TAnimal,IShape,TDog', '', 'TColor2,Integer,clRed,ExtCount,TGuid2');
+  // A generic argument in a declaration's type takes a type written in
+  // place (16.3.1, dcc 37): `array`, `set`, `record`... are offered there;
+  // in an expression and an inline var's type, a type name alone.
+  ProjCase(EXP_HEAD_A + 'var V1: TFree<|>;'#10'implementation'#10'end.'#10);
+  KwCheck('generic argument in a declaration: types in place',
+    'array,set,record,string,procedure', 'class,interface');
+  ProjCase(EXP_HEAD_A + EXP_HEAD_B + '  var V := TBoxA<|>.Create;'#10 +
+    PROJ_TAIL);
+  KwCheck('generic argument in an expression: a type name', 'string',
+    'array,set,record');
+  // The IDE report (2026-11-27): an alias of an instance over a type written
+  // in place lists the instance's field after `.`.
+  ProjCase(EXP_HEAD_A + '  TMyRec<T: unmanaged> = record F: T; end;'#10 +
+    '  TMyRecArray = TMyRec<array[1..2] of Char>;'#10 +
+    'var RA: TMyRecArray;'#10 + EXP_HEAD_B + '  RA.|'#10 + PROJ_TAIL);
+  GCounter.Ok('member: RA. over TMyRec<array[1..2] of Char> lists F',
+    Has('F'));
   TypDecl('  TMyBox<T: class, |> = class end;', 'constructor', 'IShape', '',
     'TColor2');
   TypDecl('  TMyBox<A; B: I|> = class end;', '', 'IShape,IRound', '',

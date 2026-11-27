@@ -11907,10 +11907,11 @@ begin
   // So does an inline procedural type's (audit B3-38) and an anonymous method
   // literal's (E3-39), and an `@X` under the TYPEDADDRESS switch (E3-20),
   // and an array or pointer type written inline in a variable's or field's
-  // type slot (TPasSemaResolver.DeclareAnonValueType).
+  // type slot (TPasSemaResolver.DeclareAnonValueType), and a set, enumeration
+  // or file type written in place as a type argument (DeclareAnonTypeArg).
   if LM.Tree.Nodes[LName].Kind in [nkRecordType, nkClassType, nkInterfaceType,
      nkObjectType, nkHelperType, nkProcType, nkAnonMethod, nkUnaryOp,
-     nkArrayType, nkPointerType] then
+     nkArrayType, nkPointerType, nkSetType, nkEnumType, nkFileType] then
     Exit(LName);
   LParent := LM.Tree.Nodes[LName].Parent;
   if (LParent = NIL_NODE) or (LM.Tree.Nodes[LParent].Kind <> nkTypeDecl) then
@@ -12797,6 +12798,20 @@ var
                  ((LCat = tcProc) and IsMethodRefTypeX(LArgX)) then
                 Flag(LArgNode, 'E2513',
                   Format(SE2513_MustHaveParamlessCtor, [LParamName]));
+            // `unmanaged` - an identifier, the one childless constraint whose
+            // word is not reserved: refuses exactly the managed types (20.3.1:
+            // long strings, interfaces, Variant, dynamic arrays, `reference
+            // to`, a record or object with a managed field or a lifecycle
+            // operator, a static array of a managed element); a class, a
+            // class reference, a pointer, a plain or `of object` procedural
+            // type, ShortString pass (dcc64 37.0, 2026-11-27, local/
+            // probe-park/unmanaged U1, U8). Read off the argument's node, so a
+            // type written in place (`TG<array[0..1] of string>`) is judged as
+            // a named one.
+            PasTree.Types.tkIdentifier:
+              if IsManagedTypeNode(AId, LArgNode, NIL_INST, 0) then
+                Flag(LArgNode, 'E2668',
+                  Format(SE2668_MustBeUnmanaged, [LParamName]));
           end;
         end;
       end;
@@ -13530,7 +13545,7 @@ var
   procedure CheckConstraintList(AParam: Integer);
   var
     LC: Integer;
-    LClass, LRecord, LCtor: Boolean;
+    LClass, LRecord, LCtor, LUnmanaged: Boolean;
     LClassTypes: Integer;
     LIntfs: TArray<TSemaXType>;
     LX, LRoot: TSemaXType;
@@ -13552,6 +13567,7 @@ var
     LClass := False;
     LRecord := False;
     LCtor := False;
+    LUnmanaged := False;
     LClassTypes := 0;
     LIntfs := nil;
     LRoot := XNil;
@@ -13564,10 +13580,32 @@ var
       begin
         if LM.Tree.Nodes[LC].FirstChild = NIL_NODE then
           case HeadTok(LC) of
+            // `unmanaged` (16.4.1, dcc64 37.0, 2026-11-27, local/probe-park/
+            // unmanaged U2, U7): no keyword may stand with it in either order
+            // - E2516 naming the later word; with an interface type E2666,
+            // with a class type E2665, both naming `unmanaged`.
+            tkIdentifier:
+              if LUnmanaged then
+                Stop('E2603', 'Constraint ''unmanaged'' cannot be ' +
+                  'specified more than once')
+              else if LClass or LRecord or LCtor then
+                Stop('E2516', 'Constraint ''unmanaged'' is conflicting ' +
+                  'with previous constraints')
+              else if Length(LIntfs) > 0 then
+                Stop('E2666', 'Constraint ''unmanaged'' and interface ' +
+                  'type constraint cannot be specified together')
+              else if LClassTypes > 0 then
+                Stop('E2665', 'Constraint ''unmanaged'' and class type ' +
+                  'constraint cannot be specified together')
+              else
+                LUnmanaged := True;
             tkClass:
               if LClass then
                 Stop('E2603', 'Constraint ''class'' cannot be specified ' +
                   'more than once')
+              else if LUnmanaged then
+                Stop('E2516', 'Constraint ''class'' is conflicting with ' +
+                  'previous constraints')
               else if LRecord then
                 Stop('E2507', 'CLASS constraint and RECORD constraint ' +
                   'cannot be specified together')
@@ -13583,7 +13621,7 @@ var
               else if LClass then
                 Stop('E2507', 'CLASS constraint and RECORD constraint ' +
                   'cannot be specified together')
-              else if LCtor then
+              else if LCtor or LUnmanaged then
                 Stop('E2516', 'Constraint ''record'' is conflicting ' +
                   'with previous constraints')
               else if LClassTypes > 0 then
@@ -13598,7 +13636,7 @@ var
               if LCtor then
                 Stop('E2603', 'Constraint ''constructor'' cannot be ' +
                   'specified more than once')
-              else if LRecord then
+              else if LRecord or LUnmanaged then
                 Stop('E2516', 'Constraint ''constructor'' is ' +
                   'conflicting with previous constraints')
               else
@@ -13625,6 +13663,9 @@ var
               else if LClassTypes > 0 then
                 Stop('E2553', 'Class type constraint cannot be ' +
                   'specified more than once')
+              else if LUnmanaged then
+                Stop('E2665', 'Constraint ''unmanaged'' and class type ' +
+                  'constraint cannot be specified together')
               else if LClass or LRecord then
                 Stop('E2552', 'CLASS or RECORD constraint and class ' +
                   'type constraint cannot be specified together')
@@ -13634,6 +13675,9 @@ var
               begin
                 if LRecord then
                   Stop('E2666', 'Constraint ''record'' and interface ' +
+                    'type constraint cannot be specified together');
+                if LUnmanaged then
+                  Stop('E2666', 'Constraint ''unmanaged'' and interface ' +
                     'type constraint cannot be specified together');
                 for var LI in LIntfs do
                   if XSameType(LI, LX) then
@@ -16879,6 +16923,16 @@ begin
     // ProcResultX calls through it as through a named one.
     nkProcType:
       if LM.AnonTypeSyms.TryGetValue(ANode, LSym) then
+        Result := XPlain(AId, LSym);
+    // A type written in place as a type ARGUMENT (`TG<array[1..2] of Char>`,
+    // `TG<(eA, eB)>`, 16.3.1): the unnamed symbol the resolver declared for it
+    // (DeclareAnonTypeArg), which the instantiation takes as its argument. In
+    // a variable's slot the same kinds stay untyped here, as before - their
+    // variables are typed off the node.
+    nkArrayType, nkPointerType, nkSetType, nkEnumType, nkFileType:
+      if (LM.Tree.Nodes[ANode].Parent <> NIL_NODE) and
+         (LM.Tree.Nodes[LM.Tree.Nodes[ANode].Parent].Kind = nkTypeArgs) and
+         LM.AnonTypeSyms.TryGetValue(ANode, LSym) then
         Result := XPlain(AId, LSym);
 
     nkTypeArgs, nkAmbiguous:
