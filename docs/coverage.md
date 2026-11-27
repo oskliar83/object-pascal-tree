@@ -271,6 +271,15 @@ of less work, not a gap in following the language; its consequences are in
   interface declared with any bracket counts as having a GUID, though dcc
   may drop the bracket's items as attributes (14.1.1).
 
+### 4.11.3 OLE named arguments
+- `Name := Value` in an argument list is taken as a named argument whatever
+  the callee: the parser wraps it (nkNamedArg) and the resolver never looks
+  the name up. dcc accepts the form only on a `Variant` / `OleVariant`
+  callee and reports E2003 on the name elsewhere (a class or interface
+  method, a statically typed dispinterface, a plain routine). E2166 (an
+  unnamed argument after a named one) is not reported. A lost diagnostic,
+  never a false one.
+
 ### 4.11.4 Result types of the value-returning intrinsics
 - the result rules are implemented in both typers from the spec's probe
   table, with these edges left out: `Ord` of an enumeration or subrange
