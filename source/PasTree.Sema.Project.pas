@@ -2431,6 +2431,17 @@ type
       (0 the same type, 1 the parent), -1 unless xdYes. }
     function XDescentDistX(const ADesc, ABase: TSemaXType;
       out ADist: Integer): TPasDescent;
+    { Whether two instances of ONE generic are one type (16.1.1): their
+      arguments compared as types, weak aliases followed - xdYes, xdNo when
+      an argument pair is surely two types, xdUnknown when one cannot be
+      judged (an open parameter, an unresolved argument, two anonymous sets
+      or files, which dcc counts as one type when their bases agree). }
+    function XSameInstanceX(const A, B: TSemaXType;
+      ADepth: Integer = 0): TPasDescent;
+    { ADesc's ancestor of ABase's generic, each heritage hop's parent closed
+      over the instance it was read from (SubstX) - XNil when the walk does
+      not reach it. }
+    function ClosedAncestorX(const ADesc, ABase: TSemaXType): TSemaXType;
     { How many heritage hops lead from the class or interface AX to its root
       (TObject, IInterface; 0 the root itself) - up to a link it cannot
       follow, or 15. }
@@ -12516,6 +12527,22 @@ begin
       Exit(xdUnknown);
     if (LCur.UnitId = LBase.UnitId) and (LCur.Sym = LBase.Sym) then
     begin
+      // Two instances of the generic met: another argument list is another
+      // type (`TC<Integer> := TD<string>` for `TD<T> = class(TC<T>)` is
+      // E2010, dcc64 37.0). Judged only when it surely differs.
+      if (LCur.Inst <> LBase.Inst) and (LCur.Inst <> NIL_INST) and
+         (LBase.Inst <> NIL_INST) then
+        case XSameInstanceX(LCur, LBase) of
+          xdNo:
+            Exit(xdNo);
+          // An ancestor read in its descendant's frame - `TC<T>` of `TD<T>
+          // = class(TC<T>)` met from TD<string>: walked again, each hop's
+          // parent closed over the instance below it. Rare, so the common
+          // walk never instantiates (Instantiate's lock).
+          xdUnknown:
+            if XSameInstanceX(ClosedAncestorX(ADesc, LBase), LBase) = xdNo then
+              Exit(xdNo);
+        end;
       ADist := LDist;
       Exit(xdYes);
     end;
@@ -12526,6 +12553,118 @@ begin
       Inc(LDist);
   end;
   Result := xdUnknown;   // the depth cap
+end;
+
+function TPasSemaProject.ClosedAncestorX(const ADesc,
+  ABase: TSemaXType): TSemaXType;
+var
+  LCur: TSemaXType;
+  LFrame, LDef: Integer;
+  LHop: Boolean;
+begin
+  Result := XNil;
+  LCur := ADesc;
+  for var LDepth := 1 to 32 do
+  begin
+    if not XValid(LCur) then
+      Exit;
+    if (LCur.UnitId = ABase.UnitId) and (LCur.Sym = ABase.Sym) then
+      Exit(LCur);
+    LFrame := LCur.Inst;
+    if XAncestryStepX(LCur, LDef, LHop) <> xdYes then
+      Exit;
+    if (LFrame <> NIL_INST) and (LCur.Inst <> NIL_INST) then
+      LCur := SubstX(LCur, LFrame, 0);
+  end;
+end;
+
+function TPasSemaProject.XSameInstanceX(const A, B: TSemaXType;
+  ADepth: Integer): TPasDescent;
+
+  // A symbol that stands for no one type: an open type parameter.
+  function Open(const AX: TSemaXType): Boolean;
+  begin
+    Result := FModels[AX.UnitId].Symbols[AX.Sym].Kind = skGenericParam;
+  end;
+
+  function Anonymous(const AX: TSemaXType): Boolean;
+  begin
+    Result := (AX.Inst = NIL_INST) and
+      (FModels[AX.UnitId].Symbols[AX.Sym].Kind = skType) and
+      (FModels[AX.UnitId].Symbols[AX.Sym].Name = '');
+  end;
+
+  // The node kind an anonymous type's symbol was declared for.
+  function AnonKind(const AX: TSemaXType): TPasNodeKind;
+  var
+    LDecl: Integer;
+  begin
+    Result := nkError;
+    LDecl := FModels[AX.UnitId].Symbols[AX.Sym].DeclNode;
+    if (LDecl <> NIL_NODE) and (LDecl < Length(FModels[AX.UnitId].Tree.Nodes)) then
+      Result := FModels[AX.UnitId].Tree.Nodes[LDecl].Kind;
+  end;
+
+  function ArgVerdict(const AA, AB: TSemaXType): TPasDescent;
+  var
+    LA, LB: TSemaXType;
+  begin
+    if not XValid(AA) or not XValid(AB) then
+      Exit(xdUnknown);
+    LA := CanonTypeX(AA);
+    LB := CanonTypeX(AB);
+    if not XValid(LA) or not XValid(LB) then
+      Exit(xdUnknown);
+    if Open(LA) or Open(LB) then
+      Exit(xdUnknown);
+    if XSameType(LA, LB) then
+      Exit(xdYes);
+    if (LA.Inst <> NIL_INST) and (LB.Inst <> NIL_INST) then
+    begin
+      if (LA.UnitId = LB.UnitId) and (LA.Sym = LB.Sym) then
+        Exit(XSameInstanceX(LA, LB, ADepth + 1));
+      Exit(xdNo);
+    end;
+    // Two anonymous sets or files of one base are one type (16.3.1), and
+    // their bases are not compared here. Any other writing - an array, a
+    // pointer, a record, a procedural type - is a type of its own, whose
+    // category an unnamed record's or procedural type's symbol may not carry.
+    if Anonymous(LA) and Anonymous(LB) and
+       (AnonKind(LA) in [nkSetType, nkFileType]) and
+       (AnonKind(LA) = AnonKind(LB)) then
+      Exit(xdUnknown);
+    if Anonymous(LA) or Anonymous(LB) then
+      Exit(xdNo);
+    if (XCatOf(LA) = tcUnknown) or (XCatOf(LB) = tcUnknown) then
+      Exit(xdUnknown);
+    // Otherwise each declaration - a named type, a distinct `type X` copy,
+    // an anonymous argument's own writing - is a type of its own.
+    Result := xdNo;
+  end;
+
+var
+  LIA, LIB: TSemaInstance;
+  LVerdict: TPasDescent;
+begin
+  if not XValid(A) or not XValid(B) or (A.Inst = NIL_INST) or
+     (B.Inst = NIL_INST) or (A.UnitId <> B.UnitId) or (A.Sym <> B.Sym) or
+     (ADepth > 8) then
+    Exit(xdUnknown);
+  if A.Inst = B.Inst then
+    Exit(xdYes);
+  LIA := InstanceRead(A.Inst);
+  LIB := InstanceRead(B.Inst);
+  if Length(LIA.Args) <> Length(LIB.Args) then
+    Exit(xdUnknown);
+  Result := xdYes;
+  for var LIdx := 0 to High(LIA.Args) do
+  begin
+    LVerdict := ArgVerdict(LIA.Args[LIdx], LIB.Args[LIdx]);
+    if LVerdict = xdUnknown then
+      Exit(xdUnknown);
+    if LVerdict = xdNo then
+      Result := xdNo;
+  end;
 end;
 
 function TPasSemaProject.XHeritageDepthX(const AX: TSemaXType): Integer;
@@ -16287,18 +16426,14 @@ var
 
   procedure CheckBody(AClass, AClassSym: Integer);
   var
-    LChild, LField, LTypeInfo: Integer;
+    LChild, LField: Integer;
     LPublished: Boolean;
   begin
-    LTypeInfo := -2;   // not asked yet
     LPublished := False;
     LChild := LM.Tree.Nodes[AClass].FirstChild;
     // Before the first section word: published under RTTI (11.2.1).
     if LChild <> NIL_NODE then
-    begin
-      LTypeInfo := ClassTypeInfoX(XPlain(AId, AClassSym), 0);
-      LPublished := LTypeInfo = 1;
-    end;
+      LPublished := ClassTypeInfoX(XPlain(AId, AClassSym), 0) = 1;
     while LChild <> NIL_NODE do
     begin
       case LM.Tree.Nodes[LChild].Kind of
@@ -25200,8 +25335,12 @@ var
         Exit;
       LRoutine := TargetSym(LCore, LMid, LSym) and
         (FModels[LMid].Symbols[LSym].Kind = skRoutine);
-      // A procedure named is its address, nothing this walk types.
-      if LRoutine and (FModels[LMid].Symbols[LSym].TypeNode = NIL_NODE) then
+      // A procedure named is its address, nothing this walk types - but a
+      // constructor named is called, its value the class (5.7: `A :=
+      // TB.Create` is E2010 'TA' and 'TB' as `TB.Create()` is, dcc64 37.0).
+      if LRoutine and (FModels[LMid].Symbols[LSym].TypeNode = NIL_NODE) and
+         not (IsConstructorSym(LMid, LSym) and
+              (XCatOf(CanonTypeX(ADstX)) <> tcProc)) then
         Exit;
     end;
     // A function's own name as the target is its result (typed so), never
@@ -26698,6 +26837,34 @@ var
       ADst typed ADstX, at the statement or declaration AStmt - True with
       the error dcc gives, not reported. ADst / ASrc are the nodes
       Unreliable reads. }
+    // Does the instance AX take an anonymous argument that is no array -
+    // one dcc names `:N` in a message (16.3.1) - at any depth?
+    function ColonNamedArg(const AX: TSemaXType; ADepth: Integer): Boolean;
+    var
+      LArg: TSemaXType;
+    begin
+      Result := False;
+      if (AX.Inst = NIL_INST) or (ADepth > 8) then
+        Exit;
+      for var LRaw in InstanceRead(AX.Inst).Args do
+      begin
+        if not XValid(LRaw) then
+          Continue;
+        LArg := CanonTypeX(LRaw);
+        if not XValid(LArg) then
+          Continue;
+        if LArg.Inst <> NIL_INST then
+        begin
+          if ColonNamedArg(LArg, ADepth + 1) then
+            Exit(True);
+        end
+        else if (FModels[LArg.UnitId].Symbols[LArg.Sym].Kind = skType) and
+          (FModels[LArg.UnitId].Symbols[LArg.Sym].Name = '') and
+          (XCatOf(LArg) <> tcArray) then
+          Exit(True);
+      end;
+    end;
+
     function ConvVerdict(AStmt, ADst, ASrc: Integer; const ADstX,
       ASrcX: TSemaXType; out ACode, AMsg, ANote: string): Boolean;
     var
@@ -26751,12 +26918,27 @@ var
       // .Appearances' `for LPair in FFactories`: TDictionary's TPair<K, V>
       // read in its frame against the variable's written TPair<...> - the
       // same text, two instances; diag gate 1).
+      // Judged only when an argument pair is surely two types (16.1.1:
+      // `TG<Integer> := TG<Byte>` is E2010, dcc64 37.0).
       LDc := CanonTypeX(LDstX);
       LSc := CanonTypeX(LSrcX);
       if XValid(LDc) and XValid(LSc) and (LDc.UnitId = LSc.UnitId) and
-         (LDc.Sym = LSc.Sym) then
+         (LDc.Sym = LSc.Sym) and (XSameInstanceX(LDc, LSc) <> xdNo) then
         Exit;
       Result := True;
+      // Two instances dcc names alike - two writings of one array argument,
+      // `TG<array[0..1] of Byte>` - are E2008, which names neither (16.3.1).
+      // Any other anonymous argument dcc names `:N`, by its writing, so two
+      // of them differ in the message: E2010 'TG<:1>' and 'TG<:2>'.
+      if XValid(LDc) and XValid(LSc) and (LDc.Inst <> NIL_INST) and
+         (LSc.Inst <> NIL_INST) and not ColonNamedArg(LDc, 0) and
+         not ColonNamedArg(LSc, 0) and
+         (XTypeText(LDstX) = XTypeText(LSrcX)) then
+      begin
+        ACode := 'E2008';
+        AMsg := SE2008_IncompatibleTypes;
+        Exit;
+      end;
       // Two anonymous types: E2008, which names neither (8.1.1, 10.1.2).
       if AnonValueX(LDstX) and (AnonValueX(LSrcX) or
          LM.AnonTypeSyms.ContainsKey(PeelParens(LM.Tree, ASrc))) then
@@ -28630,7 +28812,13 @@ var
           LArgX := GetX(LArg);
           LPc := CanonTypeX(LParX);
           LAc := CanonTypeX(LArgX);
-          if Judged(LPc) and Judged(LAc) and not XSameType(LPc, LAc) and
+          // Two instances of one generic: when an argument pair is surely
+          // two types (16.1.1; `PV(B)` for `var V: TG<Integer>`, B a
+          // TG<Byte>, is E2033, dcc64 37.0).
+          if ((Judged(LPc) and Judged(LAc) and not XSameType(LPc, LAc)) or
+              (XValid(LPc) and XValid(LAc) and (LPc.Inst <> NIL_INST) and
+               (LAc.Inst <> NIL_INST) and (LPc.UnitId = LAc.UnitId) and
+               (LPc.Sym = LAc.Sym) and (XSameInstanceX(LPc, LAc) = xdNo))) and
              not InUntypedWith(N) and not Unreliable(N, LArg, LArgX) then
             EmitAt(LM, LArg, 'E2033', Format(SE2033_VarParamNotIdentical,
               [XTypeText(LPc), XTypeText(LAc)]));

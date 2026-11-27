@@ -18117,6 +18117,101 @@ begin
   end;
 end;
 
+// Two instances of one generic (spec 16.3.1, 16.1.1, 2.6.1; dcc64 37.0,
+// 2026-11-27, local/probe-park/gaps T1): over different arguments they are
+// two types - E2010 at an assignment, E2008 for two writings of one array
+// argument, E2033 for a `var` argument, through a descendant's ancestry - and
+// one type through an alias, one declaration's names, two `set of` writings.
+// A paren-less constructor call is the class it constructs.
+procedure TestInstanceIdentity;
+const
+  SRC =
+    'program InI;'#13#10 +                                                // 1
+    'type'#13#10 +                                                        // 2
+    '  TG<T> = record F: T; end;'#13#10 +                                 // 3
+    '  TC<T> = class F: T; constructor Create; end;'#13#10 +              // 4
+    '  TD<T> = class(TC<T>) end;'#13#10 +                                 // 5
+    '  TC2 = class(TC<Integer>) end;'#13#10 +                             // 6
+    '  TI = TG<Integer>;'#13#10 +                                         // 7
+    '  TDI = type Integer;'#13#10 +                                       // 8
+    '  TA = class end;'#13#10 +                                           // 9
+    '  TB = class constructor Create; end;'#13#10 +                       // 10
+    'var'#13#10 +                                                         // 11
+    '  A: TG<Integer>;'#13#10 +                                           // 12
+    '  B: TG<Byte>;'#13#10 +                                              // 13
+    '  C: TI;'#13#10 +                                                    // 14
+    '  D: TG<TDI>;'#13#10 +                                               // 15
+    '  E: TC<Integer>;'#13#10 +                                           // 16
+    '  H: TC<string>;'#13#10 +                                            // 17
+    '  K1, K2: TG<array[0..1] of Byte>;'#13#10 +                          // 18
+    '  K3: TG<array[0..1] of Byte>;'#13#10 +                              // 19
+    '  K4: TG<array[0..2] of Byte>;'#13#10 +                              // 20
+    '  S1: TG<set of Byte>;'#13#10 +                                      // 21
+    '  S2: TG<set of Byte>;'#13#10 +                                      // 22
+    '  P1: TG<^Integer>;'#13#10 +                                         // 23
+    '  P2: TG<^Integer>;'#13#10 +                                         // 24
+    '  R1: TG<record X: Integer; end>;'#13#10 +                           // 25
+    '  N1: TG<TG<Integer>>;'#13#10 +                                      // 26
+    '  N2: TG<TG<Byte>>;'#13#10 +                                         // 27
+    '  D2: TD<string>;'#13#10 +                                           // 28
+    '  D3: TD<Integer>;'#13#10 +                                          // 29
+    '  X: TA;'#13#10 +                                                    // 30
+    'procedure PV(var V: TG<Integer>); begin end; constructor TC<T>.Create;' +
+      ' begin end; constructor TB.Create; begin end;'#13#10 +             // 31
+    'begin'#13#10 +                                                       // 32
+    '  A := C;'#13#10 +                                                   // 33
+    '  C := A;'#13#10 +                                                   // 34
+    '  A := B;'#13#10 +                                                   // 35
+    '  A := D;'#13#10 +                                                   // 36
+    '  E := H;'#13#10 +                                                   // 37
+    '  K1 := K2;'#13#10 +                                                 // 38
+    '  K1 := K3;'#13#10 +                                                 // 39
+    '  K1 := K4;'#13#10 +                                                 // 40
+    '  S1 := S2;'#13#10 +                                                 // 41
+    '  P1 := P2;'#13#10 +                                                 // 42
+    '  R1 := A;'#13#10 +                                                  // 43
+    '  N1 := N2;'#13#10 +                                                 // 44
+    '  E := D2;'#13#10 +                                                  // 45
+    '  E := D3;'#13#10 +                                                  // 46
+    '  E := TC2.Create;'#13#10 +                                          // 47
+    '  H := TC2.Create;'#13#10 +                                          // 48
+    '  X := TB.Create;'#13#10 +                                           // 49
+    '  PV(C);'#13#10 +                                                    // 50
+    '  PV(B);'#13#10 +                                                    // 51
+    'end.'#13#10;                                                        // 52
+var
+  LDir: string;
+  LM: TPasSemaModel;
+  LSeen: TStringList;
+begin
+  LDir := FreshDir('pastree_sema_instidentity');
+  TFile.WriteAllText(TPath.Combine(LDir, 'InI.dpr'), SRC);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  LSeen := TStringList.Create;
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'InI.dpr'));
+    LM := ModelByName('ini');
+    Ok('instance identity: InI loaded', Assigned(LM));
+    if not Assigned(LM) then
+      Exit;
+    for var LD in LM.Diags do
+      LSeen.Add(Format('%.2d:%s', [LD.Line, LD.Code]));
+    LSeen.Sort;
+    Ok('instance identity: dcc''s rows alone [' + LSeen.CommaText + ']',
+      LSeen.CommaText = '35:E2010,36:E2010,37:E2010,39:E2008,40:E2010,' +
+        '42:E2010,43:E2010,44:E2010,45:E2010,48:E2010,49:E2010,51:E2033');
+    Ok('instance identity: E2010 names both instances',
+      DiagHasText(LM, 'E2010', '''TG<Integer>'' and ''TG<Byte>'''));
+    Ok('instance identity: a descendant named by its own instance',
+      DiagHasText(LM, 'E2010', '''TC<Integer>'' and ''TD<string>'''));
+  finally
+    LSeen.Free;
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // Program-level and directive rows (spec 1.1.3, 1.2.x, 19.2.1, 20.x; dcc64
 // 37.0, spec audit g1 Circ, Circ2, ExpMeth, g6 R01-R05, M4, MA,
 // local/sa4-intf R1): an interface-only `uses` cycle (F2047, once, at the
@@ -27569,6 +27664,7 @@ begin
   TestSa4Generics;
   TestUnmanagedConstraint;
   TestAnonTypeArgs;
+  TestInstanceIdentity;
   TestSa4ProgramRules;
   TestSa5Exprs;
 

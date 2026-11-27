@@ -767,8 +767,12 @@ of less work, not a gap in following the language; its consequences are in
 - a type written in place as an argument (`TG<array[1..2] of Char>`) in an
   expression or an inline var's type is E2029 at its first word, where dcc
   reads `TG<` as a comparison and reports E2003 on `TG` - the same line. Two
-  instances over different arguments - two writings of one anonymous type,
-  or two named types - are not judged for assignment (dcc: E2008 / E2010).
+  instances over different arguments are judged (E2010, E2008 for two array
+  writings, E2033 for a `var` argument) only when an argument pair is surely
+  two types: an open parameter, an unresolved argument or two anonymous sets
+  or files leave the pair unjudged, and two `string[N]` writings, which dcc
+  counts as two types, read as one ShortString here. An E2010's text names
+  an anonymous argument by its writing, not by dcc's `:N`.
   On the completion overlay such an argument takes its last-good twin by
   position under the enclosing named declaration; an edit that changed that
   declaration's shape leaves the instance open.
